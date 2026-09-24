@@ -1,0 +1,8 @@
+# Build outputs (regenerate with g++/em++, see README)
+*.exe
+*.obj
+townforge.html
+townforge.js
+townforge.wasm
+townforge.data
+townforge_save.txt

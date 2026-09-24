@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="EN-us">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <title>Town Forge - 3D Preview</title>
+
+    <style>
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden; /* no page scroll/bounce on mobile - the canvas fills the viewport itself */
+        background: #000;
+      }
+
+      /* Fills the viewport (address-bar-safe on mobile via the 100dvh override) and
+         centers the canvas, letterboxing rather than stretching it. */
+      .emscripten_border {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100vw;
+        height: 100vh;
+        height: 100dvh;
+        overflow: hidden;
+      }
+
+      /* NOTE: Canvas *must not* have any border or padding, or mouse coords will be wrong */
+      canvas.emscripten {
+        border: 0px none;
+        background: black;
+        max-width: 100%;
+        max-height: 100%;
+        width: auto;
+        height: auto;
+        aspect-ratio: 540 / 900;
+        image-rendering: pixelated; /* keep the pixel art crisp when scaled up, not blurry */
+      }
+
+      #loading {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: arial, sans-serif;
+        font-size: 16px;
+        color: #ddd;
+        background: #000;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="emscripten_border">
+      <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex=-1></canvas>
+    </div>
+    <div id="loading">Loading...</div>
+
+    <script type='text/javascript'>
+        var loadingEl = document.querySelector('#loading');
+        var Module = {
+            preRun: [],
+            postRun: [],
+            print: function(text) {
+                if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
+                console.log(text);
+            },
+            printErr: function(text) {
+                if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
+                console.error(text);
+            },
+            canvas: (function() {
+                var canvas = document.querySelector('#canvas');
+                canvas.addEventListener("webglcontextlost", function(e) {
+                    alert('WebGL context lost. You will need to reload the page.');
+                    e.preventDefault();
+                }, false);
+                return canvas;
+            })(),
+            setStatus: function(text) {
+                if (loadingEl) loadingEl.textContent = text || '';
+                if (!text && loadingEl) loadingEl.style.display = 'none';
+            },
+            totalDependencies: 0,
+            monitorRunDependencies: function(left) {
+                this.totalDependencies = Math.max(this.totalDependencies, left);
+                Module.setStatus(left ? 'Loading... (' + (this.totalDependencies - left) + '/' + this.totalDependencies + ')' : '');
+            },
+        };
+
+        Module.setStatus('Loading...');
+        window.onerror = function() {
+            Module.setStatus('Something went wrong - check the console.');
+        };
+
+        // Browsers block audio until a user gesture; resume any suspended
+        // AudioContext on first tap/click anywhere (no visible button needed -
+        // orbiting/tapping the 3D view already provides that first gesture).
+        const audioContexts = [];
+        self.AudioContext = new Proxy(self.AudioContext, {
+            construct(target, args) {
+                const ctx = new target(...args);
+                audioContexts.push(ctx);
+                return ctx;
+            }
+        });
+        window.addEventListener('pointerdown', function resumeAudioOnce() {
+            audioContexts.forEach(ctx => { if (ctx.state === 'suspended') ctx.resume(); });
+        }, { passive: true });
+    </script>
+    {{{ SCRIPT }}}
+  </body>
+</html>

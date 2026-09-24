@@ -6035,10 +6035,11 @@ static void DrawLiveCombatQuickItems(GameState& s) {
 // ---------------------------------------------------------------------
 
 // ---------------------------------------------------------------------
-// 3D town view (2026-09-24, first 3D milestone) — a programmer-art 3D
-// rendering of the Town screen built from raylib primitives, toggled with
-// the "3D [V]" HUD button or the V key (see DrawTownScreen). The 2D sprite
-// view is untouched and remains the default.
+// 3D town view (2026-09-24, first 3D milestone) — a 3D rendering of the Town
+// screen built from raylib primitives plus real CC0 building models (Quaternius
+// Medieval Village MegaKit, assembled per-building in Town3DDrawBuilding),
+// toggled with the "3D [V]" HUD button or the V key (see DrawTownScreen). The 2D
+// sprite view is untouched and remains the default.
 //
 // Design notes:
 //  - World mapping: 2D world (x, y) -> 3D (x, 0, y), ground plane at y=0.
@@ -6053,8 +6054,11 @@ static void DrawLiveCombatQuickItems(GameState& s) {
 //    DrawTownScreen before this is called, and clicking a building box in
 //    3D sets s.selectedTile exactly like walking up + E does in 2D.
 //  - Minimal vector helpers below instead of raymath.h — main.cpp only
-//    includes raylib.h today, and this keeps the 3D section dependency-free.
+//    includes raylib.h today, and this keeps the 3D section dependency-free
+//    (rlgl.h is pulled in below for the shadowmap pattern only — it ships
+//    with raylib's headers on every platform, including the emscripten build).
 // ---------------------------------------------------------------------
+#include "rlgl.h"
 
 // Tiny Vector3 helpers (this file doesn't pull in raymath.h).
 static Vector3 T3VSub(Vector3 a, Vector3 b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
@@ -6068,25 +6072,78 @@ static Vector3 T3VNorm(Vector3 a) {
     float l = sqrtf(a.x * a.x + a.y * a.y + a.z * a.z);
     return l > 0.0f ? T3VScale(a, 1.0f / l) : a;
 }
+// Minimal 4x4 multiply (T3DMatMul(A,B) = A*B), mirroring raylib's own
+// MatrixMultiply expansion, so the shadow pass can build the light VP matrix
+// without pulling in raymath.h.
+static Matrix T3DMatMul(Matrix a, Matrix b) {
+    Matrix r{};
+    r.m0  = a.m0*b.m0  + a.m1*b.m4  + a.m2*b.m8   + a.m3*b.m12;
+    r.m4  = a.m0*b.m1  + a.m1*b.m5  + a.m2*b.m9   + a.m3*b.m13;
+    r.m8  = a.m0*b.m2  + a.m1*b.m6  + a.m2*b.m10  + a.m3*b.m14;
+    r.m12 = a.m0*b.m3  + a.m1*b.m7  + a.m2*b.m11  + a.m3*b.m15;
+    r.m1  = a.m4*b.m0  + a.m5*b.m4  + a.m6*b.m8   + a.m7*b.m12;
+    r.m5  = a.m4*b.m1  + a.m5*b.m5  + a.m6*b.m9   + a.m7*b.m13;
+    r.m9  = a.m4*b.m2  + a.m5*b.m6  + a.m6*b.m10  + a.m7*b.m14;
+    r.m13 = a.m4*b.m3  + a.m5*b.m7  + a.m6*b.m11  + a.m7*b.m15;
+    r.m2  = a.m8*b.m0  + a.m9*b.m4  + a.m10*b.m8  + a.m11*b.m12;
+    r.m6  = a.m8*b.m1  + a.m9*b.m5  + a.m10*b.m9  + a.m11*b.m13;
+    r.m10 = a.m8*b.m2  + a.m9*b.m6  + a.m10*b.m10 + a.m11*b.m14;
+    r.m14 = a.m8*b.m3  + a.m9*b.m7  + a.m10*b.m11 + a.m11*b.m15;
+    r.m3  = a.m12*b.m0 + a.m13*b.m4 + a.m14*b.m8  + a.m15*b.m12;
+    r.m7  = a.m12*b.m1 + a.m13*b.m5 + a.m14*b.m9  + a.m15*b.m13;
+    r.m11 = a.m12*b.m2 + a.m13*b.m6 + a.m14*b.m10 + a.m15*b.m14;
+    r.m15 = a.m12*b.m3 + a.m13*b.m7 + a.m14*b.m11 + a.m15*b.m15;
+    return r;
+}
 
 // Orbit-camera state for the 3D town view. File-statics (like g_scrollDragging),
 // not GameState — purely transient view state, never saved.
-static float g_t3dYaw = 0.7f;    // radians, around the player
-static float g_t3dPitch = 0.85f; // radians above horizontal
-static float g_t3dDist = 650.0f; // camera distance from target
+// g_t3dYaw/Pitch/Dist are the *targets* written by input; the smoothed copies
+// below are what the camera actually uses, eased each frame (2026-09-24 feel
+// pass), so drags and wheel zooms glide instead of snapping.
+static float g_t3dYaw = 0.7f;    // radians, around the player (target)
+static float g_t3dPitch = 0.85f; // radians above horizontal (target)
+static float g_t3dDist = 650.0f; // camera distance from target (target)
+static float g_t3dYawSm = 0.7f, g_t3dPitchSm = 0.85f, g_t3dDistSm = 650.0f; // smoothed
+static Vector3 g_t3dTargetSm = { 0.0f, 0.0f, 0.0f }; // smoothed orbit target
+static bool g_t3dCamInit = false;
+// Feel-pass tuning constants (2026-09-24) — tweak these on the PC build:
+static const float kT3DPitchMin = 0.22f; // polar clamp: camera can never dip below the ground
+static const float kT3DPitchMax = 1.35f; // ~77 deg: near-top-down is as far as it goes
+static const float kT3DDistMin = 260.0f; // closest zoom: building fills the view
+static const float kT3DDistMax = 1500.0f;// farthest zoom: whole town in frame
+static const float kT3DCamDamp = 9.0f;   // orbit smoothing speed (per second; higher = snappier)
+static const float kT3DZoomDamp = 7.0f;  // zoom smoothing speed (per second)
+static const float kT3DTargetDamp = 6.0f;// how fast the camera follows the walking player
 static bool g_t3dOrbiting = false;
 static Vector2 g_t3dLastMouse = {0, 0};
 static float g_t3dDragDist = 0.0f;
 
 // Camera basis derived from the orbit state; target follows the player.
+// The smoothed values ease toward the input targets every frame (exponential
+// damping), so orbit/zoom/follow all glide. First call snaps (no sweep-in).
 struct Town3DCam { Vector3 pos, target, fwd, right, up; float fovY, aspect, vw, vh; };
 static Town3DCam Town3DGetCam(const GameState& s, int screenW, int screenH) {
+    float dt = GetFrameTime();
+    if (!g_t3dCamInit) {
+        g_t3dYawSm = g_t3dYaw; g_t3dPitchSm = g_t3dPitch; g_t3dDistSm = g_t3dDist;
+        g_t3dTargetSm = { s.townPlayerPos.x, 0.0f, s.townPlayerPos.y };
+        g_t3dCamInit = true;
+    }
+    float ty = 1.0f - expf(-dt * kT3DCamDamp);
+    float tz = 1.0f - expf(-dt * kT3DZoomDamp);
+    float tt = 1.0f - expf(-dt * kT3DTargetDamp);
+    g_t3dYawSm += (g_t3dYaw - g_t3dYawSm) * ty;
+    g_t3dPitchSm += (g_t3dPitch - g_t3dPitchSm) * ty;
+    g_t3dDistSm += (g_t3dDist - g_t3dDistSm) * tz;
+    Vector3 pw = { s.townPlayerPos.x, 0.0f, s.townPlayerPos.y };
+    g_t3dTargetSm = T3VAdd(g_t3dTargetSm, T3VScale(T3VSub(pw, g_t3dTargetSm), tt));
     Town3DCam c;
-    c.target = { s.townPlayerPos.x, 0.0f, s.townPlayerPos.y };
-    float cp = cosf(g_t3dPitch), sp = sinf(g_t3dPitch);
-    c.pos = { c.target.x + cp * sinf(g_t3dYaw) * g_t3dDist,
-              c.target.y + sp * g_t3dDist,
-              c.target.z + cp * cosf(g_t3dYaw) * g_t3dDist };
+    c.target = g_t3dTargetSm;
+    float cp = cosf(g_t3dPitchSm), sp = sinf(g_t3dPitchSm);
+    c.pos = { c.target.x + cp * sinf(g_t3dYawSm) * g_t3dDistSm,
+              c.target.y + sp * g_t3dDistSm,
+              c.target.z + cp * cosf(g_t3dYawSm) * g_t3dDistSm };
     c.fwd = T3VNorm(T3VSub(c.target, c.pos));
     c.right = T3VNorm(T3VCross(c.fwd, { 0, 1, 0 }));
     c.up = T3VCross(c.right, c.fwd);
@@ -6122,10 +6179,417 @@ static bool Town3DProject(const Town3DCam& c, Vector3 p, Vector2* out) {
 }
 
 static float Town3DBuildingHeight(const std::string& key) {
-    if (key == "townhall") return 150.0f;
-    if (key == "bank" || key == "stable") return 120.0f;
-    if (key == "house") return 105.0f;
-    return 95.0f;
+    // Model-based heights (Quaternius Medieval Village MegaKit assemblies, 2026-09-24):
+    // a single-story house tops out ~162 units, the two-story Town Hall ~231.
+    if (key == "townhall") return 235.0f;
+    return 165.0f;
+}
+
+// ---- 3D town lighting: warm sun + shadowmap + gradient sky (2026-09-24) ----
+// Follows raylib's shaders_shadowmap_rendering example pattern (rlgl depth FBO,
+// one directional light, 3x3 PCF) with the glsl100 shaders in
+// assets/shaders/shadowmap.vs/.fs. If the shaders or the depth FBO can't be
+// created, Town3DEnsureShadow leaves g_t3dShadow.ready false and the 3D view
+// falls back to the previous flat lighting — never a crash, never 2D impact.
+#define T3D_SHADOWMAP_RES 1024
+struct Town3DShadow {
+    bool ready = false;
+    bool tried = false;
+    Shader shader{};
+    int viewPosLoc = -1, lightDirLoc = -1, lightColLoc = -1, ambientLoc = -1;
+    int lightVPLoc = -1, shadowMapLoc = -1, shadowResLoc = -1;
+    int fogColorLoc = -1, fogRangeLoc = -1;
+    RenderTexture2D map{};
+};
+static Town3DShadow g_t3dShadow;
+static Matrix g_t3dLightVP{};      // sun view-projection, captured during the shadow pass
+static Camera3D g_t3dLightCam{};    // orthographic sun camera
+static const Vector3 kT3DSunDir = { 0.4268f, -0.8535f, 0.2987f }; // normalized (0.5,-1,0.35)
+static const Color kT3DSkyHorizon = { 238, 216, 178, 255 };
+static const Color kT3DSkyZenith  = { 125, 170, 222, 255 };
+
+// Depth-only FBO for the shadowmap (mirrors the raylib example's
+// LoadShadowmapRenderTexture helper).
+static RenderTexture2D Town3DLoadShadowmapRT(int width, int height) {
+    RenderTexture2D target{};
+    target.id = rlLoadFramebuffer();
+    target.texture.width = width;
+    target.texture.height = height;
+    if (target.id > 0) {
+        rlEnableFramebuffer(target.id);
+        target.depth.id = rlLoadTextureDepth(width, height, false);
+        target.depth.width = width;
+        target.depth.height = height;
+        target.depth.format = 19; // DEPTH_COMPONENT_24BIT
+        target.depth.mipmaps = 1;
+        rlFramebufferAttach(target.id, target.depth.id, RL_ATTACHMENT_DEPTH,
+                            RL_ATTACHMENT_TEXTURE2D, 0);
+        if (rlFramebufferComplete(target.id))
+            TRACELOG(LOG_INFO, "3D town: shadowmap FBO created");
+        else {
+            TRACELOG(LOG_WARNING, "3D town: shadowmap FBO incomplete, shadows off");
+            rlUnloadFramebuffer(target.id);
+            target.id = 0;
+        }
+        rlDisableFramebuffer();
+    } else {
+        TRACELOG(LOG_WARNING, "3D town: shadowmap FBO failed, shadows off");
+    }
+    return target;
+}
+
+static void Town3DEnsureShadow() {
+    Town3DShadow& S = g_t3dShadow;
+    if (S.ready || S.tried) return;
+    S.tried = true;
+    S.shader = LoadShader("assets/shaders/shadowmap.vs", "assets/shaders/shadowmap.fs");
+    if (S.shader.id == 0) return; // missing shader files: stay on flat lighting
+    S.shader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(S.shader, "viewPos");
+    S.viewPosLoc   = S.shader.locs[SHADER_LOC_VECTOR_VIEW];
+    S.lightDirLoc  = GetShaderLocation(S.shader, "lightDir");
+    S.lightColLoc  = GetShaderLocation(S.shader, "lightColor");
+    S.ambientLoc   = GetShaderLocation(S.shader, "ambient");
+    S.lightVPLoc   = GetShaderLocation(S.shader, "lightVP");
+    S.shadowMapLoc = GetShaderLocation(S.shader, "shadowMap");
+    S.shadowResLoc = GetShaderLocation(S.shader, "shadowMapResolution");
+    S.fogColorLoc  = GetShaderLocation(S.shader, "fogColor");
+    S.fogRangeLoc  = GetShaderLocation(S.shader, "fogRange");
+
+    Vector3 sunDir = kT3DSunDir;
+    SetShaderValue(S.shader, S.lightDirLoc, &sunDir, SHADER_UNIFORM_VEC3);
+    Vector4 sunCol = ColorNormalize(Color{ 255, 242, 220, 255 }); // warm afternoon sun
+    SetShaderValue(S.shader, S.lightColLoc, &sunCol, SHADER_UNIFORM_VEC4);
+    float ambient[4] = { 0.45f, 0.40f, 0.33f, 1.0f };
+    SetShaderValue(S.shader, S.ambientLoc, ambient, SHADER_UNIFORM_VEC4);
+    int res = T3D_SHADOWMAP_RES;
+    SetShaderValue(S.shader, S.shadowResLoc, &res, SHADER_UNIFORM_INT);
+    Vector3 fogCol = { kT3DSkyHorizon.r / 255.0f, kT3DSkyHorizon.g / 255.0f,
+                       kT3DSkyHorizon.b / 255.0f };
+    SetShaderValue(S.shader, S.fogColorLoc, &fogCol, SHADER_UNIFORM_VEC3);
+    float fogRange[2] = { 900.0f, 2600.0f }; // subtle: only the far side hazes out
+    SetShaderValue(S.shader, S.fogRangeLoc, fogRange, SHADER_UNIFORM_VEC2);
+
+    S.map = Town3DLoadShadowmapRT(T3D_SHADOWMAP_RES, T3D_SHADOWMAP_RES);
+    if (S.map.id == 0) { UnloadShader(S.shader); S.shader.id = 0; return; }
+
+    // Fixed orthographic sun camera covering the whole 1000x1000 town.
+    Vector3 center = { 500, 0, 500 };
+    g_t3dLightCam.position = T3VSub(center, T3VScale(kT3DSunDir, -1300.0f));
+    g_t3dLightCam.target = center;
+    g_t3dLightCam.up = { 0, 1, 0 };
+    g_t3dLightCam.fovy = 1350.0f; // ortho box height; aspect is 1:1 on the square FBO
+    g_t3dLightCam.projection = CAMERA_ORTHOGRAPHIC;
+    S.ready = true;
+}
+
+// Point a loaded model at the shadow shader (every material), so buildings and
+// the ground render lit + shadowed + fogged. No-op when shadows are off.
+static void Town3DApplyShadowShader(Model& m) {
+    if (!g_t3dShadow.ready || m.meshCount <= 0) return;
+    for (int i = 0; i < m.materialCount; i++) m.materials[i].shader = g_t3dShadow.shader;
+}
+
+// ---- 3D town ground: procedural grass texture (2026-09-24) ----
+// The flat colored DrawPlane is replaced by a 1024px texture baked once per
+// town: perlin-noise grass variation, a paved plaza circle, and dirt roads
+// from the plaza to each building (mirroring the old box-road layout) plus the
+// main street down to the Wilderness Gate. Baked into the texture = zero
+// z-fighting, one draw call. World 0..1000 maps to px = world * (1024/1000),
+// v=0 at world z=0 (matches GenMeshPlane's UV layout).
+static const int kT3DGroundPx = 1024;
+struct Town3DGround {
+    bool loaded = false;
+    int town = -1;
+    Texture2D tex{};
+    Model model{};
+};
+static Town3DGround g_t3dGround;
+
+static void Town3DGroundRoad(Image* img, float x1, float z1, float x2, float z2, Color col) {
+    const float k = kT3DGroundPx / 1000.0f;
+    const float w = 26.0f * k;
+    float px1 = x1 * k, pz1 = z1 * k, px2 = x2 * k, pz2 = z2 * k;
+    if (fabsf(x2 - x1) < 0.01f)
+        ImageDrawRectangle(img, (int)(px1 - w / 2), (int)fminf(pz1, pz2), (int)w,
+                           (int)fabsf(pz2 - pz1), col);
+    else
+        ImageDrawRectangle(img, (int)fminf(px1, px2), (int)(pz1 - w / 2),
+                           (int)fabsf(px2 - px1), (int)w, col);
+}
+// Same L-bend layout the old 3D box roads used, but ending on the plaza circle
+// (radius 85 at town center) instead of the plaza rect.
+static void Town3DGroundRoadToPlaza(Image* img, Vector2 bp, Color col) {
+    const float cx = 500.0f, cy = 500.0f, pr = 85.0f;
+    float dx = bp.x - cx, dy = bp.y - cy;
+    if (fabsf(dx) < pr && fabsf(dy) < pr) return; // inside the plaza already
+    if (fabsf(dx) < pr) {
+        Town3DGroundRoad(img, bp.x, bp.y, bp.x, cy + (dy < 0 ? -pr : pr), col);
+    } else if (fabsf(dy) < pr) {
+        Town3DGroundRoad(img, bp.x, bp.y, cx + (dx < 0 ? -pr : pr), bp.y, col);
+    } else {
+        Town3DGroundRoad(img, bp.x, bp.y, cx, bp.y, col);
+        Town3DGroundRoad(img, cx, bp.y, cx, cy + (dy < 0 ? -pr : pr), col);
+    }
+}
+
+static void Town3DEnsureGround(const GameState& s) {
+    Town3DGround& G = g_t3dGround;
+    if (G.loaded && G.town == s.selectedTown) return;
+    // Rebuild on town switch (frees the old texture/model first).
+    if (G.loaded) {
+        UnloadTexture(G.tex);
+        UnloadModel(G.model);
+        G.loaded = false;
+    }
+    Town3DEnsureShadow(); // ground model wants the shadow shader when available
+    bool town2 = (s.selectedTown != 0);
+    Color grassDark  = town2 ? Color{ 96, 132, 88, 255 }   : Color{ 104, 148, 82, 255 };
+    Color grassLight = town2 ? Color{ 132, 168, 118, 255 }  : Color{ 148, 190, 112, 255 };
+    Color plazaCol   = town2 ? Color{ 160, 162, 168, 255 }  : Color{ 196, 168, 108, 255 };
+    Color plazaRim   = town2 ? Color{ 128, 130, 136, 255 }  : Color{ 170, 142, 90, 255 };
+    Color roadCol    = town2 ? Color{ 150, 146, 138, 255 }  : Color{ 178, 146, 98, 255 };
+
+    const int SZ = kT3DGroundPx;
+    Image ground = GenImageColor(SZ, SZ, grassLight);
+    Image noise = GenImagePerlinNoise(SZ, SZ, 0, 0, 4.0f);
+    Color* gp = LoadImageColors(ground);
+    Color* np = LoadImageColors(noise);
+    for (int i = 0; i < SZ * SZ; i++) {
+        float t = np[i].r / 255.0f;
+        gp[i].r = (unsigned char)(grassDark.r + (grassLight.r - grassDark.r) * t);
+        gp[i].g = (unsigned char)(grassDark.g + (grassLight.g - grassDark.g) * t);
+        gp[i].b = (unsigned char)(grassDark.b + (grassLight.b - grassDark.b) * t);
+        gp[i].a = 255;
+    }
+    // Write the varied grass back into the image, then bake roads/plaza on top.
+    // (Direct copy: GenImageColor is RGBA8888, same layout as LoadImageColors.)
+    Color* dst = (Color*)ground.data;
+    for (int i = 0; i < SZ * SZ; i++) dst[i] = gp[i];
+    UnloadImageColors(gp);
+    UnloadImageColors(np);
+    UnloadImage(noise);
+
+    for (auto& node : kTownNodePositions) Town3DGroundRoadToPlaza(&ground, node.pos, roadCol);
+    // Main street: plaza's south edge down to the Wilderness Gate (mirrors 2D).
+    Town3DGroundRoad(&ground, 500, 500 + 85, 500, kWildernessGatePos.y, roadCol);
+    // Paved plaza circle at town center (rim first, then the face).
+    const float k = SZ / 1000.0f;
+    ImageDrawCircle(&ground, (int)(500 * k), (int)(500 * k), (int)(90 * k), plazaRim);
+    ImageDrawCircle(&ground, (int)(500 * k), (int)(500 * k), (int)(84 * k), plazaCol);
+
+    G.tex = LoadTextureFromImage(ground);
+    UnloadImage(ground);
+    GenTextureMipmaps(&G.tex);
+    SetTextureFilter(G.tex, TEXTURE_FILTER_TRILINEAR);
+    G.model = LoadModelFromMesh(GenMeshPlane(1000, 1000, 1, 1));
+    G.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = G.tex;
+    Town3DApplyShadowShader(G.model);
+    G.town = s.selectedTown;
+    G.loaded = true;
+}
+
+// ---- 3D town sky: gradient dome that follows the camera (2026-09-24) ----
+// Stacked open-topped cylinder bands, horizon (warm haze) -> zenith (blue).
+// Centered on the camera's x/z so the viewer is always inside it (the far
+// plane is 1000; the wall sits at 950). Drawn with the default shader —
+// unlit, unfogged — before the shadow shader is enabled for the scene.
+static void Town3DDrawSky(Vector3 camPos) {
+    const float R = 950.0f, bandH = 60.0f;
+    const int bands = 16;
+    rlDisableBackfaceCulling(); // we see the inside of the cylinder wall
+    for (int i = 0; i < bands; i++) {
+        float t = (float)i / (float)(bands - 1);
+        Color col = ColorLerp(kT3DSkyHorizon, kT3DSkyZenith, t * t * 0.92f);
+        DrawCylinder({ camPos.x, -30.0f + (i + 0.5f) * bandH, camPos.z },
+                     R, R, bandH, 24, col);
+    }
+    // Zenith cap overhead.
+    DrawCylinder({ camPos.x, 931.0f, camPos.z }, R, R, 2.0f, 24, kT3DSkyZenith);
+    rlEnableBackfaceCulling();
+}
+
+// ---- Real 3D building models (2026-09-24) ----
+// Quaternius Medieval Village MegaKit (CC0 1.0,
+// https://quaternius.com/packs/medievalvillagemegakit.html), glTF copies under
+// assets/models/ with textures downscaled to 512px for the web build.
+// The kit is modular: walls are 2m x 3.125m grid pieces, so each town building is
+// assembled here from wall/door/window/roof/prop pieces at kT3DModScale world
+// units per meter. The 2D view is untouched; picking still uses the unchanged
+// tile-footprint boxes in Town3DPick.
+static const float kT3DModScale = 22.0f; // world units per model meter
+
+struct Town3DModels {
+    bool loaded = false;
+    Model wallPlaster{}, wallPlasterDoor{}, wallPlasterWin{};
+    Model wallBrick{}, wallBrickDoor{}, wallBrickWin{};
+    Model roof44{}, roof46{};
+    Model chimney{}, crate{}, wagon{}, vine{};
+    // Props pass (2026-09-24): real CC0 models replacing the raylib primitives.
+    Model treeOak{}, treePine{}, treeDetailed{}, treeDefault{}, treeFat{}, bush{};
+    Model barrel{}, chest{};
+    Model fenceSingle{}, fenceExt{};
+};
+static Town3DModels g_t3dModels;
+
+static void Town3DLoadModels() {
+    Town3DModels& M = g_t3dModels;
+    if (M.loaded) return;
+    M.loaded = true;
+    Town3DEnsureShadow(); // models want the sun shader when shadows are available
+    M.wallPlaster     = LoadModel("assets/models/Wall_Plaster_Straight.gltf");
+    M.wallPlasterDoor = LoadModel("assets/models/Wall_Plaster_Door_Flat.gltf");
+    M.wallPlasterWin  = LoadModel("assets/models/Wall_Plaster_Window_Wide_Flat.gltf");
+    M.wallBrick       = LoadModel("assets/models/Wall_UnevenBrick_Straight.gltf");
+    M.wallBrickDoor   = LoadModel("assets/models/Wall_UnevenBrick_Door_Flat.gltf");
+    M.wallBrickWin    = LoadModel("assets/models/Wall_UnevenBrick_Window_Wide_Flat.gltf");
+    M.roof44          = LoadModel("assets/models/Roof_RoundTiles_4x4.gltf");
+    M.roof46          = LoadModel("assets/models/Roof_RoundTiles_4x6.gltf");
+    M.chimney         = LoadModel("assets/models/Prop_Chimney.gltf");
+    M.crate           = LoadModel("assets/models/Prop_Crate.gltf");
+    M.wagon           = LoadModel("assets/models/Prop_Wagon.gltf");
+    M.vine            = LoadModel("assets/models/Prop_Vine1.gltf");
+    // Props pass: Kenney Nature Kit trees/bush (CC0), KayKit Dungeon barrel/chest
+    // (CC0), Quaternius wooden fences (CC0, same kit as the buildings).
+    M.treeOak         = LoadModel("assets/models/tree_oak.glb");
+    M.treePine        = LoadModel("assets/models/tree_pineDefaultA.glb");
+    M.treeDetailed    = LoadModel("assets/models/tree_detailed.glb");
+    M.treeDefault     = LoadModel("assets/models/tree_default.glb");
+    M.treeFat         = LoadModel("assets/models/tree_fat.glb");
+    M.bush            = LoadModel("assets/models/plant_bush.glb");
+    M.barrel          = LoadModel("assets/models/barrel_small.glb");
+    M.chest           = LoadModel("assets/models/chest.glb");
+    M.fenceSingle     = LoadModel("assets/models/Prop_WoodenFence_Single.gltf");
+    M.fenceExt        = LoadModel("assets/models/Prop_WoodenFence_Extension1.gltf");
+    Town3DApplyShadowShader(M.wallPlaster);
+    Town3DApplyShadowShader(M.wallPlasterDoor);
+    Town3DApplyShadowShader(M.wallPlasterWin);
+    Town3DApplyShadowShader(M.wallBrick);
+    Town3DApplyShadowShader(M.wallBrickDoor);
+    Town3DApplyShadowShader(M.wallBrickWin);
+    Town3DApplyShadowShader(M.roof44);
+    Town3DApplyShadowShader(M.roof46);
+    Town3DApplyShadowShader(M.chimney);
+    Town3DApplyShadowShader(M.crate);
+    Town3DApplyShadowShader(M.wagon);
+    Town3DApplyShadowShader(M.vine);
+    Town3DApplyShadowShader(M.treeOak);
+    Town3DApplyShadowShader(M.treePine);
+    Town3DApplyShadowShader(M.treeDetailed);
+    Town3DApplyShadowShader(M.treeDefault);
+    Town3DApplyShadowShader(M.treeFat);
+    Town3DApplyShadowShader(M.bush);
+    Town3DApplyShadowShader(M.barrel);
+    Town3DApplyShadowShader(M.chest);
+    Town3DApplyShadowShader(M.fenceSingle);
+    Town3DApplyShadowShader(M.fenceExt);
+}
+
+// DrawModelEx guarded against a failed/missing asset, so a partially-filled
+// assets/models/ folder can never crash the 3D view. scaleMul multiplies the
+// standard kT3DModScale (models authored at different real-world sizes need
+// different multipliers); tint multiplies the material diffuse color, which the
+// shadow shader honors via colDiffuse.
+static void Town3DDrawPiece(Model m, Vector3 pos, float rotYDeg,
+                            float scaleMul = 1.0f, Color tint = WHITE) {
+    if (m.meshCount <= 0) return;
+    float s = kT3DModScale * scaleMul;
+    DrawModelEx(m, pos, { 0, 1, 0 }, rotYDeg, { s, s, s }, tint);
+}
+
+// Deterministic 0..1 hash from a world position — stable across frames, so
+// per-instance variation never jitters.
+static float Town3DHash01(float x, float z) {
+    float h = sinf(x * 12.9898f + z * 78.233f) * 43758.5453f;
+    return h - floorf(h);
+}
+
+// Subtle per-building tint palette (2026-09-24 variety pass): near-white
+// multipliers so same-kit buildings stop looking copy-pasted without changing
+// their identity. Deterministic per building key.
+static Color Town3DTintFor(const std::string& key, bool roof) {
+    unsigned h = 0;
+    for (char c : key) h = h * 31u + (unsigned char)c;
+    if (roof) {
+        static const Color pal[4] = {
+            { 255, 244, 232, 255 }, { 250, 236, 222, 255 },
+            { 255, 250, 240, 255 }, { 244, 230, 214, 255 },
+        };
+        return pal[h % 4];
+    }
+    static const Color pal[4] = {
+        { 255, 255, 255, 255 }, { 246, 242, 232, 255 },
+        { 250, 246, 238, 255 }, { 240, 236, 226, 255 },
+    };
+    return pal[h % 4];
+}
+
+// One modular house centered at (cx, cz): wMod x dMod footprint in 2m modules,
+// `stories` wall stories high, door on the ground-floor front (+z) face.
+// Wall pieces are modeled with their exterior toward local -z, so the back row
+// needs no rotation and the front row is turned 180 degrees.
+static void Town3DDrawHouse(float cx, float cz, const Model& wall, const Model& wallDoor,
+                            const Model& wallWin, const Model& roof, float roofRotY,
+                            int wMod, int dMod, int stories, bool chimney,
+                            Color wallTint, Color roofTint) {
+    const float S = kT3DModScale;
+    const float mod = 2.0f;      // kit grid module, meters
+    const float wallH = 3.125f;  // one wall story, meters
+    const float baseY = 2.0f;    // sits on the foundation slab
+    float hw = wMod * mod * 0.5f, hd = dMod * mod * 0.5f; // half extents, meters
+    for (int st = 0; st < stories; st++) {
+        float yb = baseY + st * wallH * S;
+        for (int i = 0; i < wMod; i++) { // front (+z, door) and back (-z) rows
+            float x = cx + (-hw + mod * (i + 0.5f)) * S;
+            const Model& m = (st == 0 && i == wMod / 2) ? wallDoor : ((i % 2) ? wallWin : wall);
+            Town3DDrawPiece(m, { x, yb, cz + hd * S }, 180.0f, 1.0f, wallTint);
+            Town3DDrawPiece(m, { x, yb, cz - hd * S }, 0.0f, 1.0f, wallTint);
+        }
+        for (int i = 0; i < dMod; i++) { // left (-x) and right (+x) rows
+            float z = cz + (-hd + mod * (i + 0.5f)) * S;
+            const Model& m = (i % 2) ? wallWin : wall;
+            Town3DDrawPiece(m, { cx - hw * S, yb, z }, 90.0f, 1.0f, wallTint);
+            Town3DDrawPiece(m, { cx + hw * S, yb, z }, -90.0f, 1.0f, wallTint);
+        }
+    }
+    float topY = baseY + stories * wallH * S;
+    // Roof origin sits 0.5m up into the eaves (measured from the glTF bounds).
+    Town3DDrawPiece(roof, { cx, topY + 0.5f * S, cz }, roofRotY, 1.0f, roofTint);
+    if (chimney)
+        Town3DDrawPiece(g_t3dModels.chimney, { cx + 1.3f * S, topY + 1.2f * S, cz }, 0.0f);
+}
+
+// One town building -> its MegaKit assembly. Footprints match the old box layout
+// (picking boxes in Town3DPick are unchanged).
+static void Town3DDrawBuilding(const std::string& key, float cx, float cz) {
+    Town3DModels& M = g_t3dModels;
+    bool brick = (key == "smith" || key == "alchemy" || key == "bank");
+    const Model& w  = brick ? M.wallBrick : M.wallPlaster;
+    const Model& wd = brick ? M.wallBrickDoor : M.wallPlasterDoor;
+    const Model& ww = brick ? M.wallBrickWin : M.wallPlasterWin;
+    // Variety pass: subtle per-building wall/roof tint shifts so same-kit
+    // buildings don't read as copy-pasted. Deterministic per key.
+    Color wallTint = Town3DTintFor(key, false);
+    Color roofTint = Town3DTintFor(key, true);
+    const float S = kT3DModScale;
+    if (key == "townhall") {
+        // Two-story, 3x2 modules — the town's landmark. Roof46's long axis runs
+        // along z, so it is turned 90 degrees to cover the 6m x-axis span.
+        Town3DDrawHouse(cx, cz, w, wd, ww, M.roof46, 90.0f, 3, 2, 2, true, wallTint, roofTint);
+    } else if (key == "bank" || key == "stable") {
+        Town3DDrawHouse(cx, cz, w, wd, ww, M.roof46, 90.0f, 3, 2, 1, key == "bank", wallTint, roofTint);
+        if (key == "stable") // wagon parked on the grass by the stable
+            Town3DDrawPiece(M.wagon, { cx + 4.6f * S, 0.0f, cz + 1.0f * S }, 90.0f);
+    } else {
+        Town3DDrawHouse(cx, cz, w, wd, ww, M.roof44, 0.0f, 2, 2, 1,
+                        key == "smith" || key == "alchemy", wallTint, roofTint);
+        if (key == "carpenter" || key == "provisioner") { // crates of goods by the door
+            Town3DDrawPiece(M.crate, { cx + 3.4f * S, 0.0f, cz + 2.6f * S }, 15.0f);
+            Town3DDrawPiece(M.crate, { cx + 3.4f * S, 0.0f + 1.06f * S, cz + 2.6f * S }, 40.0f);
+        }
+        if (key == "tailor" || key == "healer" || key == "house") { // vines on the front wall
+            Town3DDrawPiece(M.vine, { cx - 1.0f * S, 2.0f + 2.6f * S, cz + 2.35f * S }, 0.0f);
+        }
+    }
 }
 static const float kTown3DBuildingHalf = 55.0f; // 110-unit footprint, ~kNodeRadius*2
 
@@ -6146,10 +6610,11 @@ static bool Town3DPointInUI(Vector2 m, const GameState& s, int screenW) {
     return false;
 }
 
-// Click (press+release without a drag) on a building box selects it, exactly like
-// walking up + E does in 2D. Clicking the Wilderness Gate walks through it.
-static void Town3DPick(GameState& s, Vector2 mouse, int screenW, int screenH) {
-    Town3DCam c = Town3DGetCam(s, screenW, screenH);
+// Shared ray/box hit-test for the 3D town: returns the building key under the
+// mouse, or sets *outGate when the Wilderness Gate wins. Used by both the
+// click path (Town3DPick) and the per-frame hover highlight, so taps and
+// hover always agree.
+static std::string Town3DHitTest(const Town3DCam& c, Vector2 mouse, bool* outGate) {
     Ray ray = Town3DMouseRay(c, mouse);
     float bestT = 1e9f;
     std::string bestKey;
@@ -6167,7 +6632,17 @@ static void Town3DPick(GameState& s, Vector2 mouse, int screenW, int screenH) {
         RayCollision hit = GetRayCollisionBox(ray, bb);
         if (hit.hit && hit.distance < bestT) { bestT = hit.distance; bestGate = true; }
     }
-    if (bestGate) {
+    if (outGate) *outGate = bestGate;
+    return bestKey;
+}
+
+// Click (press+release without a drag) on a building box selects it, exactly like
+// walking up + E does in 2D. Clicking the Wilderness Gate walks through it.
+static void Town3DPick(GameState& s, Vector2 mouse, int screenW, int screenH) {
+    Town3DCam c = Town3DGetCam(s, screenW, screenH);
+    bool gate = false;
+    std::string bestKey = Town3DHitTest(c, mouse, &gate);
+    if (gate) {
         s.screen = Screen::Wilderness;
         s.wildernessPlayerPos = (s.selectedTown == 0) ? Vector2{ 900, 1650 } : Vector2{ 2900, 1650 };
     } else if (!bestKey.empty()) {
@@ -6175,102 +6650,59 @@ static void Town3DPick(GameState& s, Vector2 mouse, int screenW, int screenH) {
     }
 }
 
-// One flat road box between two world points (axis-aligned), mirroring
-// DrawRoadToPlaza's layout against kTownPlaza.
-static void Town3DRoadSeg(float x1, float z1, float x2, float z2, Color col) {
-    const float w = 28.0f;
-    float sx = fabsf(x2 - x1) < 0.01f ? w : fabsf(x2 - x1);
-    float sz = fabsf(z2 - z1) < 0.01f ? w : fabsf(z2 - z1);
-    DrawCube({ (x1 + x2) / 2.0f, 1.0f, (z1 + z2) / 2.0f }, sx, 2.0f, sz, col);
-}
-static void Town3DRoadToPlaza(Vector2 bp, Color col) {
-    const Rectangle& plaza = kTownPlaza;
-    bool insideX = bp.x >= plaza.x && bp.x <= plaza.x + plaza.width;
-    bool insideY = bp.y >= plaza.y && bp.y <= plaza.y + plaza.height;
-    if (insideX && insideY) return;
-    if (insideX) {
-        float edge = (bp.y < plaza.y) ? plaza.y : plaza.y + plaza.height;
-        Town3DRoadSeg(bp.x, bp.y, bp.x, edge, col);
-    } else if (insideY) {
-        float edge = (bp.x < plaza.x) ? plaza.x : plaza.x + plaza.width;
-        Town3DRoadSeg(bp.x, bp.y, edge, bp.y, col);
-    } else {
-        // Same center-x L-bend as DrawRoadToPlaza so corner roads merge into the
-        // edge-mid spokes instead of piling up parallel strips.
-        float cx = plaza.x + plaza.width / 2.0f;
-        float edge = (bp.y < plaza.y) ? plaza.y : plaza.y + plaza.height;
-        Town3DRoadSeg(bp.x, bp.y, cx, bp.y, col);
-        Town3DRoadSeg(cx, bp.y, cx, edge, col);
-    }
-}
+// The 3D town's drawable contents, shared by the shadow pass (depth from the
+// sun's POV) and the main pass (lit + shadowed). The sky is NOT included — it
+// is drawn only in the main pass, unlit, before the shadow shader is enabled.
+static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
+    (void)shadowPass;
+    Town3DLoadModels();
+    Town3DEnsureGround(s);
 
-static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
-    Vector2 mouse = GetMousePosition();
-    bool panelOpen = s.selectedTile.has_value() || s.greetedNPC.has_value();
+    // Ground: procedural grass texture with baked plaza + dirt roads, plus a
+    // large flat outer field so the horizon never shows a hard edge.
+    DrawModel(g_t3dGround.model, { 500, 0, 500 }, 1.0f, WHITE);
+    Color outerCol = (s.selectedTown == 0) ? Color{ 96, 138, 76, 255 } : Color{ 90, 124, 82, 255 };
+    DrawPlane({ 500, -1.5f, 500 }, { 4000, 4000 }, outerCol);
 
-    // --- Orbit / zoom / pick input (left-drag orbits, wheel zooms, click picks) ---
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !panelOpen &&
-        CheckCollisionPointRec(mouse, kViewport) && !Town3DPointInUI(mouse, s, screenW)) {
-        g_t3dOrbiting = true;
-        g_t3dLastMouse = mouse;
-        g_t3dDragDist = 0.0f;
-    }
-    if (g_t3dOrbiting && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-        Vector2 d = { mouse.x - g_t3dLastMouse.x, mouse.y - g_t3dLastMouse.y };
-        g_t3dLastMouse = mouse;
-        g_t3dDragDist += fabsf(d.x) + fabsf(d.y);
-        g_t3dYaw -= d.x * 0.006f;
-        g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, 0.2f, 1.35f);
-    }
-    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) {
-        bool wasClick = g_t3dDragDist < 8.0f;
-        g_t3dOrbiting = false;
-        if (wasClick && !panelOpen &&
-            CheckCollisionPointRec(mouse, kViewport) && !Town3DPointInUI(mouse, s, screenW))
-            Town3DPick(s, mouse, screenW, screenH);
-    }
-    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
-    float wheel = GetMouseWheelMove();
-    if (wheel != 0.0f && !panelOpen && CheckCollisionPointRec(mouse, kViewport))
-        g_t3dDist = std::clamp(g_t3dDist * (1.0f - wheel * 0.12f), 260.0f, 1500.0f);
-
-    // --- 3D scene ---
-    Town3DCam c = Town3DGetCam(s, screenW, screenH);
-    Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
-    BeginMode3D(cam3d);
-
-    Color groundCol = (s.selectedTown == 0) ? Color{ 210, 198, 168, 255 } : Color{ 176, 158, 132, 255 };
-    DrawPlane({ 500, 0, 500 }, { 1000, 1000 }, groundCol);
-
-    Color roadCol = (s.selectedTown == 0) ? Color{ 196, 164, 100, 255 } : Color{ 140, 148, 156, 255 };
-    DrawCube({ 500, 1, 500 }, 160, 2, 160, roadCol); // plaza
-    for (auto& node : kTownNodePositions) Town3DRoadToPlaza(node.pos, roadCol);
-    // Main street: plaza's south edge down to the Wilderness Gate (mirrors the 2D band).
-    Town3DRoadSeg(500, kTownPlaza.y + kTownPlaza.height, 500, kWildernessGatePos.y, roadCol);
-
-    // Buildings — one box per grid node, colored like the 2D tiles.
+    // Buildings — Quaternius MegaKit assemblies (see Town3DDrawBuilding), one per
+    // grid node on the same footprints the old programmer-art boxes used.
+    // Foundation slab kept; the Wilderness Gate keeps its existing gatehouse boxes.
     for (auto& node : kTownNodePositions) {
-        float h = Town3DBuildingHeight(node.key);
         Color col = TileColorFor(node.key);
         DrawCube({ node.pos.x, 1, node.pos.y }, 118, 2, 118, ColorBrightness(col, -0.4f)); // foundation
-        DrawCube({ node.pos.x, h / 2, node.pos.y }, 110, h, 110, col);
-        DrawCube({ node.pos.x, h + 9, node.pos.y }, 122, 18, 122, ColorBrightness(col, -0.25f)); // roof slab
+        Town3DDrawBuilding(node.key, node.pos.x, node.pos.y);
     }
     // Wilderness Gate — sage box, same role as in 2D.
     DrawCube({ kWildernessGatePos.x, 35, kWildernessGatePos.y }, 90, 70, 90, Color{ 140, 165, 140, 255 });
     DrawCube({ kWildernessGatePos.x, 79, kWildernessGatePos.y }, 102, 18, 102, Color{ 110, 135, 110, 255 });
 
-    // Foliage — trunk + canopy per variant (see kFoliagePositions).
+    // Foliage — real CC0 models (Kenney Nature Kit) per variant, see
+    // kFoliagePositions. Per-instance rotation + scale jitter from a
+    // deterministic position hash (stable across frames). Kenney trees are
+    // authored small (~1.2-1.7m), so they draw at 2x the modular scale.
     for (const TownFoliage& f : kFoliagePositions) {
-        DrawCylinder({ f.pos.x, 13, f.pos.y }, 5, 7, 26, 6, Color{ 120, 85, 50, 255 });
-        if (f.variant == 1) {
-            DrawCylinder({ f.pos.x, 46, f.pos.y }, 2, 26, 40, 8, Color{ 45, 110, 60, 255 }); // pine cone
-        } else if (f.variant == 5) {
-            DrawSphere({ f.pos.x, 40, f.pos.y }, 20, Color{ 200, 120, 40, 255 }); // autumn bush
-        } else {
-            Color g = (f.variant == 0) ? Color{ 70, 140, 70, 255 }
-                      : (f.variant % 2 ? Color{ 55, 125, 65, 255 } : Color{ 80, 150, 75, 255 });
-            DrawSphere({ f.pos.x, 36, f.pos.y }, 18, g);
+        Town3DModels& M = g_t3dModels;
+        float rot = Town3DHash01(f.pos.x, f.pos.y) * 360.0f;
+        float vs = 0.85f + 0.35f * Town3DHash01(f.pos.y, f.pos.x + 17.0f);
+        switch (f.variant) {
+            case 1: // pine
+                Town3DDrawPiece(M.treePine, { f.pos.x, 0, f.pos.y }, rot, 2.0f * vs);
+                break;
+            case 5: // autumn bush — bush model scaled up to read at tree spacing
+                Town3DDrawPiece(M.bush, { f.pos.x, 0, f.pos.y }, rot, 4.4f * vs);
+                break;
+            case 2:
+                Town3DDrawPiece(M.treeDetailed, { f.pos.x, 0, f.pos.y }, rot, 2.0f * vs);
+                break;
+            case 3:
+                Town3DDrawPiece(M.treeDefault, { f.pos.x, 0, f.pos.y }, rot, 2.0f * vs);
+                break;
+            case 4:
+                Town3DDrawPiece(M.treeFat, { f.pos.x, 0, f.pos.y }, rot, 2.0f * vs);
+                break;
+            default: // 0 — oak
+                Town3DDrawPiece(M.treeOak, { f.pos.x, 0, f.pos.y }, rot, 2.0f * vs);
+                break;
         }
     }
 
@@ -6301,11 +6733,13 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
                 for (int i = 0; i < 3; i++)
                     DrawCube({ x, 6.0f + i * 11.0f, z }, sz, 10, 12, Color{ 130, 90, 55, 255 });
                 break;
-            case 7: // barrel
-                DrawCylinder({ x, 11, z }, sz * 0.32f, sz * 0.36f, 22, 8, Color{ 125, 85, 50, 255 });
+            case 7: // barrel — KayKit Dungeon barrel (CC0), ~1m at modular scale
+                Town3DDrawPiece(g_t3dModels.barrel, { x, 0, z },
+                                Town3DHash01(x, z) * 360.0f, 1.0f);
                 break;
-            case 8: // crate
-                DrawCube({ x, 9, z }, 18, 18, 18, Color{ 170, 135, 90, 255 });
+            case 8: // crate — Quaternius Prop_Crate (already in the kit)
+                Town3DDrawPiece(g_t3dModels.crate, { x, 0, z },
+                                Town3DHash01(x, z) * 360.0f, 1.0f);
                 break;
             case 9: // anvil
                 DrawCube({ x, 8, z }, 16, 16, 16, Color{ 90, 70, 55, 255 });
@@ -6328,15 +6762,34 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
             case 15: // red potion
                 DrawCylinder({ x, 8, z }, 7, 8, 16, 8, Color{ 200, 70, 70, 255 });
                 break;
-            case 16: // chest
-                DrawCube({ x, 10, z }, 26, 20, 18, Color{ 120, 80, 45, 255 });
-                DrawCube({ x, 22, z }, 26, 6, 18, Color{ 95, 60, 35, 255 });
+            case 16: // chest — KayKit Dungeon chest (CC0), 0.7x to fit the old footprint
+                Town3DDrawPiece(g_t3dModels.chest, { x, 0, z },
+                                Town3DHash01(x, z) * 360.0f, 0.7f);
                 break;
             case 17: // bookshelf
                 DrawCube({ x, 22, z }, 30, 44, 12, Color{ 110, 75, 45, 255 });
                 break;
             default: break;
         }
+    }
+
+    // Plaza fence — Quaternius wooden fence rails (CC0, same kit as the
+    // buildings) marking the plaza edges, with gaps where the crossroads
+    // enter/exit. The 2D view draws fence posts here; the 3D view previously
+    // had nothing. kTownPlaza = {420,420,160,160}; one rail spans ~45 world
+    // units, so two per edge sit at the corners (Single and Extension1
+    // alternate for a hand-built look).
+    {
+        Town3DModels& M = g_t3dModels;
+        const float zN = 420.0f, zS = 580.0f, xW = 420.0f, xE = 580.0f;
+        Town3DDrawPiece(M.fenceSingle, { 442.5f, 0, zN }, 0.0f);
+        Town3DDrawPiece(M.fenceExt,    { 557.5f, 0, zN }, 0.0f);
+        Town3DDrawPiece(M.fenceSingle, { 442.5f, 0, zS }, 0.0f);
+        Town3DDrawPiece(M.fenceExt,    { 557.5f, 0, zS }, 0.0f);
+        Town3DDrawPiece(M.fenceSingle, { xW, 0, 442.5f }, 90.0f);
+        Town3DDrawPiece(M.fenceExt,    { xW, 0, 557.5f }, 90.0f);
+        Town3DDrawPiece(M.fenceSingle, { xE, 0, 442.5f }, 90.0f);
+        Town3DDrawPiece(M.fenceExt,    { xE, 0, 557.5f }, 90.0f);
     }
 
     // Player capsule (+head) and wandering townsfolk.
@@ -6348,30 +6801,272 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
         Vector2 np = TownNPCLivePos(i, s.worldTime, s.selectedTown);
         DrawCapsule({ np.x, 6, np.y }, { np.x, 40, np.y }, 11, 6, 6, Color{ 150, 150, 140, 255 });
     }
+}
 
+// Sun shadow pass: renders the town from the orthographic sun camera into the
+// shadowmap depth texture, capturing g_t3dLightVP for the main pass. Called
+// from the main loop BEFORE the frame's render target is bound (while the
+// default framebuffer is active), so Begin/EndTextureMode here can't disturb
+// the game's render texture on desktop. No-op when shadows are unavailable.
+static void Town3DShadowPass(GameState& s) {
+    Town3DEnsureShadow();
+    if (!g_t3dShadow.ready) return;
+    BeginTextureMode(g_t3dShadow.map);
+    ClearBackground(WHITE); // depth cleared; no color attachment on this FBO
+    BeginMode3D(g_t3dLightCam);
+    g_t3dLightVP = T3DMatMul(rlGetMatrixModelview(), rlGetMatrixProjection());
+    Town3DDrawSceneContents(s, true);
+    EndMode3D();
+    EndTextureMode();
+}
+
+// ---- 3D town ambience: chimney smoke + circling birds (2026-09-24 feel pass) ----
+// Cheap, high-payoff life. Smoke and birds draw in ONE batched rlgl triangle
+// batch (a single draw call), unlit, in the main 3D pass only — never in the
+// shadow pass, so they neither cast nor receive shadows.
+static const int kT3DSmokePuffsPer = 7;
+static const float kT3DSmokeRise = 26.0f;  // world units per second
+static const float kT3DSmokeLife = 3.4f;   // seconds per puff
+static const float kT3DSmokeAlpha = 0.42f; // peak puff opacity
+static const int kT3DBirdCount = 4;
+
+// Chimney world position, replicating Town3DDrawHouse's chimney math
+// (chimney sits at { cx + 1.3*S, topY + 1.2*S, cz }); puffs start above the cap.
+static Vector3 Town3DChimneyTop(const std::string& key, float cx, float cz) {
+    int stories = (key == "townhall") ? 2 : 1;
+    float topY = 2.0f + stories * 3.125f * kT3DModScale;
+    return { cx + 1.3f * kT3DModScale, topY + 2.8f * kT3DModScale, cz };
+}
+
+struct T3DSmokePuff { float age; float life; float seed; };
+static const int kT3DChimneyMax = 4; // townhall, bank, smith, alchemy
+static T3DSmokePuff g_t3dSmoke[kT3DChimneyMax * kT3DSmokePuffsPer];
+static bool g_t3dSmokeInit = false;
+
+static void Town3DUpdateAmbience(float dt) {
+    const int n = (int)(sizeof(g_t3dSmoke) / sizeof(g_t3dSmoke[0]));
+    if (!g_t3dSmokeInit) {
+        for (int i = 0; i < n; i++) {
+            g_t3dSmoke[i].life = kT3DSmokeLife * (0.85f + 0.3f * Town3DHash01((float)i, 7.0f));
+            g_t3dSmoke[i].age = g_t3dSmoke[i].life * Town3DHash01((float)i, 13.0f); // pre-rolled
+            g_t3dSmoke[i].seed = Town3DHash01((float)i, 29.0f) * 6.2832f;
+        }
+        g_t3dSmokeInit = true;
+    }
+    for (int i = 0; i < n; i++) {
+        T3DSmokePuff& p = g_t3dSmoke[i];
+        p.age += dt;
+        if (p.age >= p.life) {
+            p.age = 0.0f;
+            p.life = kT3DSmokeLife * (0.85f + 0.3f * Town3DHash01(p.seed, (float)i + 1.0f));
+        }
+    }
+}
+
+static void Town3DDrawAmbience(const Town3DCam& c) {
+    float t = (float)GetTime();
+    rlDisableBackfaceCulling();
+    rlBegin(RL_TRIANGLES);
+    // Smoke — one recycled puff pool per chimney (townhall, bank, smith, alchemy).
+    const int puffN = (int)(sizeof(g_t3dSmoke) / sizeof(g_t3dSmoke[0]));
+    int pi = 0;
+    for (auto& node : kTownNodePositions) {
+        bool hasChimney = node.key == "townhall" || node.key == "bank" ||
+                          node.key == "smith" || node.key == "alchemy";
+        if (!hasChimney || pi + kT3DSmokePuffsPer > puffN) continue;
+        Vector3 top = Town3DChimneyTop(node.key, node.pos.x, node.pos.y);
+        for (int k = 0; k < kT3DSmokePuffsPer; k++, pi++) {
+            const T3DSmokePuff& p = g_t3dSmoke[pi];
+            float lt = p.age / p.life; // 0..1 over the puff's life
+            Vector3 pc = { top.x + 6.0f * p.age + sinf(p.age * 2.2f + p.seed) * (6.0f + 10.0f * lt),
+                           top.y + p.age * kT3DSmokeRise,
+                           top.z + 2.0f * p.age + sinf(p.age * 2.2f + p.seed) * (3.0f + 5.0f * lt) };
+            float hs = 16.0f + 34.0f * lt; // puff grows as it rises
+            float a = sinf(3.14159f * lt) * kT3DSmokeAlpha; // fade in and out
+            Vector3 rx = T3VScale(c.right, hs), uy = T3VScale(c.up, hs);
+            Vector3 v0 = T3VSub(T3VSub(pc, rx), uy); // billboarded quad, camera-facing
+            Vector3 v1 = T3VAdd(T3VSub(pc, rx), uy);
+            Vector3 v2 = T3VAdd(T3VAdd(pc, rx), uy);
+            Vector3 v3 = T3VSub(T3VAdd(pc, rx), uy);
+            rlColor4ub(205, 200, 195, (unsigned char)(a * 255.0f));
+            rlVertex3f(v0.x, v0.y, v0.z); rlVertex3f(v1.x, v1.y, v1.z); rlVertex3f(v2.x, v2.y, v2.z);
+            rlVertex3f(v0.x, v0.y, v0.z); rlVertex3f(v2.x, v2.y, v2.z); rlVertex3f(v3.x, v3.y, v3.z);
+        }
+    }
+    // Birds — dark silhouettes circling high above the town, wings flapping.
+    for (int i = 0; i < kT3DBirdCount; i++) {
+        float ang = t * 0.22f + (float)i * 1.5708f;
+        float rad = 720.0f + (float)i * 110.0f;
+        Vector3 ctr = { 500.0f + cosf(ang) * rad,
+                        470.0f + (float)i * 32.0f + sinf(t * 0.6f + (float)i) * 24.0f,
+                        500.0f + sinf(ang) * rad };
+        Vector3 fwd = { -sinf(ang), 0.0f, cosf(ang) };  // direction of travel
+        Vector3 side = { cosf(ang), 0.0f, -sinf(ang) };  // wing axis
+        Vector3 nose = T3VAdd(ctr, T3VScale(fwd, 16.0f));
+        Vector3 tail = T3VSub(ctr, T3VScale(fwd, 12.0f));
+        float tipY = 6.0f + sinf(t * 8.0f + (float)i * 2.1f) * 18.0f; // flap
+        Vector3 lw = { ctr.x + side.x * 38.0f, ctr.y + tipY, ctr.z + side.z * 38.0f };
+        Vector3 rw = { ctr.x - side.x * 38.0f, ctr.y + tipY, ctr.z - side.z * 38.0f };
+        rlColor4ub(42, 38, 46, 255);
+        rlVertex3f(nose.x, nose.y, nose.z); rlVertex3f(tail.x, tail.y, tail.z); rlVertex3f(lw.x, lw.y, lw.z);
+        rlVertex3f(nose.x, nose.y, nose.z); rlVertex3f(rw.x, rw.y, rw.z); rlVertex3f(tail.x, tail.y, tail.z);
+    }
+    rlEnd();
+    rlEnableBackfaceCulling();
+}
+
+// Flat ground ring at (x, z), drawn unlit via immediate-mode triangles
+// (this raylib's DrawRing is 2D-only).
+static void Town3DDrawGroundRing(float x, float z, float y, float rIn, float rOut, int segs, Color col) {
+    rlDisableBackfaceCulling();
+    rlBegin(RL_TRIANGLES);
+    rlColor4ub(col.r, col.g, col.b, col.a);
+    for (int i = 0; i < segs; i++) {
+        float a0 = (float)i / (float)segs * 6.2832f, a1 = (float)(i + 1) / (float)segs * 6.2832f;
+        float c0 = cosf(a0), s0 = sinf(a0), c1 = cosf(a1), s1 = sinf(a1);
+        Vector3 i0 = { x + c0 * rIn, y, z + s0 * rIn };
+        Vector3 o0 = { x + c0 * rOut, y, z + s0 * rOut };
+        Vector3 o1 = { x + c1 * rOut, y, z + s1 * rOut };
+        Vector3 i1 = { x + c1 * rIn, y, z + s1 * rIn };
+        rlVertex3f(i0.x, i0.y, i0.z); rlVertex3f(o0.x, o0.y, o0.z); rlVertex3f(o1.x, o1.y, o1.z);
+        rlVertex3f(i0.x, i0.y, i0.z); rlVertex3f(o1.x, o1.y, o1.z); rlVertex3f(i1.x, i1.y, i1.z);
+    }
+    rlEnd();
+    rlEnableBackfaceCulling();
+}
+
+static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
+    Vector2 mouse = GetMousePosition();
+    bool panelOpen = s.selectedTile.has_value() || s.greetedNPC.has_value();
+
+    // --- Orbit / zoom / pick input (left-drag orbits, wheel zooms, click picks) ---
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !panelOpen &&
+        CheckCollisionPointRec(mouse, kViewport) && !Town3DPointInUI(mouse, s, screenW)) {
+        g_t3dOrbiting = true;
+        g_t3dLastMouse = mouse;
+        g_t3dDragDist = 0.0f;
+    }
+    if (g_t3dOrbiting && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        Vector2 d = { mouse.x - g_t3dLastMouse.x, mouse.y - g_t3dLastMouse.y };
+        g_t3dLastMouse = mouse;
+        g_t3dDragDist += fabsf(d.x) + fabsf(d.y);
+        g_t3dYaw -= d.x * 0.006f; // unbounded; the smoothed yaw follows continuously
+        g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
+    }
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) {
+        bool wasClick = g_t3dDragDist < 8.0f;
+        g_t3dOrbiting = false;
+        if (wasClick && !panelOpen &&
+            CheckCollisionPointRec(mouse, kViewport) && !Town3DPointInUI(mouse, s, screenW))
+            Town3DPick(s, mouse, screenW, screenH);
+    }
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
+    float wheel = GetMouseWheelMove();
+    if (wheel != 0.0f && !panelOpen && CheckCollisionPointRec(mouse, kViewport))
+        g_t3dDist = std::clamp(g_t3dDist * (1.0f - wheel * 0.12f), kT3DDistMin, kT3DDistMax);
+
+    // --- 3D scene: sky, then the lit + shadowed town ---
+    Town3DEnsureShadow();
+    Town3DLoadModels();
+    Town3DEnsureGround(s);
+    Town3DCam c = Town3DGetCam(s, screenW, screenH);
+    // Hover highlight: the same hit-test taps use (Town3DHitTest), evaluated on
+    // the smoothed camera so hover and tap always agree. Touch taps get their
+    // feedback from the selectedTile ring below while the panel is open.
+    std::string hoverKey;
+    bool hoverGate = false, hasHover = false;
+    if (!panelOpen && !g_t3dOrbiting && CheckCollisionPointRec(mouse, kViewport) &&
+        !Town3DPointInUI(mouse, s, screenW)) {
+        hoverKey = Town3DHitTest(c, mouse, &hoverGate);
+        hasHover = !hoverKey.empty() || hoverGate;
+    }
+    Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
+    BeginMode3D(cam3d);
+    Town3DDrawSky(c.pos); // gradient sky, default shader (unlit, unfogged)
+    bool shadowsOn = g_t3dShadow.ready;
+    if (shadowsOn) {
+        // Per-frame shader state: camera pos for specular/fog, the sun VP matrix
+        // captured by Town3DShadowPass, and the shadowmap depth texture on slot 10.
+        SetShaderValue(g_t3dShadow.shader, g_t3dShadow.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
+        SetShaderValueMatrix(g_t3dShadow.shader, g_t3dShadow.lightVPLoc, g_t3dLightVP);
+        rlEnableShader(g_t3dShadow.shader.id);
+        int shadowSlot = 10;
+        rlActiveTextureSlot(shadowSlot);
+        rlEnableTexture(g_t3dShadow.map.depth.id);
+        rlSetUniform(g_t3dShadow.shadowMapLoc, &shadowSlot, SHADER_UNIFORM_INT, 1);
+    }
+    Town3DDrawSceneContents(s, false);
+    if (shadowsOn) {
+        // Unbind the depth texture and restore the default shader so the 2D
+        // overlay labels below (and the rest of the frame) render normally.
+        rlActiveTextureSlot(10);
+        rlDisableTexture();
+        rlActiveTextureSlot(0);
+        rlEnableShader(rlGetShaderIdDefault());
+    }
+    // Ambience (smoke + birds): unlit, one batched draw call, main pass only.
+    Town3DUpdateAmbience(GetFrameTime());
+    Town3DDrawAmbience(c);
+    // Hover / selection ring: warm outline at the building's base. While a
+    // detail panel is open the tapped building keeps its ring (touch feedback).
+    {
+        std::string ringKey;
+        bool ringGate = false, showRing = false;
+        if (hasHover) { ringKey = hoverKey; ringGate = hoverGate; showRing = true; }
+        else if (s.selectedTile.has_value()) { ringKey = *s.selectedTile; showRing = true; }
+        if (showRing) {
+            float pulse = 0.60f + 0.18f * sinf((float)GetTime() * 4.0f);
+            Color rc = Fade(Color{ 255, 196, 110, 255 }, pulse);
+            if (ringGate) {
+                Town3DDrawGroundRing(kWildernessGatePos.x, kWildernessGatePos.y, 3.0f, 52.0f, 62.0f, 36, rc);
+            } else {
+                for (auto& node : kTownNodePositions)
+                    if (node.key == ringKey) {
+                        Town3DDrawGroundRing(node.pos.x, node.pos.y, 3.0f, 63.0f, 73.0f, 44, rc);
+                        break;
+                    }
+            }
+        }
+    }
     EndMode3D();
 
     // --- 2D overlay: building labels projected from 3D, interaction prompt, hints ---
+    // Labels fade and shrink as the camera pulls back (tuning constants below),
+    // so the far-zoomed town stays readable instead of a wall of nameplates.
+    const float kLabelFadeNear = 750.0f;  // full opacity at/inside this camera distance
+    const float kLabelFadeFar = 1450.0f;  // fully faded at/outside this distance
+    const auto& activeNPCs = (s.selectedTown == 0) ? kTownNPCs : kTown2NPCs;
     for (auto& node : kTownNodePositions) {
         float h = Town3DBuildingHeight(node.key);
         Vector2 sp;
         if (!Town3DProject(c, { node.pos.x, h + 30, node.pos.y }, &sp)) continue;
         if (sp.x < -60 || sp.x > screenW + 60 || sp.y < 100 || sp.y > screenH) continue;
+        Vector3 d3 = T3VSub(c.pos, { node.pos.x, 0.0f, node.pos.y });
+        float bd = sqrtf(T3VDot(d3, d3));
+        float a = std::clamp((kLabelFadeFar - bd) / (kLabelFadeFar - kLabelFadeNear), 0.0f, 1.0f);
+        if (a < 0.03f) continue;
+        int fsz = (int)(11.0f + 3.0f * a); // 14 close, 11 far
         std::string name = TileNameFor(node.key);
-        int w = MeasureUIText(name.c_str(), 13);
-        int sx = (int)(sp.x - w / 2), sy = (int)(sp.y - 13);
-        DrawRectangle(sx - 4, sy - 2, w + 8, 18, Fade(BLACK, 0.55f));
-        DrawUIText(name.c_str(), sx, sy, 13, WHITE);
+        int w = MeasureUIText(name.c_str(), fsz);
+        int sx = (int)(sp.x - w / 2), sy = (int)(sp.y - fsz);
+        DrawRectangle(sx - 4, sy - 2, w + 8, fsz + 5, Fade(BLACK, 0.55f * a));
+        DrawUIText(name.c_str(), sx, sy, fsz, Fade(WHITE, a));
     }
     {
         Vector2 sp;
         if (Town3DProject(c, { kWildernessGatePos.x, 100, kWildernessGatePos.y }, &sp) &&
             sp.x > -60 && sp.x < screenW + 60 && sp.y > 100 && sp.y < screenH) {
-            const char* name = "Wilderness Gate";
-            int w = MeasureUIText(name, 13);
-            int sx = (int)(sp.x - w / 2), sy = (int)(sp.y - 13);
-            DrawRectangle(sx - 4, sy - 2, w + 8, 18, Fade(BLACK, 0.55f));
-            DrawUIText(name, sx, sy, 13, WHITE);
+            Vector3 d3 = T3VSub(c.pos, { kWildernessGatePos.x, 0.0f, kWildernessGatePos.y });
+            float bd = sqrtf(T3VDot(d3, d3));
+            float a = std::clamp((kLabelFadeFar - bd) / (kLabelFadeFar - kLabelFadeNear), 0.0f, 1.0f);
+            if (a >= 0.03f) {
+                int fsz = (int)(11.0f + 3.0f * a);
+                const char* name = "Wilderness Gate";
+                int w = MeasureUIText(name, fsz);
+                int sx = (int)(sp.x - w / 2), sy = (int)(sp.y - fsz);
+                DrawRectangle(sx - 4, sy - 2, w + 8, fsz + 5, Fade(BLACK, 0.55f * a));
+                DrawUIText(name, sx, sy, fsz, Fade(WHITE, a));
+            }
         }
     }
     // Nearest-interactable prompt (mirrors the 2D "[E] ..." prompt DrawPlayer draws).
@@ -9287,6 +9982,13 @@ static void UpdateDrawFrame() {
                 state.screen = next;
             }
         }
+
+        // --- 3D town sun-shadow pass: renders depth from the light's POV into the
+        // shadowmap (see Town3DShadowPass), capturing the light VP matrix the
+        // main 3D pass needs. Must run while the default framebuffer is bound,
+        // before BeginTextureMode(g_zoomTarget)/BeginDrawing below. 2D screens
+        // are untouched (guarded by town3DView).
+        if (state.screen == Screen::Town && state.town3DView) Town3DShadowPass(state);
 
         // --- Draw ---
 #ifndef __EMSCRIPTEN__
