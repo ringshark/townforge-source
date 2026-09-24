@@ -7727,7 +7727,14 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     // large flat outer field so the horizon never shows a hard edge.
     DrawModel(g_t3dGround.model, { 500, 0, 500 }, 1.0f, WHITE);
     Color outerCol = (s.selectedTown == 0) ? Color{ 96, 138, 76, 255 } : Color{ 90, 124, 82, 255 };
-    DrawPlane({ 500, -1.5f, 500 }, { 4000, 4000 }, outerCol);
+    // 2026-09-24: was -1.5 — z-fought with the ground model at long view
+    // distances once the far clip plane was extended to 5000 (see
+    // rlSetClipPlanes in main()) to fix a web-only clipping bug; depth
+    // precision gets coarser the farther the far plane sits, and 1.5 units
+    // stopped being a resolvable gap at the town's max zoom. -15 is still
+    // visually nothing (this plane is a flat-color horizon filler, never
+    // seen edge-on) but leaves enough margin to stay unambiguous.
+    DrawPlane({ 500, -15.0f, 500 }, { 4000, 4000 }, outerCol);
 
     // Buildings — Quaternius MegaKit assemblies (see Town3DDrawBuilding), one per
     // grid node on the same footprints the old programmer-art boxes used.
@@ -8529,7 +8536,12 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     // Ground: procedural meadow with baked paths, plus a large flat outer field
     // so the horizon never shows a hard edge.
     DrawModel(g_wild3dGround.model, { 1600, 0, 1600 }, 1.0f, WHITE);
-    DrawPlane({ 1600, -1.5f, 1600 }, { 8000, 8000 }, Color{ 92, 132, 70, 255 });
+    // 2026-09-24: was -1.5 — visibly z-fought (flickering horizontal bands)
+    // against the ground model at the wilderness's max zoom (2600 units) once
+    // the far clip plane was extended to 5000 to fix a web-only clipping bug;
+    // found by testing this exact zoom level, not guessed. -15 keeps the same
+    // "invisible flat-color filler" role with enough depth margin at range.
+    DrawPlane({ 1600, -15.0f, 1600 }, { 8000, 8000 }, Color{ 92, 132, 70, 255 });
 
     // Extra scatter (3D-only filler; see Wild3DBuildScatter).
     for (const Wild3DScatterItem& it : g_wild3dScatter) {
@@ -12525,6 +12537,20 @@ int main() {
     InitWindow(kScreenW, kScreenH, "Town Forge");
 #endif
     SetTargetFPS(60);
+    // 2026-09-24: the two raylib copies this project builds against disagree on
+    // rlgl's default far cull distance — the desktop copy
+    // (raylib-6.0_win64_mingw-w64) defaults to 4000, but the web copy
+    // (raylib-src, used by the em++ build) defaults to 1000. The 3D Wilderness
+    // view's camera can zoom out to 2600 units and its sky dome sits at a
+    // 4200-unit radius, both fine against the desktop default but silently
+    // clipped away on web — ground, trees, and the sky itself would vanish at
+    // moderate zoom on the web build while looking completely fine on desktop
+    // (found by reading rlgl.h for both copies, not by seeing it happen — the
+    // desktop sandbox this project is built in can't reproduce a web-only
+    // clipping bug by screenshotting the desktop build). Setting an explicit,
+    // platform-independent far plane here — comfortably past every 3D view's
+    // farthest zoom/sky radius — removes the discrepancy for good.
+    rlSetClipPlanes(0.05, 5000.0);
     LoadGameAssets(); // must come after InitWindow — texture loading needs a graphics context
 
 #ifdef __EMSCRIPTEN__
