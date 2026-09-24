@@ -6393,6 +6393,37 @@ static void Town3DEnsureGround(const GameState& s) {
 // Centered on the camera's x/z so the viewer is always inside it (the far
 // plane is 1000; the wall sits at 950). Drawn with the default shader —
 // unlit, unfogged — before the shadow shader is enabled for the scene.
+//
+// 2026-09-24 bugfix: this used to call DrawCylinder per band, which (per
+// rmodels.c) always fills BOTH a top and a bottom cap in addition to the
+// side wall. Stacking 16 of those gave ~17 solid 950-radius discs at every
+// band boundary — the camera, sitting between two of them, had its view of
+// the ground/buildings completely blocked by the nearest disc below it,
+// which read as an empty flat-colored view with no geometry at all (found
+// by bisecting: removing this call entirely made buildings/ground appear
+// correctly, confirming the sky itself was the occluder). DrawCylinderEx
+// looked like the fix (draw between two points, no position+height) but
+// turned out to ALSO fill a full disc cap at either end whenever that end's
+// radius is nonzero (same rmodels.c) — same bug, different call. Fixed for
+// real with Town3DSkyBand below: hand-rolled side-wall-only quads (no cap
+// vertices emitted at all), safe to stack with zero occlusion risk.
+static void Town3DSkyBand(Vector3 base, Vector3 top, float radius, int sides, Color color) {
+    float step = 360.0f / (float)sides;
+    rlBegin(RL_TRIANGLES);
+        rlColor4ub(color.r, color.g, color.b, color.a);
+        for (int i = 0; i < sides; i++) {
+            float a0 = DEG2RAD * i * step, a1 = DEG2RAD * (i + 1) * step;
+            float s0 = sinf(a0) * radius, c0 = cosf(a0) * radius;
+            float s1 = sinf(a1) * radius, c1 = cosf(a1) * radius;
+            Vector3 b0 = { base.x + s0, base.y, base.z + c0 };
+            Vector3 b1 = { base.x + s1, base.y, base.z + c1 };
+            Vector3 t0 = { top.x + s0, top.y, top.z + c0 };
+            Vector3 t1 = { top.x + s1, top.y, top.z + c1 };
+            rlVertex3f(b0.x, b0.y, b0.z); rlVertex3f(b1.x, b1.y, b1.z); rlVertex3f(t1.x, t1.y, t1.z);
+            rlVertex3f(t0.x, t0.y, t0.z); rlVertex3f(b0.x, b0.y, b0.z); rlVertex3f(t1.x, t1.y, t1.z);
+        }
+    rlEnd();
+}
 static void Town3DDrawSky(Vector3 camPos) {
     const float R = 950.0f, bandH = 60.0f;
     const int bands = 16;
@@ -6400,10 +6431,10 @@ static void Town3DDrawSky(Vector3 camPos) {
     for (int i = 0; i < bands; i++) {
         float t = (float)i / (float)(bands - 1);
         Color col = ColorLerp(kT3DSkyHorizon, kT3DSkyZenith, t * t * 0.92f);
-        DrawCylinder({ camPos.x, -30.0f + (i + 0.5f) * bandH, camPos.z },
-                     R, R, bandH, 24, col);
+        float y0 = -30.0f + i * bandH, y1 = y0 + bandH;
+        Town3DSkyBand({ camPos.x, y0, camPos.z }, { camPos.x, y1, camPos.z }, R, 24, col);
     }
-    // Zenith cap overhead.
+    // Zenith cap overhead — the one real cap, sealing the top of the dome.
     DrawCylinder({ camPos.x, 931.0f, camPos.z }, R, R, 2.0f, 24, kT3DSkyZenith);
     rlEnableBackfaceCulling();
 }
