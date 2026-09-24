@@ -731,6 +731,14 @@ struct GameState {
     // world render between the classic 2D sprite view and the new 3D programmer-art
     // view (DrawTown3DWorld). Transient UI state, not saved - same as selectedTile above.
     bool town3DView = false;
+    // 3D wilderness view toggle (2026-09-24, Phase 1 of the wilderness 3D work) -
+    // same deal for DrawWildernessScreen: the 3D view is a pure view layer, all game
+    // logic stays in the shared DrawWildernessScreen code. Transient, not saved.
+    bool wild3DView = false;
+    // 3D dungeon view toggle (2026-09-24, Phase 2 — dungeons 3D) - same deal for
+    // DrawHuntScreen's explorable dungeon arena: the 3D view is a pure view layer,
+    // all game logic stays in the shared DrawHuntScreen code. Transient, not saved.
+    bool hunt3DView = false;
     // Second town (2026-09-22, "second town" plan) — 0 = Town 1 (existing), 1 = Town 2.
     // Reuses Town 1's exact layout/collision/roads (see DrawTownScreen); only the
     // building tint/texture, ground texture, and NPC flavor differ per town, per the
@@ -6096,6 +6104,848 @@ static Matrix T3DMatMul(Matrix a, Matrix b) {
     return r;
 }
 
+// ==== T3C-KIT-BEGIN ====
+// ---------------------------------------------------------------------
+// Phase 3 — Procedural Creature Kit (2026-09-24).
+//
+// Mark's directive: no placeholder stand-ins. The CC0 hunt could not cover
+// the roster (the KayKit-Adventurers repo 404s and kaykit.com is unreachable
+// from here; no single CC0 pack spans wolf/panther/sabertooth/griffin/
+// wyvern/drake/dragon/bear/bison/horse/dog/bat/goblin/imp/bandit/orc), so
+// every creature is assembled in code from flat-shaded primitives, matching
+// the Quaternius low-poly look. Zero new assets, zero license risk, and
+// per-instance procedural animation (trot cycles, wing flaps, idle head
+// turns) that a stiff downloaded rig could not give us.
+//
+// View-layer only: positions/facings/speeds are read from live game state
+// (town/wilderness/dungeon player pos, companion pos, wander offsets);
+// no game logic is touched.
+//
+// Performance: each archetype's part meshes are built ONCE and shared by
+// every instance; per-instance variation comes from DrawModel's tint +
+// scale via the matrix stack. Quadrupeds collapse to one merged mesh in the
+// shadow pass and past ~750 units (far LOD); humanoids are few enough to
+// stay fully articulated (6 draws each) everywhere.
+// ---------------------------------------------------------------------
+
+// The kit is defined before Town3DHash01, so it carries its own tiny
+// deterministic hasher instead of depending on it.
+static float T3CHash01(float x, float y) {
+    float h = sinf(x * 127.1f + y * 311.7f) * 43758.5453f;
+    return h - floorf(h);
+}
+
+// Town3DApplyShadowShader is defined below with the town view; the kit only
+// needs it for the per-frame sun-shader assignment on its shared models.
+static void Town3DApplyShadowShader(Model& m);
+
+// ---- Flat-shaded primitive mesh builder ----
+// Non-indexed triangles with per-face normals: every part comes out faceted,
+// which is exactly the Quaternius flat-shaded look. Vertex colors are white;
+// per-instance/per-part color comes from DrawModel's tint at draw time.
+struct T3CMeshBuilder {
+    std::vector<float> pos;         // xyz per vertex
+    std::vector<float> nor;         // xyz per vertex
+    std::vector<float> uv;          // xy per vertex
+    std::vector<unsigned char> col; // rgba per vertex
+};
+
+static void T3CPushTri(T3CMeshBuilder& b, const float p0[3], const float p1[3],
+                       const float p2[3], Color col) {
+    float ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    float vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    float l = sqrtf(nx * nx + ny * ny + nz * nz);
+    if (l < 1e-9f) return; // degenerate (sphere pole fans) — skip instead of
+                           // emitting a zero-area tri with a bogus normal
+    nx /= l; ny /= l; nz /= l;
+    const float* ps[3] = { p0, p1, p2 };
+    for (int i = 0; i < 3; i++) {
+        b.pos.push_back(ps[i][0]); b.pos.push_back(ps[i][1]); b.pos.push_back(ps[i][2]);
+        b.nor.push_back(nx); b.nor.push_back(ny); b.nor.push_back(nz);
+        b.uv.push_back(0.0f); b.uv.push_back(0.0f);
+        b.col.push_back(col.r); b.col.push_back(col.g); b.col.push_back(col.b); b.col.push_back(col.a);
+    }
+}
+
+static void T3CQuad(T3CMeshBuilder& b, const float v0[3], const float v1[3],
+                    const float v2[3], const float v3[3], Color col) {
+    T3CPushTri(b, v0, v1, v2, col);
+    T3CPushTri(b, v0, v2, v3, col);
+}
+
+// Axis-aligned box. Face windings below are ordered so the computed face
+// normal points outward (verified: cross(b-a, c-a) per face).
+static void T3CBox(T3CMeshBuilder& b, float cx, float cy, float cz,
+                   float sx, float sy, float sz, Color col) {
+    float x0 = cx - sx / 2, x1 = cx + sx / 2;
+    float y0 = cy - sy / 2, y1 = cy + sy / 2;
+    float z0 = cz - sz / 2, z1 = cz + sz / 2;
+    const float px[4][3] = {{x1,y0,z0},{x1,y1,z0},{x1,y1,z1},{x1,y0,z1}}; // +X
+    const float nx[4][3] = {{x0,y0,z1},{x0,y1,z1},{x0,y1,z0},{x0,y0,z0}}; // -X
+    const float py[4][3] = {{x0,y1,z0},{x0,y1,z1},{x1,y1,z1},{x1,y1,z0}}; // +Y
+    const float ny[4][3] = {{x0,y0,z1},{x0,y0,z0},{x1,y0,z0},{x1,y0,z1}}; // -Y
+    const float pz[4][3] = {{x0,y0,z1},{x1,y0,z1},{x1,y1,z1},{x0,y1,z1}}; // +Z
+    const float nz[4][3] = {{x1,y0,z0},{x0,y0,z0},{x0,y1,z0},{x1,y1,z0}}; // -Z
+    T3CQuad(b, px[0], px[1], px[2], px[3], col);
+    T3CQuad(b, nx[0], nx[1], nx[2], nx[3], col);
+    T3CQuad(b, py[0], py[1], py[2], py[3], col);
+    T3CQuad(b, ny[0], ny[1], ny[2], ny[3], col);
+    T3CQuad(b, pz[0], pz[1], pz[2], pz[3], col);
+    T3CQuad(b, nz[0], nz[1], nz[2], nz[3], col);
+}
+
+// Faceted ellipsoid (sphere with per-axis radii). quad(p00,p10,p11,p01) with
+// p00=(lat0,lon0), p10=(lat1,lon0), p11=(lat1,lon1), p01=(lat0,lon1) yields
+// outward face normals (verified by cross-product check at the equator).
+static void T3CSphere(T3CMeshBuilder& b, float cx, float cy, float cz,
+                      float rx, float ry, float rz, int rings, int slices, Color col) {
+    for (int i = 0; i < rings; i++) {
+        float lat0 = -1.5707963f + 3.14159265f * (float)i / (float)rings;
+        float lat1 = -1.5707963f + 3.14159265f * (float)(i + 1) / (float)rings;
+        for (int j = 0; j < slices; j++) {
+            float lon0 = 6.2831853f * (float)j / (float)slices;
+            float lon1 = 6.2831853f * (float)(j + 1) / (float)slices;
+            float p00[3] = { cx + rx * cosf(lat0) * cosf(lon0), cy + ry * sinf(lat0), cz + rz * cosf(lat0) * sinf(lon0) };
+            float p10[3] = { cx + rx * cosf(lat1) * cosf(lon0), cy + ry * sinf(lat1), cz + rz * cosf(lat1) * sinf(lon0) };
+            float p11[3] = { cx + rx * cosf(lat1) * cosf(lon1), cy + ry * sinf(lat1), cz + rz * cosf(lat1) * sinf(lon1) };
+            float p01[3] = { cx + rx * cosf(lat0) * cosf(lon1), cy + ry * sinf(lat0), cz + rz * cosf(lat0) * sinf(lon1) };
+            if (i == 0) {
+                T3CPushTri(b, p00, p10, p11, col); // south pole fan (p00 == p01)
+            } else if (i == rings - 1) {
+                T3CPushTri(b, p00, p11, p01, col); // north pole fan (p10 == p11)
+            } else {
+                T3CQuad(b, p00, p10, p11, p01, col);
+            }
+        }
+    }
+}
+
+// Vertical cylinder from y0 (radius r0) to y1 (radius r1). Side quad order
+// (a,d,c,bb) and cap windings verified outward by cross-product check.
+static void T3CCylinder(T3CMeshBuilder& b, float cx, float y0, float cz, float y1,
+                        float r0, float r1, int sides, Color col,
+                        bool capTop = true, bool capBottom = true) {
+    for (int j = 0; j < sides; j++) {
+        float l0 = 6.2831853f * (float)j / (float)sides;
+        float l1 = 6.2831853f * (float)(j + 1) / (float)sides;
+        float a[3]  = { cx + r0 * cosf(l0), y0, cz + r0 * sinf(l0) };
+        float bb[3] = { cx + r0 * cosf(l1), y0, cz + r0 * sinf(l1) };
+        float c[3]  = { cx + r1 * cosf(l1), y1, cz + r1 * sinf(l1) };
+        float d[3]  = { cx + r1 * cosf(l0), y1, cz + r1 * sinf(l0) };
+        T3CQuad(b, a, d, c, bb, col);
+        if (capTop) {
+            float t[3] = { cx, y1, cz };
+            T3CPushTri(b, t, c, d, col);
+        }
+        if (capBottom) {
+            float bt[3] = { cx, y0, cz };
+            T3CPushTri(b, bt, a, bb, col);
+        }
+    }
+}
+
+// Cone with base disc centered at base[], axis dir[] (normalized inside),
+// apex at base + dir*len. Winding verified outward for dir=+Y (side tri
+// (apex,p0,p1), cap tri (base,p1,p0)); holds for general dir by rotation.
+static void T3CConeDir(T3CMeshBuilder& b, const float baseIn[3], const float dirIn[3],
+                       float len, float r, int sides, Color col) {
+    float dir[3] = { dirIn[0], dirIn[1], dirIn[2] };
+    float dl = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    if (dl > 1e-6f) { dir[0] /= dl; dir[1] /= dl; dir[2] /= dl; }
+    float u[3] = { -dir[1], dir[0], 0.0f };
+    float ul = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+    if (ul < 1e-4f) { u[0] = 1.0f; u[1] = 0.0f; u[2] = 0.0f; ul = 1.0f; }
+    u[0] /= ul; u[1] /= ul; u[2] /= ul;
+    float v[3] = { dir[1] * u[2] - dir[2] * u[1], dir[2] * u[0] - dir[0] * u[2],
+                   dir[0] * u[1] - dir[1] * u[0] }; // dir x u
+    float apex[3] = { baseIn[0] + dir[0] * len, baseIn[1] + dir[1] * len, baseIn[2] + dir[2] * len };
+    for (int j = 0; j < sides; j++) {
+        float a0 = 6.2831853f * (float)j / (float)sides;
+        float a1 = 6.2831853f * (float)(j + 1) / (float)sides;
+        float p0[3] = { baseIn[0] + r * (u[0] * cosf(a0) + v[0] * sinf(a0)),
+                        baseIn[1] + r * (u[1] * cosf(a0) + v[1] * sinf(a0)),
+                        baseIn[2] + r * (u[2] * cosf(a0) + v[2] * sinf(a0)) };
+        float p1[3] = { baseIn[0] + r * (u[0] * cosf(a1) + v[0] * sinf(a1)),
+                        baseIn[1] + r * (u[1] * cosf(a1) + v[1] * sinf(a1)),
+                        baseIn[2] + r * (u[2] * cosf(a1) + v[2] * sinf(a1)) };
+        T3CPushTri(b, apex, p0, p1, col);
+        T3CPushTri(b, baseIn, p1, p0, col); // base cap, normal = -dir
+    }
+}
+
+static Model T3CFinish(T3CMeshBuilder& b) {
+    Mesh mesh{};
+    int n = (int)(b.pos.size() / 3);
+    mesh.vertexCount = n;
+    mesh.triangleCount = n / 3;
+    mesh.vertices = new float[(size_t)n * 3];
+    mesh.normals = new float[(size_t)n * 3];
+    mesh.texcoords = new float[(size_t)n * 2];
+    mesh.colors = new unsigned char[(size_t)n * 4];
+    for (int i = 0; i < n * 3; i++) { mesh.vertices[i] = b.pos[(size_t)i]; mesh.normals[i] = b.nor[(size_t)i]; }
+    for (int i = 0; i < n * 2; i++) mesh.texcoords[i] = b.uv[(size_t)i];
+    for (int i = 0; i < n * 4; i++) mesh.colors[i] = b.col[(size_t)i];
+    UploadMesh(&mesh, false);
+    // NOTE: the CPU-side arrays are intentionally never freed — the part
+    // meshes are built once and live for the whole session.
+    return LoadModelFromMesh(mesh);
+}
+
+// Append a part mesh translated to its rest pose (for the merged LOD mesh).
+static void T3CMergeInto(T3CMeshBuilder& out, const Mesh& m, float tx, float ty, float tz) {
+    int n = m.vertexCount;
+    for (int i = 0; i < n; i++) {
+        out.pos.push_back(m.vertices[i * 3] + tx);
+        out.pos.push_back(m.vertices[i * 3 + 1] + ty);
+        out.pos.push_back(m.vertices[i * 3 + 2] + tz);
+        out.nor.push_back(m.normals[i * 3]);
+        out.nor.push_back(m.normals[i * 3 + 1]);
+        out.nor.push_back(m.normals[i * 3 + 2]);
+        out.uv.push_back(m.texcoords ? m.texcoords[i * 2] : 0.0f);
+        out.uv.push_back(m.texcoords ? m.texcoords[i * 2 + 1] : 0.0f);
+        out.col.push_back(m.colors ? m.colors[i * 4] : 255);
+        out.col.push_back(m.colors ? m.colors[i * 4 + 1] : 255);
+        out.col.push_back(m.colors ? m.colors[i * 4 + 2] : 255);
+        out.col.push_back(m.colors ? m.colors[i * 4 + 3] : 255);
+    }
+}
+
+// ---- Archetype specs ----
+struct T3CQuadSpec {
+    const char* key;
+    float bodyLen, bodyH, bodyW; // torso ellipsoid full extents
+    float legLen, legR;
+    float neckUp;                // head pivot height above torso center
+    float headR;
+    float snoutLen;              // box snout (0 = none)
+    float beakLen;               // cone beak (0 = none)
+    float earH;                  // cone ears (0 = none)
+    float tailLen, tailR;
+    float wingSpan, wingChord;   // 0 = no wings
+    bool saberTeeth, horns, mane;
+    bool hindOnly;               // wyvern/bat body plan: rear legs only
+    bool hover, alwaysFlap;      // bat flight behavior
+    bool serpent;                // serpentine body plan: no legs, segment chain
+};
+
+// key, bodyLen, bodyH, bodyW, legLen, legR, neckUp, headR,
+// snoutLen, beakLen, earH, tailLen, tailR, wingSpan, wingChord,
+// saberTeeth, horns, mane, hindOnly, hover, alwaysFlap, serpent
+static const T3CQuadSpec kT3CQuadSpecs[11] = {
+    { "canine",      46, 20, 15, 26, 3.6f, 10, 8.5f, 10, 0, 7, 16, 3.0f,  0,  0, false, false, false, false, false, false, false },
+    { "feline",      48, 17, 13, 27, 3.2f,  9, 7.5f,  8, 0, 6, 24, 2.2f,  0,  0, false, false, false, false, false, false, false },
+    { "felineSaber", 48, 18, 14, 27, 3.4f,  9, 8.5f,  9, 0, 6, 24, 2.4f,  0,  0, true,  false, false, false, false, false, false },
+    { "bulky",       44, 26, 22, 22, 5.0f,  8, 9.0f,  8, 0, 5,  8, 3.5f,  0,  0, false, false, false, false, false, false, false },
+    { "bulkyHorned", 46, 27, 23, 22, 5.2f,  6, 9.0f,  9, 0, 4, 10, 3.0f,  0,  0, false, true,  false, false, false, false, false },
+    { "equine",      48, 20, 15, 32, 3.8f, 16, 7.0f, 12, 0, 8, 22, 2.6f,  0,  0, false, false, true,  false, false, false, false },
+    { "winged",      50, 20, 16, 24, 4.0f, 10, 8.0f,  9, 0, 6, 28, 2.8f, 58, 24, false, true,  false, false, false, false, false },
+    { "wingedBeak",  48, 19, 16, 24, 3.8f, 10, 7.5f,  0, 9, 7, 20, 2.6f, 56, 24, false, false, false, false, false, false, false },
+    { "wyvern",      46, 18, 14, 26, 3.6f, 10, 7.5f,  8, 0, 5, 36, 2.4f, 62, 26, false, true,  false, true,  false, false, false },
+    { "bat",         16, 10,  9,  8, 1.8f,  4, 5.0f,  4, 0, 6,  6, 1.4f, 36, 16, false, false, false, true,  true,  true,  false },
+    // serpent: bodyLen = chain length, tailR = segment radius, headR/neckUp as usual
+    { "serpent",     70,  0,  0,  0, 0.0f, 10, 9.0f,  8, 0, 0,  0, 7.0f,  0,  0, false, false, false, false, false, false, true  },
+};
+
+struct T3CQuadParts {
+    Model torso, head, leg, tail, wingL, wingR, merged;
+    Model segBody;                       // serpent: one body segment mesh
+    int segCount = 0; float segSpacing = 0.0f;
+    Vector3 neckP, legFLP, legFRP, legBLP, legBRP, tailP, wingLP, wingRP;
+    bool hasWings = false, hindOnly = false, hover = false, alwaysFlap = false;
+    bool serpent = false;
+};
+
+static T3CQuadParts T3CBuildQuad(const T3CQuadSpec& s) {
+    T3CQuadParts P{};
+    if (s.serpent) { // ---- Serpentine body plan: segment chain + head, no legs ----
+        P.serpent = true;
+        P.segCount = 7;
+        P.segSpacing = s.bodyLen / (float)P.segCount;
+        float segR = s.tailR;
+        {
+            T3CMeshBuilder b;
+            T3CSphere(b, 0.0f, 0.0f, 0.0f, segR, segR * 0.9f, segR * 0.9f, 6, 8, WHITE);
+            P.segBody = T3CFinish(b);
+        }
+        P.neckP = { s.bodyLen * 0.5f + 4.0f, s.neckUp, 0.0f };
+        {
+            T3CMeshBuilder b;
+            T3CSphere(b, 0.0f, 0.0f, 0.0f, s.headR, s.headR * 0.9f, s.headR * 0.85f, 6, 8, WHITE);
+            if (s.snoutLen > 0.0f)
+                T3CBox(b, s.headR * 0.7f + s.snoutLen * 0.4f, -s.headR * 0.15f, 0.0f,
+                       s.snoutLen, s.headR * 0.55f, s.headR * 0.6f, WHITE);
+            P.head = T3CFinish(b);
+        }
+        { // merged rest pose: straight chain + head (shadow/LOD only; dungeons
+          // have no shadow pass, this is a formality)
+            T3CMeshBuilder b;
+            for (int i = 0; i < P.segCount; i++)
+                T3CMergeInto(b, P.segBody.meshes[0], -((float)i + 0.5f) * P.segSpacing, 8.0f, 0.0f);
+            T3CMergeInto(b, P.head.meshes[0], P.neckP.x, P.neckP.y, P.neckP.z);
+            P.merged = T3CFinish(b);
+        }
+        return P;
+    }
+    P.hasWings = s.wingSpan > 0.0f;
+    P.hindOnly = s.hindOnly;
+    P.hover = s.hover;
+    P.alwaysFlap = s.alwaysFlap;
+
+    float hipY = s.legLen + 1.0f;
+    float torsoY = hipY + s.bodyH * 0.30f;
+    float fx = s.bodyLen * 0.30f;
+    float lz = s.bodyW * 0.42f;
+
+    { // Torso — baked at rest.
+        T3CMeshBuilder b;
+        T3CSphere(b, 0.0f, torsoY, 0.0f, s.bodyLen * 0.5f, s.bodyH * 0.5f, s.bodyW * 0.5f, 7, 10, WHITE);
+        P.torso = T3CFinish(b);
+    }
+    // Head group — pivot at the neck base so yaw/pitch read as head turns.
+    float neckX = s.bodyLen * 0.5f + 1.0f;
+    float neckY = torsoY + s.neckUp;
+    P.neckP = { neckX, neckY, 0.0f };
+    {
+        T3CMeshBuilder b;
+        float hx = 5.0f;
+        T3CSphere(b, hx, 1.5f, 0.0f, s.headR, s.headR, s.headR, 6, 8, WHITE);
+        if (s.snoutLen > 0.0f)
+            T3CBox(b, hx + s.headR * 0.65f + s.snoutLen * 0.5f, 0.0f, 0.0f,
+                   s.snoutLen, s.headR * 0.72f, s.headR * 0.72f, WHITE);
+        if (s.beakLen > 0.0f) {
+            float base[3] = { hx + s.headR * 0.55f, 0.5f, 0.0f };
+            float dir[3] = { 1.0f, -0.12f, 0.0f };
+            T3CConeDir(b, base, dir, s.beakLen, s.headR * 0.5f, 6, WHITE);
+        }
+        if (s.earH > 0.0f) {
+            for (int e = -1; e <= 1; e += 2) {
+                float base[3] = { hx - 1.0f, s.headR * 0.75f, (float)e * s.headR * 0.5f };
+                float dir[3] = { -0.15f, 1.0f, (float)e * 0.25f };
+                T3CConeDir(b, base, dir, s.earH, s.headR * 0.32f, 5, WHITE);
+            }
+        }
+        if (s.saberTeeth) {
+            for (int e = -1; e <= 1; e += 2) {
+                float sx = hx + s.headR * 0.65f + s.snoutLen * 0.55f;
+                float base[3] = { sx, -s.headR * 0.28f, (float)e * s.headR * 0.3f };
+                float dir[3] = { 0.1f, -1.0f, 0.0f };
+                T3CConeDir(b, base, dir, s.headR * 0.7f, s.headR * 0.14f, 5, WHITE);
+            }
+        }
+        if (s.horns) {
+            for (int e = -1; e <= 1; e += 2) {
+                float base[3] = { hx - 2.0f, s.headR * 0.7f, (float)e * s.headR * 0.55f };
+                float dir[3] = { -0.35f, 0.75f, (float)e * 0.55f };
+                T3CConeDir(b, base, dir, s.headR * 1.5f, s.headR * 0.22f, 5, WHITE);
+            }
+        }
+        if (s.mane)
+            T3CBox(b, -2.0f, s.headR * 0.9f, 0.0f, s.headR * 1.6f, s.headR * 0.7f, s.headR * 0.35f, WHITE);
+        P.head = T3CFinish(b);
+    }
+    { // Leg — one mesh shared by all four legs (pivot at the hip, extends -Y).
+        T3CMeshBuilder b;
+        T3CCylinder(b, 0.0f, 0.0f, 0.0f, -s.legLen, s.legR, s.legR * 0.7f, 6, WHITE);
+        T3CBox(b, 0.0f, -s.legLen + 1.5f, 0.0f, s.legR * 1.8f, 3.0f, s.legR * 1.8f, WHITE);
+        P.leg = T3CFinish(b);
+    }
+    P.legFLP = { fx, hipY, lz }; P.legFRP = { fx, hipY, -lz };
+    P.legBLP = { -fx, hipY, lz }; P.legBRP = { -fx, hipY, -lz };
+    // Tail — pivot at the rear; cone angled up-back.
+    P.tailP = { -s.bodyLen * 0.5f + 2.0f, torsoY + s.bodyH * 0.22f, 0.0f };
+    {
+        T3CMeshBuilder b;
+        float base[3] = { 0.0f, 0.0f, 0.0f };
+        float dir[3] = { -0.82f, 0.57f, 0.0f };
+        T3CConeDir(b, base, dir, s.tailLen, s.tailR, 6, WHITE);
+        P.tail = T3CFinish(b);
+    }
+    // Wings — pivot at the shoulder; two double-sided triangles each.
+    if (P.hasWings) {
+        float wx = s.bodyLen * 0.08f, wy = torsoY + s.bodyH * 0.38f, wz = s.bodyW * 0.32f;
+        float span = s.wingSpan, chord = s.wingChord;
+        P.wingLP = { wx, wy, wz }; P.wingRP = { wx, wy, -wz };
+        for (int side = 0; side < 2; side++) {
+            float sg = (side == 0) ? 1.0f : -1.0f; // 0 = +Z, 1 = -Z
+            T3CMeshBuilder b;
+            float r0[3] = { chord * 0.35f, 0.0f, sg * 2.0f };
+            float r1[3] = { -chord * 0.45f, 0.0f, sg * 2.0f };
+            float mid[3] = { 0.0f, 2.0f, sg * span * 0.55f };
+            float tip[3] = { -chord * 0.55f, 4.0f, sg * span };
+            T3CPushTri(b, r0, r1, mid, WHITE); T3CPushTri(b, r0, mid, r1, WHITE);
+            T3CPushTri(b, r1, tip, mid, WHITE); T3CPushTri(b, r1, mid, tip, WHITE);
+            if (side == 0) P.wingL = T3CFinish(b); else P.wingR = T3CFinish(b);
+        }
+    }
+    // Merged rest-pose mesh (shadow pass + far LOD): every part at rest.
+    {
+        T3CMeshBuilder b;
+        T3CMergeInto(b, P.torso.meshes[0], 0.0f, 0.0f, 0.0f);
+        T3CMergeInto(b, P.head.meshes[0], P.neckP.x, P.neckP.y, P.neckP.z);
+        if (!P.hindOnly) {
+            T3CMergeInto(b, P.leg.meshes[0], P.legFLP.x, P.legFLP.y, P.legFLP.z);
+            T3CMergeInto(b, P.leg.meshes[0], P.legFRP.x, P.legFRP.y, P.legFRP.z);
+        }
+        T3CMergeInto(b, P.leg.meshes[0], P.legBLP.x, P.legBLP.y, P.legBLP.z);
+        T3CMergeInto(b, P.leg.meshes[0], P.legBRP.x, P.legBRP.y, P.legBRP.z);
+        T3CMergeInto(b, P.tail.meshes[0], P.tailP.x, P.tailP.y, P.tailP.z);
+        if (P.hasWings) {
+            T3CMergeInto(b, P.wingL.meshes[0], P.wingLP.x, P.wingLP.y, P.wingLP.z);
+            T3CMergeInto(b, P.wingR.meshes[0], P.wingRP.x, P.wingRP.y, P.wingRP.z);
+        }
+        P.merged = T3CFinish(b);
+    }
+    return P;
+}
+
+struct T3CHumanSpec {
+    const char* key;
+    float hipY, torsoH, torsoW, torsoD;
+    float shoulderY, neckY, headR;
+    float armLen, armR, legLen, legR;
+    float shoulderHW, hipHW;
+};
+
+// key, hipY, torsoH, torsoW, torsoD, shoulderY, neckY, headR,
+// armLen, armR, legLen, legR, shoulderHW, hipHW
+static const T3CHumanSpec kT3CHumanSpecs[2] = {
+    { "human", 30, 24, 19, 11, 50, 53, 7.5f, 26, 3.6f, 30, 4.6f, 11.5f, 6.5f },
+    { "orc",   29, 25, 24, 14, 50, 53, 8.0f, 27, 4.6f, 29, 5.6f, 14.0f, 7.5f },
+};
+
+struct T3CHumanParts {
+    Model torso, head, arm, leg; // arm/leg meshes shared L/R
+    Model merged;                // rest-pose merge (shadow pass)
+    Vector3 neckP, armLP, armRP, legLP, legRP;
+};
+
+static T3CHumanParts T3CBuildHuman(const T3CHumanSpec& s) {
+    T3CHumanParts P{};
+    { // Torso — baked at rest, with a belt band.
+        T3CMeshBuilder b;
+        T3CBox(b, 0.0f, s.hipY + s.torsoH * 0.5f, 0.0f, s.torsoD, s.torsoH, s.torsoW, WHITE);
+        T3CBox(b, 0.0f, s.hipY + 2.0f, 0.0f, s.torsoD + 1.5f, 3.0f, s.torsoW + 1.5f, WHITE);
+        P.torso = T3CFinish(b);
+    }
+    P.neckP = { 0.0f, s.neckY, 0.0f };
+    {
+        T3CMeshBuilder b;
+        T3CSphere(b, 1.5f, s.headR * 0.85f, 0.0f, s.headR, s.headR, s.headR, 6, 8, WHITE);
+        P.head = T3CFinish(b);
+    }
+    { // Arm — pivot at the shoulder, extends -Y.
+        T3CMeshBuilder b;
+        T3CCylinder(b, 0.0f, 0.0f, 0.0f, -s.armLen, s.armR, s.armR * 0.75f, 6, WHITE);
+        T3CSphere(b, 0.0f, -s.armLen, 0.0f, s.armR * 1.15f, s.armR * 1.15f, s.armR * 1.15f, 5, 6, WHITE);
+        P.arm = T3CFinish(b);
+    }
+    P.armLP = { 0.0f, s.shoulderY, s.shoulderHW };
+    P.armRP = { 0.0f, s.shoulderY, -s.shoulderHW };
+    { // Leg — pivot at the hip, extends -Y, with a boot.
+        T3CMeshBuilder b;
+        T3CCylinder(b, 0.0f, 0.0f, 0.0f, -s.legLen, s.legR, s.legR * 0.8f, 6, WHITE);
+        T3CBox(b, 1.5f, -s.legLen + 1.5f, 0.0f, s.legR * 2.2f, 3.0f, s.legR * 1.9f, WHITE);
+        P.leg = T3CFinish(b);
+    }
+    P.legLP = { 0.0f, s.hipY, s.hipHW };
+    P.legRP = { 0.0f, s.hipY, -s.hipHW };
+    { // merged rest pose for the shadow pass
+        T3CMeshBuilder b;
+        T3CMergeInto(b, P.torso.meshes[0], 0.0f, 0.0f, 0.0f);
+        T3CMergeInto(b, P.head.meshes[0], P.neckP.x, P.neckP.y, P.neckP.z);
+        T3CMergeInto(b, P.arm.meshes[0], P.armLP.x, P.armLP.y, P.armLP.z);
+        T3CMergeInto(b, P.arm.meshes[0], P.armRP.x, P.armRP.y, P.armRP.z);
+        T3CMergeInto(b, P.leg.meshes[0], P.legLP.x, P.legLP.y, P.legLP.z);
+        T3CMergeInto(b, P.leg.meshes[0], P.legRP.x, P.legRP.y, P.legRP.z);
+        P.merged = T3CFinish(b);
+    }
+    return P;
+}
+
+// ---- Kit registry (built once, shared by every instance) ----
+struct T3CQuadEntry { T3CQuadParts parts; };
+struct T3CHumanEntry { T3CHumanParts parts; };
+static T3CQuadEntry g_t3cQuads[11];
+static T3CHumanEntry g_t3cHumans[2];
+static bool g_t3cBuilt = false;
+static Shader g_t3cFallbackShader{}; // default material shader, captured at build
+static std::vector<Model*> g_t3cKitModels;
+
+static void T3CKitEnsure() {
+    if (g_t3cBuilt) return;
+    g_t3cBuilt = true;
+    for (int i = 0; i < 11; i++) g_t3cQuads[i].parts = T3CBuildQuad(kT3CQuadSpecs[i]);
+    for (int i = 0; i < 2; i++) g_t3cHumans[i].parts = T3CBuildHuman(kT3CHumanSpecs[i]);
+    for (int i = 0; i < 11; i++) {
+        T3CQuadParts& p = g_t3cQuads[i].parts;
+        g_t3cKitModels.push_back(&p.torso);
+        g_t3cKitModels.push_back(&p.head);
+        g_t3cKitModels.push_back(&p.leg);
+        g_t3cKitModels.push_back(&p.tail);
+        g_t3cKitModels.push_back(&p.merged);
+        if (p.serpent) g_t3cKitModels.push_back(&p.segBody);
+        if (p.hasWings) { g_t3cKitModels.push_back(&p.wingL); g_t3cKitModels.push_back(&p.wingR); }
+    }
+    for (int i = 0; i < 2; i++) {
+        T3CHumanParts& p = g_t3cHumans[i].parts;
+        g_t3cKitModels.push_back(&p.torso);
+        g_t3cKitModels.push_back(&p.head);
+        g_t3cKitModels.push_back(&p.arm);
+        g_t3cKitModels.push_back(&p.leg);
+        g_t3cKitModels.push_back(&p.merged);
+    }
+    g_t3cFallbackShader = g_t3cKitModels[0]->materials[0].shader;
+}
+
+// Sun/shadow-map shader for town + wilderness (same as every other model).
+// Called per frame before drawing creatures because the kit models are
+// shared with the dungeon view, which swaps them to the torch shader.
+static void T3CKitUseSunShader() {
+    T3CKitEnsure();
+    for (size_t i = 0; i < g_t3cKitModels.size(); i++) Town3DApplyShadowShader(*g_t3cKitModels[i]);
+}
+
+// Arbitrary shader assignment (the dungeon view passes the torch shader).
+static void T3CKitUseShader(Shader sh) {
+    T3CKitEnsure();
+    for (size_t i = 0; i < g_t3cKitModels.size(); i++) {
+        Model* m = g_t3cKitModels[i];
+        for (int k = 0; k < m->materialCount; k++) m->materials[k].shader = sh;
+    }
+}
+
+static Shader T3CKitDefaultShader() {
+    T3CKitEnsure();
+    return g_t3cFallbackShader;
+}
+
+// ---- Procedural animation ----
+// Per-creature velocity tracker: move 0 = idle, 1 = full trot. Ids are small
+// ints unique per creature per view (see kT3CTrack* below); the table is
+// transient view state, never saved.
+struct T3CSpeedSlot { float x = 0.0f, z = 0.0f, v = 0.0f; bool init = false; };
+static T3CSpeedSlot g_t3cSpeed[256];
+static float T3CSpeedTrack(int id, float x, float z, bool update) {
+    T3CSpeedSlot& s = g_t3cSpeed[id & 255];
+    if (!update) return s.init ? s.v : 0.0f; // shadow pass: read-only, no decay
+    float dt = GetFrameTime();
+    float inst = 0.0f;
+    if (s.init && dt > 1e-5f) {
+        float dx = x - s.x, dz = z - s.z;
+        inst = sqrtf(dx * dx + dz * dz) / dt;
+    }
+    s.x = x; s.z = z; s.init = true;
+    float target = fminf(inst, 400.0f);
+    s.v += (target - s.v) * fminf(1.0f, dt * 8.0f);
+    return s.v;
+}
+
+struct T3CAnim { float t; float move; float seed; };
+// update=false in the shadow pass: the tracker is written once per frame
+// (main pass) so the shadow pass can't decay the speed toward zero.
+static T3CAnim T3CMakeAnim(int trackId, float x, float z, bool update = true) {
+    float v = T3CSpeedTrack(trackId, x, z, update);
+    T3CAnim a{ (float)GetTime(), fminf(v / 140.0f, 1.0f), (float)(trackId * 13 + 5) };
+    return a;
+}
+
+// Subtle per-instance brightness variation, stable per creature (seeded by
+// the track id, not the live position, so the tint never flickers).
+static Color T3CTintVar(Color c, float seed) {
+    float k = 0.92f + 0.16f * T3CHash01(seed, 3.7f);
+    Color r;
+    r.r = (unsigned char)fminf(c.r * k, 255.0f);
+    r.g = (unsigned char)fminf(c.g * k, 255.0f);
+    r.b = (unsigned char)fminf(c.b * k, 255.0f);
+    r.a = c.a;
+    return r;
+}
+
+static const float kT3CDeg = 57.29578f;
+static const float kT3CFarLOD = 750.0f; // past this, quadrupeds draw merged
+
+static void T3CDrawQuad(const T3CQuadParts& P, float x, float z, float yawRad, float scale,
+                        Color coat, T3CAnim a, float distToPlayer, bool shadowPass) {
+    Color coatV = T3CTintVar(coat, a.seed);
+    Color darkV = T3CTintVar(ColorBrightness(coat, -0.35f), a.seed);
+    if (shadowPass || distToPlayer > kT3CFarLOD) {
+        DrawModelEx(P.merged, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f },
+                    -yawRad * kT3CDeg, { scale, scale, scale }, coatV);
+        return;
+    }
+    float t = a.t, mv = a.move;
+    float freq = 7.0f + 4.0f * mv;              // trot cadence rises with speed
+    float swingAmp = 0.5f * mv;                 // legs still at idle
+    float bobY = sinf(t * 2.1f + a.seed) * 1.2f +
+                 (P.hover ? (6.0f + sinf(t * 3.0f + a.seed) * 3.0f) : 0.0f);
+    float hs = sinf(t * 0.43f + a.seed * 1.7f);
+    float headYaw = hs * hs * hs * 0.7f;        // dwells near 0, turns occasionally
+    float headPitch = sinf(t * 0.9f + a.seed) * 0.08f - mv * 0.12f;
+    float tailSway = sinf(t * 2.7f + a.seed * 2.3f) * 0.35f;
+    float flapAmp = P.alwaysFlap ? 0.85f : (0.22f + 0.65f * mv);
+    float flapFreq = P.alwaysFlap ? 13.0f : (6.0f + 8.0f * mv);
+    float flap = sinf(t * flapFreq + a.seed) * flapAmp; // bird wing-flap pattern
+
+    rlPushMatrix();
+    rlTranslatef(x, 0.0f, z);
+    rlRotatef(-yawRad * kT3CDeg, 0.0f, 1.0f, 0.0f);
+    rlScalef(scale, scale, scale);
+    rlPushMatrix(); // torso
+    rlTranslatef(0.0f, bobY, 0.0f);
+    DrawModel(P.torso, { 0.0f, 0.0f, 0.0f }, 1.0f, coatV);
+    rlPopMatrix();
+    rlPushMatrix(); // head
+    rlTranslatef(P.neckP.x, P.neckP.y + bobY, 0.0f);
+    rlRotatef(-headYaw * kT3CDeg, 0.0f, 1.0f, 0.0f);
+    rlRotatef(headPitch * kT3CDeg, 0.0f, 0.0f, 1.0f);
+    DrawModel(P.head, { 0.0f, 0.0f, 0.0f }, 1.0f, coatV);
+    rlPopMatrix();
+    // Legs — diagonal pairs (FL+BR phase 0, FR+BL phase PI), the trot cycle.
+    const Vector3 piv[4] = { P.legFLP, P.legFRP, P.legBLP, P.legBRP };
+    const float phs[4] = { 0.0f, 3.14159265f, 3.14159265f, 0.0f };
+    for (int i = 0; i < 4; i++) {
+        if (P.hindOnly && i < 2) continue; // wyvern/bat: rear legs only
+        float sw = sinf(t * freq + phs[i] + a.seed) * swingAmp;
+        rlPushMatrix();
+        rlTranslatef(piv[i].x, piv[i].y + bobY, piv[i].z);
+        rlRotatef(sw * kT3CDeg, 0.0f, 0.0f, 1.0f);
+        DrawModel(P.leg, { 0.0f, 0.0f, 0.0f }, 1.0f, darkV);
+        rlPopMatrix();
+    }
+    rlPushMatrix(); // tail
+    rlTranslatef(P.tailP.x, P.tailP.y + bobY, 0.0f);
+    rlRotatef(tailSway * kT3CDeg, 0.0f, 1.0f, 0.0f);
+    DrawModel(P.tail, { 0.0f, 0.0f, 0.0f }, 1.0f, darkV);
+    rlPopMatrix();
+    if (P.hasWings) { // +Z wing dips with -flap, -Z wing with +flap (mirrored)
+        rlPushMatrix();
+        rlTranslatef(P.wingLP.x, P.wingLP.y + bobY, P.wingLP.z);
+        rlRotatef(-flap * kT3CDeg, 1.0f, 0.0f, 0.0f);
+        DrawModel(P.wingL, { 0.0f, 0.0f, 0.0f }, 1.0f, darkV);
+        rlPopMatrix();
+        rlPushMatrix();
+        rlTranslatef(P.wingRP.x, P.wingRP.y + bobY, P.wingRP.z);
+        rlRotatef(flap * kT3CDeg, 1.0f, 0.0f, 0.0f);
+        DrawModel(P.wingR, { 0.0f, 0.0f, 0.0f }, 1.0f, darkV);
+        rlPopMatrix();
+    }
+    rlPopMatrix();
+}
+
+// Serpentine draw: a chain of shared segment meshes along a sinusoidal slither
+// (amplitude grows toward the tail, cadence rises with movement speed), head
+// leading the wave. Dungeons have few entities so per-segment draws are fine.
+static void T3CDrawSerpent(const T3CQuadParts& P, float x, float z, float yawRad, float scale,
+                           Color coat, T3CAnim a, bool shadowPass) {
+    Color coatV = T3CTintVar(coat, a.seed);
+    if (shadowPass) {
+        DrawModelEx(P.merged, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f },
+                    -yawRad * kT3CDeg, { scale, scale, scale }, coatV);
+        return;
+    }
+    float t = a.t, mv = a.move;
+    float slither = 0.35f + 0.65f * mv;
+    float freq = 2.2f + 3.0f * mv;
+    rlPushMatrix();
+    rlTranslatef(x, 0.0f, z);
+    rlRotatef(-yawRad * kT3CDeg, 0.0f, 1.0f, 0.0f);
+    rlScalef(scale, scale, scale);
+    int n = P.segCount > 0 ? P.segCount : 1;
+    for (int i = 0; i < n; i++) {
+        float f = (n > 1) ? (float)i / (float)(n - 1) : 0.0f;
+        float ph = t * freq - (float)i * 0.55f + a.seed;
+        float sx = -((float)i + 0.5f) * P.segSpacing;
+        float sz = sinf(ph) * 7.0f * (0.3f + 0.7f * f) * slither;
+        float sy = 8.0f + sinf(ph * 0.5f) * 1.5f * slither;
+        float taper = 1.0f - 0.55f * f;
+        rlPushMatrix();
+        rlTranslatef(sx, sy, sz);
+        rlScalef(taper, taper, taper);
+        DrawModel(P.segBody, { 0.0f, 0.0f, 0.0f }, 1.0f, coatV);
+        rlPopMatrix();
+    }
+    { // head — leads the wave, raised, yawing with it
+        float ph = t * freq + a.seed;
+        rlPushMatrix();
+        rlTranslatef(P.segSpacing * 0.5f + 4.0f, 10.0f + sinf(ph * 0.5f) * 1.5f,
+                     sinf(ph) * 7.0f * 0.3f * slither);
+        rlRotatef(-cosf(ph) * 18.0f * slither, 0.0f, 1.0f, 0.0f);
+        DrawModel(P.head, { 0.0f, 0.0f, 0.0f }, 1.0f, coatV);
+        rlPopMatrix();
+    }
+    rlPopMatrix();
+}
+
+static void T3CDrawHumanoid(const T3CHumanParts& P, float x, float z, float yawRad, float scale,
+                            Color shirt, Color pants, Color skin, T3CAnim a, bool shadowPass) {
+    if (shadowPass) { // shadow pass: one merged rest-pose draw
+        DrawModelEx(P.merged, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f },
+                    -yawRad * kT3CDeg, { scale, scale, scale }, shirt);
+        return;
+    }
+    Color shirtV = T3CTintVar(shirt, a.seed);
+    Color pantsV = T3CTintVar(pants, a.seed);
+    Color skinV = T3CTintVar(skin, a.seed);
+    float t = a.t, mv = a.move;
+    float ph = t * (6.0f + 4.0f * mv) + a.seed;
+    float legSw = sinf(ph) * 0.55f * mv;
+    float armSw = sinf(ph + 3.14159265f) * 0.45f * mv; // arms counter-swing the legs
+    float bobY = fabsf(sinf(ph)) * 2.2f * mv + sinf(t * 2.0f + a.seed) * 1.0f;
+    float hs = sinf(t * 0.4f + a.seed * 1.3f);
+    float headYaw = hs * hs * hs * 0.8f;
+
+    rlPushMatrix();
+    rlTranslatef(x, 0.0f, z);
+    rlRotatef(-yawRad * kT3CDeg, 0.0f, 1.0f, 0.0f);
+    rlScalef(scale, scale, scale);
+    rlPushMatrix(); // torso
+    rlTranslatef(0.0f, bobY, 0.0f);
+    DrawModel(P.torso, { 0.0f, 0.0f, 0.0f }, 1.0f, shirtV);
+    rlPopMatrix();
+    rlPushMatrix(); // head
+    rlTranslatef(P.neckP.x, P.neckP.y + bobY, 0.0f);
+    rlRotatef(-headYaw * kT3CDeg, 0.0f, 1.0f, 0.0f);
+    DrawModel(P.head, { 0.0f, 0.0f, 0.0f }, 1.0f, skinV);
+    rlPopMatrix();
+    rlPushMatrix(); // arm L
+    rlTranslatef(P.armLP.x, P.armLP.y + bobY, P.armLP.z);
+    rlRotatef(armSw * kT3CDeg, 0.0f, 0.0f, 1.0f);
+    DrawModel(P.arm, { 0.0f, 0.0f, 0.0f }, 1.0f, shirtV);
+    rlPopMatrix();
+    rlPushMatrix(); // arm R
+    rlTranslatef(P.armRP.x, P.armRP.y + bobY, P.armRP.z);
+    rlRotatef(-armSw * kT3CDeg, 0.0f, 0.0f, 1.0f);
+    DrawModel(P.arm, { 0.0f, 0.0f, 0.0f }, 1.0f, shirtV);
+    rlPopMatrix();
+    rlPushMatrix(); // leg L
+    rlTranslatef(P.legLP.x, P.legLP.y + bobY, P.legLP.z);
+    rlRotatef(legSw * kT3CDeg, 0.0f, 0.0f, 1.0f);
+    DrawModel(P.leg, { 0.0f, 0.0f, 0.0f }, 1.0f, pantsV);
+    rlPopMatrix();
+    rlPushMatrix(); // leg R
+    rlTranslatef(P.legRP.x, P.legRP.y + bobY, P.legRP.z);
+    rlRotatef(-legSw * kT3CDeg, 0.0f, 0.0f, 1.0f);
+    DrawModel(P.leg, { 0.0f, 0.0f, 0.0f }, 1.0f, pantsV);
+    rlPopMatrix();
+    rlPopMatrix();
+}
+
+// ---- Roster mapping (2D roster -> kit archetype) ----
+// kWildCreatures order: 0 Stray Dog, 1 Timber Wolf, 2 Grizzly Bear,
+// 3 Dire Panther, 4 Plains Bison, 5 War Horse, 6 Sabertooth Cat,
+// 7 Storm Griffin, 8 Young Drake, 9 Elder Wyvern, 10 Forest Dragon.
+struct T3CQuadLook { int specIdx; Color coat; float scale; };
+static T3CQuadLook T3CCreatureLook(int creatureIdx) {
+    switch (creatureIdx) {
+        case 0:  return { 0, { 170, 140, 100, 255 }, 0.80f }; // Stray Dog
+        case 1:  return { 0, { 130, 130, 140, 255 }, 1.00f }; // Timber Wolf
+        case 2:  return { 3, { 120,  85,  55, 255 }, 1.25f }; // Grizzly Bear
+        case 3:  return { 1, {  45,  42,  50, 255 }, 1.05f }; // Dire Panther
+        case 4:  return { 4, {  95,  70,  50, 255 }, 1.30f }; // Plains Bison
+        case 5:  return { 5, { 110,  75,  50, 255 }, 1.15f }; // War Horse
+        case 6:  return { 2, { 180, 140,  90, 255 }, 1.05f }; // Sabertooth Cat
+        case 7:  return { 7, { 140, 110,  80, 255 }, 1.40f }; // Storm Griffin
+        case 8:  return { 6, {  80, 130,  80, 255 }, 1.20f }; // Young Drake
+        case 9:  return { 8, {  70, 120, 110, 255 }, 1.35f }; // Elder Wyvern
+        case 10: return { 6, {  60, 110,  70, 255 }, 1.60f }; // Forest Dragon
+        default: return { 0, { 130, 130, 130, 255 }, 1.00f };
+    }
+}
+
+// Wilderness fightable monsters by iconIdx: 0 Wild Bat, 1 Wandering Goblin,
+// 2 Lone Wolf, 3 Lesser Imp, 4 Highway/Mountain Bandit.
+struct T3CMonLook {
+    bool humanoid; int specIdx; Color coat, shirt, pants, skin; float scale;
+};
+static T3CMonLook T3CMonsterLook(int iconIdx) {
+    switch (iconIdx) {
+        case 0: // Wild Bat — winged, flaps constantly
+            return { false, 9, { 90, 80, 110, 255 }, {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, 1.0f };
+        case 1: // Wandering Goblin — small humanoid, green skin
+            return { true, 0, {0,0,0,0}, { 110, 90, 60, 255 }, { 70, 60, 50, 255 }, { 90, 160, 80, 255 }, 0.62f };
+        case 2: // Lone Wolf
+            return { false, 0, { 120, 120, 130, 255 }, {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, 1.0f };
+        case 3: // Lesser Imp — small humanoid, red skin
+            return { true, 0, {0,0,0,0}, { 80, 50, 50, 255 }, { 50, 40, 40, 255 }, { 180, 80, 60, 255 }, 0.55f };
+        case 4: // Highway/Mountain Bandit — humanoid, dark garb
+        default:
+            return { true, 0, {0,0,0,0}, { 60, 55, 60, 255 }, { 45, 40, 45, 255 }, { 225, 200, 165, 255 }, 1.0f };
+    }
+}
+
+// Dungeon monsters -> body plan, per monster (monsterIdx 0..4 regulars in
+// kDungeons[di] order, 5 = boss). Serpents, drakes, wyverns, rats and cats are
+// quadrupeds; orcs, undead and wraiths are humanoids.
+struct T3CDunLook { bool humanoid; bool serpent; int specIdx; int humanIdx; float scale; };
+static T3CDunLook T3CDungeonMonsterLook(int dungeonIdx, int monsterIdx) {
+    bool boss = (monsterIdx == 5);
+    float bs = boss ? 1.35f : 1.0f;
+    switch (dungeonIdx % 5) {
+        case 0: // Emberveil Hollow — living elements: brutes + critters
+            switch (monsterIdx) {
+                case 0:  return { true, false, 0, 0, 0.95f };       // Silt Wretch
+                case 1:  return { true, false, 0, 1, 1.10f };       // Stoneborn
+                case 2:  return { false, false, 0, 0, 0.55f };      // Cinderling (small canine)
+                case 3:  return { false, false, 3, 0, 1.10f * bs }; // Bloatspore (bulky quadruped)
+                case 4:  return { true, false, 0, 1, 1.25f };       // Ridgeback Troll
+                default: return { true, false, 0, 1, 1.35f * bs }; // Cinderlord
+            }
+        case 1: // Bloodtusk Hold — orcs, all bulky humanoids, growing by rank
+            return { true, false, 0, 1, (0.85f + 0.10f * (float)monsterIdx) * bs };
+        case 2: // The Sunken Crypt — undead humanoids, growing by rank
+            return { true, false, 0, 0, (0.90f + 0.08f * (float)monsterIdx) * bs };
+        case 3: // Wyrmscar Depths — wyrm-kin
+            switch (monsterIdx) {
+                case 0:  return { false, true, 10, 0, 1.00f };      // Fen Serpent (serpentine)
+                case 1:  return { true, false, 0, 1, 1.00f };       // Scalekin Raider
+                case 2:  return { false, false, 6, 0, 1.00f };      // Emberdrake (winged drake)
+                case 3:  return { false, false, 8, 0, 1.10f };      // Skywyrm (wyvern)
+                case 4:  return { false, false, 8, 0, 1.25f };      // Sovereign Wyrm (wyvern)
+                default: return { false, false, 6, 0, 1.60f * bs }; // The Ancient Sovereign (dragon)
+            }
+        default: // case 4 — The Hollow Warrens — mine skulkers
+            switch (monsterIdx) {
+                case 0:  return { false, false, 0, 0, 0.55f };      // Warren Rat (small canine)
+                case 1:  return { false, false, 1, 0, 0.90f };      // Tunnel Skulker (feline)
+                case 2:  return { true, false, 0, 0, 1.00f };       // Pickaxe Wraith
+                case 3:  return { true, false, 0, 1, 1.15f };       // Cave Brute
+                case 4:  return { true, false, 0, 1, 1.20f };       // Deep Marauder
+                default: return { true, false, 0, 1, 1.40f * bs };  // The Warren King
+            }
+    }
+}
+
+// AI companion look by pet role (mirrors WildCreatureSheetForRole's
+// Wolf/Bear/Drake picks for Melee/Tank/Caster).
+static T3CQuadLook T3CPetLook(PetRole role) {
+    switch (role) {
+        case PetRole::Tank:   return { 3, { 120, 85, 55, 255 }, 0.80f }; // bear
+        case PetRole::Caster: return { 6, {  80, 130, 80, 255 }, 0.80f }; // drake
+        case PetRole::Melee:
+        default:              return { 0, { 130, 130, 140, 255 }, 0.75f }; // wolf
+    }
+}
+
+// Town NPC shirt palette (per-NPC clothing colors; pants/skin shared).
+static const Color kT3CNPCShirts[6] = {
+    { 140, 110, 80, 255 }, { 90, 120, 150, 255 }, { 170, 140, 90, 255 },
+    { 120, 90, 120, 255 }, { 100, 140, 100, 255 }, { 150, 110, 110, 255 },
+};
+
+// Speed-tracker ids (unique per creature per view; < 256).
+static const int kT3CTrackPlayerTown = 1;
+static const int kT3CTrackNPCTown = 10;      // + npc idx (0..5)
+static const int kT3CTrackPlayerWild = 20;
+static const int kT3CTrackCreatureWild = 30; // + creature spot idx
+static const int kT3CTrackMonsterWild = 60;  // + monster spot idx
+static const int kT3CTrackRival = 90;
+static const int kT3CTrackInnocentWild = 100; // + innocent idx
+static const int kT3CTrackCompanion = 120;
+static const int kT3CTrackPlayerDungeon = 130;
+static const int kT3CTrackMonsterDungeon = 140; // + monster idx (0..5), engaged = +6
+// ==== T3C-KIT-END ====
+
 // Orbit-camera state for the 3D town view. File-statics (like g_scrollDragging),
 // not GameState — purely transient view state, never saved.
 // g_t3dYaw/Pitch/Dist are the *targets* written by input; the smoothed copies
@@ -6107,6 +6957,7 @@ static float g_t3dDist = 650.0f; // camera distance from target (target)
 static float g_t3dYawSm = 0.7f, g_t3dPitchSm = 0.85f, g_t3dDistSm = 650.0f; // smoothed
 static Vector3 g_t3dTargetSm = { 0.0f, 0.0f, 0.0f }; // smoothed orbit target
 static bool g_t3dCamInit = false;
+static int g_t3dCamScreen = -1; // which screen the smoothed camera last served (0=town, 1=wilderness)
 // Feel-pass tuning constants (2026-09-24) — tweak these on the PC build:
 static const float kT3DPitchMin = 0.22f; // polar clamp: camera can never dip below the ground
 static const float kT3DPitchMax = 1.35f; // ~77 deg: near-top-down is as far as it goes
@@ -6121,14 +6972,19 @@ static float g_t3dDragDist = 0.0f;
 
 // Camera basis derived from the orbit state; target follows the player.
 // The smoothed values ease toward the input targets every frame (exponential
-// damping), so orbit/zoom/follow all glide. First call snaps (no sweep-in).
+// damping), so orbit/zoom/follow all glide. First call (or a screen switch)
+// snaps the follow target to the new player instead of sweeping across the world.
 struct Town3DCam { Vector3 pos, target, fwd, right, up; float fovY, aspect, vw, vh; };
-static Town3DCam Town3DGetCam(const GameState& s, int screenW, int screenH) {
+static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, int screenId,
+                                 float distMin, float distMax) {
     float dt = GetFrameTime();
-    if (!g_t3dCamInit) {
+    if (!g_t3dCamInit || g_t3dCamScreen != screenId) {
         g_t3dYawSm = g_t3dYaw; g_t3dPitchSm = g_t3dPitch; g_t3dDistSm = g_t3dDist;
-        g_t3dTargetSm = { s.townPlayerPos.x, 0.0f, s.townPlayerPos.y };
-        g_t3dCamInit = true;
+        g_t3dTargetSm = { playerPos.x, 0.0f, playerPos.y };
+        g_t3dCamInit = true; g_t3dCamScreen = screenId;
+        // Entering a world with tighter zoom limits never starts out of range.
+        g_t3dDist = std::clamp(g_t3dDist, distMin, distMax);
+        g_t3dDistSm = std::clamp(g_t3dDistSm, distMin, distMax);
     }
     float ty = 1.0f - expf(-dt * kT3DCamDamp);
     float tz = 1.0f - expf(-dt * kT3DZoomDamp);
@@ -6136,7 +6992,7 @@ static Town3DCam Town3DGetCam(const GameState& s, int screenW, int screenH) {
     g_t3dYawSm += (g_t3dYaw - g_t3dYawSm) * ty;
     g_t3dPitchSm += (g_t3dPitch - g_t3dPitchSm) * ty;
     g_t3dDistSm += (g_t3dDist - g_t3dDistSm) * tz;
-    Vector3 pw = { s.townPlayerPos.x, 0.0f, s.townPlayerPos.y };
+    Vector3 pw = { playerPos.x, 0.0f, playerPos.y };
     g_t3dTargetSm = T3VAdd(g_t3dTargetSm, T3VScale(T3VSub(pw, g_t3dTargetSm), tt));
     Town3DCam c;
     c.target = g_t3dTargetSm;
@@ -6152,6 +7008,9 @@ static Town3DCam Town3DGetCam(const GameState& s, int screenW, int screenH) {
     c.vh = (float)screenH;
     c.aspect = c.vw / c.vh; // render-texture framebuffer aspect (see kZoom's comment)
     return c;
+}
+static Town3DCam Town3DGetCam(const GameState& s, int screenW, int screenH) {
+    return Town3DGetCamFor(s.townPlayerPos, screenW, screenH, 0, kT3DDistMin, kT3DDistMax);
 }
 
 // Picking ray from a virtual-canvas mouse position (see the section header on
@@ -6238,20 +7097,12 @@ static RenderTexture2D Town3DLoadShadowmapRT(int width, int height) {
     return target;
 }
 
-// 2026-09-24: Mark reported the deployed preview flashing/strobing while
-// moving on his phone — the classic look of shadow-map depth-precision
-// banding ("shadow acne"). Desktop (full-precision float depth) shows no
-// artifact at all with the same shader and bias values, which points at
-// WebGL/mobile GPUs honoring the shader's `precision mediump float;`
-// qualifier much more literally than desktop drivers do — a real
-// difference I can't reproduce or safely tune from this desktop sandbox.
-// A quick bias increase traded the banding for the whole scene going too
-// dark instead (same shader, different failure mode) — not a confident
-// fix without a real device to verify against. Shadows off for now via
-// this single switch (same pattern as kAmbushSystemEnabled etc.) — the 3D
-// view already has a graceful flat-lit fallback for exactly this case, so
-// nothing else changes. Re-enable once shadow bias/precision is tuned
-// against a real phone.
+// 2026-09-24: shadows disabled pending real-device tuning — see the
+// kT3DShadowsEnabled comment in the previous fix commit (empty-screen sky
+// bug + WebGL shadow-acne flashing bug, both found and fixed on the
+// pre-Muse 3D milestone). Re-applied here since this drop was built on the
+// pre-fix baseline. The 3D views already fall back to flat-lit rendering
+// when shadows are off, so nothing else needs to change.
 static const bool kT3DShadowsEnabled = false;
 static void Town3DEnsureShadow() {
     Town3DShadow& S = g_t3dShadow;
@@ -6288,13 +7139,6 @@ static void Town3DEnsureShadow() {
     S.map = Town3DLoadShadowmapRT(T3D_SHADOWMAP_RES, T3D_SHADOWMAP_RES);
     if (S.map.id == 0) { UnloadShader(S.shader); S.shader.id = 0; return; }
 
-    // Fixed orthographic sun camera covering the whole 1000x1000 town.
-    Vector3 center = { 500, 0, 500 };
-    g_t3dLightCam.position = T3VSub(center, T3VScale(kT3DSunDir, -1300.0f));
-    g_t3dLightCam.target = center;
-    g_t3dLightCam.up = { 0, 1, 0 };
-    g_t3dLightCam.fovy = 1350.0f; // ortho box height; aspect is 1:1 on the square FBO
-    g_t3dLightCam.projection = CAMERA_ORTHOGRAPHIC;
     S.ready = true;
 }
 
@@ -6321,31 +7165,57 @@ struct Town3DGround {
 };
 static Town3DGround g_t3dGround;
 
-static void Town3DGroundRoad(Image* img, float x1, float z1, float x2, float z2, Color col) {
+// ---- 3D town street network (2026-09-24 layout pass) ----
+// The 3D town mirrors the 2D layout, but its streets are its own design: every
+// building door faces +z (south), so one lane runs along the front of each
+// building row, right past every doorstep, joined by the main north-south
+// street (plaza -> bank -> Wilderness Gate). Baked into the ground texture, so
+// zero z-fighting by construction. Gameplay positions (kTownNodePositions /
+// kTownPlaza / kWildernessGatePos) are untouched — only the paint changes.
+static const float kT3DRoadW = 26.0f;
+
+static void Town3DGroundDisc(Image* img, float x, float z, float r, Color col) {
     const float k = kT3DGroundPx / 1000.0f;
-    const float w = 26.0f * k;
-    float px1 = x1 * k, pz1 = z1 * k, px2 = x2 * k, pz2 = z2 * k;
-    if (fabsf(x2 - x1) < 0.01f)
-        ImageDrawRectangle(img, (int)(px1 - w / 2), (int)fminf(pz1, pz2), (int)w,
-                           (int)fabsf(pz2 - pz1), col);
-    else
-        ImageDrawRectangle(img, (int)fminf(px1, px2), (int)(pz1 - w / 2),
-                           (int)fabsf(px2 - px1), (int)w, col);
+    ImageDrawCircle(img, (int)(x * k), (int)(z * k), (int)(r * k + 0.5f), col);
 }
-// Same L-bend layout the old 3D box roads used, but ending on the plaza circle
-// (radius 85 at town center) instead of the plaza rect.
-static void Town3DGroundRoadToPlaza(Image* img, Vector2 bp, Color col) {
-    const float cx = 500.0f, cy = 500.0f, pr = 85.0f;
-    float dx = bp.x - cx, dy = bp.y - cy;
-    if (fabsf(dx) < pr && fabsf(dy) < pr) return; // inside the plaza already
-    if (fabsf(dx) < pr) {
-        Town3DGroundRoad(img, bp.x, bp.y, bp.x, cy + (dy < 0 ? -pr : pr), col);
-    } else if (fabsf(dy) < pr) {
-        Town3DGroundRoad(img, bp.x, bp.y, cx + (dx < 0 ? -pr : pr), bp.y, col);
-    } else {
-        Town3DGroundRoad(img, bp.x, bp.y, cx, bp.y, col);
-        Town3DGroundRoad(img, cx, bp.y, cx, cy + (dy < 0 ? -pr : pr), col);
+
+// One street polyline, painted as overlapping discs every ~3 world units so
+// curves stay smooth at the 1024px texture resolution.
+static void Town3DGroundRoadPath(Image* img, const std::vector<Vector2>& pts, Color col) {
+    for (size_t i = 0; i + 1 < pts.size(); i++) {
+        float x0 = pts[i].x, z0 = pts[i].y, x1 = pts[i + 1].x, z1 = pts[i + 1].y;
+        float len = hypotf(x1 - x0, z1 - z0);
+        int n = (int)(len / 3.0f) + 1;
+        for (int j = 0; j <= n; j++) {
+            float t = (float)j / (float)n;
+            Town3DGroundDisc(img, x0 + (x1 - x0) * t, z0 + (z1 - z0) * t,
+                             kT3DRoadW * 0.5f, col);
+        }
     }
+}
+
+// The full network as polylines (also feeds the worn-grass edge pass below).
+static void Town3DStreetPolylines(std::vector<std::vector<Vector2>>& out) {
+    out.push_back({ { 500, 100 }, { 500, 900 } }); // main street, north edge to the gate
+    { // north lane: gentle bow past smith/carpenter/tailor's doors
+        std::vector<Vector2> p;
+        for (int i = 0; i <= 24; i++) {
+            float t = (float)i / 24.0f, u = 1.0f - t;
+            p.push_back({ u * u * 140 + 2 * u * t * 500 + t * t * 860,
+                          u * u * 274 + 2 * u * t * 266 + t * t * 274 });
+        }
+        out.push_back(p);
+    }
+    out.push_back({ { 140, 574 }, { 960, 574 } }); // middle lane, past alchemy/stable/house
+    out.push_back({ { 140, 876 }, { 860, 876 } }); // south lane, past healer/bank/provisioner
+}
+
+static float Town3DDistPtSeg(float px, float pz, float ax, float az, float bx, float bz) {
+    float dx = bx - ax, dz = bz - az;
+    float l2 = dx * dx + dz * dz;
+    float t = (l2 <= 0.0f) ? 0.0f : (px - ax) * dx + (pz - az) * dz;
+    t = (l2 <= 0.0f) ? 0.0f : std::clamp(t / l2, 0.0f, 1.0f);
+    return hypotf(px - (ax + t * dx), pz - (az + t * dz));
 }
 
 static void Town3DEnsureGround(const GameState& s) {
@@ -6366,32 +7236,89 @@ static void Town3DEnsureGround(const GameState& s) {
     Color roadCol    = town2 ? Color{ 150, 146, 138, 255 }  : Color{ 178, 146, 98, 255 };
 
     const int SZ = kT3DGroundPx;
+    const float k = SZ / 1000.0f;
+    Color wornCol = town2 ? Color{ 140, 142, 108, 255 } : Color{ 170, 168, 112, 255 };
     Image ground = GenImageColor(SZ, SZ, grassLight);
-    Image noise = GenImagePerlinNoise(SZ, SZ, 0, 0, 4.0f);
+    Image fineN = GenImagePerlinNoise(SZ, SZ, 0, 0, 4.0f);
+    Image patchN = GenImagePerlinNoise(SZ, SZ, 0, 0, 1.2f);
     Color* gp = LoadImageColors(ground);
-    Color* np = LoadImageColors(noise);
+    Color* np = LoadImageColors(fineN);
+    Color* pp = LoadImageColors(patchN);
     for (int i = 0; i < SZ * SZ; i++) {
-        float t = np[i].r / 255.0f;
-        gp[i].r = (unsigned char)(grassDark.r + (grassLight.r - grassDark.r) * t);
-        gp[i].g = (unsigned char)(grassDark.g + (grassLight.g - grassDark.g) * t);
-        gp[i].b = (unsigned char)(grassDark.b + (grassLight.b - grassDark.b) * t);
+        float t = np[i].r / 255.0f; // fine blade-level variation
+        float m = (pp[i].r / 255.0f - 0.5f) * 0.9f; // broad meadow blotches
+        float r = grassDark.r + (grassLight.r - grassDark.r) * t + m * 26.0f;
+        float g = grassDark.g + (grassLight.g - grassDark.g) * t + m * 30.0f;
+        float b = grassDark.b + (grassLight.b - grassDark.b) * t + m * 8.0f;
+        gp[i].r = (unsigned char)std::clamp(r, 0.0f, 255.0f);
+        gp[i].g = (unsigned char)std::clamp(g, 0.0f, 255.0f);
+        gp[i].b = (unsigned char)std::clamp(b, 0.0f, 255.0f);
         gp[i].a = 255;
     }
     // Write the varied grass back into the image, then bake roads/plaza on top.
     // (Direct copy: GenImageColor is RGBA8888, same layout as LoadImageColors.)
     Color* dst = (Color*)ground.data;
     for (int i = 0; i < SZ * SZ; i++) dst[i] = gp[i];
-    UnloadImageColors(gp);
-    UnloadImageColors(np);
-    UnloadImage(noise);
 
-    for (auto& node : kTownNodePositions) Town3DGroundRoadToPlaza(&ground, node.pos, roadCol);
-    // Main street: plaza's south edge down to the Wilderness Gate (mirrors 2D).
-    Town3DGroundRoad(&ground, 500, 500 + 85, 500, kWildernessGatePos.y, roadCol);
-    // Paved plaza circle at town center (rim first, then the face).
-    const float k = SZ / 1000.0f;
+    // Street network (see Town3DStreetPolylines), then the paved plaza circle
+    // on top so lane/plaza overlaps read as streets joining the plaza.
+    std::vector<std::vector<Vector2>> streets;
+    Town3DStreetPolylines(streets);
+    for (auto& pl : streets) Town3DGroundRoadPath(&ground, pl, roadCol);
     ImageDrawCircle(&ground, (int)(500 * k), (int)(500 * k), (int)(90 * k), plazaRim);
     ImageDrawCircle(&ground, (int)(500 * k), (int)(500 * k), (int)(84 * k), plazaCol);
+
+    // Detail pass: worn-grass tint feathering out from every road edge and
+    // around the plaza rim, plus subtle stone mottling inside the plaza.
+    struct T3DBB { float x0, x1, z0, z1; };
+    std::vector<T3DBB> streetBB;
+    for (auto& pl : streets) {
+        T3DBB bb{ 1e9f, -1e9f, 1e9f, -1e9f };
+        for (auto& p : pl) {
+            bb.x0 = fminf(bb.x0, p.x); bb.x1 = fmaxf(bb.x1, p.x);
+            bb.z0 = fminf(bb.z0, p.y); bb.z1 = fmaxf(bb.z1, p.y);
+        }
+        streetBB.push_back(bb);
+    }
+    for (int py = 0; py < SZ; py++) {
+        for (int px = 0; px < SZ; px++) {
+            float wx = px / k, wz = py / k;
+            float dc = hypotf(wx - 500.0f, wz - 500.0f);
+            int idx = py * SZ + px;
+            if (dc < 84.0f) { // plaza face: stone mottling from the fine noise
+                float s = (np[idx].r / 255.0f - 0.5f) * 22.0f;
+                dst[idx].r = (unsigned char)std::clamp(dst[idx].r + s, 0.0f, 255.0f);
+                dst[idx].g = (unsigned char)std::clamp(dst[idx].g + s, 0.0f, 255.0f);
+                dst[idx].b = (unsigned char)std::clamp(dst[idx].b + s, 0.0f, 255.0f);
+                continue;
+            }
+            float dw = 1e9f;
+            for (size_t si = 0; si < streets.size(); si++) {
+                const T3DBB& bb = streetBB[si];
+                if (wx < bb.x0 - 40 || wx > bb.x1 + 40 || wz < bb.z0 - 40 || wz > bb.z1 + 40)
+                    continue;
+                const auto& pl = streets[si];
+                for (size_t i = 0; i + 1 < pl.size(); i++)
+                    dw = fminf(dw, Town3DDistPtSeg(wx, wz, pl[i].x, pl[i].y,
+                                                   pl[i + 1].x, pl[i + 1].y));
+            }
+            float wear = 0.0f;
+            if (dw >= kT3DRoadW * 0.5f && dw < kT3DRoadW * 0.5f + 23.0f)
+                wear = (1.0f - (dw - kT3DRoadW * 0.5f) / 23.0f) * 0.55f;
+            float dpe = fabsf(dc - 90.0f); // worn ring just outside the plaza rim
+            if (dpe < 24.0f) wear = fmaxf(wear, (1.0f - dpe / 24.0f) * 0.35f);
+            if (wear > 0.0f) {
+                dst[idx].r = (unsigned char)(dst[idx].r + (wornCol.r - dst[idx].r) * wear);
+                dst[idx].g = (unsigned char)(dst[idx].g + (wornCol.g - dst[idx].g) * wear);
+                dst[idx].b = (unsigned char)(dst[idx].b + (wornCol.b - dst[idx].b) * wear);
+            }
+        }
+    }
+    UnloadImageColors(gp);
+    UnloadImageColors(np);
+    UnloadImageColors(pp);
+    UnloadImage(fineN);
+    UnloadImage(patchN);
 
     G.tex = LoadTextureFromImage(ground);
     UnloadImage(ground);
@@ -6409,20 +7336,14 @@ static void Town3DEnsureGround(const GameState& s) {
 // Centered on the camera's x/z so the viewer is always inside it (the far
 // plane is 1000; the wall sits at 950). Drawn with the default shader —
 // unlit, unfogged — before the shadow shader is enabled for the scene.
-//
-// 2026-09-24 bugfix: this used to call DrawCylinder per band, which (per
-// rmodels.c) always fills BOTH a top and a bottom cap in addition to the
-// side wall. Stacking 16 of those gave ~17 solid 950-radius discs at every
-// band boundary — the camera, sitting between two of them, had its view of
-// the ground/buildings completely blocked by the nearest disc below it,
-// which read as an empty flat-colored view with no geometry at all (found
-// by bisecting: removing this call entirely made buildings/ground appear
-// correctly, confirming the sky itself was the occluder). DrawCylinderEx
-// looked like the fix (draw between two points, no position+height) but
-// turned out to ALSO fill a full disc cap at either end whenever that end's
-// radius is nonzero (same rmodels.c) — same bug, different call. Fixed for
-// real with Town3DSkyBand below: hand-rolled side-wall-only quads (no cap
-// vertices emitted at all), safe to stack with zero occlusion risk.
+// 2026-09-24 bugfix (re-applied on this drop, built on the pre-fix
+// baseline): DrawCylinder always fills a full disc cap at both ends, even
+// for a straight tube. Stacking 16 of those for the sky gave ~17 solid
+// 950-radius discs at every band boundary, and the camera (sitting between
+// two of them) had its view of the ground/buildings completely blocked by
+// the nearest one — an empty flat-colored screen. DrawCylinderEx has the
+// identical cap behavior, so the real fix is this hand-rolled side-wall-
+// only quad function, shared by both the town and wilderness skies below.
 static void Town3DSkyBand(Vector3 base, Vector3 top, float radius, int sides, Color color) {
     float step = 360.0f / (float)sides;
     rlBegin(RL_TRIANGLES);
@@ -6624,14 +7545,16 @@ static void Town3DDrawBuilding(const std::string& key, float cx, float cz) {
         Town3DDrawHouse(cx, cz, w, wd, ww, M.roof46, 90.0f, 3, 2, 2, true, wallTint, roofTint);
     } else if (key == "bank" || key == "stable") {
         Town3DDrawHouse(cx, cz, w, wd, ww, M.roof46, 90.0f, 3, 2, 1, key == "bank", wallTint, roofTint);
-        if (key == "stable") // wagon parked on the grass by the stable
-            Town3DDrawPiece(M.wagon, { cx + 4.6f * S, 0.0f, cz + 1.0f * S }, 90.0f);
+        if (key == "stable") // wagon parked on the grass west of the stable
+            // (kept clear of the house's footprint and the middle lane)
+            Town3DDrawPiece(M.wagon, { cx - 5.2f * S, 0.0f, cz + 5.2f * S }, 90.0f);
     } else {
         Town3DDrawHouse(cx, cz, w, wd, ww, M.roof44, 0.0f, 2, 2, 1,
                         key == "smith" || key == "alchemy", wallTint, roofTint);
         if (key == "carpenter" || key == "provisioner") { // crates of goods by the door
-            Town3DDrawPiece(M.crate, { cx + 3.4f * S, 0.0f, cz + 2.6f * S }, 15.0f);
-            Town3DDrawPiece(M.crate, { cx + 3.4f * S, 0.0f + 1.06f * S, cz + 2.6f * S }, 40.0f);
+            // (kept just north of the lanes so they never sit on the road)
+            Town3DDrawPiece(M.crate, { cx + 3.4f * S, 0.0f, cz + 1.8f * S }, 15.0f);
+            Town3DDrawPiece(M.crate, { cx + 3.4f * S, 0.0f + 1.06f * S, cz + 1.8f * S }, 40.0f);
         }
         if (key == "tailor" || key == "healer" || key == "house") { // vines on the front wall
             Town3DDrawPiece(M.vine, { cx - 1.0f * S, 2.0f + 2.6f * S, cz + 2.35f * S }, 0.0f);
@@ -6692,8 +7615,103 @@ static void Town3DPick(GameState& s, Vector2 mouse, int screenW, int screenH) {
     if (gate) {
         s.screen = Screen::Wilderness;
         s.wildernessPlayerPos = (s.selectedTown == 0) ? Vector2{ 900, 1650 } : Vector2{ 2900, 1650 };
+        s.wild3DView = true; // clicked through from the 3D town: stay in 3D (view state only)
     } else if (!bestKey.empty()) {
         s.selectedTile = bestKey;
+    }
+}
+
+// ---- 3D town layout pass (2026-09-24): presentation-only adjustments ----
+// The 3D view mirrors the 2D town, but 3D models are bulkier than 2D sprites:
+// a few 2D foliage/prop spots intersect 3D buildings, lanes, or doorways.
+// kFoliagePositions and kTownProps are shared with the 2D view and are NEVER
+// edited here; the tables below only adjust the 3D presentation.
+struct T3DPosFix { float ox, oz, nx, nz; }; // original -> 3D position
+static const T3DPosFix kT3DTreeFixes[] = {
+    { 296, 272, 300, 350 }, // was on the north lane
+    { 704, 272, 700, 350 }, // was on the north lane
+    { 632, 596, 632, 645 }, // canopy overlapped the middle lane
+    { 110, 140, 80, 115 },  // canopy touched the smith's foundation
+    { 344, 890, 340, 935 }, // was on the south lane
+    { 120, 500, 85, 500 },  // canopy touched alchemy's foundation
+    { 880, 500, 985, 350 }, // was inside the house footprint
+    { 920, 572, 965, 650 }, // was on the middle lane, blocking the house door
+};
+// Extra 3D-only greenery: gate approach and town edges, so the town reads
+// nestled in rather than pasted on.
+static const TownFoliage kT3DExtraTrees[] = {
+    { { 380, 950 }, 1 }, { { 620, 950 }, 1 },
+    { { 150, 45 }, 1 }, { { 550, 45 }, 0 }, { { 850, 45 }, 1 },
+    { { 30, 350 }, 0 }, { { 30, 650 }, 2 },
+    { { 975, 700 }, 1 }, { { 975, 930 }, 3 },
+    { { 200, 960 }, 0 }, { { 700, 960 }, 2 },
+};
+struct T3DPropFix { int kind; float ox, oz, nx, nz; };
+static const T3DPropFix kT3DPropFixes[] = {
+    // kind, old x, old z, new x, new z — 2D-placed props nudged off the 3D lanes
+    { 8, 430, 270, 430, 238 },  // carpenter's crate off the north lane
+    { 7, 880, 270, 880, 236 },  // tailor's barrel off the north lane
+    { 8, 740, 270, 740, 236 },  // tailor's crate off the north lane
+    { 6, 548, 254, 548, 238 },  // lumber pile off the north lane edge
+    { 7, 270, 560, 270, 538 },  // alchemy's barrel off the middle lane
+    { 7, 870, 560, 870, 604 },  // stable's barrel off the middle lane
+    { 8, 870, 440, 890, 420 },  // stable's crate: clear of the widened foundation
+    { 12, 740, 430, 740, 415 }, // farm animal: clear of the widened foundation
+    { 11, 740, 570, 740, 614 }, // farm animal off the middle lane
+    { 15, 170, 570, 170, 604 }, // alchemy's potion off the middle lane
+    { 8, 270, 860, 270, 836 },  // healer's crate off the south lane
+    { 8, 560, 870, 560, 914 },  // bank's crate off the south lane
+    { 16, 440, 860, 440, 914 }, // bank's chest off the south lane
+    { 17, 560, 460, 610, 460 }, // bookshelf was clipping town hall's east wall
+    // market cluster: was sitting on the south lane, moved just south of it
+    { 3, 740, 860, 740, 940 }, { 4, 800, 880, 800, 960 }, { 5, 850, 860, 850, 940 },
+    { 7, 704, 830, 704, 910 }, { 8, 880, 830, 880, 910 },
+};
+// Street lamps for the 3D lane network (the 2D lamps flank the old spokes, so
+// the 3D view places its own along the main street + lanes instead).
+static const Vector2 kT3DLamps[] = {
+    { 458, 300 }, { 542, 300 }, { 458, 700 }, { 542, 700 },
+    { 300, 232 }, { 700, 232 }, { 300, 532 }, { 700, 532 },
+    { 300, 832 }, { 700, 832 },
+};
+
+static void Town3DApplyTreeFix(float& x, float& z) {
+    for (auto& fix : kT3DTreeFixes)
+        if (fabsf(x - fix.ox) < 0.5f && fabsf(z - fix.oz) < 0.5f) {
+            x = fix.nx; z = fix.nz; return;
+        }
+}
+static void Town3DApplyPropFix(int kind, float& x, float& z) {
+    for (auto& fix : kT3DPropFixes)
+        if (fix.kind == kind && fabsf(x - fix.ox) < 0.5f && fabsf(z - fix.oz) < 0.5f) {
+            x = fix.nx; z = fix.nz; return;
+        }
+}
+
+// One foliage item at an explicit position (fixes already applied by the caller).
+static void Town3DDrawFoliageOne(const TownFoliage& f, float x, float z) {
+    Town3DModels& M = g_t3dModels;
+    float rot = Town3DHash01(x, z) * 360.0f;
+    float vs = 0.85f + 0.35f * Town3DHash01(z, x + 17.0f);
+    switch (f.variant) {
+        case 1: // pine
+            Town3DDrawPiece(M.treePine, { x, 0, z }, rot, 2.0f * vs);
+            break;
+        case 5: // autumn bush — bush model scaled up to read at tree spacing
+            Town3DDrawPiece(M.bush, { x, 0, z }, rot, 4.4f * vs);
+            break;
+        case 2:
+            Town3DDrawPiece(M.treeDetailed, { x, 0, z }, rot, 2.0f * vs);
+            break;
+        case 3:
+            Town3DDrawPiece(M.treeDefault, { x, 0, z }, rot, 2.0f * vs);
+            break;
+        case 4:
+            Town3DDrawPiece(M.treeFat, { x, 0, z }, rot, 2.0f * vs);
+            break;
+        default: // 0 — oak
+            Town3DDrawPiece(M.treeOak, { x, 0, z }, rot, 2.0f * vs);
+            break;
     }
 }
 
@@ -6713,10 +7731,15 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
 
     // Buildings — Quaternius MegaKit assemblies (see Town3DDrawBuilding), one per
     // grid node on the same footprints the old programmer-art boxes used.
-    // Foundation slab kept; the Wilderness Gate keeps its existing gatehouse boxes.
+    // Foundation slab kept, widened for the 3x2-module buildings (townhall,
+    // bank, stable) so the slab never peeks out from under the walls; the
+    // Wilderness Gate keeps its existing gatehouse boxes.
     for (auto& node : kTownNodePositions) {
         Color col = TileColorFor(node.key);
-        DrawCube({ node.pos.x, 1, node.pos.y }, 118, 2, 118, ColorBrightness(col, -0.4f)); // foundation
+        bool wide = (node.key == "townhall" || node.key == "bank" || node.key == "stable");
+        float fw = wide ? 140.0f : 118.0f; // 3x2 buildings are 132 wide
+        float fd = wide ? 96.0f : 118.0f;  // ...and 88 deep
+        DrawCube({ node.pos.x, 1, node.pos.y }, fw, 2, fd, ColorBrightness(col, -0.4f)); // foundation
         Town3DDrawBuilding(node.key, node.pos.x, node.pos.y);
     }
     // Wilderness Gate — sage box, same role as in 2D.
@@ -6727,35 +7750,23 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     // kFoliagePositions. Per-instance rotation + scale jitter from a
     // deterministic position hash (stable across frames). Kenney trees are
     // authored small (~1.2-1.7m), so they draw at 2x the modular scale.
+    // 3D-side position fixes applied (see kT3DTreeFixes), plus 3D-only edge
+    // and gate-approach greenery (kT3DExtraTrees).
     for (const TownFoliage& f : kFoliagePositions) {
-        Town3DModels& M = g_t3dModels;
-        float rot = Town3DHash01(f.pos.x, f.pos.y) * 360.0f;
-        float vs = 0.85f + 0.35f * Town3DHash01(f.pos.y, f.pos.x + 17.0f);
-        switch (f.variant) {
-            case 1: // pine
-                Town3DDrawPiece(M.treePine, { f.pos.x, 0, f.pos.y }, rot, 2.0f * vs);
-                break;
-            case 5: // autumn bush — bush model scaled up to read at tree spacing
-                Town3DDrawPiece(M.bush, { f.pos.x, 0, f.pos.y }, rot, 4.4f * vs);
-                break;
-            case 2:
-                Town3DDrawPiece(M.treeDetailed, { f.pos.x, 0, f.pos.y }, rot, 2.0f * vs);
-                break;
-            case 3:
-                Town3DDrawPiece(M.treeDefault, { f.pos.x, 0, f.pos.y }, rot, 2.0f * vs);
-                break;
-            case 4:
-                Town3DDrawPiece(M.treeFat, { f.pos.x, 0, f.pos.y }, rot, 2.0f * vs);
-                break;
-            default: // 0 — oak
-                Town3DDrawPiece(M.treeOak, { f.pos.x, 0, f.pos.y }, rot, 2.0f * vs);
-                break;
-        }
+        float fx = f.pos.x, fz = f.pos.y;
+        Town3DApplyTreeFix(fx, fz);
+        Town3DDrawFoliageOne(f, fx, fz);
     }
+    for (const TownFoliage& f : kT3DExtraTrees)
+        Town3DDrawFoliageOne(f, f.pos.x, f.pos.y);
 
-    // Props — small primitive clusters per kind (see kTownProps' kind index).
+    // Props — small primitive clusters per kind (see kTownProps' kind index),
+    // with 3D-side nudges off the 3D lanes (see kT3DPropFixes). Street lamps
+    // are placed for the 3D lane network instead (kT3DLamps).
     for (const TownProp& p : kTownProps) {
+        if (p.kind == 1) continue; // 3D lamps drawn below
         float x = p.pos.x, z = p.pos.y, sz = p.size;
+        Town3DApplyPropFix(p.kind, x, z);
         switch (p.kind) {
             case 0: // fountain
                 DrawCylinder({ x, 7, z }, sz * 0.65f, sz * 0.7f, 14, 10, Color{ 150, 150, 155, 255 });
@@ -6820,12 +7831,21 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
         }
     }
 
+    // Street lamps along the 3D lane network (kT3DLamps) — the 2D lamps flank
+    // the old spoke layout, so the 3D view places its own here instead.
+    for (const Vector2& lp : kT3DLamps) {
+        DrawCylinder({ lp.x, 22, lp.y }, 3, 4, 44, 6, Color{ 60, 60, 65, 255 });
+        DrawSphere({ lp.x, 48, lp.y }, 7, Color{ 255, 220, 130, 255 });
+    }
+
     // Plaza fence — Quaternius wooden fence rails (CC0, same kit as the
-    // buildings) marking the plaza edges, with gaps where the crossroads
+    // buildings) marking the plaza edges, with gaps where the streets
     // enter/exit. The 2D view draws fence posts here; the 3D view previously
     // had nothing. kTownPlaza = {420,420,160,160}; one rail spans ~45 world
     // units, so two per edge sit at the corners (Single and Extension1
-    // alternate for a hand-built look).
+    // alternate for a hand-built look). The north/south edges keep center
+    // gaps for the main street; the west/east edges leave their south half
+    // open as a gateway where the middle lane passes.
     {
         Town3DModels& M = g_t3dModels;
         const float zN = 420.0f, zS = 580.0f, xW = 420.0f, xE = 580.0f;
@@ -6834,19 +7854,32 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
         Town3DDrawPiece(M.fenceSingle, { 442.5f, 0, zS }, 0.0f);
         Town3DDrawPiece(M.fenceExt,    { 557.5f, 0, zS }, 0.0f);
         Town3DDrawPiece(M.fenceSingle, { xW, 0, 442.5f }, 90.0f);
-        Town3DDrawPiece(M.fenceExt,    { xW, 0, 557.5f }, 90.0f);
+        Town3DDrawPiece(M.fenceExt,    { xW, 0, 502.5f }, 90.0f);
         Town3DDrawPiece(M.fenceSingle, { xE, 0, 442.5f }, 90.0f);
-        Town3DDrawPiece(M.fenceExt,    { xE, 0, 557.5f }, 90.0f);
+        Town3DDrawPiece(M.fenceExt,    { xE, 0, 502.5f }, 90.0f);
     }
 
-    // Player capsule (+head) and wandering townsfolk.
-    DrawCapsule({ s.townPlayerPos.x, 8, s.townPlayerPos.y },
-                { s.townPlayerPos.x, 56, s.townPlayerPos.y }, 15, 8, 8, Color{ 70, 130, 220, 255 });
-    DrawSphere({ s.townPlayerPos.x, 64, s.townPlayerPos.y }, 10, Color{ 240, 210, 180, 255 });
+    // Player + wandering townsfolk (Phase 3: procedural humanoids from the
+    // creature kit — walk swing tied to movement speed, idle bob + head turns).
+    T3CKitUseSunShader();
+    {
+        float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
+        T3CAnim pa = T3CMakeAnim(kT3CTrackPlayerTown, s.townPlayerPos.x, s.townPlayerPos.y, !shadowPass);
+        T3CDrawHumanoid(g_t3cHumans[0].parts, s.townPlayerPos.x, s.townPlayerPos.y, pyaw, 1.0f,
+                        Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
+                        Color{ 240, 210, 180, 255 }, pa, shadowPass);
+    }
     const auto& activeNPCs = (s.selectedTown == 0) ? kTownNPCs : kTown2NPCs;
     for (int i = 0; i < (int)activeNPCs.size(); i++) {
         Vector2 np = TownNPCLivePos(i, s.worldTime, s.selectedTown);
-        DrawCapsule({ np.x, 6, np.y }, { np.x, 40, np.y }, 11, 6, 6, Color{ 150, 150, 140, 255 });
+        Vector2 na = TownNPCLivePos(i, s.worldTime + 0.6f, s.selectedTown);
+        float ndx = na.x - np.x, ndz = na.y - np.y;
+        float nyaw = (ndx * ndx + ndz * ndz < 0.04f)
+                     ? Town3DHash01(np.x, np.y) * 6.2832f : atan2f(ndz, ndx);
+        T3CAnim na2 = T3CMakeAnim(kT3CTrackNPCTown + i, np.x, np.y, !shadowPass);
+        T3CDrawHumanoid(g_t3cHumans[0].parts, np.x, np.y, nyaw, 0.97f,
+                        kT3CNPCShirts[i % 6], Color{ 70, 62, 55, 255 },
+                        Color{ 235, 205, 175, 255 }, na2, shadowPass);
     }
 }
 
@@ -6858,6 +7891,15 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
 static void Town3DShadowPass(GameState& s) {
     Town3DEnsureShadow();
     if (!g_t3dShadow.ready) return;
+    // Fixed orthographic sun camera covering the whole 1000x1000 town. Set here
+    // (not in Town3DEnsureShadow) so the wilderness shadow pass can point the
+    // same shared light camera at its own bigger world on its own frames.
+    Vector3 center = { 500, 0, 500 };
+    g_t3dLightCam.position = T3VSub(center, T3VScale(kT3DSunDir, -1300.0f));
+    g_t3dLightCam.target = center;
+    g_t3dLightCam.up = { 0, 1, 0 };
+    g_t3dLightCam.fovy = 1350.0f; // ortho box height; aspect is 1:1 on the square FBO
+    g_t3dLightCam.projection = CAMERA_ORTHOGRAPHIC;
     BeginTextureMode(g_t3dShadow.map);
     ClearBackground(WHITE); // depth cleared; no color attachment on this FBO
     BeginMode3D(g_t3dLightCam);
@@ -7148,6 +8190,1189 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
                Color{ 90, 74, 52, 255 });
 }
 
+// ---------------------------------------------------------------------
+// 3D wilderness view (2026-09-24, Phase 1 of the wilderness 3D work)
+// The wilderness is 3.2x the town's world (kWildernessWorldSize = 3200), so
+// this reuses the town's 3D tech (sun shadowmap, damped orbit camera, guarded
+// model drawing, ground rings, batched rlgl birds) with wilderness-sized
+// parameters. Like the town view, this is a pure view layer: every gameplay
+// position (gather nodes, creature/monster spots, gates, entrances) is read
+// from the unchanged 2D data, and all game logic stays in DrawWildernessScreen.
+// ---------------------------------------------------------------------
+static const int kWild3DGroundPx = 2048; // 3200-unit world => ~1.56 units/px. 4096px
+                                        // would be 64MB of texture for mostly grass.
+static const float kWild3DDistMin = 300.0f;
+static const float kWild3DDistMax = 2600.0f;
+
+static float Wild3DSmooth(float a, float b, float x) {
+    float t = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+// ---- 3D wilderness ground: procedural meadow texture (Phase 1) ----
+// Same baked-texture tech as the town (Town3DEnsureGround), scaled to the
+// 3200-unit wilderness: perlin grass + meadow blotches, dirt patches from a
+// third noise, zone tinting (darker forest floor NE, gray-brown mountains W),
+// and dirt paths from the Return Gate to each dungeon entrance + the Saltmere
+// trade road. One draw call, zero z-fighting.
+struct Wild3DGround {
+    bool loaded = false;
+    Texture2D tex{};
+    Model model{};
+};
+static Wild3DGround g_wild3dGround;
+
+static void Wild3DGroundDisc(Image* img, float x, float z, float r, Color col) {
+    const float k = kWild3DGroundPx / kWildernessWorldSize;
+    ImageDrawCircle(img, (int)(x * k), (int)(z * k), (int)(r * k + 0.5f), col);
+}
+static void Wild3DGroundPath(Image* img, Vector2 a, Vector2 b, Color col) {
+    float len = hypotf(b.x - a.x, b.y - a.y);
+    int n = (int)(len / 4.0f) + 1;
+    for (int j = 0; j <= n; j++) {
+        float t = (float)j / (float)n;
+        Wild3DGroundDisc(img, a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, 13.0f, col);
+    }
+}
+static void Wild3DEnsureGround() {
+    Wild3DGround& G = g_wild3dGround;
+    if (G.loaded) return;
+    Town3DEnsureShadow(); // ground model wants the shadow shader when available
+    const float WS = kWildernessWorldSize;
+    const int SZ = kWild3DGroundPx;
+    const float k = SZ / WS;
+    Color grassDark  = { 96, 142, 74, 255 };
+    Color grassLight = { 142, 186, 104, 255 };
+    Color dirtCol    = { 164, 134, 94, 255 };
+    Color pathCol    = { 178, 150, 106, 255 };
+    Image ground = GenImageColor(SZ, SZ, grassLight);
+    Image fineN = GenImagePerlinNoise(SZ, SZ, 0, 0, 5.0f);
+    Image blotchN = GenImagePerlinNoise(SZ, SZ, 0, 0, 1.4f);
+    Image dirtN = GenImagePerlinNoise(SZ, SZ, 7, 7, 0.9f);
+    Color* gp = LoadImageColors(ground);
+    Color* np = LoadImageColors(fineN);
+    Color* bp = LoadImageColors(blotchN);
+    Color* dp = LoadImageColors(dirtN);
+    for (int i = 0; i < SZ * SZ; i++) {
+        float wx = (float)(i % SZ) / k, wz = (float)(i / SZ) / k;
+        float t = np[i].r / 255.0f;                  // fine blade-level variation
+        float m = (bp[i].r / 255.0f - 0.5f) * 0.9f;  // broad meadow blotches
+        float r = grassDark.r + (grassLight.r - grassDark.r) * t + m * 26.0f;
+        float g = grassDark.g + (grassLight.g - grassDark.g) * t + m * 30.0f;
+        float b = grassDark.b + (grassLight.b - grassDark.b) * t + m * 8.0f;
+        // Dense Forest zone (NE): darker, cooler floor
+        float fz = Wild3DSmooth(1350.0f, 1550.0f, wx) * (1.0f - Wild3DSmooth(1950.0f, 2150.0f, wx)) *
+                   (1.0f - Wild3DSmooth(550.0f, 750.0f, wz));
+        r += (62.0f - r) * fz * 0.55f; g += (104.0f - g) * fz * 0.55f; b += (58.0f - b) * fz * 0.55f;
+        // Dragontooth mountains (W): gray-brown rock tint
+        float mz = 1.0f - Wild3DSmooth(350.0f, 550.0f, wx);
+        r += (128.0f - r) * mz * 0.5f; g += (120.0f - g) * mz * 0.5f; b += (106.0f - b) * mz * 0.5f;
+        // Dirt patches where the dirt noise runs high
+        float dn = dp[i].r / 255.0f;
+        if (dn > 0.60f) {
+            float w = fminf((dn - 0.60f) / 0.40f, 1.0f) * 0.8f;
+            r += (dirtCol.r - r) * w; g += (dirtCol.g - g) * w; b += (dirtCol.b - b) * w;
+        }
+        gp[i].r = (unsigned char)std::clamp(r, 0.0f, 255.0f);
+        gp[i].g = (unsigned char)std::clamp(g, 0.0f, 255.0f);
+        gp[i].b = (unsigned char)std::clamp(b, 0.0f, 255.0f);
+        gp[i].a = 255;
+    }
+    Color* dst = (Color*)ground.data;
+    for (int i = 0; i < SZ * SZ; i++) dst[i] = gp[i];
+    // Dirt paths: Return Gate -> each dungeon entrance, plus the Saltmere trade road.
+    for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances)
+        Wild3DGroundPath(&ground, kWildernessReturnGatePos, e.pos, pathCol);
+    Wild3DGroundPath(&ground, kWildernessReturnGatePos, kWildernessTown2GatePos, pathCol);
+    UnloadImageColors(gp);
+    UnloadImageColors(np);
+    UnloadImageColors(bp);
+    UnloadImageColors(dp);
+    UnloadImage(fineN);
+    UnloadImage(blotchN);
+    UnloadImage(dirtN);
+    G.tex = LoadTextureFromImage(ground);
+    UnloadImage(ground);
+    GenTextureMipmaps(&G.tex);
+    SetTextureFilter(G.tex, TEXTURE_FILTER_TRILINEAR);
+    G.model = LoadModelFromMesh(GenMeshPlane(WS, WS, 1, 1));
+    G.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = G.tex;
+    Town3DApplyShadowShader(G.model);
+    G.loaded = true;
+}
+
+// ---- 3D wilderness models (Phase 1) ----
+// Shared Kenney trees/bush/chest/fence come from Town3DLoadModels (loaded once
+// for both views); the wilderness adds only what the town didn't need: rocks
+// (ore clusters + mountain scatter) and a stump marking wood-gather spots.
+// All CC0 — see assets/models/README.md for provenance.
+struct Wild3DModels {
+    bool loaded = false;
+    Model rockLargeA{}, rockLargeB{}, rockLargeC{};
+    Model rockSmallA{}, rockSmallB{}, rockSmallC{};
+    Model stump{};
+};
+static Wild3DModels g_wild3dModels;
+static void Wild3DLoadModels() {
+    Wild3DModels& M = g_wild3dModels;
+    Town3DLoadModels(); // shared trees/bush/chest/fence
+    if (M.loaded) return;
+    M.loaded = true;
+    M.rockLargeA = LoadModel("assets/models/rock_largeA.glb");
+    M.rockLargeB = LoadModel("assets/models/rock_largeB.glb");
+    M.rockLargeC = LoadModel("assets/models/rock_largeC.glb");
+    M.rockSmallA = LoadModel("assets/models/rock_smallA.glb");
+    M.rockSmallB = LoadModel("assets/models/rock_smallB.glb");
+    M.rockSmallC = LoadModel("assets/models/rock_smallC.glb");
+    M.stump      = LoadModel("assets/models/stump_roundDetailed.glb");
+    Town3DApplyShadowShader(M.rockLargeA);
+    Town3DApplyShadowShader(M.rockLargeB);
+    Town3DApplyShadowShader(M.rockLargeC);
+    Town3DApplyShadowShader(M.rockSmallA);
+    Town3DApplyShadowShader(M.rockSmallB);
+    Town3DApplyShadowShader(M.rockSmallC);
+    Town3DApplyShadowShader(M.stump);
+}
+
+// Damped follow camera for the wilderness: same orbit tech as the town
+// (Town3DGetCamFor), following s.wildernessPlayerPos with wider zoom limits
+// for the 3200-unit world. Orbit yaw/pitch/zoom state is shared with the town.
+static Town3DCam Wild3DGetCam(const GameState& s, int screenW, int screenH) {
+    return Town3DGetCamFor(s.wildernessPlayerPos, screenW, screenH, 1, kWild3DDistMin, kWild3DDistMax);
+}
+
+// Cheap camera-space frustum test so the big world's scatter doesn't cost draw
+// calls when it's off-screen. The shadow pass (different camera) skips culling.
+static bool Wild3DInView(const Town3DCam& c, float x, float z, float radius) {
+    float rx = x - c.pos.x, ry = 0.0f - c.pos.y, rz = z - c.pos.z;
+    float zc = rx * c.fwd.x + ry * c.fwd.y + rz * c.fwd.z;
+    if (zc < 10.0f || zc > 4200.0f) return false;
+    float tanF = tanf(c.fovY * 0.5f * DEG2RAD);
+    float xc = rx * c.right.x + ry * c.right.y + rz * c.right.z;
+    float yc = rx * c.up.x + ry * c.up.y + rz * c.up.z;
+    float m = radius + 60.0f;
+    return fabsf(xc) < zc * tanF * c.aspect + m && fabsf(yc) < zc * tanF + m;
+}
+
+// Gather nodes as real 3D objects at their EXACT 2D positions
+// (kWildernessGatherNodes, untouched). Wood: a full-size tree plus a cut stump
+// beside it. Ore: a gray rock cluster studded with colored ore flecks (tint
+// cycles per node, like the 2D rock art).
+static void Wild3DDrawGatherNode(const WildernessGatherNode& node, int idx) {
+    Town3DModels& T = g_t3dModels;
+    Wild3DModels& W = g_wild3dModels;
+    float h1 = Town3DHash01(node.pos.x, node.pos.y);
+    float rot = h1 * 360.0f;
+    if (node.resource == "wood") {
+        const Model& tree = (idx % 2 == 0) ? T.treeOak : T.treePine;
+        Town3DDrawPiece(tree, { node.pos.x, 0, node.pos.y }, rot, 2.6f);
+        float sa = h1 * 6.2832f;
+        Town3DDrawPiece(W.stump, { node.pos.x + cosf(sa) * 44.0f, 0, node.pos.y + sinf(sa) * 44.0f },
+                        rot + 40.0f, 3.0f);
+    } else {
+        const Model& rock = (idx % 3 == 0) ? W.rockLargeA : (idx % 3 == 1) ? W.rockLargeB : W.rockLargeC;
+        Town3DDrawPiece(rock, { node.pos.x, 0, node.pos.y }, rot, 3.2f, Color{ 200, 200, 205, 255 });
+        Town3DDrawPiece(W.rockSmallA, { node.pos.x + 36.0f, 0, node.pos.y + 20.0f }, rot + 70.0f, 2.4f,
+                        Color{ 195, 195, 200, 255 });
+        static const Color kWild3DOreCols[3] = {
+            { 216, 178, 90, 255 }, { 196, 120, 70, 255 }, { 170, 180, 200, 255 } }; // gold/copper/silver
+        Color fleck = kWild3DOreCols[idx % 3];
+        for (int fi = 0; fi < 3; fi++) {
+            float fa = h1 * 6.2832f + (float)fi * 2.1f;
+            float fr = 24.0f + (float)(fi % 2) * 14.0f;
+            DrawSphere({ node.pos.x + cosf(fa) * fr, 13.0f + (float)(fi % 3) * 9.0f,
+                         node.pos.y + sinf(fa) * fr }, 5.5f, fleck);
+        }
+    }
+}
+
+// 2D decorative scatter (kWildernessFoliage, untouched) mapped to 3D models.
+// Variants with no sensible 3D stand-in (water/deerskull/cactus/haybale) are skipped.
+static void Wild3DDrawFoliageOne(const WildernessFoliage& f, bool shadowPass) {
+    Town3DModels& T = g_t3dModels;
+    Wild3DModels& W = g_wild3dModels;
+    float x = f.pos.x, z = f.pos.y;
+    float rot = Town3DHash01(x, z) * 360.0f;
+    float vs = 0.85f + 0.35f * Town3DHash01(z, x + 17.0f);
+    switch (f.variant) {
+        case 0: case 1: case 2: case 8: case 14: // bushes/ferns/plant
+            if (shadowPass) return; // no meaningful shadow; skip the pass
+            Town3DDrawPiece(T.bush, { x, 0, z }, rot, 3.6f * vs);
+            return;
+        case 12: // grass tuft
+            if (shadowPass) return;
+            Town3DDrawPiece(T.bush, { x, 0, z }, rot, 5.5f * vs, Color{ 200, 220, 150, 255 });
+            return;
+        case 3: // tree
+            Town3DDrawPiece(T.treeDetailed, { x, 0, z }, rot, 2.2f * vs);
+            return;
+        case 4: // rock
+            Town3DDrawPiece(W.rockLargeB, { x, 0, z }, rot, 2.6f * vs);
+            return;
+        case 9: // rocks (small)
+            Town3DDrawPiece(W.rockSmallB, { x, 0, z }, rot, 2.0f * vs);
+            return;
+        case 7: // chest
+            Town3DDrawPiece(T.chest, { x, 0, z }, rot, 0.9f);
+            return;
+        case 11: // fence
+            Town3DDrawPiece(T.fenceSingle, { x, 0, z }, rot, 1.0f);
+            return;
+        default: return; // 5=water, 6=deerskull, 10=cactus, 13=haybale: no stand-in
+    }
+}
+
+// 3D-only scatter filling the big empty stretches of the 3200-unit world (the
+// 2D content is sparse out here). Deterministic hash grid, built once —
+// positions derive from world coordinates, never from gameplay data, and every
+// gameplay position gets a keep-clear radius so nothing overlaps a node.
+struct Wild3DScatterItem { float x, z; int kind; int variant; float rot, scale; }; // kind: 0=tree 1=rock 2=mixed
+static std::vector<Wild3DScatterItem> g_wild3dScatter;
+static void Wild3DBuildScatter() {
+    if (!g_wild3dScatter.empty()) return;
+    std::vector<Vector2> clear;
+    for (const auto& n : kWildernessGatherNodes) clear.push_back(n.pos);
+    for (const auto& sp : kWildernessCreatureSpots) clear.push_back(sp.pos);
+    for (const auto& m : kWildernessMonsterSpots) clear.push_back(m.pos);
+    for (const auto& e : kWildernessDungeonEntrances) clear.push_back(e.pos);
+    for (const auto& f : kWildernessFoliage) clear.push_back(f.pos);
+    for (const auto& ip : kWildernessInnocentSpots) clear.push_back(ip.pos);
+    clear.push_back(kWildernessReturnGatePos);
+    clear.push_back(kWildernessTown2GatePos);
+    auto isClear = [&](float x, float z) {
+        for (const Vector2& p : clear) {
+            float dx = x - p.x, dz = z - p.y;
+            if (dx * dx + dz * dz < 110.0f * 110.0f) return false;
+        }
+        return true;
+    };
+    struct Zone { float x0, x1, z0, z1, step, density; int kind; };
+    static const Zone zones[] = {
+        { 1500, 2050, 0, 700, 80, 0.62f, 0 },     // Dense Forest (NE) — trees
+        { 0, 450, 0, 1800, 95, 0.45f, 1 },        // Dragontooth mountains (W) — rocks
+        { 1800, 2950, 1500, 2000, 110, 0.40f, 2 },// Saltmere corridor verges — mixed
+        { 0, 1500, 0, 1800, 150, 0.16f, 2 },      // original zone — light filler
+    };
+    for (const Zone& zn : zones) {
+        for (float gx = zn.x0; gx <= zn.x1; gx += zn.step) {
+            for (float gz = zn.z0; gz <= zn.z1; gz += zn.step) {
+                float jx = gx + (Town3DHash01(gx, gz) - 0.5f) * zn.step * 0.8f;
+                float jz = gz + (Town3DHash01(gz, gx + 31.0f) - 0.5f) * zn.step * 0.8f;
+                if (jx < 40 || jx > 3160 || jz < 40 || jz > 3160) continue;
+                if (Town3DHash01(jx * 1.7f, jz * 2.3f) > zn.density) continue;
+                if (!isClear(jx, jz)) continue;
+                Wild3DScatterItem it;
+                it.x = jx; it.z = jz; it.kind = zn.kind;
+                it.variant = (int)(Town3DHash01(jx + 5.0f, jz + 9.0f) * 3.0f);
+                it.rot = Town3DHash01(jx, jz) * 360.0f;
+                it.scale = 0.8f + 0.5f * Town3DHash01(jz, jx + 3.0f);
+                g_wild3dScatter.push_back(it);
+            }
+        }
+    }
+}
+static void Wild3DDrawScatterOne(const Wild3DScatterItem& it, bool shadowPass) {
+    Town3DModels& T = g_t3dModels;
+    Wild3DModels& W = g_wild3dModels;
+    if (it.kind == 0) {
+        const Model& t = (it.variant == 0) ? T.treeOak : (it.variant == 1) ? T.treePine : T.treeFat;
+        Town3DDrawPiece(t, { it.x, 0, it.z }, it.rot, 2.1f * it.scale);
+    } else if (it.kind == 1) {
+        const Model& r = (it.variant == 0) ? W.rockLargeA : (it.variant == 1) ? W.rockLargeC : W.rockSmallA;
+        Town3DDrawPiece(r, { it.x, 0, it.z }, it.rot, (it.variant == 2 ? 2.2f : 3.0f) * it.scale);
+    } else {
+        if (it.variant == 0) {
+            if (shadowPass) return; // bushes skip the shadow pass
+            Town3DDrawPiece(T.bush, { it.x, 0, it.z }, it.rot, 4.0f * it.scale);
+        } else if (it.variant == 1) {
+            Town3DDrawPiece(W.rockSmallB, { it.x, 0, it.z }, it.rot, 2.2f * it.scale);
+        } else {
+            Town3DDrawPiece(T.treeDefault, { it.x, 0, it.z }, it.rot, 1.8f * it.scale);
+        }
+    }
+}
+
+// Dungeon entrance: stone arch + glowing portal disc in the entrance's own color.
+static void Wild3DDrawEntrance(const WildernessDungeonEntrance& e) {
+    Color stone = { 150, 148, 142, 255 }, dark = { 110, 108, 102, 255 };
+    DrawCube({ e.pos.x - 30, 32, e.pos.y }, 18, 64, 18, stone);
+    DrawCube({ e.pos.x + 30, 32, e.pos.y }, 18, 64, 18, stone);
+    DrawCube({ e.pos.x, 70, e.pos.y }, 84, 16, 22, dark);
+    DrawCylinder({ e.pos.x, 5, e.pos.y }, 24, 24, 4, 20, e.color);
+}
+// Travel gate: two posts + beam.
+static void Wild3DDrawGate(float x, float z, Color post, Color beam) {
+    DrawCube({ x - 42, 32, z }, 20, 64, 20, post);
+    DrawCube({ x + 42, 32, z }, 20, 64, 20, post);
+    DrawCube({ x, 70, z }, 108, 16, 24, beam);
+}
+
+// (Phase 3 removed the old primitive stand-ins — Wild3DDrawAnimal,
+// Wild3DDrawMonster, Wild3DCreatureColor/Size — in favor of the procedural
+// creature kit above; the call sites below draw kit archetypes instead.)
+// Facing from the wander loop's local velocity (matches the 2D screen deriving
+// real facing from movement); falls back to a hashed direction when still.
+static float Wild3DWanderFacing(int idx, float x, float z, float worldTime) {
+    Vector2 a = MonsterWanderOffset(idx, worldTime);
+    Vector2 b = MonsterWanderOffset(idx, worldTime + 0.6f);
+    float dx = b.x - a.x, dz = b.y - a.y;
+    if (dx * dx + dz * dz < 0.04f) return Town3DHash01(x, z) * 6.2832f;
+    return atan2f(dz, dx);
+}
+
+static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DCam* cull) {
+    Wild3DLoadModels();
+    Wild3DEnsureGround();
+    Wild3DBuildScatter();
+    auto vis = [&](float x, float z, float r) { return !cull || Wild3DInView(*cull, x, z, r); };
+
+    // Ground: procedural meadow with baked paths, plus a large flat outer field
+    // so the horizon never shows a hard edge.
+    DrawModel(g_wild3dGround.model, { 1600, 0, 1600 }, 1.0f, WHITE);
+    DrawPlane({ 1600, -1.5f, 1600 }, { 8000, 8000 }, Color{ 92, 132, 70, 255 });
+
+    // Extra scatter (3D-only filler; see Wild3DBuildScatter).
+    for (const Wild3DScatterItem& it : g_wild3dScatter) {
+        if (!vis(it.x, it.z, 80.0f)) continue;
+        Wild3DDrawScatterOne(it, shadowPass);
+    }
+    // Decorative foliage from the 2D data.
+    for (const WildernessFoliage& f : kWildernessFoliage) {
+        if (!vis(f.pos.x, f.pos.y, 60.0f)) continue;
+        Wild3DDrawFoliageOne(f, shadowPass);
+    }
+    // Gather nodes at their exact 2D positions.
+    for (size_t i = 0; i < kWildernessGatherNodes.size(); i++) {
+        const WildernessGatherNode& n = kWildernessGatherNodes[i];
+        if (!vis(n.pos.x, n.pos.y, 80.0f)) continue;
+        Wild3DDrawGatherNode(n, (int)i);
+    }
+    // Dungeon entrances.
+    for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances) {
+        if (!vis(e.pos.x, e.pos.y, 90.0f)) continue;
+        Wild3DDrawEntrance(e);
+    }
+    // Travel gates.
+    if (vis(kWildernessReturnGatePos.x, kWildernessReturnGatePos.y, 90.0f))
+        Wild3DDrawGate(kWildernessReturnGatePos.x, kWildernessReturnGatePos.y,
+                       Color{ 140, 110, 80, 255 }, Color{ 110, 85, 60, 255 });
+    if (vis(kWildernessTown2GatePos.x, kWildernessTown2GatePos.y, 90.0f))
+        Wild3DDrawGate(kWildernessTown2GatePos.x, kWildernessTown2GatePos.y,
+                       Color{ 150, 148, 142, 255 }, Color{ 118, 116, 110, 255 });
+
+    bool wasEngaged = s.wildEngaged.has_value();
+    // Phase 3 procedural creatures (kit shader matches the sun/shadow pipeline).
+    T3CKitUseSunShader();
+    auto kitDist = [&](float x, float z) {
+        return (cull && !shadowPass) ? hypotf(cull->pos.x - x, cull->pos.z - z) : 0.0f;
+    };
+    // Tameable creatures at their exact 2D spawn spots.
+    for (size_t i = 0; i < kWildernessCreatureSpots.size(); i++) {
+        const WildernessCreatureSpot& sp = kWildernessCreatureSpots[i];
+        if (!vis(sp.pos.x, sp.pos.y, 70.0f)) continue;
+        T3CQuadLook look = T3CCreatureLook(sp.creatureIdx);
+        T3CAnim ca = T3CMakeAnim(kT3CTrackCreatureWild + (int)i, sp.pos.x, sp.pos.y, !shadowPass);
+        T3CDrawQuad(g_t3cQuads[look.specIdx].parts, sp.pos.x, sp.pos.y,
+                    Town3DHash01(sp.pos.x, sp.pos.y) * 6.2832f,
+                    look.scale, look.coat, ca, kitDist(sp.pos.x, sp.pos.y), shadowPass);
+    }
+    // Monsters at their live positions (the engaged one at its fight position).
+    for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
+        bool eng = wasEngaged && s.wildEngaged->spotIdx == (int)i;
+        Vector2 mp = eng ? s.wildEngaged->pos : WildernessMonsterLivePos((int)i, s.worldTime);
+        if (!vis(mp.x, mp.y, 70.0f)) continue;
+        float face = eng ? atan2f(s.wildernessPlayerPos.y - mp.y, s.wildernessPlayerPos.x - mp.x)
+                         : Wild3DWanderFacing((int)i, mp.x, mp.y, s.worldTime);
+        T3CMonLook mlook = T3CMonsterLook(kWildernessMonsterSpots[i].iconIdx);
+        T3CAnim ma = T3CMakeAnim(kT3CTrackMonsterWild + (int)i, mp.x, mp.y, !shadowPass);
+        if (mlook.humanoid) {
+            T3CDrawHumanoid(g_t3cHumans[0].parts, mp.x, mp.y, face, mlook.scale,
+                            mlook.shirt, mlook.pants, mlook.skin, ma, shadowPass);
+        } else {
+            T3CDrawQuad(g_t3cQuads[mlook.specIdx].parts, mp.x, mp.y, face,
+                        mlook.scale, mlook.coat, ma, kitDist(mp.x, mp.y), shadowPass);
+        }
+    }
+    // The Rival Adventurer.
+    {
+        Vector2 rp = (wasEngaged && s.wildEngaged->isRival) ? s.wildEngaged->pos : s.rivalPos;
+        if (vis(rp.x, rp.y, 70.0f)) {
+            float ryaw = atan2f(s.wildernessPlayerPos.y - rp.y, s.wildernessPlayerPos.x - rp.x);
+            T3CAnim ra = T3CMakeAnim(kT3CTrackRival, rp.x, rp.y, !shadowPass);
+            T3CDrawHumanoid(g_t3cHumans[0].parts, rp.x, rp.y, ryaw, 1.0f,
+                            Color{ 150, 60, 55, 255 }, Color{ 60, 50, 55, 255 },
+                            Color{ 235, 200, 170, 255 }, ra, shadowPass);
+        }
+    }
+    // Roaming innocents (only the ones currently present).
+    for (size_t i = 0; i < kWildernessInnocentSpots.size(); i++) {
+        if (!s.innocentSpots[i].present) continue;
+        Vector2 ip = WildernessInnocentLivePos((int)i, s.worldTime);
+        if (!vis(ip.x, ip.y, 70.0f)) continue;
+        Vector2 ia = WildernessInnocentLivePos((int)i, s.worldTime + 0.6f);
+        float idx2 = ia.x - ip.x, idz = ia.y - ip.y;
+        float iyaw = (idx2 * idx2 + idz * idz < 0.04f)
+                     ? Town3DHash01(ip.x, ip.y) * 6.2832f : atan2f(idz, idx2);
+        T3CAnim ia2 = T3CMakeAnim(kT3CTrackInnocentWild + (int)i, ip.x, ip.y, !shadowPass);
+        T3CDrawHumanoid(g_t3cHumans[0].parts, ip.x, ip.y, iyaw, 0.95f,
+                        kT3CNPCShirts[i % 6], Color{ 75, 68, 60, 255 },
+                        Color{ 240, 210, 180, 255 }, ia2, shadowPass);
+    }
+    // AI companion.
+    if (Pet* ap = ActivePet(s)) {
+        if (vis(s.companionPos.x, s.companionPos.y, 70.0f)) {
+            Vector2 d = { s.wildernessPlayerPos.x - s.companionPos.x,
+                          s.wildernessPlayerPos.y - s.companionPos.y };
+            float face = (d.x * d.x + d.y * d.y > 1.0f) ? atan2f(d.y, d.x) : 0.0f;
+            T3CQuadLook plook = T3CPetLook(ap->role);
+            T3CAnim pa2 = T3CMakeAnim(kT3CTrackCompanion, s.companionPos.x, s.companionPos.y, !shadowPass);
+            T3CDrawQuad(g_t3cQuads[plook.specIdx].parts, s.companionPos.x, s.companionPos.y,
+                        face, plook.scale, plook.coat, pa2,
+                        kitDist(s.companionPos.x, s.companionPos.y), shadowPass);
+        }
+    }
+    // Player, same humanoid kit as the town 3D view.
+    {
+        float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
+        T3CAnim pa3 = T3CMakeAnim(kT3CTrackPlayerWild, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y, !shadowPass);
+        T3CDrawHumanoid(g_t3cHumans[0].parts, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y,
+                        pyaw, 1.0f, Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
+                        Color{ 240, 210, 180, 255 }, pa3, shadowPass);
+    }
+}
+
+// Sun shadow pass for the wilderness: same rlgl depth-FBO tech as the town,
+// with the orthographic sun camera widened to cover the 3200-unit world.
+// Called from the main loop before the frame's render target is bound.
+// Phase 1 deferred item (2026-09-24): frustum-cull the shadow pass. The shadow
+// camera covers the whole world, so without culling every scatter/foliage/node
+// in the wilderness (~660 draws worst case) renders into the shadowmap every
+// frame. The main camera's frustum is a safe cull here: anything outside it is
+// invisible anyway, and the sun is steep enough that off-screen casters' shadows
+// barely reach into view.
+static void Wild3DShadowPass(GameState& s, const Town3DCam* cull) {
+    Town3DEnsureShadow();
+    if (!g_t3dShadow.ready) return;
+    Vector3 center = { 1600, 0, 1600 };
+    g_t3dLightCam.position = T3VSub(center, T3VScale(kT3DSunDir, -2600.0f));
+    g_t3dLightCam.target = center;
+    g_t3dLightCam.up = { 0, 1, 0 };
+    g_t3dLightCam.fovy = 4600.0f; // ortho box height; covers the world + margin
+    g_t3dLightCam.projection = CAMERA_ORTHOGRAPHIC;
+    BeginTextureMode(g_t3dShadow.map);
+    ClearBackground(WHITE);
+    BeginMode3D(g_t3dLightCam);
+    g_t3dLightVP = T3DMatMul(rlGetMatrixModelview(), rlGetMatrixProjection());
+    Wild3DDrawSceneContents(s, true, cull);
+    EndMode3D();
+    EndTextureMode();
+}
+
+// Gradient sky dome for the wilderness — same banded-cylinder tech as the
+// town, widened so the horizon sits past the fog range.
+static void Wild3DDrawSky(Vector3 camPos) {
+    const float R = 4200.0f, bandH = 120.0f;
+    const int bands = 16;
+    rlDisableBackfaceCulling();
+    for (int i = 0; i < bands; i++) {
+        float t = (float)i / (float)(bands - 1);
+        Color col = ColorLerp(kT3DSkyHorizon, kT3DSkyZenith, t * t * 0.92f);
+        float y0 = -60.0f + i * bandH, y1 = y0 + bandH;
+        Town3DSkyBand({ camPos.x, y0, camPos.z }, { camPos.x, y1, camPos.z }, R, 24, col);
+    }
+    DrawCylinder({ camPos.x, 1861.0f, camPos.z }, R, R, 2.0f, 24, kT3DSkyZenith);
+    rlEnableBackfaceCulling();
+}
+
+// Circling birds over the wilderness — the town's batched rlgl bird tech
+// (one draw call), main pass only.
+static void Wild3DDrawAmbience(const Town3DCam& c) {
+    (void)c;
+    float t = (float)GetTime();
+    rlDisableBackfaceCulling();
+    rlBegin(RL_TRIANGLES);
+    for (int i = 0; i < 5; i++) {
+        float ang = t * 0.18f + (float)i * 1.2566f;
+        float rad = 900.0f + (float)i * 160.0f;
+        Vector3 ctr = { 1600.0f + cosf(ang) * rad,
+                        560.0f + (float)i * 28.0f + sinf(t * 0.6f + (float)i) * 24.0f,
+                        1600.0f + sinf(ang) * rad };
+        Vector3 fwd = { -sinf(ang), 0.0f, cosf(ang) };
+        Vector3 side = { cosf(ang), 0.0f, -sinf(ang) };
+        Vector3 nose = T3VAdd(ctr, T3VScale(fwd, 16.0f));
+        Vector3 tail = T3VSub(ctr, T3VScale(fwd, 12.0f));
+        float tipY = 6.0f + sinf(t * 8.0f + (float)i * 2.1f) * 18.0f;
+        Vector3 lw = { ctr.x + side.x * 38.0f, ctr.y + tipY, ctr.z + side.z * 38.0f };
+        Vector3 rw = { ctr.x - side.x * 38.0f, ctr.y + tipY, ctr.z - side.z * 38.0f };
+        rlColor4ub(42, 38, 46, 255);
+        rlVertex3f(nose.x, nose.y, nose.z); rlVertex3f(tail.x, tail.y, tail.z); rlVertex3f(lw.x, lw.y, lw.z);
+        rlVertex3f(nose.x, nose.y, nose.z); rlVertex3f(rw.x, rw.y, rw.z); rlVertex3f(tail.x, tail.y, tail.z);
+    }
+    rlEnd();
+    rlEnableBackfaceCulling();
+}
+
+// Nearest interactable for the 3D view's highlight ring + label. Mirrors the
+// nearest-search in DrawWildernessScreen (positions only); the real interaction
+// logic stays there.
+struct Wild3DNearest {
+    bool valid = false;
+    Vector2 pos{};
+    float dist = 1e9f;
+    std::string label;
+    bool engaged = false;
+};
+static Wild3DNearest Wild3DNearestInfo(const GameState& s) {
+    Wild3DNearest r;
+    auto consider = [&](Vector2 pos, const std::string& label) {
+        float d = Dist(s.wildernessPlayerPos, pos);
+        if (d < r.dist) { r.dist = d; r.valid = true; r.pos = pos; r.label = label; }
+    };
+    for (const WildernessGatherNode& n : kWildernessGatherNodes) consider(n.pos, "Gather " + n.resource);
+    for (const WildernessCreatureSpot& sp : kWildernessCreatureSpots)
+        consider(sp.pos, "Tame " + kWildCreatures[sp.creatureIdx].name);
+    bool wasEngaged = s.wildEngaged.has_value();
+    for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
+        Vector2 mp = (wasEngaged && (int)i == s.wildEngaged->spotIdx) ? s.wildEngaged->pos
+                     : WildernessMonsterLivePos((int)i, s.worldTime);
+        consider(mp, "Fight " + kWildernessMonsterSpots[i].name);
+    }
+    consider((wasEngaged && s.wildEngaged->isRival) ? s.wildEngaged->pos : s.rivalPos, "Fight Rival Adventurer");
+    for (size_t i = 0; i < kWildernessInnocentSpots.size(); i++) {
+        if (!s.innocentSpots[i].present) continue;
+        consider(WildernessInnocentLivePos((int)i, s.worldTime), "Approach " + s.innocentSpots[i].name);
+    }
+    for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances)
+        consider(e.pos, "Enter " + kDungeons[e.dungeonIdx].name);
+    consider(kWildernessReturnGatePos, "Return to Town");
+    consider(kWildernessTown2GatePos, std::string("Enter ") + kTown2Name);
+    if (wasEngaged) { r.engaged = true; r.pos = s.wildEngaged->pos; }
+    return r;
+}
+
+// UI rects the orbit input must ignore (mirrors Town3DPointInUI for the
+// wilderness HUD: the 3D/2D toggle, tap-to-interact, the virtual joystick,
+// and the live-combat UI while engaged).
+static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
+    if (CheckCollisionPointRec(m, { 452, 120, 68, 30 })) return true; // 3D/2D toggle
+    if (CheckCollisionPointRec(m, { kViewport.x + kViewport.width - 150.0f,
+                                    kViewport.y + kViewport.height - 90.0f, 130.0f, 60.0f })) return true; // tap-to-interact
+    if (CheckCollisionPointRec(m, kJoystickZone)) return true;
+    if (s.wildEngaged.has_value()) {
+        if (CheckCollisionPointRec(m, { 20, 110, 330, 60 })) return true; // HP/mana strip
+        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return true; // quick items
+        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return true; // spell hotbar
+    }
+    return false;
+}
+
+static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const std::string& prompt) {
+    Vector2 mouse = GetMousePosition();
+
+    // --- Orbit / zoom input (same feel as the town 3D view; the orbit state is
+    // shared). No click-picking in Phase 1 — interaction stays walk-up + E / tap,
+    // exactly like the 2D wilderness.
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+        CheckCollisionPointRec(mouse, kViewport) && !Wild3DPointInUI(mouse, s)) {
+        g_t3dOrbiting = true;
+        g_t3dLastMouse = mouse;
+        g_t3dDragDist = 0.0f;
+    }
+    if (g_t3dOrbiting && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        Vector2 d = { mouse.x - g_t3dLastMouse.x, mouse.y - g_t3dLastMouse.y };
+        g_t3dLastMouse = mouse;
+        g_t3dDragDist += fabsf(d.x) + fabsf(d.y);
+        g_t3dYaw -= d.x * 0.006f; // unbounded; the smoothed yaw follows continuously
+        g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
+    }
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) g_t3dOrbiting = false;
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
+    float wheel = GetMouseWheelMove();
+    if (wheel != 0.0f && CheckCollisionPointRec(mouse, kViewport) && !Wild3DPointInUI(mouse, s))
+        g_t3dDist = std::clamp(g_t3dDist * (1.0f - wheel * 0.12f), kWild3DDistMin, kWild3DDistMax);
+
+    // --- 3D scene: sky, then the lit + shadowed wilderness ---
+    Town3DEnsureShadow();
+    Wild3DLoadModels();
+    Wild3DEnsureGround();
+    Wild3DBuildScatter();
+    Town3DCam c = Wild3DGetCam(s, screenW, screenH);
+    Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
+    BeginMode3D(cam3d);
+    Wild3DDrawSky(c.pos); // gradient sky, default shader (unlit, unfogged)
+    bool shadowsOn = g_t3dShadow.ready;
+    if (shadowsOn) {
+        // Per-frame shader state, same as the town pass: camera pos, the sun VP
+        // matrix captured by Wild3DShadowPass, and the shadowmap depth on slot 10.
+        SetShaderValue(g_t3dShadow.shader, g_t3dShadow.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
+        SetShaderValueMatrix(g_t3dShadow.shader, g_t3dShadow.lightVPLoc, g_t3dLightVP);
+        rlEnableShader(g_t3dShadow.shader.id);
+        int shadowSlot = 10;
+        rlActiveTextureSlot(shadowSlot);
+        rlEnableTexture(g_t3dShadow.map.depth.id);
+        rlSetUniform(g_t3dShadow.shadowMapLoc, &shadowSlot, SHADER_UNIFORM_INT, 1);
+    }
+    Wild3DDrawSceneContents(s, false, &c);
+    if (shadowsOn) {
+        rlActiveTextureSlot(10);
+        rlDisableTexture();
+        rlActiveTextureSlot(0);
+        rlEnableShader(rlGetShaderIdDefault());
+    }
+    Wild3DDrawAmbience(c); // birds, unlit, one batched draw call, main pass only
+    // Nearest-interactable ring (warm) + red ring on the engaged monster.
+    Wild3DNearest nearest = Wild3DNearestInfo(s);
+    bool inRange = nearest.valid && nearest.dist < kNodeRadius + kInteractRange;
+    {
+        float pulse = 0.60f + 0.18f * sinf((float)GetTime() * 4.0f);
+        if (nearest.engaged)
+            Town3DDrawGroundRing(nearest.pos.x, nearest.pos.y, 3.0f, 46.0f, 56.0f, 36,
+                                 Fade(Color{ 255, 80, 60, 255 }, pulse));
+        else if (inRange)
+            Town3DDrawGroundRing(nearest.pos.x, nearest.pos.y, 3.0f, 52.0f, 62.0f, 36,
+                                 Fade(Color{ 255, 196, 110, 255 }, pulse));
+    }
+    EndMode3D();
+
+    // --- 2D overlay: gate/entrance labels (distance-faded like the town's) ---
+    {
+        const float fadeNear = 1200.0f, fadeFar = 2400.0f;
+        auto label3D = [&](float x, float y, float z, const std::string& text) {
+            Vector2 sp;
+            if (!Town3DProject(c, { x, y, z }, &sp)) return;
+            if (sp.x < -60 || sp.x > screenW + 60 || sp.y < 100 || sp.y > screenH) return;
+            float bd = hypotf(c.pos.x - x, c.pos.z - z);
+            float a = std::clamp((fadeFar - bd) / (fadeFar - fadeNear), 0.0f, 1.0f);
+            if (a < 0.03f) return;
+            int fsz = (int)(11.0f + 3.0f * a);
+            int w = MeasureUIText(text.c_str(), fsz);
+            int sx = (int)(sp.x - w / 2), sy = (int)(sp.y - fsz);
+            DrawRectangle(sx - 4, sy - 2, w + 8, fsz + 5, Fade(BLACK, 0.55f * a));
+            DrawUIText(text.c_str(), sx, sy, fsz, Fade(WHITE, a));
+        };
+        label3D(kWildernessReturnGatePos.x, 110, kWildernessReturnGatePos.y, "Town Gate");
+        label3D(kWildernessTown2GatePos.x, 110, kWildernessTown2GatePos.y, kTown2Name);
+        for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances)
+            label3D(e.pos.x, 110, e.pos.y, kDungeons[e.dungeonIdx].name);
+        if (inRange && !nearest.engaged)
+            label3D(nearest.pos.x, 80, nearest.pos.y, nearest.label);
+    }
+    // Interaction prompt (the 2D view draws it via DrawPlayer; the 3D view has no
+    // player sprite call, so it goes here, same style as the town 3D prompt).
+    if (!prompt.empty()) {
+        int w = MeasureUIText(prompt.c_str(), 14);
+        int sx = (int)(screenW - w) / 2, sy = screenH - 96;
+        DrawRectangle(sx - 6, sy - 3, w + 12, 22, Fade(BLACK, 0.55f));
+        DrawUIText(prompt.c_str(), sx, sy, 14, WHITE);
+    }
+    DrawUIText("3D view: drag to orbit, wheel to zoom. [V] toggles 2D.", 20, 196, 12,
+               Color{ 90, 74, 52, 255 });
+}
+
+
+// ---------------------------------------------------------------------
+// 3D dungeon view (2026-09-24, Phase 2 — dungeons 3D). One 3D view per
+// dungeon, built from the same 2D data the classic view uses: wall geometry
+// is extruded from the kDungeonRoomLayouts rectangles (anything not floor is
+// wall, exactly like DungeonIsFloor), floors are baked per-dungeon from the
+// themed 2D tiles, and torches sit in the big rooms. Lighting is a custom
+// torchlight shader (assets/shaders/torchlight.*): dark ambient + up to 8
+// warm flickering point lights — no sun, no shadowmaps indoors. Pure view
+// layer: positions, transitions, and combat all stay in DrawHuntScreen.
+// ---------------------------------------------------------------------
+static const float kDung3DDistMin = 150.0f;  // closest zoom: one room fills the view
+static const float kDung3DDistMax = 700.0f;  // farthest zoom: most of the dungeon in frame
+static const float kDung3DWallH = 100.0f;    // extruded wall height
+static const float kDung3DCell = 45.0f;      // wall-scan grid cell (1800/45 = 40)
+static const int kDung3DGridN = 40;
+static const int kDung3DGroundPx = 1024;     // baked floor texture resolution
+static const int kDung3DMaxTorches = 8;      // torchlight shader light count
+static const Vector2 kDung3DExitPos = { 900, 1300 }; // mirrors DrawHuntScreen's kDungeonExitPos
+
+// Torch-light shader + baked flame sprite (both one-time).
+struct Dungeon3DTorch {
+    bool ready = false;
+    bool tried = false;
+    Shader shader{};
+    int torchPosLoc = -1, torchCountLoc = -1, timeLoc = -1, ambientLoc = -1;
+    Texture2D flameTex{};
+};
+static Dungeon3DTorch g_dung3dTorch;
+
+static void Dungeon3DEnsureTorch() {
+    Dungeon3DTorch& T = g_dung3dTorch;
+    if (T.ready || T.tried) return;
+    T.tried = true;
+    T.shader = LoadShader("assets/shaders/torchlight.vs", "assets/shaders/torchlight.fs");
+    if (T.shader.id == 0) return; // missing shader files: fall back to flat lighting below
+    T.torchPosLoc = GetShaderLocation(T.shader, "torchPos");
+    T.torchCountLoc = GetShaderLocation(T.shader, "torchCount");
+    T.timeLoc = GetShaderLocation(T.shader, "time");
+    T.ambientLoc = GetShaderLocation(T.shader, "ambient");
+    float amb[4] = { 0.30f, 0.27f, 0.30f, 1.0f }; // cool dark ambient — the torches do the work
+    SetShaderValue(T.shader, T.ambientLoc, amb, SHADER_UNIFORM_VEC4);
+    // Procedural flame sprite (no new assets): white-yellow core fading to
+    // transparent orange, teardrop-narrowed toward the top. Drawn as a
+    // camera-facing billboard at each torch, unlit.
+    Image img = GenImageColor(64, 64, { 0, 0, 0, 0 });
+    for (int y = 0; y < 64; y++) {
+        for (int x = 0; x < 64; x++) {
+            float dx = (x - 32) / 32.0f, dy = (y - 30) / 32.0f;
+            float w = 1.0f - (y / 64.0f) * 0.45f;
+            float d = sqrtf(dx * dx / (w * w) + dy * dy);
+            if (d < 1.0f) {
+                float a = 1.0f - d;
+                Color c = { 255, (unsigned char)(120 + 135 * a), (unsigned char)(30 + 60 * a),
+                            (unsigned char)(255 * a * a) };
+                ImageDrawPixel(&img, x, y, c);
+            }
+        }
+    }
+    T.flameTex = LoadTextureFromImage(img);
+    UnloadImage(img);
+    SetTextureFilter(T.flameTex, TEXTURE_FILTER_BILINEAR);
+    T.ready = true;
+}
+
+// Assign the torch shader to a model's materials — required, not optional:
+// DrawModel enables the MATERIAL's shader, so a bare rlEnableShader before
+// DrawModel would be overridden (same reason Town3DApplyShadowShader exists).
+static void Dungeon3DApplyTorchShader(Model& m) {
+    Dungeon3DEnsureTorch();
+    if (!g_dung3dTorch.ready || m.meshCount <= 0) return;
+    for (int i = 0; i < m.materialCount; i++) m.materials[i].shader = g_dung3dTorch.shader;
+}
+
+// Torch positions: one per big room (corridors are too narrow for a pole),
+// from kDungeonRoomLayouts; rect 0 is always the entrance room. Offset
+// slightly off the room center so the pole doesn't sit exactly on the
+// monster's wander node there.
+static void Dungeon3DTorchSpots(int dungeonIdx, Vector3* out, int* outCount) {
+    int n = 0;
+    for (const Rectangle& r : kDungeonRoomLayouts[dungeonIdx]) {
+        if (n >= kDung3DMaxTorches) break;
+        if (r.width * r.height < 50000.0f) continue; // corridor, skip
+        out[n++] = { r.x + r.width * 0.5f + 70.0f, 0.0f, r.y + r.height * 0.5f + 40.0f };
+    }
+    *outCount = n;
+}
+
+// Baked dungeon floor: one 1024px texture over the 1800-unit world, stamped
+// one tile per 45-unit cell — wall texture everywhere, themed floor texture
+// where DungeonIsFloor, plus the same per-dungeon specials the 2D view draws
+// (Sunken Crypt water pool, Hollow Warrens boss-room rug). One draw call.
+struct Dungeon3DGround {
+    bool loaded = false;
+    int dungeon = -1;
+    Texture2D tex{};
+    Model model{};
+};
+static Dungeon3DGround g_dung3dGround;
+
+static void Dungeon3DEnsureGround(int dungeonIdx) {
+    Dungeon3DGround& G = g_dung3dGround;
+    if (G.loaded && G.dungeon == dungeonIdx) return;
+    if (G.loaded) { UnloadModel(G.model); UnloadTexture(G.tex); G.loaded = false; }
+    const int SZ = kDung3DGroundPx;
+    Image ground = GenImageColor(SZ, SZ, { 20, 18, 22, 255 });
+    const float k = (float)SZ / kDungeonWorldSize; // px per world unit (v=0 at world z=0, like the town bake)
+    const Texture2D* wallTex = ThemedDungeonWall(dungeonIdx);
+    const Texture2D* floorTex = ThemedDungeonFloor(dungeonIdx);
+    Image wallImg{}, floorImg{};
+    bool wallOk = wallTex && wallTex->id > 0;
+    bool floorOk = floorTex && floorTex->id > 0;
+    if (wallOk) wallImg = LoadImageFromTexture(*wallTex);
+    if (floorOk) floorImg = LoadImageFromTexture(*floorTex);
+    const float cell = kDung3DCell;
+    for (float wy = 0; wy < kDungeonWorldSize; wy += cell) {
+        for (float wx = 0; wx < kDungeonWorldSize; wx += cell) {
+            bool isFloor = DungeonIsFloor(dungeonIdx, { wx + cell * 0.5f, wy + cell * 0.5f });
+            Rectangle dest = { wx * k, wy * k, cell * k + 1.0f, cell * k + 1.0f };
+            if (isFloor && floorOk) {
+                ImageDraw(&ground, floorImg, { 0, 0, (float)floorImg.width, (float)floorImg.height }, dest, WHITE);
+            } else if (!isFloor && wallOk) {
+                // Emberveil's lava wall/floor art reads as nearly identical (see the
+                // 2D view's obsidian multiply tint) — same treatment here.
+                Color tint = (dungeonIdx == 0) ? Color{ 110, 85, 75, 255 } : WHITE;
+                ImageDraw(&ground, wallImg, { 0, 0, (float)wallImg.width, (float)wallImg.height }, dest, tint);
+            } else {
+                ImageDrawRectangle(&ground, (int)dest.x, (int)dest.y, (int)dest.width, (int)dest.height,
+                                   isFloor ? Color{ 60, 50, 46, 255 } : Color{ 40, 40, 44, 255 });
+            }
+        }
+    }
+    // Sunken Crypt's flooded boss room — same rect the 2D view tiles water over.
+    if (dungeonIdx == 2 && g_assets.sunkenCryptWaterOk) {
+        Image wimg = LoadImageFromTexture(g_assets.sunkenCryptWater);
+        for (float wy = 1260; wy < 1600; wy += 32)
+            for (float wx = 1260; wx < 1600; wx += 32)
+                ImageDraw(&ground, wimg, { 0, 0, 32, 14 }, { wx * k, wy * k, 32 * k, 32 * k }, WHITE);
+        UnloadImage(wimg);
+    }
+    // Hollow Warrens' medallion rug in its boss room — same rect as the 2D view.
+    if (dungeonIdx == 4 && g_assets.hollowWarrensRugOk) {
+        Image rimg = LoadImageFromTexture(g_assets.hollowWarrensRug);
+        ImageDraw(&ground, rimg, { 0, 0, (float)rimg.width, (float)rimg.height },
+                          { 680 * k, 240 * k, 440 * k, 400 * k }, WHITE);
+        UnloadImage(rimg);
+    }
+    if (wallOk) UnloadImage(wallImg);
+    if (floorOk) UnloadImage(floorImg);
+    G.tex = LoadTextureFromImage(ground);
+    UnloadImage(ground);
+    GenTextureMipmaps(&G.tex);
+    SetTextureFilter(G.tex, TEXTURE_FILTER_TRILINEAR);
+    G.model = LoadModelFromMesh(GenMeshPlane(kDungeonWorldSize, kDungeonWorldSize, 1, 1));
+    G.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = G.tex;
+    Dungeon3DApplyTorchShader(G.model); // DrawModel needs the shader on the material
+    G.dungeon = dungeonIdx;
+    G.loaded = true;
+}
+
+// Dungeon walls: one merged mesh extruded from the 2D floor test. The 1800-unit
+// world is scanned on a 45-unit grid; a cell is wall when DungeonIsFloor is
+// false there but true in a neighbor — so room openings/corridors come out
+// exactly where the 2D collision says floor is. Top faces for every wall cell,
+// side faces only toward floor neighbors: one model, one draw call.
+struct Dungeon3DWalls {
+    bool loaded = false;
+    int dungeon = -1;
+    Model model{};
+};
+static Dungeon3DWalls g_dung3dWalls;
+
+static void Dungeon3DBuildWalls(int dungeonIdx) {
+    Dungeon3DWalls& W = g_dung3dWalls;
+    if (W.loaded && W.dungeon == dungeonIdx) return;
+    if (W.loaded) { UnloadModel(W.model); W.loaded = false; }
+    const int N = kDung3DGridN;
+    const float cell = kDung3DCell;
+    const float wallH = kDung3DWallH;
+    std::vector<char> isFloor(N * N, 0);
+    for (int gz = 0; gz < N; gz++)
+        for (int gx = 0; gx < N; gx++)
+            isFloor[gz * N + gx] = DungeonIsFloor(dungeonIdx, { (gx + 0.5f) * cell, (gz + 0.5f) * cell }) ? 1 : 0;
+    auto at = [&](int gx, int gz) -> bool {
+        if (gx < 0 || gz < 0 || gx >= N || gz >= N) return false; // outside the world: solid
+        return isFloor[gz * N + gx] != 0;
+    };
+    struct DWVert { float x, y, z, nx, ny, nz, u, v; };
+    std::vector<DWVert> verts;
+    std::vector<unsigned short> idx;
+    const float tileW = 90.0f; // world units per wall-texture repeat
+    auto quad = [&](DWVert a, DWVert b, DWVert c, DWVert d) {
+        unsigned short base = (unsigned short)verts.size();
+        verts.push_back(a); verts.push_back(b); verts.push_back(c); verts.push_back(d);
+        idx.push_back(base); idx.push_back(base + 1); idx.push_back(base + 2);
+        idx.push_back(base); idx.push_back(base + 2); idx.push_back(base + 3);
+    };
+    for (int gz = 0; gz < N; gz++) {
+        for (int gx = 0; gx < N; gx++) {
+            if (at(gx, gz)) continue;
+            // Only cells touching floor get geometry — deeper rock is invisible.
+            bool touches = at(gx - 1, gz - 1) || at(gx, gz - 1) || at(gx + 1, gz - 1) ||
+                           at(gx - 1, gz) || at(gx + 1, gz) ||
+                           at(gx - 1, gz + 1) || at(gx, gz + 1) || at(gx + 1, gz + 1);
+            if (!touches) continue;
+            float x0 = gx * cell, x1 = (gx + 1) * cell, z0 = gz * cell, z1 = (gz + 1) * cell;
+            // Top face (CCW from above). Side faces only toward floor neighbors
+            // (CCW from outside); winding verified against ((b-a)x(c-a)).n > 0.
+            quad({ x0, wallH, z1, 0, 1, 0, x0 / tileW, z1 / tileW },
+                 { x1, wallH, z1, 0, 1, 0, x1 / tileW, z1 / tileW },
+                 { x1, wallH, z0, 0, 1, 0, x1 / tileW, z0 / tileW },
+                 { x0, wallH, z0, 0, 1, 0, x0 / tileW, z0 / tileW });
+            if (at(gx, gz - 1))
+                quad({ x1, 0, z0, 0, 0, -1, x1 / tileW, 0 },
+                     { x0, 0, z0, 0, 0, -1, x0 / tileW, 0 },
+                     { x0, wallH, z0, 0, 0, -1, x0 / tileW, wallH / tileW },
+                     { x1, wallH, z0, 0, 0, -1, x1 / tileW, wallH / tileW });
+            if (at(gx, gz + 1))
+                quad({ x0, 0, z1, 0, 0, 1, x0 / tileW, 0 },
+                     { x1, 0, z1, 0, 0, 1, x1 / tileW, 0 },
+                     { x1, wallH, z1, 0, 0, 1, x1 / tileW, wallH / tileW },
+                     { x0, wallH, z1, 0, 0, 1, x0 / tileW, wallH / tileW });
+            if (at(gx - 1, gz))
+                quad({ x0, 0, z0, -1, 0, 0, z0 / tileW, 0 },
+                     { x0, 0, z1, -1, 0, 0, z1 / tileW, 0 },
+                     { x0, wallH, z1, -1, 0, 0, z1 / tileW, wallH / tileW },
+                     { x0, wallH, z0, -1, 0, 0, z0 / tileW, wallH / tileW });
+            if (at(gx + 1, gz))
+                quad({ x1, 0, z1, 1, 0, 0, z1 / tileW, 0 },
+                     { x1, 0, z0, 1, 0, 0, z0 / tileW, 0 },
+                     { x1, wallH, z0, 1, 0, 0, z1 / tileW, wallH / tileW },
+                     { x1, wallH, z1, 1, 0, 0, z1 / tileW, wallH / tileW });
+        }
+    }
+    if (verts.empty() || verts.size() > 60000) return; // shouldn't happen; stay safe
+    Mesh mesh = { 0 };
+    mesh.vertexCount = (int)verts.size();
+    mesh.triangleCount = (int)idx.size() / 3;
+    mesh.vertices = (float*)malloc(verts.size() * 3 * sizeof(float));
+    mesh.normals = (float*)malloc(verts.size() * 3 * sizeof(float));
+    mesh.texcoords = (float*)malloc(verts.size() * 2 * sizeof(float));
+    mesh.colors = (unsigned char*)malloc(verts.size() * 4);
+    mesh.indices = (unsigned short*)malloc(idx.size() * sizeof(unsigned short));
+    // Emberveil's lava wall art reads as nearly identical to its floor (see the 2D
+    // view's obsidian multiply tint) — same treatment here, via vertex colors.
+    unsigned char tr = 255, tg = 255, tb = 255;
+    if (dungeonIdx == 0) { tr = 150; tg = 120; tb = 105; }
+    for (size_t i = 0; i < verts.size(); i++) {
+        const DWVert& v = verts[i];
+        mesh.vertices[i * 3] = v.x; mesh.vertices[i * 3 + 1] = v.y; mesh.vertices[i * 3 + 2] = v.z;
+        mesh.normals[i * 3] = v.nx; mesh.normals[i * 3 + 1] = v.ny; mesh.normals[i * 3 + 2] = v.nz;
+        mesh.texcoords[i * 2] = v.u; mesh.texcoords[i * 2 + 1] = v.v;
+        mesh.colors[i * 4] = tr; mesh.colors[i * 4 + 1] = tg; mesh.colors[i * 4 + 2] = tb; mesh.colors[i * 4 + 3] = 255;
+    }
+    for (size_t i = 0; i < idx.size(); i++) mesh.indices[i] = idx[i];
+    UploadMesh(&mesh, false);
+    W.model = LoadModelFromMesh(mesh);
+    const Texture2D* wallTex = ThemedDungeonWall(dungeonIdx);
+    if (wallTex && wallTex->id > 0) {
+        SetTextureWrap(*wallTex, TEXTURE_WRAP_REPEAT);
+        W.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = *wallTex;
+    } else {
+        W.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].color = Color{ 90, 85, 95, 255 };
+    }
+    Dungeon3DApplyTorchShader(W.model); // DrawModel needs the shader on the material
+    W.dungeon = dungeonIdx;
+    W.loaded = true;
+}
+
+// Interior camera: the shared damped orbit/follow rig with tighter zoom
+// limits, clamped inside the dungeon so it can't leave through the outer rock.
+// (Room walls can still occlude at very low zoom — the tight limits keep that
+// rare; the player marker, torchlight, and labels stay readable regardless.)
+static Town3DCam Dungeon3DGetCam(const GameState& s, int screenW, int screenH) {
+    Town3DCam c = Town3DGetCamFor(s.dungeonPlayerPos, screenW, screenH, 2, kDung3DDistMin, kDung3DDistMax);
+    c.pos.x = std::clamp(c.pos.x, 40.0f, kDungeonWorldSize - 40.0f);
+    c.pos.z = std::clamp(c.pos.z, 40.0f, kDungeonWorldSize - 40.0f);
+    c.target.x = std::clamp(c.target.x, 40.0f, kDungeonWorldSize - 40.0f);
+    c.target.z = std::clamp(c.target.z, 40.0f, kDungeonWorldSize - 40.0f);
+    c.fwd = T3VNorm(T3VSub(c.target, c.pos));
+    c.right = T3VNorm(T3VCross(c.fwd, { 0, 1, 0 }));
+    c.up = T3VCross(c.right, c.fwd);
+    return c;
+}
+
+static Color Dungeon3DMonsterColor(int dungeonIdx, bool boss) {
+    static const Color cols[5] = {
+        { 130, 45, 32, 255 },   // Emberveil Hollow — ember red
+        { 105, 85, 45, 255 },   // Bloodtusk Hold — raider bronze
+        { 110, 125, 145, 255 }, // The Sunken Crypt — drowned pale blue
+        { 55, 100, 60, 255 },   // Wyrmscar Depths — cave green
+        { 85, 70, 115, 255 },   // The Hollow Warrens — warren violet
+    };
+    Color c = cols[dungeonIdx % 5];
+    return boss ? ColorBrightness(c, 0.3f) : c;
+}
+
+// Phase 3 procedural dungeon monster: per-dungeon body plan from the creature
+// kit (humanoid for orcs/goblins/wraiths/skeletons, quadruped for beasts),
+// with diagonal-pair trot, idle bob and head turns. `tint` is the per-dungeon
+// palette color (boss brightened by the caller).
+static void Dungeon3DDrawMonster(int dungeonIdx, int monsterIdx, int trackId, float x, float z,
+                                 float yawRad, Color tint, float sizeMul) {
+    T3CDunLook look = T3CDungeonMonsterLook(dungeonIdx, monsterIdx);
+    T3CAnim a = T3CMakeAnim(trackId, x, z);
+    float sm = sizeMul * look.scale;
+    if (look.serpent) {
+        T3CDrawSerpent(g_t3cQuads[10].parts, x, z, yawRad, sm, tint, a, false);
+    } else if (look.humanoid) {
+        T3CDrawHumanoid(g_t3cHumans[look.humanIdx].parts, x, z, yawRad, sm, tint,
+                        ColorBrightness(tint, -0.45f), Color{ 200, 170, 140, 255 }, a, false);
+    } else {
+        T3CDrawQuad(g_t3cQuads[look.specIdx].parts, x, z, yawRad, sm, tint, a, 0.0f, false);
+    }
+}
+
+static void Dungeon3DDrawPlayer(const GameState& s) {
+    float x = s.dungeonPlayerPos.x, z = s.dungeonPlayerPos.y;
+    float yaw = atan2f(s.playerFacing.y, s.playerFacing.x);
+    T3CAnim a = T3CMakeAnim(kT3CTrackPlayerDungeon, x, z);
+    T3CDrawHumanoid(g_t3cHumans[0].parts, x, z, yaw, 1.0f,
+                    Color{ 100, 130, 185, 255 }, Color{ 55, 60, 75, 255 },
+                    Color{ 225, 200, 165, 255 }, a, false);
+}
+
+static bool Dung3DPointInUI(Vector2 m, const GameState& s) {
+    (void)s;
+    if (CheckCollisionPointRec(m, { 452, 116, 68, 30 })) return true; // the 2D/3D toggle button
+    if (CheckCollisionPointRec(m, { 20, 110, 330, 60 })) return true; // HP strip
+    if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return true; // quick items
+    if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return true; // spell hotbar
+    return false;
+}
+
+static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std::string& prompt,
+                               bool inRange, Vector2 nearestPos, const std::string& nearestLabel) {
+    int di = *s.selectedDungeon; // caller guarantees a selected dungeon
+    Vector2 mouse = GetMousePosition();
+
+    // --- Orbit / zoom input (the shared orbit state; tighter dungeon limits).
+    // No click-picking — interaction stays walk-up + E / tap, like the 2D view.
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+        CheckCollisionPointRec(mouse, kViewport) && !Dung3DPointInUI(mouse, s)) {
+        g_t3dOrbiting = true;
+        g_t3dLastMouse = mouse;
+        g_t3dDragDist = 0.0f;
+    }
+    if (g_t3dOrbiting && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        Vector2 d = { mouse.x - g_t3dLastMouse.x, mouse.y - g_t3dLastMouse.y };
+        g_t3dLastMouse = mouse;
+        g_t3dDragDist += fabsf(d.x) + fabsf(d.y);
+        g_t3dYaw -= d.x * 0.006f;
+        g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
+    }
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) g_t3dOrbiting = false;
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
+    float wheel = GetMouseWheelMove();
+    if (wheel != 0.0f && CheckCollisionPointRec(mouse, kViewport) && !Dung3DPointInUI(mouse, s))
+        g_t3dDist = std::clamp(g_t3dDist * (1.0f - wheel * 0.12f), kDung3DDistMin, kDung3DDistMax);
+
+    // --- 3D scene ---
+    Dungeon3DEnsureTorch();
+    Dungeon3DEnsureGround(di);
+    Dungeon3DBuildWalls(di);
+    Vector3 torchSpots[kDung3DMaxTorches];
+    int torchCount = 0;
+    Dungeon3DTorchSpots(di, torchSpots, &torchCount);
+    Town3DCam c = Dungeon3DGetCam(s, screenW, screenH);
+    Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
+    BeginMode3D(cam3d);
+    bool torchOn = g_dung3dTorch.ready;
+    if (torchOn) {
+        // Per-frame shader state: torch positions at flame height, count, time.
+        // Ground + wall models carry the torch shader on their materials (set in
+        // Dungeon3DEnsureGround/Dungeon3DBuildWalls); the rlEnableShader here is
+        // for the immediate-mode primitives below (monsters, player, pet), which
+        // render with whatever shader is currently bound.
+        Vector3 tpos[kDung3DMaxTorches];
+        for (int i = 0; i < torchCount; i++) tpos[i] = { torchSpots[i].x, 62.0f, torchSpots[i].z };
+        SetShaderValueV(g_dung3dTorch.shader, g_dung3dTorch.torchPosLoc, tpos, SHADER_UNIFORM_VEC3, torchCount);
+        SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.torchCountLoc, &torchCount, SHADER_UNIFORM_INT);
+        float t = (float)GetTime();
+        SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.timeLoc, &t, SHADER_UNIFORM_FLOAT);
+        rlEnableShader(g_dung3dTorch.shader.id);
+    }
+    DrawModel(g_dung3dGround.model, { 900, 0, 900 }, 1.0f, WHITE);
+    if (g_dung3dWalls.loaded) DrawModel(g_dung3dWalls.model, { 0, 0, 0 }, 1.0f, WHITE);
+    // Phase 3 creatures use the same torch shader as the dungeon geometry
+    // (falling back to the default shader when torch lighting is off).
+    T3CKitUseShader(torchOn ? g_dung3dTorch.shader : T3CKitDefaultShader());
+    {
+        bool engaged = s.dungeonEngaged.has_value();
+        const DungeonDef& dungeon = kDungeons[di];
+        bool bossUnlocked = s.dungeonXP[di] >= dungeon.bossUnlockXp;
+        for (int i = 0; i < 5; i++) {
+            // The engaged slot is drawn separately below at its live position —
+            // same convention as the 2D view.
+            if (engaged && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
+            Vector2 mp = DungeonMonsterLivePos(di, i, s.worldTime);
+            Vector2 f = WanderFacing(i, s.worldTime);
+            Dungeon3DDrawMonster(di, i, kT3CTrackMonsterDungeon + i, mp.x, mp.y, atan2f(f.y, f.x),
+                                 Dungeon3DMonsterColor(di, false), 1.0f);
+        }
+        if (!(engaged && s.dungeonEngaged->isBoss)) {
+            Vector2 bp = DungeonMonsterLivePos(di, 5, s.worldTime);
+            Vector2 f = WanderFacing(5, s.worldTime);
+            Color bc = bossUnlocked ? Dungeon3DMonsterColor(di, true) : Color{ 110, 110, 120, 255 };
+            Dungeon3DDrawMonster(di, 5, kT3CTrackMonsterDungeon + 5, bp.x, bp.y, atan2f(f.y, f.x),
+                                 bc, bossUnlocked ? 1.0f : 0.9f);
+        }
+        if (engaged) {
+            const GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
+            Vector2 toPlayer = { s.dungeonPlayerPos.x - am.pos.x, s.dungeonPlayerPos.y - am.pos.y };
+            float len = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
+            Vector2 facing = len > 0.001f ? Vector2{ toPlayer.x / len, toPlayer.y / len } : Vector2{ 0, 1 };
+            int midx = am.isBoss ? 5 : am.monsterIdx;
+            Dungeon3DDrawMonster(di, midx, kT3CTrackMonsterDungeon + 6, am.pos.x, am.pos.y,
+                                 atan2f(facing.y, facing.x),
+                                 Dungeon3DMonsterColor(di, am.isBoss), 1.0f);
+        }
+    }
+    Dungeon3DDrawPlayer(s);
+    if (ActivePet(s)) {
+        Vector2 d = { s.dungeonPlayerPos.x - s.companionPos.x,
+                      s.dungeonPlayerPos.y - s.companionPos.y };
+        float face = (d.x * d.x + d.y * d.y > 1.0f) ? atan2f(d.y, d.x) : 0.0f;
+        T3CQuadLook plook = T3CPetLook(ActivePet(s)->role);
+        T3CAnim pa = T3CMakeAnim(kT3CTrackCompanion, s.companionPos.x, s.companionPos.y);
+        T3CDrawQuad(g_t3cQuads[plook.specIdx].parts, s.companionPos.x, s.companionPos.y,
+                    face, plook.scale, plook.coat, pa, 0.0f, false);
+    }
+    if (torchOn) rlEnableShader(rlGetShaderIdDefault());
+    // --- Unlit dressing: torch poles + flames, exit portal, rings ---
+    if (torchOn) {
+        for (int i = 0; i < torchCount; i++) {
+            DrawCylinder({ torchSpots[i].x, 25, torchSpots[i].z }, 4, 6, 50, 6, Color{ 40, 30, 22, 255 });
+            float flick = 1.0f + 0.12f * sinf((float)GetTime() * 11.0f + (float)i * 2.3f);
+            DrawBillboard(cam3d, g_dung3dTorch.flameTex, { torchSpots[i].x, 62.0f, torchSpots[i].z },
+                          46.0f * flick, WHITE);
+        }
+    }
+    {
+        // Exit portal at the exact 2D exit position.
+        float pulse = 0.6f + 0.25f * sinf((float)GetTime() * 3.0f);
+        DrawCylinder({ kDung3DExitPos.x, 5, kDung3DExitPos.y }, 30, 30, 8, 20, Color{ 70, 190, 160, 255 });
+        Town3DDrawGroundRing(kDung3DExitPos.x, kDung3DExitPos.y, 6.0f, 34.0f, 46.0f, 28,
+                             Fade(Color{ 120, 255, 210, 255 }, pulse));
+    }
+    {
+        float pulse = 0.60f + 0.18f * sinf((float)GetTime() * 4.0f);
+        if (s.dungeonEngaged.has_value())
+            Town3DDrawGroundRing(s.dungeonEngaged->pos.x, s.dungeonEngaged->pos.y, 3.0f, 46.0f, 56.0f, 36,
+                                 Fade(Color{ 255, 80, 60, 255 }, pulse));
+        else if (inRange)
+            Town3DDrawGroundRing(nearestPos.x, nearestPos.y, 3.0f, 52.0f, 62.0f, 36,
+                                 Fade(Color{ 255, 196, 110, 255 }, pulse));
+    }
+    EndMode3D();
+
+    // --- 2D overlay: labels (distance-faded), engaged HP bar, prompt ---
+    {
+        const float fadeNear = 500.0f, fadeFar = 1100.0f;
+        auto label3D = [&](float x, float y, float z, const std::string& text) {
+            Vector2 sp;
+            if (!Town3DProject(c, { x, y, z }, &sp)) return;
+            if (sp.x < -60 || sp.x > screenW + 60 || sp.y < 100 || sp.y > screenH) return;
+            float bd = hypotf(c.pos.x - x, c.pos.z - z);
+            float a = std::clamp((fadeFar - bd) / (fadeFar - fadeNear), 0.0f, 1.0f);
+            if (a < 0.03f) return;
+            int fsz = (int)(11.0f + 3.0f * a);
+            int w = MeasureUIText(text.c_str(), fsz);
+            int sx = (int)(sp.x - w / 2), sy = (int)(sp.y - fsz);
+            DrawRectangle(sx - 4, sy - 2, w + 8, fsz + 5, Fade(BLACK, 0.55f * a));
+            DrawUIText(text.c_str(), sx, sy, fsz, Fade(WHITE, a));
+        };
+        label3D(kDung3DExitPos.x, 80, kDung3DExitPos.y, "Exit");
+        if (s.dungeonXP[di] >= kDungeons[di].bossUnlockXp) {
+            Vector2 bp = DungeonMonsterLivePos(di, 5, s.worldTime);
+            label3D(bp.x, 90, bp.y, kDungeons[di].boss.name + " (Boss)");
+        }
+        if (inRange && !s.dungeonEngaged.has_value() && !nearestLabel.empty())
+            label3D(nearestPos.x, 80, nearestPos.y, nearestLabel);
+    }
+    if (s.dungeonEngaged.has_value()) {
+        const GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
+        Vector2 sp;
+        if (Town3DProject(c, { am.pos.x, 60, am.pos.y }, &sp)) {
+            float hpPct = std::clamp(am.hp / am.maxHp, 0.0f, 1.0f);
+            DrawRectangle((int)sp.x - 30, (int)sp.y - 14, 60, 8, Fade(BLACK, 0.5f));
+            DrawRectangle((int)sp.x - 30, (int)sp.y - 14, (int)(60 * hpPct), 8, Color{ 122, 46, 46, 255 });
+        }
+    }
+    if (!prompt.empty()) {
+        int w = MeasureUIText(prompt.c_str(), 14);
+        int sx = (int)(screenW - w) / 2, sy = screenH - 96;
+        DrawRectangle(sx - 6, sy - 3, w + 12, 22, Fade(BLACK, 0.55f));
+        DrawUIText(prompt.c_str(), sx, sy, 14, WHITE);
+    }
+    DrawUIText(TextFormat("%s — 3D view: drag to orbit, wheel to zoom. [V] toggles 2D.",
+                          kDungeons[di].name.c_str()),
+               20, 196, 12, Color{ 200, 180, 150, 255 });
+}
+
+
 static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     bool canGather = !s.gatheringResource.has_value();
     // Second town (2026-09-22) — reuses Town 1's exact building positions/plaza/roads/
@@ -7194,6 +9419,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
             else if (gateIsNearest) {
                 s.screen = Screen::Wilderness;
                 s.wildernessPlayerPos = (s.selectedTown == 0) ? Vector2{ 900, 1650 } : Vector2{ 2900, 1650 };
+                s.wild3DView = s.town3DView; // entering from the 3D town stays 3D (view state only)
             }
             else s.selectedTile = nearestKey;
         }
@@ -7388,6 +9614,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         else if (gateIsNearest) {
             s.screen = Screen::Wilderness;
             s.wildernessPlayerPos = (s.selectedTown == 0) ? Vector2{ 900, 1650 } : Vector2{ 2900, 1650 };
+            s.wild3DView = s.town3DView; // entering from the 3D town stays 3D (view state only)
         }
         else s.selectedTile = nearestKey;
     }
@@ -7892,6 +10119,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         s.selectedDungeon = idx;
         s.huntSubView = 0;
         s.screen = Screen::Hunt;
+        s.hunt3DView = s.wild3DView; // entering from the 3D wilderness stays 3D (view state only)
     };
     auto tryInteract = [&]() {
         if (nearestKind == WildNodeKind::Gather) TryStartGather(s, kWildernessGatherNodes[nearestIdx].resource, 5.0f);
@@ -7904,8 +10132,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             s.selectedTown = 1;
             s.screen = Screen::Town;
             s.townPlayerPos = { 450, 830 }; // same relative spawn every town uses, just south of its own gate
+            if (s.wild3DView) s.town3DView = true; // stay in 3D across the gate (view state only)
         }
-        else { s.selectedTown = 0; s.screen = Screen::Town; s.townPlayerPos = { 450, 830 }; } // just south of kWildernessGatePos
+        else {
+            s.selectedTown = 0; s.screen = Screen::Town; s.townPlayerPos = { 450, 830 };
+            if (s.wild3DView) s.town3DView = true; // walking back through the gate returns to 3D town
+        } // just south of kWildernessGatePos
     };
     // Being engaged in a live fight takes over the prompt/E-press entirely — same
     // "combat blocks other actions" convention the old panel-based system already had
@@ -7973,6 +10205,10 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         tryInteract();
     }
 
+    // 3D wilderness view (2026-09-24, Phase 1): when wild3DView is on, the whole
+    // 2D world block below is skipped and DrawWilderness3DWorld renders the 3D
+    // scene instead. Movement, interaction, combat, and the HUD are shared.
+    if (s.wild3DView) { DrawWilderness3DWorld(s, screenW, screenH, prompt); } else {
     BeginScissorMode((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height);
     Vector2 camera = CameraTopLeft(s.wildernessPlayerPos, kWildernessWorldSize);
     DrawTiledGround(g_assets.groundGrassOk ? &g_assets.groundGrass : nullptr, kViewport, camera, 48.0f,
@@ -8162,6 +10398,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     }
     DrawPlayer(s, WorldToScreen(s.wildernessPlayerPos, camera), s.playerFacing, prompt, 1.0f, wildCombatAnim);
     EndScissorMode();
+    } // end else: 2D world view (3D renders via DrawWilderness3DWorld above)
     DrawVirtualJoystick();
     if (wasEngaged) {
         // Melee is fully automatic now (see the trySwingAtEngagedMonster call site
@@ -8194,6 +10431,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         }
     }
     DrawHotbarPicker(s, screenW, screenH);
+
+    // 3D view toggle (2026-09-24, Phase 1) - same view switch as the V key below.
+    if (Button({ 452, 120, 68, 30 }, s.wild3DView ? "2D [V]" : "3D [V]", true)) s.wild3DView = !s.wild3DView;
 
     // Status strip, mirrors Town's gather HUD — solid-backed and split across separate
     // short lines rather than one long concatenated string (2026-09-22 fix, same reason
@@ -8501,6 +10741,11 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     DrawUIText(dungeon.theme.c_str(), 20, y, 12, DARKGRAY);
     y += 8;
 
+    // 3D dungeon view toggle (2026-09-24, Phase 2) — same V-key/button switch as
+    // the Town/Wilderness views. Only the explorable arena below goes 3D; the
+    // picker tabs, combat panel, and HUD stay 2D.
+    if (Button({ 452, 116, 68, 30 }, s.hunt3DView ? "2D [V]" : "3D [V]", true)) s.hunt3DView = !s.hunt3DView;
+
     // Mana bar — only while actually engaged in a live fight; HP is already always
     // shown at the top of this screen (see the header above), so only Mana is missing.
     // Safe to draw here (unlike Wilderness's equivalent) since this whole header
@@ -8569,7 +10814,10 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     };
 
     auto tryDungeonInteract = [&]() {
-        if (nearestIsExit) s.screen = Screen::Wilderness;
+        if (nearestIsExit) {
+            s.screen = Screen::Wilderness;
+            s.wild3DView = s.hunt3DView; // leaving in 3D returns to the 3D wilderness (view state only)
+        }
         else if (nearestIsBoss) tryEngageDungeonMonster(5, true);
         else tryEngageDungeonMonster(std::stoi(nearestKey), false);
     };
@@ -8735,6 +10983,39 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         tryDungeonInteract();
     }
 
+    // Prompt + nearest-interactable info, shared by the 2D arena and the 3D view
+    // below (computed once here since both branches need them; nothing between
+    // here and the old prompt site mutated dungeonEngaged).
+    std::string prompt;
+    if (s.dungeonEngaged.has_value()) {
+        // Melee is automatic now — just naming who you're fighting, no button needed.
+        const DungeonMonster& m = s.dungeonEngaged->isBoss ? dungeon.boss : dungeon.monsters[s.dungeonEngaged->monsterIdx];
+        prompt = "Fighting " + m.name;
+    } else if (inRange) {
+        if (nearestIsExit) prompt = "[E] Leave dungeon";
+        else prompt = nearestIsBoss ? "[E] Fight " + dungeon.boss.name
+                                      : "[E] Fight " + dungeon.monsters[std::stoi(nearestKey)].name;
+    }
+    Vector2 nearest3DPos = s.dungeonPlayerPos;
+    std::string nearest3DLabel;
+    if (inRange && !s.dungeonEngaged.has_value()) {
+        if (nearestIsExit) { nearest3DPos = { 900, 1300 }; nearest3DLabel = "Exit"; }
+        else if (nearestIsBoss) {
+            nearest3DPos = DungeonMonsterLivePos(*s.selectedDungeon, 5, s.worldTime);
+            nearest3DLabel = dungeon.boss.name;
+        } else if (!nearestKey.empty()) {
+            int mi = std::stoi(nearestKey);
+            nearest3DPos = DungeonMonsterLivePos(*s.selectedDungeon, mi, s.worldTime);
+            nearest3DLabel = dungeon.monsters[mi].name;
+        }
+    }
+
+    // --- 3D dungeon view (2026-09-24, Phase 2): when hunt3DView is on, the 2D
+    // arena block below is skipped and DrawDungeon3DWorld renders the dungeon
+    // in 3D instead. Movement, interaction, combat, and the HUD are shared.
+    if (s.hunt3DView) {
+        DrawDungeon3DWorld(s, screenW, screenH, prompt, inRange, nearest3DPos, nearest3DLabel);
+    } else {
     Rectangle arenaViewport = { kViewport.x, (float)y + 14, kViewport.width, kViewport.y + kViewport.height - (y + 14) };
     BeginScissorMode((int)arenaViewport.x, (int)arenaViewport.y, (int)arenaViewport.width, (int)arenaViewport.height);
     Vector2 camera = CameraTopLeft(s.dungeonPlayerPos, kDungeonWorldSize);
@@ -8859,16 +11140,6 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         DrawRectangleRec({ hpBg.x, hpBg.y, hpBg.width * hpPct, hpBg.height }, Color{ 122, 46, 46, 255 });
         DrawRectangleLinesEx(hpBg, 1.0f, Fade(RAYWHITE, 0.8f));
     }
-    std::string prompt;
-    if (s.dungeonEngaged.has_value()) {
-        // Melee is automatic now — just naming who you're fighting, no button needed.
-        const DungeonMonster& m = s.dungeonEngaged->isBoss ? dungeon.boss : dungeon.monsters[s.dungeonEngaged->monsterIdx];
-        prompt = "Fighting " + m.name;
-    } else if (inRange) {
-        if (nearestIsExit) prompt = "[E] Leave dungeon";
-        else prompt = nearestIsBoss ? "[E] Fight " + dungeon.boss.name
-                                      : "[E] Fight " + dungeon.monsters[std::stoi(nearestKey)].name;
-    }
     if (Pet* companion = ActivePet(s)) {
         Vector2 companionScreenPos = WorldToScreen(s.companionPos, camera);
         const DirSpriteSheet& sheet = WildCreatureSheetForRole(companion->role);
@@ -8891,6 +11162,11 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     }
     DrawPlayer(s, WorldToScreen(s.dungeonPlayerPos, camera), s.playerFacing, prompt, 1.0f, dungeonCombatAnim);
     EndScissorMode();
+    } // end 2D arena branch — the touch/combat HUD below is shared with the 3D view
+
+    // --- Shared touch/combat HUD (view-independent): virtual joystick, quick
+    // items / interact button, engaged spell hotbar, hotbar picker. Runs for
+    // both the 2D arena and the 3D dungeon view. ---
     DrawVirtualJoystick();
     if (wasDungeonEngaged) {
         // Melee is fully automatic now — no interact button needed here anymore for it.
@@ -10008,6 +12284,12 @@ static void UpdateDrawFrame() {
             if (IsKeyPressed(KEY_ESCAPE)) state.selectedTile.reset();
             if (IsKeyPressed(KEY_V)) state.town3DView = !state.town3DView; // 3D town view toggle
         }
+        if (!encounterPending && state.screen == Screen::Wilderness) {
+            if (IsKeyPressed(KEY_V)) state.wild3DView = !state.wild3DView; // 3D wilderness view toggle
+        }
+        if (!encounterPending && state.screen == Screen::Hunt && !state.combat.has_value()) {
+            if (IsKeyPressed(KEY_V)) state.hunt3DView = !state.hunt3DView; // 3D dungeon view toggle
+        }
         // --- Input: combat shortcuts, only meaningful on Hunt while fighting ---
         if (!encounterPending && state.screen == Screen::Hunt && state.combat.has_value()) {
             if (IsKeyPressed(KEY_A)) ResolveCombatRound(state);
@@ -10036,6 +12318,13 @@ static void UpdateDrawFrame() {
         // before BeginTextureMode(g_zoomTarget)/BeginDrawing below. 2D screens
         // are untouched (guarded by town3DView).
         if (state.screen == Screen::Town && state.town3DView) Town3DShadowPass(state);
+        else if (state.screen == Screen::Wilderness && state.wild3DView) {
+            // Frustum cull for the shadow pass (Phase 1 deferred item): reuse the
+            // damped main camera — calling Wild3DGetCam twice a frame just eases
+            // the damping a touch faster, visually negligible.
+            Town3DCam wildCull = Wild3DGetCam(state, screenW, screenH);
+            Wild3DShadowPass(state, &wildCull);
+        }
 
         // --- Draw ---
 #ifndef __EMSCRIPTEN__

@@ -31,3 +31,58 @@ direct downloads were used instead — same stylized low-poly look, zero frictio
 If Mark wants the exact Quaternius trees/lanterns later, grab
 https://quaternius.itch.io/stylized-nature-megakit and
 https://quaternius.itch.io/fantasy-props-megakit (Standard zips are free).
+
+## Wilderness 3D additions (2026-09-24) — all CC0, ~0.05MB
+
+- Kenney Nature Kit v2.1 (https://kenney.nl/assets/nature-kit) — CC0 1.0
+  Universal (see License.txt in the pack; verified at download time):
+  rock_largeA.glb, rock_largeB.glb, rock_largeC.glb (ore-vein clusters +
+  mountain scatter), rock_smallA.glb, rock_smallB.glb, rock_smallC.glb
+  (small scatter), stump_roundDetailed.glb (wood-gather node marker).
+  Self-contained GLBs, vertex-colored via material baseColorFactor.
+
+## Dungeons 3D additions (2026-09-24) — no new asset files, ~0MB
+
+The dungeon 3D view reuses the existing 2D themed tiles and bakes everything
+else procedurally at runtime:
+
+- `assets/dungeon_themed/<theme>_{floor,wall}.png` (already vendored for the 2D
+  dungeon view; CC0 — lava/volcanic, orc-camp, tomb, rock, and mine themes per
+  dungeon, see the "Dungeon Tileset" art entry in main.cpp's asset comments)
+  are stamped into the baked 3D floor texture and onto the merged wall mesh.
+- `assets/dungeon_themed/sunkencrypt_water.png` (Sunken Crypt boss-room pool)
+  and `assets/dungeon_themed/hollowwarrens_rug.png` (Hollow Warrens boss-room
+  rug) are baked into the floor texture at the same rects the 2D view uses.
+- Torch flames are a procedural 64x64 radial-gradient sprite baked at runtime
+  (`Dungeon3DEnsureTorch`); the wall mesh is merged geometry built from
+  `kDungeonRoomLayouts` at runtime. Lighting is the new
+  `assets/shaders/torchlight.vs/.fs` (written for this phase, dark ambient +
+  flickering point lights, no shadowmaps indoors).
+
+## Phase 3 creatures (2026-09-24) — 100% procedural, zero asset files
+
+No downloaded creature models are used. The KayKit Adventurers pack (the first
+choice for humanoid player/NPC models) could not be fetched from this
+environment — https://github.com/KayKit-Game-Assets/KayKit-Adventurers-1.0
+returned 404 and kaykit.com yielded nothing usable — and no unverified-license
+asset was going to ship, so per the project directive ("do NOT leave creatures
+as placeholders — build a PROCEDURAL CREATURE KIT in code instead") every
+creature, player avatar, NPC, rival, innocent and companion in the town,
+wilderness and dungeon 3D views is built at runtime by the procedural creature
+kit in main.cpp (section "T3C-KIT", between the vector helpers and the
+orbit-camera state).
+
+What the kit builds (flat-shaded faceted primitives, CC0-by-construction —
+there is no third-party artwork involved, so no license to verify):
+- 11 quadruped archetypes: canine, feline, sabertooth, bulky, horned/bison,
+  equine, winged dragon, winged griffin (beaked), wyvern, bat, serpent
+- 2 humanoid archetypes: traveler (player/NPCs/rival/innocents/goblins/imps/
+  bandits/undead/wraiths) and bulky orc (orcs/trolls/brutes)
+- Articulated procedural animation driven by per-instance live speed tracking:
+  diagonal-pair trot (FL+BR / FR+BL), idle bob, occasional head turns,
+  counter-swinging arms, tail sway, bird-pattern wing flap, serpent slither
+
+Draw-call budget: far quadrupeds (>750 units) and the shadow pass use a single
+merged rest-pose mesh (1 draw per creature); near creatures use ~5-9 draws.
+The 2D game and all game logic are untouched — the 3D views only read live
+positions and facing from the existing simulation state.
