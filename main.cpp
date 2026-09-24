@@ -727,6 +727,10 @@ struct GameState {
     // Which kTownNPCs index is currently greeted (open name+greeting popup), if any —
     // transient UI state, not saved, same as selectedTile above.
     std::optional<int> greetedNPC;
+    // 3D town view toggle (2026-09-24, first 3D milestone) - switches DrawTownScreen's
+    // world render between the classic 2D sprite view and the new 3D programmer-art
+    // view (DrawTown3DWorld). Transient UI state, not saved - same as selectedTile above.
+    bool town3DView = false;
     // Second town (2026-09-22, "second town" plan) — 0 = Town 1 (existing), 1 = Town 2.
     // Reuses Town 1's exact layout/collision/roads (see DrawTownScreen); only the
     // building tint/texture, ground texture, and NPC flavor differ per town, per the
@@ -6030,6 +6034,378 @@ static void DrawLiveCombatQuickItems(GameState& s) {
 // upgrade panel, which pauses movement until closed.
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// 3D town view (2026-09-24, first 3D milestone) — a programmer-art 3D
+// rendering of the Town screen built from raylib primitives, toggled with
+// the "3D [V]" HUD button or the V key (see DrawTownScreen). The 2D sprite
+// view is untouched and remains the default.
+//
+// Design notes:
+//  - World mapping: 2D world (x, y) -> 3D (x, 0, y), ground plane at y=0.
+//    The grid uses the same kTownNodePositions/kTownPlaza/kWildernessGatePos
+//    constants as the 2D view, so the 3D layout always matches.
+//  - Desktop draws into a 540x900 render texture (see kZoom), so raylib's
+//    GetScreenToWorldRay/GetWorldToScreen (which use the *window* size)
+//    would mis-map. The ray and the label projection below are computed by
+//    hand against the virtual canvas instead — consistent with what
+//    BeginMode3D actually renders into the texture.
+//  - All game logic is shared: movement/E-interact/panels run in
+//    DrawTownScreen before this is called, and clicking a building box in
+//    3D sets s.selectedTile exactly like walking up + E does in 2D.
+//  - Minimal vector helpers below instead of raymath.h — main.cpp only
+//    includes raylib.h today, and this keeps the 3D section dependency-free.
+// ---------------------------------------------------------------------
+
+// Tiny Vector3 helpers (this file doesn't pull in raymath.h).
+static Vector3 T3VSub(Vector3 a, Vector3 b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
+static Vector3 T3VAdd(Vector3 a, Vector3 b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
+static Vector3 T3VScale(Vector3 a, float s) { return { a.x * s, a.y * s, a.z * s }; }
+static float T3VDot(Vector3 a, Vector3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+static Vector3 T3VCross(Vector3 a, Vector3 b) {
+    return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
+}
+static Vector3 T3VNorm(Vector3 a) {
+    float l = sqrtf(a.x * a.x + a.y * a.y + a.z * a.z);
+    return l > 0.0f ? T3VScale(a, 1.0f / l) : a;
+}
+
+// Orbit-camera state for the 3D town view. File-statics (like g_scrollDragging),
+// not GameState — purely transient view state, never saved.
+static float g_t3dYaw = 0.7f;    // radians, around the player
+static float g_t3dPitch = 0.85f; // radians above horizontal
+static float g_t3dDist = 650.0f; // camera distance from target
+static bool g_t3dOrbiting = false;
+static Vector2 g_t3dLastMouse = {0, 0};
+static float g_t3dDragDist = 0.0f;
+
+// Camera basis derived from the orbit state; target follows the player.
+struct Town3DCam { Vector3 pos, target, fwd, right, up; float fovY, aspect, vw, vh; };
+static Town3DCam Town3DGetCam(const GameState& s, int screenW, int screenH) {
+    Town3DCam c;
+    c.target = { s.townPlayerPos.x, 0.0f, s.townPlayerPos.y };
+    float cp = cosf(g_t3dPitch), sp = sinf(g_t3dPitch);
+    c.pos = { c.target.x + cp * sinf(g_t3dYaw) * g_t3dDist,
+              c.target.y + sp * g_t3dDist,
+              c.target.z + cp * cosf(g_t3dYaw) * g_t3dDist };
+    c.fwd = T3VNorm(T3VSub(c.target, c.pos));
+    c.right = T3VNorm(T3VCross(c.fwd, { 0, 1, 0 }));
+    c.up = T3VCross(c.right, c.fwd);
+    c.fovY = 45.0f;
+    c.vw = (float)screenW;
+    c.vh = (float)screenH;
+    c.aspect = c.vw / c.vh; // render-texture framebuffer aspect (see kZoom's comment)
+    return c;
+}
+
+// Picking ray from a virtual-canvas mouse position (see the section header on
+// why this is hand-rolled instead of GetScreenToWorldRay).
+static Ray Town3DMouseRay(const Town3DCam& c, Vector2 m) {
+    float tanF = tanf(c.fovY * 0.5f * DEG2RAD);
+    float nx = (2.0f * m.x / c.vw - 1.0f) * tanF * c.aspect;
+    float ny = (1.0f - 2.0f * m.y / c.vh) * tanF;
+    Vector3 dir = T3VNorm(T3VAdd(T3VAdd(c.fwd, T3VScale(c.right, nx)), T3VScale(c.up, ny)));
+    return { c.pos, dir };
+}
+
+// Project a world point to virtual-canvas 2D coords for overlay labels.
+// Returns false when behind the camera.
+static bool Town3DProject(const Town3DCam& c, Vector3 p, Vector2* out) {
+    Vector3 rel = T3VSub(p, c.pos);
+    float zc = T3VDot(rel, c.fwd);
+    if (zc <= 1.0f) return false;
+    float tanF = tanf(c.fovY * 0.5f * DEG2RAD);
+    float xc = T3VDot(rel, c.right);
+    float yc = T3VDot(rel, c.up);
+    out->x = c.vw * 0.5f + (xc / (zc * tanF * c.aspect)) * c.vw * 0.5f;
+    out->y = c.vh * 0.5f - (yc / (zc * tanF)) * c.vh * 0.5f;
+    return true;
+}
+
+static float Town3DBuildingHeight(const std::string& key) {
+    if (key == "townhall") return 150.0f;
+    if (key == "bank" || key == "stable") return 120.0f;
+    if (key == "house") return 105.0f;
+    return 95.0f;
+}
+static const float kTown3DBuildingHalf = 55.0f; // 110-unit footprint, ~kNodeRadius*2
+
+// True when the point hits a HUD control that must win over orbit/pick input.
+// Rects mirror the ones drawn later in DrawTownScreen's HUD section.
+static bool Town3DPointInUI(Vector2 m, const GameState& s, int screenW) {
+    if (CheckCollisionPointRec(m, { 20, 120, 130, 30 })) return true;  // Gather Wood
+    if (CheckCollisionPointRec(m, { 160, 120, 120, 30 })) return true;  // Gather Ore
+    if (CheckCollisionPointRec(m, { 290, 120, 150, 30 })) return true;  // Auto-Gather
+    if (CheckCollisionPointRec(m, { 452, 120, 68, 30 })) return true;   // 3D/2D toggle
+    if (CheckCollisionPointRec(m, { kViewport.x + kViewport.width - 150.0f,
+                                    kViewport.y + kViewport.height - 90.0f, 130.0f, 60.0f })) return true; // tap-to-interact
+    if (CheckCollisionPointRec(m, kJoystickZone)) return true;
+    if (s.selectedTile.has_value() &&
+        CheckCollisionPointRec(m, { 20, 500, (float)(screenW - 40), 220 })) return true; // detail panel
+    if (s.greetedNPC.has_value() &&
+        CheckCollisionPointRec(m, { 20, 500, (float)(screenW - 40), 100 })) return true; // greet popup
+    return false;
+}
+
+// Click (press+release without a drag) on a building box selects it, exactly like
+// walking up + E does in 2D. Clicking the Wilderness Gate walks through it.
+static void Town3DPick(GameState& s, Vector2 mouse, int screenW, int screenH) {
+    Town3DCam c = Town3DGetCam(s, screenW, screenH);
+    Ray ray = Town3DMouseRay(c, mouse);
+    float bestT = 1e9f;
+    std::string bestKey;
+    bool bestGate = false;
+    for (auto& node : kTownNodePositions) {
+        float h = Town3DBuildingHeight(node.key);
+        BoundingBox bb = { { node.pos.x - kTown3DBuildingHalf, 0, node.pos.y - kTown3DBuildingHalf },
+                           { node.pos.x + kTown3DBuildingHalf, h + 20, node.pos.y + kTown3DBuildingHalf } };
+        RayCollision hit = GetRayCollisionBox(ray, bb);
+        if (hit.hit && hit.distance < bestT) { bestT = hit.distance; bestKey = node.key; bestGate = false; }
+    }
+    {
+        BoundingBox bb = { { kWildernessGatePos.x - 45, 0, kWildernessGatePos.y - 45 },
+                           { kWildernessGatePos.x + 45, 90, kWildernessGatePos.y + 45 } };
+        RayCollision hit = GetRayCollisionBox(ray, bb);
+        if (hit.hit && hit.distance < bestT) { bestT = hit.distance; bestGate = true; }
+    }
+    if (bestGate) {
+        s.screen = Screen::Wilderness;
+        s.wildernessPlayerPos = (s.selectedTown == 0) ? Vector2{ 900, 1650 } : Vector2{ 2900, 1650 };
+    } else if (!bestKey.empty()) {
+        s.selectedTile = bestKey;
+    }
+}
+
+// One flat road box between two world points (axis-aligned), mirroring
+// DrawRoadToPlaza's layout against kTownPlaza.
+static void Town3DRoadSeg(float x1, float z1, float x2, float z2, Color col) {
+    const float w = 28.0f;
+    float sx = fabsf(x2 - x1) < 0.01f ? w : fabsf(x2 - x1);
+    float sz = fabsf(z2 - z1) < 0.01f ? w : fabsf(z2 - z1);
+    DrawCube({ (x1 + x2) / 2.0f, 1.0f, (z1 + z2) / 2.0f }, sx, 2.0f, sz, col);
+}
+static void Town3DRoadToPlaza(Vector2 bp, Color col) {
+    const Rectangle& plaza = kTownPlaza;
+    bool insideX = bp.x >= plaza.x && bp.x <= plaza.x + plaza.width;
+    bool insideY = bp.y >= plaza.y && bp.y <= plaza.y + plaza.height;
+    if (insideX && insideY) return;
+    if (insideX) {
+        float edge = (bp.y < plaza.y) ? plaza.y : plaza.y + plaza.height;
+        Town3DRoadSeg(bp.x, bp.y, bp.x, edge, col);
+    } else if (insideY) {
+        float edge = (bp.x < plaza.x) ? plaza.x : plaza.x + plaza.width;
+        Town3DRoadSeg(bp.x, bp.y, edge, bp.y, col);
+    } else {
+        // Same center-x L-bend as DrawRoadToPlaza so corner roads merge into the
+        // edge-mid spokes instead of piling up parallel strips.
+        float cx = plaza.x + plaza.width / 2.0f;
+        float edge = (bp.y < plaza.y) ? plaza.y : plaza.y + plaza.height;
+        Town3DRoadSeg(bp.x, bp.y, cx, bp.y, col);
+        Town3DRoadSeg(cx, bp.y, cx, edge, col);
+    }
+}
+
+static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
+    Vector2 mouse = GetMousePosition();
+    bool panelOpen = s.selectedTile.has_value() || s.greetedNPC.has_value();
+
+    // --- Orbit / zoom / pick input (left-drag orbits, wheel zooms, click picks) ---
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !panelOpen &&
+        CheckCollisionPointRec(mouse, kViewport) && !Town3DPointInUI(mouse, s, screenW)) {
+        g_t3dOrbiting = true;
+        g_t3dLastMouse = mouse;
+        g_t3dDragDist = 0.0f;
+    }
+    if (g_t3dOrbiting && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        Vector2 d = { mouse.x - g_t3dLastMouse.x, mouse.y - g_t3dLastMouse.y };
+        g_t3dLastMouse = mouse;
+        g_t3dDragDist += fabsf(d.x) + fabsf(d.y);
+        g_t3dYaw -= d.x * 0.006f;
+        g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, 0.2f, 1.35f);
+    }
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) {
+        bool wasClick = g_t3dDragDist < 8.0f;
+        g_t3dOrbiting = false;
+        if (wasClick && !panelOpen &&
+            CheckCollisionPointRec(mouse, kViewport) && !Town3DPointInUI(mouse, s, screenW))
+            Town3DPick(s, mouse, screenW, screenH);
+    }
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
+    float wheel = GetMouseWheelMove();
+    if (wheel != 0.0f && !panelOpen && CheckCollisionPointRec(mouse, kViewport))
+        g_t3dDist = std::clamp(g_t3dDist * (1.0f - wheel * 0.12f), 260.0f, 1500.0f);
+
+    // --- 3D scene ---
+    Town3DCam c = Town3DGetCam(s, screenW, screenH);
+    Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
+    BeginMode3D(cam3d);
+
+    Color groundCol = (s.selectedTown == 0) ? Color{ 210, 198, 168, 255 } : Color{ 176, 158, 132, 255 };
+    DrawPlane({ 500, 0, 500 }, { 1000, 1000 }, groundCol);
+
+    Color roadCol = (s.selectedTown == 0) ? Color{ 196, 164, 100, 255 } : Color{ 140, 148, 156, 255 };
+    DrawCube({ 500, 1, 500 }, 160, 2, 160, roadCol); // plaza
+    for (auto& node : kTownNodePositions) Town3DRoadToPlaza(node.pos, roadCol);
+    // Main street: plaza's south edge down to the Wilderness Gate (mirrors the 2D band).
+    Town3DRoadSeg(500, kTownPlaza.y + kTownPlaza.height, 500, kWildernessGatePos.y, roadCol);
+
+    // Buildings — one box per grid node, colored like the 2D tiles.
+    for (auto& node : kTownNodePositions) {
+        float h = Town3DBuildingHeight(node.key);
+        Color col = TileColorFor(node.key);
+        DrawCube({ node.pos.x, 1, node.pos.y }, 118, 2, 118, ColorBrightness(col, -0.4f)); // foundation
+        DrawCube({ node.pos.x, h / 2, node.pos.y }, 110, h, 110, col);
+        DrawCube({ node.pos.x, h + 9, node.pos.y }, 122, 18, 122, ColorBrightness(col, -0.25f)); // roof slab
+    }
+    // Wilderness Gate — sage box, same role as in 2D.
+    DrawCube({ kWildernessGatePos.x, 35, kWildernessGatePos.y }, 90, 70, 90, Color{ 140, 165, 140, 255 });
+    DrawCube({ kWildernessGatePos.x, 79, kWildernessGatePos.y }, 102, 18, 102, Color{ 110, 135, 110, 255 });
+
+    // Foliage — trunk + canopy per variant (see kFoliagePositions).
+    for (const TownFoliage& f : kFoliagePositions) {
+        DrawCylinder({ f.pos.x, 13, f.pos.y }, 5, 7, 26, 6, Color{ 120, 85, 50, 255 });
+        if (f.variant == 1) {
+            DrawCylinder({ f.pos.x, 46, f.pos.y }, 2, 26, 40, 8, Color{ 45, 110, 60, 255 }); // pine cone
+        } else if (f.variant == 5) {
+            DrawSphere({ f.pos.x, 40, f.pos.y }, 20, Color{ 200, 120, 40, 255 }); // autumn bush
+        } else {
+            Color g = (f.variant == 0) ? Color{ 70, 140, 70, 255 }
+                      : (f.variant % 2 ? Color{ 55, 125, 65, 255 } : Color{ 80, 150, 75, 255 });
+            DrawSphere({ f.pos.x, 36, f.pos.y }, 18, g);
+        }
+    }
+
+    // Props — small primitive clusters per kind (see kTownProps' kind index).
+    for (const TownProp& p : kTownProps) {
+        float x = p.pos.x, z = p.pos.y, sz = p.size;
+        switch (p.kind) {
+            case 0: // fountain
+                DrawCylinder({ x, 7, z }, sz * 0.65f, sz * 0.7f, 14, 10, Color{ 150, 150, 155, 255 });
+                DrawCylinder({ x, 12, z }, sz * 0.5f, sz * 0.5f, 6, 10, Color{ 90, 150, 200, 255 });
+                break;
+            case 1: // streetlamp
+                DrawCylinder({ x, 22, z }, 3, 4, 44, 6, Color{ 60, 60, 65, 255 });
+                DrawSphere({ x, 48, z }, 7, Color{ 255, 220, 130, 255 });
+                break;
+            case 2: // smith's sign
+                DrawCylinder({ x, 20, z }, 3, 3, 40, 6, Color{ 110, 75, 45, 255 });
+                DrawCube({ x, 38, z }, sz, 16, 6, Color{ 140, 100, 60, 255 });
+                break;
+            case 3: case 4: case 5: { // market stalls
+                Color sc = (p.kind == 3) ? Color{ 180, 80, 80, 255 }
+                           : (p.kind == 4) ? Color{ 80, 120, 180, 255 } : Color{ 90, 160, 90, 255 };
+                DrawCube({ x, 15, z }, sz, 30, sz * 0.8f, sc);
+                DrawCube({ x, 34, z }, sz * 1.1f, 8, sz * 0.9f, ColorBrightness(sc, -0.2f));
+                break;
+            }
+            case 6: // lumber pile
+                for (int i = 0; i < 3; i++)
+                    DrawCube({ x, 6.0f + i * 11.0f, z }, sz, 10, 12, Color{ 130, 90, 55, 255 });
+                break;
+            case 7: // barrel
+                DrawCylinder({ x, 11, z }, sz * 0.32f, sz * 0.36f, 22, 8, Color{ 125, 85, 50, 255 });
+                break;
+            case 8: // crate
+                DrawCube({ x, 9, z }, 18, 18, 18, Color{ 170, 135, 90, 255 });
+                break;
+            case 9: // anvil
+                DrawCube({ x, 8, z }, 16, 16, 16, Color{ 90, 70, 55, 255 });
+                DrawCube({ x, 20, z }, 26, 8, 12, Color{ 70, 70, 75, 255 });
+                break;
+            case 10: // statue
+                DrawCube({ x, 10, z }, 24, 20, 24, Color{ 160, 160, 165, 255 });
+                DrawSphere({ x, 30, z }, 10, Color{ 170, 170, 175, 255 });
+                break;
+            case 11: case 12: case 13: { // farm animals
+                Color ac = (p.kind == 11) ? Color{ 230, 230, 230, 255 }
+                           : (p.kind == 12) ? Color{ 120, 85, 60, 255 } : Color{ 240, 240, 235, 255 };
+                DrawSphere({ x, 12, z }, 12, ac);
+                DrawSphere({ x + 10, 20, z }, 6, ac);
+                break;
+            }
+            case 14: // purple potion
+                DrawCylinder({ x, 8, z }, 7, 8, 16, 8, Color{ 150, 80, 180, 255 });
+                break;
+            case 15: // red potion
+                DrawCylinder({ x, 8, z }, 7, 8, 16, 8, Color{ 200, 70, 70, 255 });
+                break;
+            case 16: // chest
+                DrawCube({ x, 10, z }, 26, 20, 18, Color{ 120, 80, 45, 255 });
+                DrawCube({ x, 22, z }, 26, 6, 18, Color{ 95, 60, 35, 255 });
+                break;
+            case 17: // bookshelf
+                DrawCube({ x, 22, z }, 30, 44, 12, Color{ 110, 75, 45, 255 });
+                break;
+            default: break;
+        }
+    }
+
+    // Player capsule (+head) and wandering townsfolk.
+    DrawCapsule({ s.townPlayerPos.x, 8, s.townPlayerPos.y },
+                { s.townPlayerPos.x, 56, s.townPlayerPos.y }, 15, 8, 8, Color{ 70, 130, 220, 255 });
+    DrawSphere({ s.townPlayerPos.x, 64, s.townPlayerPos.y }, 10, Color{ 240, 210, 180, 255 });
+    const auto& activeNPCs = (s.selectedTown == 0) ? kTownNPCs : kTown2NPCs;
+    for (int i = 0; i < (int)activeNPCs.size(); i++) {
+        Vector2 np = TownNPCLivePos(i, s.worldTime, s.selectedTown);
+        DrawCapsule({ np.x, 6, np.y }, { np.x, 40, np.y }, 11, 6, 6, Color{ 150, 150, 140, 255 });
+    }
+
+    EndMode3D();
+
+    // --- 2D overlay: building labels projected from 3D, interaction prompt, hints ---
+    for (auto& node : kTownNodePositions) {
+        float h = Town3DBuildingHeight(node.key);
+        Vector2 sp;
+        if (!Town3DProject(c, { node.pos.x, h + 30, node.pos.y }, &sp)) continue;
+        if (sp.x < -60 || sp.x > screenW + 60 || sp.y < 100 || sp.y > screenH) continue;
+        std::string name = TileNameFor(node.key);
+        int w = MeasureUIText(name.c_str(), 13);
+        int sx = (int)(sp.x - w / 2), sy = (int)(sp.y - 13);
+        DrawRectangle(sx - 4, sy - 2, w + 8, 18, Fade(BLACK, 0.55f));
+        DrawUIText(name.c_str(), sx, sy, 13, WHITE);
+    }
+    {
+        Vector2 sp;
+        if (Town3DProject(c, { kWildernessGatePos.x, 100, kWildernessGatePos.y }, &sp) &&
+            sp.x > -60 && sp.x < screenW + 60 && sp.y > 100 && sp.y < screenH) {
+            const char* name = "Wilderness Gate";
+            int w = MeasureUIText(name, 13);
+            int sx = (int)(sp.x - w / 2), sy = (int)(sp.y - 13);
+            DrawRectangle(sx - 4, sy - 2, w + 8, 18, Fade(BLACK, 0.55f));
+            DrawUIText(name, sx, sy, 13, WHITE);
+        }
+    }
+    // Nearest-interactable prompt (mirrors the 2D "[E] ..." prompt DrawPlayer draws).
+    if (!s.selectedTile.has_value()) {
+        std::string nearestKey;
+        float nearestDist = 1e9f;
+        for (auto& node : kTownNodePositions) {
+            float d = Dist(s.townPlayerPos, node.pos);
+            if (d < nearestDist) { nearestDist = d; nearestKey = node.key; }
+        }
+        float gateDist = Dist(s.townPlayerPos, kWildernessGatePos);
+        bool gateIsNearest = gateDist < nearestDist;
+        if (gateIsNearest) nearestDist = gateDist;
+        int nearestNPCIdx = -1;
+        for (int i = 0; i < (int)activeNPCs.size(); i++) {
+            float d = Dist(s.townPlayerPos, TownNPCLivePos(i, s.worldTime, s.selectedTown));
+            if (d < nearestDist) { nearestDist = d; nearestNPCIdx = i; }
+        }
+        bool npcIsNearest = nearestNPCIdx >= 0;
+        bool inRange = nearestDist < kNodeRadius + kInteractRange;
+        if (inRange) {
+            std::string label = npcIsNearest ? "Greet " + activeNPCs[nearestNPCIdx].name
+                                : gateIsNearest ? "Wilderness" : TileNameFor(nearestKey);
+            std::string prompt = "[E] " + label;
+            int w = MeasureUIText(prompt.c_str(), 14);
+            int sx = (int)(screenW - w) / 2, sy = screenH - 96;
+            DrawRectangle(sx - 6, sy - 3, w + 12, 22, Fade(BLACK, 0.55f));
+            DrawUIText(prompt.c_str(), sx, sy, 14, WHITE);
+        }
+    }
+    DrawUIText("3D view: drag to orbit, wheel to zoom, click a building. [V] toggles 2D.", 20, 196, 12,
+               Color{ 90, 74, 52, 255 });
+}
+
 static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     bool canGather = !s.gatheringResource.has_value();
     // Second town (2026-09-22) — reuses Town 1's exact building positions/plaza/roads/
@@ -6082,6 +6458,10 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     }
 
     // --- World render, clipped to the viewport so nothing bleeds into the HUD ---
+    // 3D milestone (2026-09-24): when town3DView is on, the whole 2D world block below
+    // is skipped and DrawTown3DWorld renders the programmer-art 3D scene instead. The
+    // HUD, panels, and interaction code around it are shared by both views.
+    if (s.town3DView) { DrawTown3DWorld(s, screenW, screenH); } else {
     BeginScissorMode((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height);
     Vector2 camera = CameraTopLeft(s.townPlayerPos, kTownWorldSize);
     // Town 2 uses the dirt/road texture as its primary ground (already loaded, no new
@@ -6258,6 +6638,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     DrawPlayer(s, WorldToScreen(s.townPlayerPos, camera), s.playerFacing,
                 (inRange && !s.selectedTile.has_value()) ? "[E] " + interactLabel : "", kTownVisualScale);
     EndScissorMode();
+    } // end else: 2D world view (3D renders via DrawTown3DWorld above)
     DrawVirtualJoystick();
     if (inRange && !s.selectedTile.has_value() && DrawInteractButton("[E] " + interactLabel)) {
         if (npcIsNearest) s.greetedNPC = (s.greetedNPC.has_value() && *s.greetedNPC == nearestNPCIdx)
@@ -6290,6 +6671,8 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     if (Button({ 160, 120, 120, 30 }, "Gather Ore [2]", canGather)) TryStartGather(s, "ore");
     std::string autoLabel = s.autoGather ? "Auto-Gather: ON" : "Auto-Gather: OFF";
     if (Button({ 290, 120, 150, 30 }, autoLabel, true)) ToggleAutoGather(s);
+    // 3D view toggle (2026-09-24 milestone) - same view switch as the V key below.
+    if (Button({ 452, 120, 68, 30 }, s.town3DView ? "2D [V]" : "3D [V]", true)) s.town3DView = !s.town3DView;
     // Solid-backed (DrawInfoLine, not bare DrawUIText) and split across two short lines
     // instead of one concatenated one — 2026-09-22 fix: this text sits directly on the
     // tiled ground with nothing else guaranteeing contrast (same class of bug already
@@ -8881,6 +9264,7 @@ static void UpdateDrawFrame() {
             if (IsKeyPressed(KEY_TWO))   TryStartGather(state, "ore");
             if (IsKeyPressed(KEY_THREE)) ToggleAutoGather(state);
             if (IsKeyPressed(KEY_ESCAPE)) state.selectedTile.reset();
+            if (IsKeyPressed(KEY_V)) state.town3DView = !state.town3DView; // 3D town view toggle
         }
         // --- Input: combat shortcuts, only meaningful on Hunt while fighting ---
         if (!encounterPending && state.screen == Screen::Hunt && state.combat.has_value()) {
