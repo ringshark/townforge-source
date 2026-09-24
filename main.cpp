@@ -6238,8 +6238,24 @@ static RenderTexture2D Town3DLoadShadowmapRT(int width, int height) {
     return target;
 }
 
+// 2026-09-24: Mark reported the deployed preview flashing/strobing while
+// moving on his phone — the classic look of shadow-map depth-precision
+// banding ("shadow acne"). Desktop (full-precision float depth) shows no
+// artifact at all with the same shader and bias values, which points at
+// WebGL/mobile GPUs honoring the shader's `precision mediump float;`
+// qualifier much more literally than desktop drivers do — a real
+// difference I can't reproduce or safely tune from this desktop sandbox.
+// A quick bias increase traded the banding for the whole scene going too
+// dark instead (same shader, different failure mode) — not a confident
+// fix without a real device to verify against. Shadows off for now via
+// this single switch (same pattern as kAmbushSystemEnabled etc.) — the 3D
+// view already has a graceful flat-lit fallback for exactly this case, so
+// nothing else changes. Re-enable once shadow bias/precision is tuned
+// against a real phone.
+static const bool kT3DShadowsEnabled = false;
 static void Town3DEnsureShadow() {
     Town3DShadow& S = g_t3dShadow;
+    if (!kT3DShadowsEnabled) { S.tried = true; return; }
     if (S.ready || S.tried) return;
     S.tried = true;
     S.shader = LoadShader("assets/shaders/shadowmap.vs", "assets/shaders/shadowmap.fs");
