@@ -145,6 +145,7 @@
 #include <optional>
 #include <algorithm>
 #include <vector>
+#include <map>
 #include <cstdlib>
 #include <ctime>
 #include <cmath>
@@ -672,7 +673,7 @@ struct UpgradeInProgress {
 // Wilderness is deliberately not in the Tab-cycle order and has no tab-bar button —
 // it's reached by walking to a gate at the edge of Town, not by clicking a tab, so
 // it's excluded wherever the other 8 screens are enumerated for that UI.
-enum class Screen { Character, Town, Hunt, Craft, Magic, Pets, Bank, House, Skills, Wilderness, Provisioner };
+enum class Screen { Character, Town, Hunt, Craft, Magic, Pets, Bank, House, Skills, Wilderness, Provisioner, Interior };
 
 struct Corpse {
     std::string monsterName;
@@ -714,6 +715,14 @@ static const long long kWeekSeconds = 7LL * 24 * 60 * 60;
 // blades array, SaveGame, and LoadGame all need it, and they sit well above the
 // PK tuning block below.
 static const int kBladeCount = 3;
+// Death/ghost/respawn slot counts (2026-09-24) — same forward-declaration need:
+// GameState's respawn-timer arrays are sized by these, and the spot tables they
+// must match (kWildernessMonsterSpots, kCenters in DungeonMonsterNodePos) are
+// declared much later. static_asserts next to those tables verify the match.
+static const int kWildMonsterSpotCount = 12;
+static const int kDungeonBossSlot = 8; // boss slot index; regular slots are 0..7
+static const int kDungeonSlotCount = kDungeonBossSlot + 1; // 9 slots per dungeon
+static const char* kGhostNoTouch = "Ghosts cannot touch the world of the living.";
 struct GameState {
     int gold = 100;
     int wood = 10;
@@ -800,6 +809,43 @@ struct GameState {
     bool autoGather = false;
     std::vector<Corpse> corpses; // left behind by combat wins, skinned for leather+gold
 
+    // --- Death / ghost / corpse / respawn (2026-09-24) — all transient, never saved ---
+    float playerDeathAnimT = 0.0f; // >0 while the player's death animation plays (counts down)
+    bool playerIsGhost = false;    // true during the 15s ghost walk before resurrection
+    float ghostTimer = 0.0f;        // counts down from kGhostDuration while a ghost
+    int ghostZone = 0;              // 0 = wilderness, 1 = dungeon (where the ghost walks)
+    int ghostDungeonIdx = -1;       // dungeon index when ghostZone == 1
+    // A monster currently playing its death animation. The fight is already over
+    // (engagement cleared, spot on respawn cooldown); rewards/corpse/ambush chaining
+    // run when the animation completes. Only one fight can be active at a time, so
+    // one slot is enough.
+    struct DyingMonster {
+        int zone; // 0 = wilderness, 1 = dungeon
+        Vector2 pos;
+        float timer, duration; // counts down from duration
+        // reward + respawn payload, captured at kill time so the win logic can run
+        // unchanged when the animation completes:
+        int spotIdx = -1;      // wilderness spot index, -1 for rival/blade
+        int dungeonIdx = -1, monsterIdx = -1; // dungeon slot (0..kDungeonBossSlot)
+        bool isBoss = false, isRival = false;
+        int bladeIdx = -1;
+        std::string name; int baseGold = 0, baseLeather = 0, level = 1;
+        int iconIdx = -1; // wilderness monster icon (for the corpse visual), -1 = generic
+    };
+    std::optional<DyingMonster> dyingMonster;
+    // Visible world corpses — purely visual markers that fade; the actual lootable
+    // corpse list above (skinned on the Hunt screen) is unchanged.
+    struct WorldCorpse {
+        Vector2 pos;
+        float timer, duration; // counts down from duration, then the marker is removed
+        int zone;              // 0 = wilderness, 1 = dungeon
+        int iconIdx = -1;      // wilderness monster icon for the 2D sprite, -1 = generic
+        std::string name;
+    };
+    std::vector<WorldCorpse> worldCorpses;
+    std::array<float, kWildMonsterSpotCount> wildSpotRespawn{}; // 0 = available, else seconds until the spot refills
+    std::array<std::array<float, kDungeonSlotCount>, 5> dungeonSpawnRespawn{}; // [dungeon][slot], 0 = available
+
     // --- Magic / spellcasting — mirrors state.magery/evalInt/meditation/mana/reagents ---
     float magery = 0, evalInt = 0, meditation = 0; // capped at 120
     int intStat = 20; // starting default (Mark's own number, not the JS's 10); grows via MaybeGainStat
@@ -885,7 +931,16 @@ struct GameState {
     struct AmbushEncounter { std::string name; int level; };
     std::optional<AmbushEncounter> ambush;
 
-    struct InnocentEncounter { std::string name; int gold; bool canSteal = false; std::string source; };
+    // Innocent encounter (2026-09-24 deep-dive): `identity` indexes kInnocentDefs
+    // (Tam Alder / Sister Liora / Silas Brack / Garran Moss). `resolved` + `farewell`
+    // show a goodbye beat in the panel after Spare instead of vanishing instantly;
+    // `shopOpen`/`reqView` drive the merchant-shop and request sub-panels; `spotIdx`
+    // is the wilderness spot this encounter came from (-1 = the old random popup).
+    struct InnocentEncounter {
+        int identity = 0; int gold = 0; bool canSteal = false; std::string source;
+        bool resolved = false; std::string farewell; bool shopOpen = false;
+        bool reqView = false; int spotIdx = -1;
+    };
     std::optional<InnocentEncounter> innocentEncounter;
 
     // Per-spot runtime state for the roaming Innocent NPCs (2026-09-23) — parallel to
@@ -894,9 +949,27 @@ struct GameState {
     // preserve "who was standing where" across a save. `present=false` with
     // `respawnTimer=0` on a fresh GameState means every spot rolls its first traveler
     // immediately on entering the Wilderness rather than waiting out a cooldown that
-    // never actually started.
-    struct InnocentSpotState { bool present = false; std::string name; int gold = 0; float respawnTimer = 0.0f; };
+    // never actually started. Spot i always hosts identity i (fixed people now).
+    struct InnocentSpotState { bool present = false; int identity = 0; int gold = 0; float respawnTimer = 0.0f; };
     std::array<InnocentSpotState, 4> innocentSpots;
+
+    // Innocent memory (2026-09-24) — PERSISTED. Each of the four travelers remembers
+    // YOUR history with them specifically; greeting lines, rumors, shop attitude and
+    // request availability all read this.
+    struct InnocentMemory { int met = 0, spared = 0, snooped = 0, stolenFrom = 0, murdered = 0, helped = 0; };
+    std::array<InnocentMemory, 4> innocentMem;
+    std::array<int, 5> deathsByDungeon = {}; // PERSISTED — feeds "restless dungeon" rumors
+    // Silas's traveling shop (2026-09-24) — PERSISTED stock counts + restock timer.
+    std::array<int, 5> merchantStock = { 3, 5, 5, 1, 1 };
+    float merchantRestockT = 600.0f;
+    // Small requests (2026-09-24) — PERSISTED per innocent: 0 none, 1 offered, 2 active.
+    // Kind: 0 = fetch 5 wood, 1 = fetch 4 ore, 2 = fetch 4 leather, 3 = escort to a gate.
+    std::array<int, 4> innocentReqState = {};
+    std::array<int, 4> innocentReqKind = {};
+    std::array<float, 4> innocentReqCooldown = {};
+    int escortInnocent = -1;          // transient — identity currently being escorted, -1 none
+    Vector2 escortPos = { 0, 0 };    // transient — the escorted innocent's world position
+    float escortTimer = 0.0f;        // transient — escort times out eventually
 
     std::string pendingEncounterCheck; // "gather" | "" — see UpdateGathering + main()
 
@@ -971,11 +1044,19 @@ struct GameState {
     Vector2 playerFacing = {0, 1}; // last nonzero movement direction, for a facing indicator
     float worldTime = 0; // elapsed seconds, ticks every frame — drives monster wander motion
 
+    // --- Building interiors (2026-09-24): walkable rooms inside each town
+    // building. Transient like the other free-move positions — not saved; leaving
+    // the interior (or re-entering) just resets the spawn. ---
+    std::string interiorKey;                 // building key whose room we're inside ("" = not inside)
+    Vector2 interiorPlayerPos = {280, 640};  // room-local position
+    bool interior3DView = false;             // 3D/2D view inside interiors (mirrors town3DView on entry, V toggles)
+    bool interiorGreeted = false;            // greeting popup open for the room's static NPC (if any)
+
     // --- Live Wilderness combat (first slice of the real-time combat rework — see
     // kWildernessMonsterSpots/DrawWildernessScreen for the rest). Unlike every other
     // monster in the game, an engaged Wilderness monster needs real per-instance state
     // (it moves and has its own HP) instead of being derived statelessly from
-    // worldTime. Exactly one can be engaged at a time; the other 4 keep idle-wandering
+    // worldTime. Exactly one can be engaged at a time; the others keep idle-wandering
     // exactly as before. Dungeon monsters and ambushes are untouched, still the older
     // panel-based state.combat system. ---
     struct ActiveMonster {
@@ -1020,7 +1101,7 @@ struct GameState {
     // not into a flat global spot array like kWildernessMonsterSpots. Ambushes/murderer
     // fights/Bloodstained Road are untouched, still the older panel-based state.combat. ---
     struct ActiveDungeonMonster {
-        int monsterIdx; // 0-4 = dungeon.monsters[idx], 5 = dungeon.boss (see isBoss)
+        int monsterIdx; // 0-7 = regular slots (DungeonSlotMonster maps 5-7 onto dungeon.monsters), kDungeonBossSlot (8) = boss (see isBoss)
         bool isBoss;
         Vector2 pos, spawnPos;
         float hp, maxHp;
@@ -1605,6 +1686,11 @@ struct GameAssets {
     // entrance for the warrens). Falls back to the existing flat color circle if missing.
     std::array<Texture2D, 5> wildEntranceTex{};
     std::array<bool, 5> wildEntranceTexOk{};
+    // Innocent traveler portraits (2026-09-24) — parallel to kInnocentDefs by identity
+    // idx: dedicated pixel-art sprites (assets/innocents/*.png) drawn in the 2D
+    // wilderness and in the encounter panel. Falls back to the old neutral circle.
+    std::array<Texture2D, 4> innocentTex{};
+    std::array<bool, 4> innocentTexOk{};
     // UI text font — see UiFont()/DrawUIText()/MeasureUIText() below. Falls back to
     // raylib's default bitmap font (blocky, hard to read at UI sizes) if this fails to
     // load, same "never crash on missing art" convention as every texture here.
@@ -2022,6 +2108,15 @@ static void LoadGameAssets() {
         bool ok = false;
         g_assets.wildEntranceTex[i] = TryLoadTexture(kWildEntranceFiles[i], ok);
         g_assets.wildEntranceTexOk[i] = ok;
+    }
+    static const char* kInnocentFiles[4] = {
+        "assets/innocents/traveler.png", "assets/innocents/pilgrim.png",
+        "assets/innocents/merchant.png", "assets/innocents/farmer.png"
+    };
+    for (int i = 0; i < 4; i++) {
+        bool ok = false;
+        g_assets.innocentTex[i] = TryLoadTexture(kInnocentFiles[i], ok);
+        g_assets.innocentTexOk[i] = ok;
     }
 }
 
@@ -3103,6 +3198,7 @@ static const float kAutoGatherMinSkill = 30.0f; // JS AUTO_GATHER_MIN_SKILL
 // walk-up-to-a-node gather nodes pass 5s instead, rewarding active play with a faster
 // rate than Town's passive/idle HUD buttons — see the call site in DrawWildernessScreen.
 static void TryStartGather(GameState& s, const std::string& resourceKey, float seconds = 8.0f) {
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
     if (s.gatheringResource.has_value()) { s.logLine = "Already gathering."; return; }
     if (s.ambush.has_value() || s.innocentEncounter.has_value()) { s.logLine = "Deal with what's in front of you first."; return; }
     s.gatheringResource = resourceKey;
@@ -3421,9 +3517,8 @@ static const float kLordKarmaThreshold = 60.0f;
 static const std::array<std::string, 5> kMurdererNames = {
     "A cutthroat", "A bandit", "A rogue", "A highwayman", "A killer"
 };
-static const std::array<std::string, 4> kInnocentNames = {
-    "A lone traveler", "A wandering pilgrim", "A tired merchant", "A humble farmer"
-};
+// (The old generic kInnocentNames went away with the 2026-09-24 deep-dive: spots
+// now host fixed identities from kInnocentDefs above.)
 
 static NotorietyTier GetNotorietyTier(const GameState& s) {
     if (s.notoriety <= 0.0f) return NotorietyTier::Innocent;
@@ -3485,6 +3580,7 @@ static const bool kAmbushSystemEnabled = false;
 // completes and after a dungeon fight ends — never while something else is pending.
 static bool TryTriggerAmbush(GameState& s, const std::string& /*source*/) {
     if (!kAmbushSystemEnabled) return false;
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) return false; // the dead can't be ambushed
     // Also guards against an active live fight (Wilderness/dungeon) — without this, a
     // live fight left running while the player tabbed to another screen (it pauses,
     // since updateEngaged*MonsterAI only runs inside its own Draw*Screen) could end up
@@ -3498,14 +3594,28 @@ static bool TryTriggerAmbush(GameState& s, const std::string& /*source*/) {
     s.logLine = name + " blocks your path!";
     return true;
 }
+// Forward declarations for the innocent deep-dive (2026-09-24): defined just
+// below TryTriggerInnocentEncounter but used inside it and in MurderInnocent.
+static std::string InnocentName(int id);
+static void MaybeOfferRequest(GameState& s, int id);
+static int BackpackCap(const GameState& s);
+// Respawn delay for a vacated innocent spot — defined here because MurderInnocent
+// (just below) multiplies it for murder, and UpdateInnocentSpots uses it too.
+static const float kInnocentRespawnSeconds = 45.0f;
+
 static bool TryTriggerInnocentEncounter(GameState& s, const std::string& source) {
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) return false; // the dead meet no one
     if (s.ambush.has_value() || s.innocentEncounter.has_value() || s.combat.has_value() ||
         s.wildEngaged.has_value() || s.dungeonEngaged.has_value()) return false;
     if (RandUnit() >= kInnocentEncounterChance) return false;
-    const std::string& name = kInnocentNames[std::rand() % kInnocentNames.size()];
+    int id = std::rand() % 4;
     int gold = 10 + (std::rand() % 41);
-    s.innocentEncounter = GameState::InnocentEncounter{ name, gold, false, source };
-    s.logLine = name + " passes by, unaware of you.";
+    GameState::InnocentEncounter enc;
+    enc.identity = id; enc.gold = gold; enc.source = source; enc.spotIdx = -1;
+    s.innocentEncounter = enc;
+    s.innocentMem[id].met++;
+    MaybeOfferRequest(s, id);
+    s.logLine = InnocentName(id) + " passes by, unaware of you.";
     return true;
 }
 // JS endMurdererWin(): direct gold reward (no corpse/skinning step), notoriety eases,
@@ -3541,6 +3651,35 @@ static DungeonMonster BloodstainedTargetFor(GameState& s, int pathIdx) {
     m.bloodstainedTierIdx = tierIdx;
     return m;
 }
+// ---------------------------------------------------------------------
+// Death / ghost / corpse / respawn (2026-09-24)
+// ---------------------------------------------------------------------
+// Grouped tuning for the whole system — one place to adjust the feel.
+static const float kPlayerDeathAnimTime = 1.2f;   // player fall+fade before the ghost rises
+static const float kGhostDuration = 15.0f;        // ghost walk seconds before resurrection (Mark's spec)
+static const float kGhostReturnNotice = 2.0f;     // "Returning to <town>..." shows this long before resurrect
+static const float kMonsterDeathAnimTime = 0.9f;  // slain monster fall+fade before the corpse settles
+static const float kCorpseFadeTime = 20.0f;       // world corpse visual lifetime (the lootable list on the Hunt screen is untouched)
+static const float kRivalCorpseFadeTime = 8.0f;   // rival/blade "corpse" is brief — they retreat, not die
+static const float kWildRespawnMin = 60.0f;       // wilderness spot respawn window (seconds)
+static const float kWildRespawnMax = 120.0f;
+static const float kDungeonRespawnMin = 60.0f;    // dungeon regular-slot respawn window
+static const float kDungeonRespawnMax = 120.0f;
+static const float kDungeonBossRespawnMin = 240.0f; // boss respawn window (4-6 min)
+static const float kDungeonBossRespawnMax = 360.0f;
+static const int kDungeonRegularSlots = 8; // regular spawn points per dungeon (was 5 — raised so respawn timers don't empty dungeons)
+
+// Forward declarations — the full definitions live just before DrawWildernessScreen,
+// after the wilderness tables they depend on (kWildernessMonsterSpots, gates, MaxMana).
+static void BeginPlayerDeath(GameState& s);
+static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& am,
+                                  const std::string& name, int baseGold, int baseLeather);
+static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeonMonster& am,
+                                     int dungeonIdx, bool wasBoss, const std::string& name,
+                                     int level, int baseGold, int baseLeather);
+static void UpdateDeathAndRespawn(GameState& s, float dt);
+static void SpawnPanelKillCorpse(GameState& s, const std::string& name);
+
 // JS endBloodstainedWin(): advances the ladder, pays path-specific Fame/Karma/
 // Notoriety, and on a boss kill loops the path (tougher next time) and permanently
 // unlocks that path's weekly bounty.
@@ -3572,6 +3711,7 @@ static void EndBloodstainedWin(GameState& s) {
             : " " + c.monster.name + " falls again — the " + path.name + " path resets, tougher than before.";
     }
     s.logLine = msg;
+    SpawnPanelKillCorpse(s, c.monster.name); // visible corpse at the player's position
     s.combat.reset();
     DecrementShaken(s);
 }
@@ -3590,6 +3730,7 @@ static void EndMurdererWin(GameState& s) {
     GainKarma(s, 10.0f);
     s.logLine = "You defeat " + c.monster.name + " and take " + std::to_string(goldFound) + " gold." +
                  (redeemed ? " Your notoriety eases." : "");
+    SpawnPanelKillCorpse(s, c.monster.name); // visible corpse at the player's position
     s.combat.reset();
     AddWeeklyProgress(s, kGoalDefeat, 1);
 }
@@ -3616,12 +3757,12 @@ static void EndMurdererLoss(GameState& s, bool fled) {
         s.gold -= goldLost;
         int itemsLost = (int)s.backpack.size();
         s.backpack.clear();
-        s.hp = std::max(1, (int)std::round(s.maxHp * 0.2f));
         s.logLine = c.monster.name + " strips you of " + std::to_string(goldLost) + " gold and " +
                      std::to_string(itemsLost) + " item" + (itemsLost == 1 ? "" : "s") + " before vanishing into the shadows.";
         ApplyShaken(s);
     }
     s.combat.reset();
+    if (!fled) BeginPlayerDeath(s); // outright defeat = death; fleeing is just a retreat
 }
 
 // JS snoopInnocent(): reveals the gold and unlocks Steal on success; on failure, a
@@ -3635,15 +3776,338 @@ static float SnoopChance(const GameState& s) {
 static float StealChance(const GameState& s) {
     return std::clamp(kStealBaseChance + EffectiveSkill(s, &GameState::stealing) * kStealSkillScaling, 2.0f, kStealMaxChance);
 }
-static void SnoopInnocent(GameState& s) {
+// ---------------------------------------------------------------------
+// Innocent identities deep-dive (2026-09-24)
+// ---------------------------------------------------------------------
+// The four wilderness travelers are now fixed people — Tam Alder (lone
+// traveler), Sister Liora (wandering pilgrim), Silas Brack (tired merchant),
+// Garran Moss (humble farmer) — each with a name, personality, dialogue, and
+// persistent memory of YOUR history with them (met/spared/snooped/stolen
+// from/murdered/helped). Wilderness spot i always hosts identity i.
+// The morality mechanics are UNCHANGED: Spare/Snoop/Steal/Murder move
+// notoriety/karma/gold exactly as before — this only adds memory, dialogue,
+// rumors, small gifts/blessings, fetch/escort requests, and Silas's traveling
+// shop on top. Grouped tuning for the whole system lives in the kInnocent*
+// constants just below.
+// ---------------------------------------------------------------------
+
+static std::string RivalEpithetName(const GameState& s); // defined with the rival
+static std::string BladeName(int bi);                    // defined with Murder Inc.
+
+// Grouped tuning — one place to adjust the feel.
+static const float kInnocentMurderRespawnMult = 3.0f; // murdered travelers take longer to be "replaced"
+static const float kInnocentRequestCooldown = 300.0f; // seconds between request offers, per innocent
+static const float kInnocentRequestChance = 0.5f;      // chance a visit produces a request offer
+static const float kMerchantRestockSeconds = 600.0f;  // Silas's stock refreshes every 10 minutes
+static const float kEscortSpeed = 230.0f;             // escorted innocent's follow speed
+static const float kEscortFollowRange = 90.0f;        // escort stops this close to you
+static const float kEscortCompleteRange = 150.0f;     // reaching a town gate completes the escort
+static const float kEscortTimeout = 300.0f;           // escort gives up after 5 minutes
+
+enum class InnocentId { Traveler = 0, Pilgrim = 1, Merchant = 2, Farmer = 3 };
+struct InnocentDef {
+    const char* name; const char* role; const char* sprite;
+    Color shirt; Color pants; Color skin; // 3D humanoid tints, fixed per identity
+};
+static const std::array<InnocentDef, 4> kInnocentDefs = {{
+    { "Tam Alder", "Lone traveler", "assets/innocents/traveler.png",
+      { 110, 118, 66, 255 }, { 70, 62, 55, 255 }, { 238, 206, 176, 255 } },
+    { "Sister Liora", "Wandering pilgrim", "assets/innocents/pilgrim.png",
+      { 228, 218, 198, 255 }, { 198, 186, 166, 255 }, { 244, 214, 184, 255 } },
+    { "Silas Brack", "Tired merchant", "assets/innocents/merchant.png",
+      { 122, 72, 112, 255 }, { 78, 58, 78, 255 }, { 238, 204, 174, 255 } },
+    { "Garran Moss", "Humble farmer", "assets/innocents/farmer.png",
+      { 138, 98, 58, 255 }, { 88, 72, 52, 255 }, { 232, 198, 168, 255 } },
+}};
+static std::string InnocentName(int id) { return kInnocentDefs[std::clamp(id, 0, 3)].name; }
+static const char* Pick2(const char* a, const char* b) { return std::rand() % 2 ? a : b; }
+
+// Net warmth: how this innocent feels about YOU, from persistent memory.
+static int InnocentWarmth(const GameState& s, int id) {
+    const GameState::InnocentMemory& m = s.innocentMem[std::clamp(id, 0, 3)];
+    return m.spared * 2 + m.helped * 3 - m.snooped - m.stolenFrom * 2 - m.murdered * 5;
+}
+
+// Memory-aware greeting. Buckets: murdered-return ("heard the stories"),
+// threatened (you're notorious), afraid (you robbed them), warm (you've been
+// kind), known (met before), first meeting.
+static std::string InnocentGreeting(const GameState& s, int id) {
+    const GameState::InnocentMemory& m = s.innocentMem[std::clamp(id, 0, 3)];
+    bool notorious = GetNotorietyTier(s) != NotorietyTier::Innocent;
+    if (m.murdered > 0) {
+        if (id == 0) return "You. You left me in the dirt once. The road spat me back out. Don't try it twice.";
+        if (id == 1) return "They say I died on this road. The road gave me back. I pray you never give it cause again.";
+        if (id == 2) return "You again — the one who left me bleeding on the road. I don't trade with killers.";
+        return "They buried me, you know. Shallow grave. I dug myself out. Just... keep walking.";
+    }
+    if (notorious) {
+        if (id == 0) return "I know what you are. Keep your distance, killer.";
+        if (id == 1) return "The light protect me... I know the mark of a killer when I see it.";
+        if (id == 2) return "Whoa, whoa! No trouble here! I'm just a poor peddler, I swear it!";
+        return "A killer, plain as day. Stay off my road!";
+    }
+    if (m.stolenFrom > 0 && InnocentWarmth(s, id) < 0) {
+        if (id == 0) return "Stay back. I know your hands better than you think.";
+        if (id == 1) return "Please... take what you want and go. I won't fight you.";
+        if (id == 2) return "Easy... easy. Take the gold, take it all, just don't hurt me.";
+        return "D-don't come closer! I know what you did!";
+    }
+    if (InnocentWarmth(s, id) >= 6) {
+        if (id == 0) return "Good to see a friendly face. These roads remember kindness.";
+        if (id == 1) return "Your kindness walks ahead of you, friend. Others will hear of it.";
+        if (id == 2) return "My favorite customer! For you, a fair price and a smile.";
+        return "There's a good soul. My missus says to thank you proper.";
+    }
+    if (m.met > 0) {
+        if (id == 0) return "You again. Road treating you fair?";
+        if (id == 1) return "We meet again. The road provides.";
+        if (id == 2) return "Back again! The road's kinder with repeat customers.";
+        return "Ho! Back from the wilds in one piece, I see.";
+    }
+    if (id == 0) return Pick2("Road's long. Mind yourself.", "Tam Alder. I walk, I watch, I don't trouble folk.");
+    if (id == 1) return "Blessings on your road, traveler. I am Liora.";
+    if (id == 2) return "Silas Brack! Finest pack on the road — well, the only pack. Buying? Browsing?";
+    return Pick2("Garran Moss. Got turnips to sell and weather to complain about.",
+                "Ho there. Garran Moss — mind the mud, it's been raining.");
+}
+
+// Spared-thanks, in their voice.
+static std::string InnocentThanks(int id) {
+    if (id == 0) return Pick2("Hm. Decent of you.", "Obliged. Not everyone out here shows mercy.");
+    if (id == 1) return "The light bless you for your mercy.";
+    if (id == 2) return "A gentleman! A scholar! Silas won't forget this!";
+    return Pick2("Much obliged, friend. The farm thanks you.", "Kindness! There's still some left in the world.");
+}
+
+// Failed snoop — they catch you, in their voice. (Mechanics unchanged.)
+static std::string InnocentCaughtLine(int id) {
+    if (id == 0) return "Tam's hand is on his knife before you blink. \"Touch my pack again and you'll draw back a stump.\"";
+    if (id == 1) return "\"I see you, child. The light sees you too. Step away.\"";
+    if (id == 2) return "\"THIEF! Guards! GUARDS! ...Oh. No guards. Fine — take the fine and GO!\"";
+    return "\"Oi! Hands off! You'll lose those fingers in my turnip patch!\"";
+}
+
+// Rumors — the star sparing reward. Every specific reads REAL game state:
+// rival position/activity, blade hunts, your dungeon deaths, your notoriety.
+// The last line is pure flavor (no fake specifics).
+static std::string InnocentRumor(const GameState& s, int id) {
+    std::vector<std::string> options;
+    std::string region;
+    if (s.rivalPos.x > 1900.0f) region = "out along the Saltmere road";
+    else if (s.rivalPos.x < 900.0f) region = "in the western woods";
+    else if (s.rivalPos.y < 700.0f) region = "up in the northern hills";
+    else region = "in the heart of the wilds";
+    options.push_back("I saw " + RivalEpithetName(s) + " skulking " + region + " not a day ago. Walk careful out there.");
+    if (s.rivalActivity == GameState::RivalActivity::Hunting ||
+        s.rivalActivity == GameState::RivalActivity::Stalking)
+        options.push_back("Word is the Rival's hunting someone in the wilds right now. Could be you. Keep moving.");
+    for (int bi = 0; bi < kBladeCount; bi++) {
+        if (s.blades[bi].activity == GameState::RivalActivity::Hunting ||
+            s.blades[bi].activity == GameState::RivalActivity::Stalking) {
+            options.push_back("Murder Inc. blades were seen on the roads — " + BladeName(bi) + " has the scent, they say.");
+            break;
+        }
+    }
+    int worst = 0;
+    for (int d = 1; d < 5; d++) if (s.deathsByDungeon[d] > s.deathsByDungeon[worst]) worst = d;
+    if (s.deathsByDungeon[worst] > 0)
+        options.push_back("Folks say " + kDungeons[worst].name + "'s gone restless — " +
+                          std::to_string(s.deathsByDungeon[worst]) + " poor soul" +
+                          (s.deathsByDungeon[worst] == 1 ? "" : "s") + " never walked back out.");
+    if (s.notoriety > 1.0f)
+        options.push_back("The town guard's asking after someone matching your description. Lie low a while, friend.");
+    options.push_back("Rain's coming. My knees never lie about rain.");
+    const std::string& rumor = options[std::rand() % options.size()];
+    if (id == 0) return "Tam mutters: \"" + rumor + "\"";
+    if (id == 1) return "Liora smiles softly: \"" + rumor + "\"";
+    if (id == 2) return "Silas leans in close: \"Psst — " + rumor + "\"";
+    return "Garran scratches his beard: \"" + rumor + "\"";
+}
+
+// Small gift reward for sparing. Modest by design — a thank-you, not an income.
+static std::string InnocentGift(GameState& s, int id) {
+    (void)id;
+    int roll = std::rand() % 3;
+    if (roll == 0) {
+        int g = 5 + (std::rand() % 11);
+        s.gold += g;
+        return "In gratitude, they press " + std::to_string(g) + " gold into your hand.";
+    }
+    if (roll == 1) { s.bandages += 2; return "In gratitude, they give you 2 bandages."; }
+    s.reagents += 3; return "In gratitude, they give you 3 reagents.";
+}
+
+// Blessing reward for sparing. Liora mends wounds; the others spread your fame.
+static std::string InnocentBlessing(GameState& s, int id) {
+    if (id == 1) {
+        s.hp = std::min((float)s.maxHp, s.hp + 15.0f);
+        return "She lays a hand on your brow — you feel your wounds mend (+15 HP).";
+    }
+    GainKarma(s, 5.0f); GainFame(s, 3.0f);
+    return "They'll speak well of you to the next travelers. (+5 Karma, +3 Fame)";
+}
+
+// --- Small requests ---------------------------------------------------------
+// Kind: 0 = fetch 5 wood, 1 = fetch 4 ore, 2 = fetch 4 leather, 3 = escort to a gate.
+static std::string InnocentRequestOffer(int id, int kind) {
+    if (kind == 0) {
+        if (id == 0) return "My staff's about to give out. Fetch me 5 wood and I'll make it worth your while.";
+        if (id == 1) return "The shrine down the road needs firewood. 5 wood, if your heart moves you — I'll pay.";
+        if (id == 2) return "Pack frames! I need 5 wood to mend them. Good gold for honest wood.";
+        return "Fence is falling over. Bring me 5 wood and there's coin in it.";
+    }
+    if (kind == 1) {
+        if (id == 0) return "Need 4 ore to re-tip my spear. Paying well.";
+        if (id == 1) return "The chapel bell needs mending — 4 ore, and I'll bless the giver.";
+        if (id == 2) return "Pots to patch! 4 ore and I'll pay proper merchant rates.";
+        return "Plowshare's cracked. 4 ore, friend, and I'll pay.";
+    }
+    if (kind == 2) {
+        if (id == 0) return "My boots are more hole than leather. 4 leather, if you're hunting.";
+        if (id == 1) return "Sandals for the pilgrims — 4 leather would clothe two of us.";
+        if (id == 2) return "Straps and belts! 4 leather, best price on the road.";
+        return "Harness is worn through. 4 leather and you've a friend for life.";
+    }
+    if (id == 0) return "These roads aren't safe for a lone walker. See me to the town gate and I'll pay.";
+    if (id == 1) return "Bandits on the road, they say. Walk with me to the gate? The light will reward you.";
+    if (id == 2) return "This pack's too heavy to run with! Escort me to the gate — gold in it for you.";
+    return "My knees can't outrun trouble anymore. Walk me to the gate, there's coin in it.";
+}
+static std::string InnocentRequestNeed(int kind) {
+    if (kind == 0) return "5 wood";
+    if (kind == 1) return "4 ore";
+    if (kind == 2) return "4 leather";
+    return "an escort to the town gate";
+}
+static std::string InnocentRequestThanks(int id) {
+    if (id == 0) return "Made it. You're a decent blade to have at your back.";
+    if (id == 1) return "Safe. The light keep you as you kept me.";
+    if (id == 2) return "The gate! Never loved a gate before! Here's your gold, hero!";
+    return "Home stretch. The missus'll hear about this kindness.";
+}
+static bool InnocentRequestFulfilled(const GameState& s, int id) {
+    int kind = s.innocentReqKind[std::clamp(id, 0, 3)];
+    if (kind == 0) return s.wood >= 5;
+    if (kind == 1) return s.ore >= 4;
+    if (kind == 2) return s.leather >= 4;
+    return false; // escort completes by walking, not by handover
+}
+static void MaybeOfferRequest(GameState& s, int id) {
+    id = std::clamp(id, 0, 3);
+    if (s.innocentReqState[id] != 0) return;
+    if (s.innocentReqCooldown[id] > 0.0f) return;
+    if (InnocentWarmth(s, id) < 0) return; // they don't ask favors of people they fear
+    if (s.innocentMem[id].murdered > 0) return;
+    if (RandUnit() >= kInnocentRequestChance) return;
+    s.innocentReqState[id] = 1; // offered
+    s.innocentReqKind[id] = std::rand() % 4;
+}
+static void CompleteFetchRequest(GameState& s, int id) {
+    id = std::clamp(id, 0, 3);
     if (!s.innocentEncounter.has_value()) return;
+    if (s.innocentReqState[id] != 2 || !InnocentRequestFulfilled(s, id)) return;
+    int kind = s.innocentReqKind[id];
+    int pay = 30;
+    if (kind == 0) { s.wood -= 5; pay = 30; }
+    else if (kind == 1) { s.ore -= 4; pay = 35; }
+    else { s.leather -= 4; pay = 35; }
+    s.gold += pay;
+    GainKarma(s, 5.0f); GainFame(s, 3.0f);
+    s.innocentMem[id].helped++;
+    s.innocentReqState[id] = 0;
+    s.innocentReqCooldown[id] = kInnocentRequestCooldown;
+    GameState::InnocentEncounter& enc = *s.innocentEncounter;
+    enc.resolved = true;
+    enc.farewell = "\"" + InnocentRequestThanks(id) + "\" (+" + std::to_string(pay) + " gold, Karma and Fame rise.)";
+    s.logLine = "You hand over the goods to " + InnocentName(id) + ".";
+}
+static void StartEscort(GameState& s, int id, Vector2 fromPos) {
+    id = std::clamp(id, 0, 3);
+    s.escortInnocent = id;
+    s.escortPos = fromPos;
+    s.escortTimer = kEscortTimeout;
+    s.innocentReqState[id] = 2; // active
+    s.innocentEncounter.reset(); // they fall in beside you; the panel closes
+    s.logLine = InnocentName(id) + " falls in beside you. \"Walk me to the town gate.\"";
+}
+static void CompleteEscort(GameState& s) {
+    int id = s.escortInnocent;
+    s.escortInnocent = -1;
+    s.innocentMem[std::clamp(id, 0, 3)].helped++;
+    s.innocentReqState[std::clamp(id, 0, 3)] = 0;
+    s.innocentReqCooldown[std::clamp(id, 0, 3)] = kInnocentRequestCooldown;
+    int pay = 45;
+    s.gold += pay;
+    GainKarma(s, 8.0f); GainFame(s, 5.0f);
+    s.logLine = "You see " + InnocentName(id) + " safely to the gate. \"" +
+                InnocentRequestThanks(id) + "\" (+" + std::to_string(pay) + " gold, Karma and Fame rise.)";
+}
+// Per-frame escort follow — declared here, defined after kWildernessReturnGatePos.
+static void UpdateEscort(GameState& s, float dt);
+// An escort can't survive leaving the wilderness (no teleport exploit, no
+// stranded request). Death, ghosting, dungeon entry, and town gates all cancel.
+static void CancelEscort(GameState& s, const std::string& why) {
+    if (s.escortInnocent < 0) return;
+    int id = s.escortInnocent;
+    s.escortInnocent = -1;
+    s.innocentReqState[std::clamp(id, 0, 3)] = 0;
+    s.innocentReqCooldown[std::clamp(id, 0, 3)] = kInnocentRequestCooldown;
+    s.logLine = InnocentName(id) + " " + why;
+}
+
+// --- Silas's traveling shop ---------------------------------------------------
+// Fair-but-not-generous: a small premium over the Provisioner's town prices for
+// the convenience of buying on the road. Warm friends (>=6 warmth) get 10% off.
+// Stock counts persist and refresh every kMerchantRestockSeconds.
+struct MerchantStockDef { const char* label; int price; int kind; };
+// kind: 0 heal potion, 1 bandage, 2 reagent, 3 Cutlass (gear), 4 Traveler's Tunic (gear)
+static const std::array<MerchantStockDef, 5> kMerchantStockDefs = {{
+    { "Heal Potion", 18, 0 }, { "Bandages", 10, 1 }, { "Reagents", 2, 2 },
+    { "Cutlass", 60, 3 }, { "Traveler's Tunic", 50, 4 },
+}};
+static const std::array<int, 5> kMerchantStockFull = {{ 3, 5, 5, 1, 1 }};
+static int MerchantPrice(const GameState& s, int stockIdx) {
+    int base = kMerchantStockDefs[std::clamp(stockIdx, 0, 4)].price;
+    if (InnocentWarmth(s, 2) >= 6) return std::max(1, (int)std::round(base * 0.9f));
+    return base;
+}
+static void MerchantBuy(GameState& s, int stockIdx) {
+    stockIdx = std::clamp(stockIdx, 0, 4);
+    if (s.merchantStock[stockIdx] <= 0) return;
+    if (s.innocentMem[2].murdered > 0) { s.logLine = "Silas wants nothing to do with you."; return; }
+    int price = MerchantPrice(s, stockIdx);
+    if (s.gold < price) { s.logLine = "Not enough gold for that."; return; }
+    int kind = kMerchantStockDefs[stockIdx].kind;
+    if ((kind == 3 || kind == 4) && (int)s.backpack.size() >= BackpackCap(s)) {
+        s.logLine = "Your backpack is full (" + std::to_string(BackpackCap(s)) + " items).";
+        return;
+    }
+    s.gold -= price;
+    s.merchantStock[stockIdx]--;
+    if (kind == 0) { // heal potion — mirrors TryBuyHealPotion
+        auto it = std::find_if(s.potions.begin(), s.potions.end(),
+                               [](const PotionStack& p) { return p.name == "Heal Potion"; });
+        if (it == s.potions.end()) s.potions.push_back({ "Heal Potion", "heal", 30, 1 });
+        else it->count += 1;
+    } else if (kind == 1) s.bandages += 1;
+    else if (kind == 2) s.reagents += 1;
+    else if (kind == 3) s.backpack.push_back(Item{ s.nextItemId++, "Cutlass", ItemType::Weapon, "", "1H", 4, "Swordsmanship" });
+    else s.backpack.push_back(Item{ s.nextItemId++, "Traveler's Tunic", ItemType::Armor, "chest", "", 3, "" });
+    s.logLine = "Bought " + std::string(kMerchantStockDefs[stockIdx].label) +
+                " from Silas for " + std::to_string(price) + " gold.";
+}
+
+static void SnoopInnocent(GameState& s) {
+    if (!s.innocentEncounter.has_value() || s.innocentEncounter->resolved) return;
     GameState::InnocentEncounter enc = *s.innocentEncounter;
+    int id = enc.identity;
     bool succeeded = RandUnit() * 100.0f < SnoopChance(s);
     float gain = GainSkillCapped(s.snooping, RollGatherSkillGain(s.snooping), 120.0f);
     std::string gainNote = gain > 0 ? " (Snooping +" + std::to_string(gain).substr(0, 4) + ")" : "";
     if (succeeded) {
+        s.innocentMem[id].snooped++;
         s.innocentEncounter->canSteal = true;
-        s.logLine = "You quietly check " + enc.name + "'s belongings — exactly " +
+        s.logLine = "You quietly check " + InnocentName(id) + "'s belongings — exactly " +
                      std::to_string(enc.gold) + " gold, and you've got a read on them now." + gainNote;
         return;
     }
@@ -3655,13 +4119,14 @@ static void SnoopInnocent(GameState& s) {
     for (int i = 0; i < itemsLost && !s.backpack.empty(); i++)
         s.backpack.erase(s.backpack.begin() + (std::rand() % s.backpack.size()));
     ApplyShaken(s);
-    s.logLine = enc.name + " catches you lingering too close and shouts for the guard — " +
+    s.logLine = InnocentCaughtLine(id) + " (" +
                  std::to_string(goldLost) + " gold and " + std::to_string(itemsLost) +
-                 " item" + (itemsLost == 1 ? "" : "s") + " confiscated." + gainNote;
+                 " item" + (itemsLost == 1 ? "" : "s") + " confiscated.)" + gainNote;
 }
 static void StealFromInnocent(GameState& s) {
-    if (!s.innocentEncounter.has_value() || !s.innocentEncounter->canSteal) return;
+    if (!s.innocentEncounter.has_value() || !s.innocentEncounter->canSteal || s.innocentEncounter->resolved) return;
     GameState::InnocentEncounter enc = *s.innocentEncounter;
+    int id = enc.identity;
     bool succeeded = RandUnit() * 100.0f < StealChance(s);
     float gain = GainSkillCapped(s.stealing, RollGatherSkillGain(s.stealing), 120.0f);
     std::string gainNote = gain > 0 ? " (Stealing +" + std::to_string(gain).substr(0, 4) + ")" : "";
@@ -3670,29 +4135,43 @@ static void StealFromInnocent(GameState& s) {
         s.gold += enc.gold;
         GainKarma(s, -5.0f);
         s.notoriety += 10.0f;
-        s.logLine = "You lift " + std::to_string(enc.gold) + " gold from " + enc.name +
+        s.innocentMem[id].stolenFrom++;
+        s.logLine = "You lift " + std::to_string(enc.gold) + " gold from " + InnocentName(id) +
                      " without them noticing." + gainNote;
     } else {
-        s.logLine = "Your nerve fails you at the last second — you let " + enc.name +
+        s.logLine = "Your nerve fails you at the last second — you let " + InnocentName(id) +
                      " walk on, empty-handed but unnoticed." + gainNote;
     }
 }
 static void SpareInnocent(GameState& s) {
-    if (!s.innocentEncounter.has_value()) return;
+    if (!s.innocentEncounter.has_value() || s.innocentEncounter->resolved) return;
+    int id = s.innocentEncounter->identity;
+    s.innocentMem[id].spared++;
     bool reduced = s.notoriety > 0.0f;
     s.notoriety = std::max(0.0f, s.notoriety - 5.0f);
     GainKarma(s, 10.0f);
-    s.logLine = "You let " + s.innocentEncounter->name + " pass unharmed." +
+    // Sparing pays: a rumor, a small gift, or a blessing — in their voice.
+    float roll = RandUnit();
+    std::string reward = (roll < 0.55f) ? InnocentRumor(s, id)
+                       : (roll < 0.80f) ? InnocentGift(s, id)
+                                        : InnocentBlessing(s, id);
+    s.innocentEncounter->resolved = true;
+    s.innocentEncounter->farewell = "\"" + InnocentThanks(id) + "\" " + reward;
+    s.logLine = "You let " + InnocentName(id) + " pass unharmed." +
                  (reduced ? " Your conscience eases slightly." : "");
-    s.innocentEncounter.reset();
 }
 static void MurderInnocent(GameState& s) {
-    if (!s.innocentEncounter.has_value()) return;
+    if (!s.innocentEncounter.has_value() || s.innocentEncounter->resolved) return;
     GameState::InnocentEncounter enc = *s.innocentEncounter;
+    int id = enc.identity;
     s.gold += enc.gold;
     s.notoriety += kNotorietyPerMurder;
     GainKarma(s, -30.0f);
-    s.logLine = "You strike down " + enc.name + " and take " + std::to_string(enc.gold) +
+    s.innocentMem[id].murdered++;
+    // A murdered traveler's replacement takes longer to appear on the road.
+    if (enc.spotIdx >= 0 && enc.spotIdx < 4)
+        s.innocentSpots[enc.spotIdx].respawnTimer = kInnocentRespawnSeconds * kInnocentMurderRespawnMult;
+    s.logLine = "You strike down " + InnocentName(id) + " and take " + std::to_string(enc.gold) +
                  " gold. Your notoriety rises.";
     s.innocentEncounter.reset();
 }
@@ -3815,6 +4294,7 @@ static bool CheckMonsterDefeatedAndHandleWin(GameState& s) {
     }
     int goldFound = std::max(1, c.monster.baseGold + (std::rand() % 3) - 1);
     s.corpses.push_back({ c.monster.name, c.monster.baseLeather, goldFound });
+    SpawnPanelKillCorpse(s, c.monster.name); // visible corpse at the player's position
     std::string msg = "Defeated the " + c.monster.name + "! Corpse left behind with leather and " +
                         std::to_string(goldFound) + " gold to loot.";
     // dungeonIdx < 0 means this isn't one of the 4 curated dungeons (Wilderness
@@ -3875,11 +4355,11 @@ static void MonsterCounterAndMaybeEnd(GameState& s) {
         }
         // --- Loss: mirrors endCombatLoss() ---
         MaybeGainMagicResist(s, c);
-        s.hp = std::max(1, (int)std::round(s.maxHp * 0.2f));
         s.logLine = "You were defeated by the " + c.monster.name + " — you retreat, battered.";
         s.combat.reset();
         ApplyShaken(s);
         if (!TryTriggerAmbush(s, "dungeon")) TryTriggerInnocentEncounter(s, "dungeon");
+        BeginPlayerDeath(s);
     }
 }
 
@@ -3916,27 +4396,18 @@ static void LiveApplyWeaponTraining(GameState& s) {
 // Same reward shape as CheckMonsterDefeatedAndHandleWin's non-boss branch with
 // dungeonIdx<0 (no dungeon XP/boss ladder — Wilderness monsters aren't part of any of
 // the 4 curated dungeons' progression).
-static void EndWildMonsterWin(GameState& s, const std::string& name, int baseGold, int baseLeather) {
-    int goldFound = std::max(1, baseGold + (std::rand() % 3) - 1);
-    s.corpses.push_back({ name, baseLeather, goldFound });
-    s.logLine = "Defeated the " + name + "! Corpse left behind with leather and " +
-                 std::to_string(goldFound) + " gold to loot.";
-    LiveMaybeGainMagicResist(s);
-    DecrementShaken(s);
-    AddWeeklyProgress(s, kGoalDefeat, 1);
-    s.wildEngaged.reset();
-    if (!TryTriggerAmbush(s, "dungeon")) TryTriggerInnocentEncounter(s, "dungeon");
-}
+// (Win handling moved to BeginWildMonsterDeath/FinishMonsterDeath — the fight now
+// ends with a death animation; rewards/corpse/ambush chaining run when it completes.)
 
 // Same shape as MonsterCounterAndMaybeEnd's loss branch (the ordinary-monster path —
 // Wilderness monsters are never murderers).
 static void EndWildMonsterLoss(GameState& s, const std::string& name) {
     LiveMaybeGainMagicResist(s);
-    s.hp = std::max(1, (int)std::round(s.maxHp * 0.2f));
     s.logLine = "You were defeated by the " + name + " — you retreat, battered.";
     s.wildEngaged.reset();
     ApplyShaken(s);
     if (!TryTriggerAmbush(s, "dungeon")) TryTriggerInnocentEncounter(s, "dungeon");
+    BeginPlayerDeath(s);
 }
 // Harsher loss consequence once the Rival has proven it can beat the player (see
 // GameState::rivalHasBeatenPlayer) — same stakes as the Notoriety system's
@@ -3951,12 +4422,12 @@ static void EndWildMonsterMurdererLoss(GameState& s, const std::string& name) {
     s.gold -= goldLost;
     int itemsLost = (int)s.backpack.size();
     s.backpack.clear();
-    s.hp = std::max(1, (int)std::round(s.maxHp * 0.2f));
     s.logLine = name + " strips you of " + std::to_string(goldLost) + " gold and " +
                  std::to_string(itemsLost) + " item" + (itemsLost == 1 ? "" : "s") + " before vanishing into the wilds.";
     s.wildEngaged.reset();
     ApplyShaken(s);
     if (!TryTriggerAmbush(s, "dungeon")) TryTriggerInnocentEncounter(s, "dungeon");
+    BeginPlayerDeath(s);
 }
 // Dungeon counterparts of the two functions above (2026-09-22) — same reward shape as
 // CheckMonsterDefeatedAndHandleWin/MonsterCounterAndMaybeEnd's ordinary-monster paths,
@@ -3964,34 +4435,16 @@ static void EndWildMonsterMurdererLoss(GameState& s, const std::string& name) {
 // monster's dungeonIdx is always valid, so a non-boss win also advances dungeonXP and
 // can unlock the boss — mirrors CheckMonsterDefeatedAndHandleWin's dungeon branch
 // exactly (main.cpp, CheckMonsterDefeatedAndHandleWin).
-static void EndDungeonMonsterWin(GameState& s, int dungeonIdx, bool isBoss, const std::string& name,
-                                    int level, int baseGold, int baseLeather) {
-    int goldFound = std::max(1, baseGold + (std::rand() % 3) - 1);
-    s.corpses.push_back({ name, baseLeather, goldFound });
-    std::string msg = "Defeated the " + name + "! Corpse left behind with leather and " +
-                        std::to_string(goldFound) + " gold to loot.";
-    if (!isBoss) {
-        s.dungeonXP[dungeonIdx] += level;
-        const DungeonDef& dungeon = kDungeons[dungeonIdx];
-        if (s.dungeonXP[dungeonIdx] >= dungeon.bossUnlockXp &&
-            s.dungeonXP[dungeonIdx] - level < dungeon.bossUnlockXp) {
-            msg += " " + dungeon.boss.name + " is now available!";
-        }
-    }
-    LiveMaybeGainMagicResist(s);
-    s.logLine = msg;
-    s.dungeonEngaged.reset();
-    DecrementShaken(s);
-    AddWeeklyProgress(s, kGoalDefeat, 1);
-    if (!TryTriggerAmbush(s, "dungeon")) TryTriggerInnocentEncounter(s, "dungeon");
-}
+// (Win handling moved to BeginDungeonMonsterDeath/FinishMonsterDeath — same deal.)
 static void EndDungeonMonsterLoss(GameState& s, const std::string& name) {
     LiveMaybeGainMagicResist(s);
-    s.hp = std::max(1, (int)std::round(s.maxHp * 0.2f));
+    if (s.selectedDungeon.has_value())
+        s.deathsByDungeon[std::clamp(*s.selectedDungeon, 0, 4)]++; // feeds "restless dungeon" rumors
     s.logLine = "You were defeated by the " + name + " — you retreat, battered.";
     s.dungeonEngaged.reset();
     ApplyShaken(s);
     if (!TryTriggerAmbush(s, "dungeon")) TryTriggerInnocentEncounter(s, "dungeon");
+    BeginPlayerDeath(s);
 }
 
 // Resolves one full round of a physical attack: player swings, then the active pet
@@ -4431,6 +4884,7 @@ static int RollInRange(const std::array<int, 2>& range) {
 }
 
 static void TryStartTameAttempt(GameState& s, int creatureIdx) {
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
     if (s.tamingAttempt.has_value() || s.ambush.has_value() || s.innocentEncounter.has_value()) return;
     const WildCreature& creature = kWildCreatures[creatureIdx];
     if (TameChance(s, creature) <= 0.0f) {
@@ -4773,6 +5227,24 @@ static void SaveGame(const GameState& s) {
     for (size_t i = 0; i < s.potions.size(); i++) out << "potions." << i << "=" << PotionToLine(s.potions[i]) << "\n";
     out << "bankItems.count=" << s.bankItems.size() << "\n";
     for (size_t i = 0; i < s.bankItems.size(); i++) out << "bankItems." << i << "=" << ItemToLine(s.bankItems[i]) << "\n";
+    // Innocent deep-dive (2026-09-24): per-identity memory, dungeon deaths, Silas's
+    // shop, and request state so Tam/Liora/Silas/Garran remember you between sessions.
+    for (int i = 0; i < 4; i++) {
+        const auto& m = s.innocentMem[i];
+        out << "innocentMem." << i << "=" << m.met << "," << m.spared << "," << m.snooped << ","
+            << m.stolenFrom << "," << m.murdered << "," << m.helped << "\n";
+    }
+    out << "deathsByDungeon=" << s.deathsByDungeon[0] << "," << s.deathsByDungeon[1] << ","
+        << s.deathsByDungeon[2] << "," << s.deathsByDungeon[3] << "," << s.deathsByDungeon[4] << "\n";
+    out << "merchantStock=" << s.merchantStock[0] << "," << s.merchantStock[1] << ","
+        << s.merchantStock[2] << "," << s.merchantStock[3] << "," << s.merchantStock[4] << "\n";
+    out << "merchantRestockT=" << (int)s.merchantRestockT << "\n";
+    out << "innocentReqState=" << s.innocentReqState[0] << "," << s.innocentReqState[1] << ","
+        << s.innocentReqState[2] << "," << s.innocentReqState[3] << "\n";
+    out << "innocentReqKind=" << s.innocentReqKind[0] << "," << s.innocentReqKind[1] << ","
+        << s.innocentReqKind[2] << "," << s.innocentReqKind[3] << "\n";
+    out << "innocentReqCooldown=" << (int)s.innocentReqCooldown[0] << "," << (int)s.innocentReqCooldown[1]
+        << "," << (int)s.innocentReqCooldown[2] << "," << (int)s.innocentReqCooldown[3] << "\n";
     out.close();
 #ifdef __EMSCRIPTEN__
     // The write above only lands in the in-memory FS — flush it to IndexedDB so it
@@ -4920,7 +5392,33 @@ static bool LoadGame(GameState& s) {
         else if (key.rfind("potions.", 0) == 0) { if (auto p = PotionFromLine(val)) s.potions.push_back(*p); }
         else if (key == "bankItems.count") { s.bankItems.clear(); s.bankItems.reserve(std::atoi(val.c_str())); }
         else if (key.rfind("bankItems.", 0) == 0) { if (auto it = ItemFromLine(val)) s.bankItems.push_back(*it); }
+        else if (key.rfind("innocentMem.", 0) == 0) {
+            int i = std::atoi(key.substr(12).c_str());
+            if (i >= 0 && i < 4) {
+                auto p = SplitStr(val, ',');
+                if (p.size() >= 6) {
+                    auto& m = s.innocentMem[i];
+                    m.met = std::atoi(p[0].c_str()); m.spared = std::atoi(p[1].c_str());
+                    m.snooped = std::atoi(p[2].c_str()); m.stolenFrom = std::atoi(p[3].c_str());
+                    m.murdered = std::atoi(p[4].c_str()); m.helped = std::atoi(p[5].c_str());
+                }
+            }
+        }
+        else if (key == "deathsByDungeon") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 5; i++) s.deathsByDungeon[i] = std::max(0, std::atoi(p[i].c_str())); }
+        else if (key == "merchantStock") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 5; i++) s.merchantStock[i] = std::max(0, std::atoi(p[i].c_str())); }
+        else if (key == "merchantRestockT") s.merchantRestockT = (float)std::max(0, std::atoi(val.c_str()));
+        else if (key == "innocentReqState") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 4; i++) s.innocentReqState[i] = std::clamp(std::atoi(p[i].c_str()), 0, 2); }
+        else if (key == "innocentReqKind") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 4; i++) s.innocentReqKind[i] = std::clamp(std::atoi(p[i].c_str()), 0, 3); }
+        else if (key == "innocentReqCooldown") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 4; i++) s.innocentReqCooldown[i] = (float)std::max(0, std::atoi(p[i].c_str())); }
     }
+
+    // Escort state doesn't persist — a loaded "active escort" request would have no
+    // follower to complete, so release it back to a cooldown instead of stranding it.
+    for (int i = 0; i < 4; i++)
+        if (s.innocentReqState[i] == 2 && s.innocentReqKind[i] == 3) {
+            s.innocentReqState[i] = 0;
+            s.innocentReqCooldown[i] = kInnocentRequestCooldown;
+        }
 
     if (lastActiveEpoch > 0) {
         long long elapsed = (long long)std::time(nullptr) - lastActiveEpoch;
@@ -4943,9 +5441,25 @@ static bool LoadGame(GameState& s) {
     // literal "maxHp == str" (Mark's call) — recompute from the loaded str rather than
     // trusting the stale saved maxHp, which would otherwise carry the old +50 forever.
     // Preserves current damage (missing HP) rather than fully healing on the fixup.
+    bool wasDeadAtSave = (s.hp <= 0); // autosave runs every 2s, even mid-death/ghost
     int missingHp = std::max(0, s.maxHp - s.hp);
     s.maxHp = s.str;
     s.hp = std::max(1, s.maxHp - missingHp);
+    if (wasDeadAtSave) {
+        // Saved mid-death — the ghost fields are transient and don't survive a
+        // reload, so complete the resurrection now: full HP at the Town 1 gate,
+        // same as the ghost timer finishing. The death penalty was already
+        // applied before the save.
+        s.screen = Screen::Town;
+        s.selectedTown = 0;
+        s.townPlayerPos = { 450, 830 };
+        s.hp = s.maxHp;
+        s.mana = MaxMana(s);
+        s.playerIsGhost = false;
+        s.playerDeathAnimT = 0.0f;
+        s.ghostTimer = 0.0f;
+        s.logLine = "You wake in Town, whole once more.";
+    }
     return true;
 }
 
@@ -5202,6 +5716,7 @@ static void SellFromBackpack(GameState& s, int backpackIdx) {
 // Skinning goes from 0 to 100 (live UO's Forensic Evaluation formula). Gold sat on
 // the corpse since the kill (see the combat-win code above) and is only collected now.
 static void SkinCorpse(GameState& s, int corpseIdx) {
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
     if (corpseIdx < 0 || corpseIdx >= (int)s.corpses.size()) return;
     Corpse c = s.corpses[corpseIdx];
     s.corpses.erase(s.corpses.begin() + corpseIdx);
@@ -5392,19 +5907,29 @@ struct WildernessInnocentSpot { Vector2 pos; };
 static const std::array<WildernessInnocentSpot, 4> kWildernessInnocentSpots = {{
     { {450, 1150} }, { {1450, 1150} }, { {1150, 450} }, { {2100, 1350} }, // last one along the Saltmere stretch
 }};
-static const float kInnocentRespawnSeconds = 45.0f;
-// Called once per frame from DrawWildernessScreen — rolls a fresh traveler (same
-// kInnocentNames/gold-range as the old passive TryTriggerInnocentEncounter) into any
-// spot that's currently empty once its respawn timer runs out.
+// (kInnocentRespawnSeconds is defined just above the innocent deep-dive section.)
+// Called once per frame from DrawWildernessScreen — rolls a fresh traveler into
+// any spot that's currently empty once its respawn timer runs out. Spot i always
+// hosts identity i now (fixed people with persistent memory, not random faces).
+// Also ticks Silas's shop restock, request cooldowns, and the escort follow.
 static void UpdateInnocentSpots(GameState& s, float dt) {
-    for (auto& spot : s.innocentSpots) {
+    for (size_t i = 0; i < s.innocentSpots.size(); i++) {
+        auto& spot = s.innocentSpots[i];
         if (spot.present) continue;
         spot.respawnTimer -= dt;
         if (spot.respawnTimer > 0.0f) continue;
         spot.present = true;
-        spot.name = kInnocentNames[std::rand() % kInnocentNames.size()];
+        spot.identity = (int)i;
         spot.gold = 10 + (std::rand() % 41);
     }
+    s.merchantRestockT -= dt;
+    if (s.merchantRestockT <= 0.0f) {
+        s.merchantStock = kMerchantStockFull;
+        s.merchantRestockT = kMerchantRestockSeconds;
+    }
+    for (int i = 0; i < 4; i++)
+        if (s.innocentReqCooldown[i] > 0.0f) s.innocentReqCooldown[i] -= dt;
+    UpdateEscort(s, dt);
 }
 struct WildernessCreatureSpot { Vector2 pos; int creatureIdx; };
 static const std::array<WildernessCreatureSpot, 17> kWildernessCreatureSpots = {{
@@ -5439,6 +5964,35 @@ static const std::array<WildernessCreatureSpot, 17> kWildernessCreatureSpots = {
 // Walk here and press E to head back to Town — placed just past the entrance so it's
 // the first thing you see coming in, same as walking straight back out a real gate.
 static const Vector2 kWildernessReturnGatePos = { 900, 1750 };
+// Saltmere-side gate position (mirrors the wilderness entry point for town 2).
+static const Vector2 kSaltmereGatePos = { 2900, 1650 };
+
+// Escort follow (2026-09-24): the escorted innocent walks toward you until close,
+// and the escort completes when they reach either town gate. Times out eventually;
+// a ghost can't be escorting anyone (BeginPlayerDeath clears it).
+static void UpdateEscort(GameState& s, float dt) {
+    if (s.escortInnocent < 0) return;
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
+        CancelEscort(s, "flees as you fall — the escort is broken.");
+        return;
+    }
+    s.escortTimer -= dt;
+    float d = Dist(s.escortPos, s.wildernessPlayerPos);
+    if (d > kEscortFollowRange && d > 0.001f) {
+        Vector2 dir = { (s.wildernessPlayerPos.x - s.escortPos.x) / d,
+                        (s.wildernessPlayerPos.y - s.escortPos.y) / d };
+        s.escortPos.x += dir.x * kEscortSpeed * dt;
+        s.escortPos.y += dir.y * kEscortSpeed * dt;
+    }
+    if (Dist(s.escortPos, kWildernessReturnGatePos) < kEscortCompleteRange ||
+        Dist(s.escortPos, kSaltmereGatePos) < kEscortCompleteRange) {
+        CompleteEscort(s);
+        return;
+    }
+    if (s.escortTimer <= 0.0f) {
+        CancelEscort(s, "gives up waiting and wanders off.");
+    }
+}
 
 // Fightable Wilderness monsters — walk up and press E to engage, then E again in
 // melee range to swing. Live/real-time (GameState::ActiveMonster/wildEngaged) — the
@@ -5475,6 +6029,8 @@ static const std::array<WildernessMonsterSpot, 12> kWildernessMonsterSpots = {{
     { {2600, 1650}, "Wandering Goblin", 5, 3, 4, 1 },   // corridor
     { {2750, 1850}, "Lone Wolf", 9, 5, 7, 2 },          // corridor, near the Saltmere side
 }};
+static_assert(kWildernessMonsterSpots.size() == kWildMonsterSpotCount,
+              "wildSpotRespawn is sized by kWildMonsterSpotCount — keep them in sync");
 // --- UO player-killer Rival (2026-09-24): epithet ladder, tuning, and helpers ---
 // Display name escalates with rivalKillsOnPlayer — the red earns its reputation.
 static std::string RivalEpithetName(const GameState& s) {
@@ -5765,6 +6321,15 @@ static const std::array<WildernessDungeonEntrance, 5> kWildernessDungeonEntrance
 
 static void UpdateRivalRoaming(GameState& s, float dt) {
     if (s.wildEngaged.has_value() && s.wildEngaged->isRival) return;
+    // Ghosts are beneath the red's notice — break off any hunt/stalk, patrol instead.
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
+        if (s.rivalActivity == GameState::RivalActivity::Hunting ||
+            s.rivalActivity == GameState::RivalActivity::Stalking) {
+            s.rivalActivity = GameState::RivalActivity::Patrol;
+            s.rivalActivityTimer = 0.0f;
+        }
+        return;
+    }
 
     // Smoothed player velocity for intercept steering. Movement runs after this in
     // DrawWildernessScreen, so this is one frame stale — fine for prediction.
@@ -5920,6 +6485,15 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
 static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
     auto& b = s.blades[bi];
     if (s.wildEngaged.has_value() && s.wildEngaged->bladeIdx == bi) return;
+    // Same ghost rule as the champion — the crew doesn't hunt the dead either.
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
+        if (b.activity == GameState::RivalActivity::Hunting ||
+            b.activity == GameState::RivalActivity::Stalking) {
+            b.activity = GameState::RivalActivity::Patrol;
+            b.activityTimer = 0.0f;
+        }
+        return;
+    }
 
     // --- Stalking: shadow the player at range, then commit (solo) or break off ---
     if (b.activity == GameState::RivalActivity::Stalking) {
@@ -6140,14 +6714,18 @@ static void DrawTiledRect(const Texture2D* tex, Rectangle worldRect, Vector2 cam
 // rooms in kDungeonRoomLayouts above (indices 0-4 = monsters 0-4, index 5 = boss).
 static Vector2 DungeonMonsterNodePos(int dungeonIdx, int idx) {
     // Doubled to match kDungeonRoomLayouts (see that array's comment).
-    static const Vector2 kCenters[5][6] = {
-        { {900,1300}, {400,1300}, {400,740}, {900,740}, {1400,740}, {1400,310} }, // Emberveil Hollow
-        { {900,1350}, {900,450}, {1350,900}, {450,900}, {1400,500}, {1420,1320} }, // Bloodtusk Hold
-        { {900,420}, {900,1380}, {1380,900}, {420,900}, {1460,320}, {1430,1430} }, // The Sunken Crypt
-        { {920,1320}, {440,1320}, {920,840}, {920,400}, {1370,840}, {1400,1300} }, // Wyrmscar Depths
-        { {900,1300}, {900,1030}, {570,1030}, {1230,1030}, {900,760}, {900,440} }, // The Hollow Warrens
+    // 9 slots per dungeon (kDungeonSlotCount): 0-7 regular, 8 boss. Slots 5-7 are
+    // extra spawns (2026-09-24) placed as second monsters in the larger rooms so
+    // respawn timers don't empty the dungeon; they reuse monster types 0-2.
+    static const Vector2 kCenters[5][kDungeonSlotCount] = {
+        { {900,1300}, {400,1300}, {400,740}, {900,740}, {1400,740}, {1040,1300}, {760,740}, {1260,740}, {1400,310} }, // Emberveil Hollow
+        { {900,1350}, {900,450}, {1350,900}, {450,900}, {1400,500}, {750,750}, {1050,1050}, {1050,450}, {1420,1320} }, // Bloodtusk Hold
+        { {900,420}, {900,1380}, {1380,900}, {420,900}, {1460,320}, {900,900}, {1040,420}, {1240,900}, {1430,1430} }, // The Sunken Crypt
+        { {920,1320}, {440,1320}, {920,840}, {920,400}, {1370,840}, {1060,1320}, {1060,840}, {1230,840}, {1400,1300} }, // Wyrmscar Depths
+        { {900,1300}, {900,1030}, {570,1030}, {1230,1030}, {900,760}, {1020,1300}, {1020,1030}, {450,1030}, {900,440} }, // The Hollow Warrens
     };
-    return kCenters[dungeonIdx][std::clamp(idx, 0, 5)];
+    static_assert(kDungeonSlotCount == 9, "kCenters must have kDungeonSlotCount entries per dungeon");
+    return kCenters[dungeonIdx][std::clamp(idx, 0, kDungeonBossSlot)];
 }
 
 // Monsters wander in a small loop around their home spot rather than standing frozen —
@@ -6263,6 +6841,19 @@ static void DrawWorldNode(Vector2 screenPos, float radius, Color color, const st
             DrawUIText(sublabel.c_str(), (int)screenPos.x - stw / 2, (int)screenPos.y + 7, 11, Fade(RAYWHITE, 0.85f));
         }
     }
+}
+
+// Death-system variant of DrawWorldNode (2026-09-24): draws an art icon fading out
+// and growing slightly as the death animation runs — used for monsters mid-death
+// in the 2D wilderness/dungeon views. Everything else (backing circle, labels)
+// would look wrong half-faded, so this only draws the fading sprite.
+static void DrawDyingWorldNode(Vector2 screenPos, float radius, const Texture2D* icon,
+                               Color iconTint, const Rectangle* iconSrcRect, float iconScaleMul) {
+    bool onScreen = screenPos.x > kViewport.x - radius * 2 && screenPos.x < kViewport.x + kViewport.width + radius * 2 &&
+                     screenPos.y > kViewport.y - radius * 2 && screenPos.y < kViewport.y + kViewport.height + radius * 2;
+    if (!onScreen || !icon) return;
+    if (iconSrcRect) DrawIconCenteredRect(*icon, *iconSrcRect, screenPos, radius * 1.5f * iconScaleMul, iconTint);
+    else DrawIconCentered(*icon, screenPos, radius * 1.5f * iconScaleMul, iconTint);
 }
 
 // Simple clickable button helper.
@@ -7294,13 +7885,15 @@ static T3CMonLook T3CMonsterLook(int iconIdx) {
     }
 }
 
-// Dungeon monsters -> body plan, per monster (monsterIdx 0..4 regulars in
-// kDungeons[di] order, 5 = boss). Serpents, drakes, wyverns, rats and cats are
-// quadrupeds; orcs, undead and wraiths are humanoids.
+// Dungeon monsters -> body plan, per monster (monsterIdx 0..7 regulars in
+// kDungeons[di] order, kDungeonBossSlot (8) = boss). Serpents, drakes, wyverns, rats and cats are
+// quadrupeds; orcs, undead and wraiths are humanoids. Extra regular slots 5-7
+// reuse the looks of monsters 0-2 (same as the name mapping in DungeonSlotMonster).
 struct T3CDunLook { bool humanoid; bool serpent; int specIdx; int humanIdx; float scale; };
 static T3CDunLook T3CDungeonMonsterLook(int dungeonIdx, int monsterIdx) {
-    bool boss = (monsterIdx == 5);
+    bool boss = (monsterIdx == kDungeonBossSlot);
     float bs = boss ? 1.35f : 1.0f;
+    if (!boss) monsterIdx = monsterIdx % 5; // extra slots 5-7 borrow looks from 0-2
     switch (dungeonIdx % 5) {
         case 0: // Emberveil Hollow — living elements: brutes + critters
             switch (monsterIdx) {
@@ -7364,7 +7957,7 @@ static const int kT3CTrackBladeWild = 91; // + blade idx (0..2) — one track pe
 static const int kT3CTrackInnocentWild = 100; // + innocent idx
 static const int kT3CTrackCompanion = 120;
 static const int kT3CTrackPlayerDungeon = 130;
-static const int kT3CTrackMonsterDungeon = 140; // + monster idx (0..5), engaged = +6
+static const int kT3CTrackMonsterDungeon = 140; // + monster idx (0..8), engaged = +9
 // ==== T3C-KIT-END ====
 
 // Orbit-camera state for the 3D town view. File-statics (like g_scrollDragging),
@@ -7825,7 +8418,7 @@ static void Town3DEnsureGround(const GameState& s) {
 // two of them) had its view of the ground/buildings completely blocked by
 // the nearest one — an empty flat-colored screen. DrawCylinderEx has the
 // identical cap behavior, so the real fix is this hand-rolled side-wall-
-// only quad function, shared by both the town and wilderness skies below.
+// only quad function, shared by the town, wilderness, and interior skies.
 static void Town3DSkyBand(Vector3 base, Vector3 top, float radius, int sides, Color color) {
     float step = 360.0f / (float)sides;
     rlBegin(RL_TRIANGLES);
@@ -9346,29 +9939,41 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                     look.scale, look.coat, ca, kitDist(sp.pos.x, sp.pos.y), shadowPass);
     }
     // Monsters at their live positions (the engaged one at its fight position).
+    bool wildDying = s.dyingMonster.has_value() && s.dyingMonster->zone == 0;
     for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
         bool eng = wasEngaged && s.wildEngaged->spotIdx == (int)i;
-        Vector2 mp = eng ? s.wildEngaged->pos : WildernessMonsterLivePos((int)i, s.worldTime);
+        // Empty slots (waiting to respawn) draw nothing — except a slot mid-death-
+        // animation, which draws the shrinking body instead.
+        bool isDying = wildDying && !s.dyingMonster->isRival && s.dyingMonster->spotIdx == (int)i;
+        if (!eng && !isDying && s.wildSpotRespawn[i] > 0.0f) continue;
+        Vector2 mp = eng ? s.wildEngaged->pos : (isDying ? s.dyingMonster->pos : WildernessMonsterLivePos((int)i, s.worldTime));
         if (!vis(mp.x, mp.y, 70.0f)) continue;
         float face = eng ? atan2f(s.wildernessPlayerPos.y - mp.y, s.wildernessPlayerPos.x - mp.x)
                          : Wild3DWanderFacing((int)i, mp.x, mp.y, s.worldTime);
         T3CMonLook mlook = T3CMonsterLook(kWildernessMonsterSpots[i].iconIdx);
         T3CAnim ma = T3CMakeAnim(kT3CTrackMonsterWild + (int)i, mp.x, mp.y, !shadowPass);
+        float shrink = isDying ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
         if (mlook.humanoid) {
-            T3CDrawHumanoid(g_t3cHumans[0].parts, mp.x, mp.y, face, mlook.scale,
+            T3CDrawHumanoid(g_t3cHumans[0].parts, mp.x, mp.y, face, mlook.scale * shrink,
                             mlook.shirt, mlook.pants, mlook.skin, ma, shadowPass);
         } else {
             T3CDrawQuad(g_t3cQuads[mlook.specIdx].parts, mp.x, mp.y, face,
-                        mlook.scale, mlook.coat, ma, kitDist(mp.x, mp.y), shadowPass);
+                        mlook.scale * shrink, mlook.coat, ma, kitDist(mp.x, mp.y), shadowPass);
         }
     }
-    // The Rival Adventurer.
+    // The Rival Adventurer — while their death animation plays, the fading body at
+    // the kill site is drawn instead of the patrolling rival (no double-draw);
+    // they "retreat" (RivalFightEnded already put them back on patrol) rather
+    // than leaving a corpse.
+    bool rivalDying3D = wildDying && s.dyingMonster->isRival && s.dyingMonster->bladeIdx < 0;
     {
-        Vector2 rp = (wasEngaged && s.wildEngaged->isRival) ? s.wildEngaged->pos : s.rivalPos;
+        Vector2 rp = rivalDying3D ? s.dyingMonster->pos
+                     : ((wasEngaged && s.wildEngaged->isRival) ? s.wildEngaged->pos : s.rivalPos);
         if (vis(rp.x, rp.y, 70.0f)) {
             float ryaw = atan2f(s.wildernessPlayerPos.y - rp.y, s.wildernessPlayerPos.x - rp.x);
             T3CAnim ra = T3CMakeAnim(kT3CTrackRival, rp.x, rp.y, !shadowPass);
-            T3CDrawHumanoid(g_t3cHumans[0].parts, rp.x, rp.y, ryaw, 1.0f,
+            float rscale = rivalDying3D ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
+            T3CDrawHumanoid(g_t3cHumans[0].parts, rp.x, rp.y, ryaw, rscale,
                             Color{ 150, 60, 55, 255 }, Color{ 60, 50, 55, 255 },
                             Color{ 235, 200, 170, 255 }, ra, shadowPass);
         }
@@ -9377,16 +9982,23 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     // dried-blood guild colors and slightly smaller, so the crew reads as the
     // crew and the champion stays the champion.
     for (int bi = 0; bi < kBladeCount; bi++) {
-        Vector2 bp = (wasEngaged && s.wildEngaged->bladeIdx == bi) ? s.wildEngaged->pos : s.blades[bi].pos;
+        // While a blade's death animation plays, the fading body at the kill site
+        // is drawn instead of the patrolling blade (no double-draw) — same
+        // retreat-not-death treatment as the champion above.
+        bool bladeDying3D = wildDying && s.dyingMonster->isRival && s.dyingMonster->bladeIdx == bi;
+        Vector2 bp = bladeDying3D ? s.dyingMonster->pos
+                     : ((wasEngaged && s.wildEngaged->bladeIdx == bi) ? s.wildEngaged->pos : s.blades[bi].pos);
         if (vis(bp.x, bp.y, 70.0f)) {
             float byaw = atan2f(s.wildernessPlayerPos.y - bp.y, s.wildernessPlayerPos.x - bp.x);
             T3CAnim ba = T3CMakeAnim(kT3CTrackBladeWild + bi, bp.x, bp.y, !shadowPass);
-            T3CDrawHumanoid(g_t3cHumans[0].parts, bp.x, bp.y, byaw, 0.95f,
+            float bscale = (bladeDying3D ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f) * 0.95f;
+            T3CDrawHumanoid(g_t3cHumans[0].parts, bp.x, bp.y, byaw, bscale,
                             Color{ 70, 25, 30, 255 }, Color{ 35, 30, 35, 255 },
                             Color{ 220, 190, 165, 255 }, ba, shadowPass);
         }
     }
-    // Roaming innocents (only the ones currently present).
+    // Roaming innocents (only the ones currently present) — fixed per-identity
+    // tints from kInnocentDefs so Tam/Liora/Silas/Garran read as distinct people.
     for (size_t i = 0; i < kWildernessInnocentSpots.size(); i++) {
         if (!s.innocentSpots[i].present) continue;
         Vector2 ip = WildernessInnocentLivePos((int)i, s.worldTime);
@@ -9396,9 +10008,29 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         float iyaw = (idx2 * idx2 + idz * idz < 0.04f)
                      ? Town3DHash01(ip.x, ip.y) * 6.2832f : atan2f(idz, idx2);
         T3CAnim ia2 = T3CMakeAnim(kT3CTrackInnocentWild + (int)i, ip.x, ip.y, !shadowPass);
+        const InnocentDef& idef = kInnocentDefs[std::clamp(s.innocentSpots[i].identity, 0, 3)];
         T3CDrawHumanoid(g_t3cHumans[0].parts, ip.x, ip.y, iyaw, 0.95f,
-                        kT3CNPCShirts[i % 6], Color{ 75, 68, 60, 255 },
-                        Color{ 240, 210, 180, 255 }, ia2, shadowPass);
+                        idef.shirt, idef.pants, idef.skin, ia2, shadowPass);
+    }
+    // An innocent you're escorting walks beside you in the 3D world too.
+    if (s.escortInnocent >= 0) {
+        Vector2 ep = s.escortPos;
+        if (vis(ep.x, ep.y, 70.0f)) {
+            float eyaw = atan2f(s.wildernessPlayerPos.y - ep.y, s.wildernessPlayerPos.x - ep.x);
+            T3CAnim ea = T3CMakeAnim(kT3CTrackInnocentWild + 10, ep.x, ep.y, !shadowPass);
+            const InnocentDef& edef = kInnocentDefs[std::clamp(s.escortInnocent, 0, 3)];
+            T3CDrawHumanoid(g_t3cHumans[0].parts, ep.x, ep.y, eyaw, 0.95f,
+                            edef.shirt, edef.pants, edef.skin, ea, shadowPass);
+        }
+    }
+    // Fallen monsters linger where they died — dark flattened mounds that fade
+    // with the corpse timer. Purely visual; the lootable corpse list is separate.
+    for (const GameState::WorldCorpse& c : s.worldCorpses) {
+        if (c.zone != 0) continue;
+        if (!vis(c.pos.x, c.pos.y, 70.0f)) continue;
+        float cfade = std::clamp(c.timer / c.duration, 0.0f, 1.0f);
+        Color mound = Fade(Color{ 55, 45, 42, 255 }, 0.85f * cfade);
+        DrawSphereEx({ c.pos.x, 6.0f, c.pos.y }, 16.0f, 8, 6, mound);
     }
     // AI companion.
     if (Pet* ap = ActivePet(s)) {
@@ -9413,13 +10045,25 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                         kitDist(s.companionPos.x, s.companionPos.y), shadowPass);
         }
     }
-    // Player, same humanoid kit as the town 3D view.
+    // Player, same humanoid kit as the town 3D view — shrinks during the death
+    // animation, ghostly-translucent while a ghost.
     {
         float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
         T3CAnim pa3 = T3CMakeAnim(kT3CTrackPlayerWild, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y, !shadowPass);
-        T3CDrawHumanoid(g_t3cHumans[0].parts, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y,
-                        pyaw, 1.0f, Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
-                        Color{ 240, 210, 180, 255 }, pa3, shadowPass);
+        if (s.playerDeathAnimT > 0.0f) {
+            float pshrink = std::max(0.05f, s.playerDeathAnimT / kPlayerDeathAnimTime);
+            T3CDrawHumanoid(g_t3cHumans[0].parts, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y,
+                            pyaw, pshrink, Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
+                            Color{ 240, 210, 180, 255 }, pa3, shadowPass);
+        } else if (s.playerIsGhost) {
+            Color g = Fade(Color{ 170, 205, 255, 255 }, 0.45f);
+            T3CDrawHumanoid(g_t3cHumans[0].parts, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y,
+                            pyaw, 1.0f, g, g, Fade(Color{ 220, 235, 255, 255 }, 0.45f), pa3, shadowPass);
+        } else {
+            T3CDrawHumanoid(g_t3cHumans[0].parts, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y,
+                            pyaw, 1.0f, Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
+                            Color{ 240, 210, 180, 255 }, pa3, shadowPass);
+        }
     }
 }
 
@@ -9515,6 +10159,7 @@ static Wild3DNearest Wild3DNearestInfo(const GameState& s) {
         consider(sp.pos, "Tame " + kWildCreatures[sp.creatureIdx].name);
     bool wasEngaged = s.wildEngaged.has_value();
     for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
+        if (s.wildSpotRespawn[i] > 0.0f) continue; // empty — waiting to respawn
         Vector2 mp = (wasEngaged && (int)i == s.wildEngaged->spotIdx) ? s.wildEngaged->pos
                      : WildernessMonsterLivePos((int)i, s.worldTime);
         consider(mp, "Fight " + kWildernessMonsterSpots[i].name);
@@ -9526,7 +10171,7 @@ static Wild3DNearest Wild3DNearestInfo(const GameState& s) {
     }
     for (size_t i = 0; i < kWildernessInnocentSpots.size(); i++) {
         if (!s.innocentSpots[i].present) continue;
-        consider(WildernessInnocentLivePos((int)i, s.worldTime), "Approach " + s.innocentSpots[i].name);
+        consider(WildernessInnocentLivePos((int)i, s.worldTime), "Approach " + InnocentName(s.innocentSpots[i].identity));
     }
     for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances)
         consider(e.pos, "Enter " + kDungeons[e.dungeonIdx].name);
@@ -9984,9 +10629,20 @@ static void Dungeon3DDrawPlayer(const GameState& s) {
     float x = s.dungeonPlayerPos.x, z = s.dungeonPlayerPos.y;
     float yaw = atan2f(s.playerFacing.y, s.playerFacing.x);
     T3CAnim a = T3CMakeAnim(kT3CTrackPlayerDungeon, x, z);
-    T3CDrawHumanoid(g_t3cHumans[0].parts, x, z, yaw, 1.0f,
-                    Color{ 100, 130, 185, 255 }, Color{ 55, 60, 75, 255 },
-                    Color{ 225, 200, 165, 255 }, a, false);
+    if (s.playerDeathAnimT > 0.0f) {
+        float pshrink = std::max(0.05f, s.playerDeathAnimT / kPlayerDeathAnimTime);
+        T3CDrawHumanoid(g_t3cHumans[0].parts, x, z, yaw, pshrink,
+                        Color{ 100, 130, 185, 255 }, Color{ 55, 60, 75, 255 },
+                        Color{ 225, 200, 165, 255 }, a, false);
+    } else if (s.playerIsGhost) {
+        Color g = Fade(Color{ 170, 205, 255, 255 }, 0.45f);
+        T3CDrawHumanoid(g_t3cHumans[0].parts, x, z, yaw, 1.0f,
+                        g, g, Fade(Color{ 220, 235, 255, 255 }, 0.45f), a, false);
+    } else {
+        T3CDrawHumanoid(g_t3cHumans[0].parts, x, z, yaw, 1.0f,
+                        Color{ 100, 130, 185, 255 }, Color{ 55, 60, 75, 255 },
+                        Color{ 225, 200, 165, 255 }, a, false);
+    }
 }
 
 static bool Dung3DPointInUI(Vector2 m, const GameState& s) {
@@ -10067,34 +10723,55 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         bool engaged = s.dungeonEngaged.has_value();
         const DungeonDef& dungeon = kDungeons[di];
         bool bossUnlocked = s.dungeonXP[di] >= dungeon.bossUnlockXp;
-        for (int i = 0; i < 5; i++) {
+        bool dyingHere = s.dyingMonster.has_value() && s.dyingMonster->zone == 1 &&
+                         s.dyingMonster->dungeonIdx == di;
+        for (int i = 0; i < kDungeonRegularSlots; i++) {
             // The engaged slot is drawn separately below at its live position —
             // same convention as the 2D view.
             if (engaged && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
-            Vector2 mp = DungeonMonsterLivePos(di, i, s.worldTime);
+            // Empty slots (waiting to respawn) show nothing — except the slot whose
+            // monster is mid-death-animation, which draws the fall below.
+            bool isDying = dyingHere && !s.dyingMonster->isBoss && s.dyingMonster->monsterIdx == i;
+            if (!isDying && s.dungeonSpawnRespawn[di][i] > 0.0f) continue;
+            Vector2 mp = isDying ? s.dyingMonster->pos : DungeonMonsterLivePos(di, i, s.worldTime);
             Vector2 f = WanderFacing(i, s.worldTime);
+            float shrink = isDying ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
             Dungeon3DDrawMonster(di, i, kT3CTrackMonsterDungeon + i, mp.x, mp.y, atan2f(f.y, f.x),
-                                 Dungeon3DMonsterColor(di, false), 1.0f);
+                                 Dungeon3DMonsterColor(di, false), shrink);
         }
         if (!(engaged && s.dungeonEngaged->isBoss)) {
-            Vector2 bp = DungeonMonsterLivePos(di, 5, s.worldTime);
-            Vector2 f = WanderFacing(5, s.worldTime);
-            Color bc = bossUnlocked ? Dungeon3DMonsterColor(di, true) : Color{ 110, 110, 120, 255 };
-            Dungeon3DDrawMonster(di, 5, kT3CTrackMonsterDungeon + 5, bp.x, bp.y, atan2f(f.y, f.x),
-                                 bc, bossUnlocked ? 1.0f : 0.9f);
+            bool bossDying = dyingHere && s.dyingMonster->isBoss;
+            if (!bossDying && s.dungeonSpawnRespawn[di][kDungeonBossSlot] > 0.0f) {
+                // boss slot empty — nothing to draw
+            } else {
+                Vector2 bp = bossDying ? s.dyingMonster->pos : DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime);
+                Vector2 f = WanderFacing(kDungeonBossSlot, s.worldTime);
+                Color bc = bossUnlocked ? Dungeon3DMonsterColor(di, true) : Color{ 110, 110, 120, 255 };
+                float shrink = bossDying ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
+                Dungeon3DDrawMonster(di, kDungeonBossSlot, kT3CTrackMonsterDungeon + kDungeonBossSlot, bp.x, bp.y, atan2f(f.y, f.x),
+                                     bc, (bossUnlocked ? 1.0f : 0.9f) * shrink);
+            }
         }
         if (engaged) {
             const GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
             Vector2 toPlayer = { s.dungeonPlayerPos.x - am.pos.x, s.dungeonPlayerPos.y - am.pos.y };
             float len = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
             Vector2 facing = len > 0.001f ? Vector2{ toPlayer.x / len, toPlayer.y / len } : Vector2{ 0, 1 };
-            int midx = am.isBoss ? 5 : am.monsterIdx;
-            Dungeon3DDrawMonster(di, midx, kT3CTrackMonsterDungeon + 6, am.pos.x, am.pos.y,
+            int midx = am.isBoss ? kDungeonBossSlot : am.monsterIdx;
+            Dungeon3DDrawMonster(di, midx, kT3CTrackMonsterDungeon + kDungeonBossSlot + 1, am.pos.x, am.pos.y,
                                  atan2f(facing.y, facing.x),
                                  Dungeon3DMonsterColor(di, am.isBoss), 1.0f);
         }
     }
     Dungeon3DDrawPlayer(s);
+    // Fallen monsters linger where they died — dark flattened mounds that fade
+    // with the corpse timer. Purely visual; the lootable corpse list is separate.
+    for (const GameState::WorldCorpse& c : s.worldCorpses) {
+        if (c.zone != 1) continue;
+        float cfade = std::clamp(c.timer / c.duration, 0.0f, 1.0f);
+        Color mound = Fade(Color{ 55, 45, 42, 255 }, 0.85f * cfade);
+        DrawSphereEx({ c.pos.x, 6.0f, c.pos.y }, 16.0f, 8, 6, mound);
+    }
     if (ActivePet(s)) {
         Vector2 d = { s.dungeonPlayerPos.x - s.companionPos.x,
                       s.dungeonPlayerPos.y - s.companionPos.y };
@@ -10150,7 +10827,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         };
         label3D(kDung3DExitPos.x, 80, kDung3DExitPos.y, "Exit");
         if (s.dungeonXP[di] >= kDungeons[di].bossUnlockXp) {
-            Vector2 bp = DungeonMonsterLivePos(di, 5, s.worldTime);
+            Vector2 bp = DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime);
             label3D(bp.x, 90, bp.y, kDungeons[di].boss.name + " (Boss)");
         }
         if (inRange && !s.dungeonEngaged.has_value() && !nearestLabel.empty())
@@ -10175,6 +10852,625 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
                           kDungeons[di].name.c_str()),
                20, 196, 12, Color{ 200, 180, 150, 255 });
 }
+
+
+// ---------------------------------------------------------------------
+// Building detail / upgrade panel — extracted 2026-09-24 from DrawTownScreen
+// so building interiors can open the identical panel from their signature
+// furniture (anvil, teller counter, ...). Content unchanged: craft buildings
+// show upgrade info + "Craft here", amenities show their screen links.
+// ---------------------------------------------------------------------
+static void DrawBuildingDetailPanel(GameState& s, int screenW) {
+    if (s.selectedTile.has_value()) {
+        std::string key = *s.selectedTile;
+        Rectangle panelBg = { 20, 500, (float)(screenW - 40), 220 };
+        DrawRectangleRounded(panelBg, 0.06f, 8, Fade(kColorPageBg, 0.97f));
+        DrawRectangleRoundedLines(panelBg, 0.06f, 8, Fade(BLACK, 0.4f));
+        int panelY = (int)panelBg.y + 16;
+
+        DrawUIText(TileNameFor(key).c_str(), 36, panelY, 18, kColorText);
+        if (Button({ (float)(screenW - 80), (float)panelY - 4, 44, 26 }, "X", true)) s.selectedTile.reset();
+
+        if (int idx = FindCraftBuildingIndex(key); idx >= 0) {
+            const BuildingDef& def = kCraftBuildings[idx];
+            int lvl = s.buildingLevel[idx];
+            std::string capLine = "Skill cap: " + std::to_string(def.levels[lvl - 1].cap);
+            DrawUIText(capLine.c_str(), 36, panelY + 28, 13, DARKGRAY);
+
+            if (lvl < 5) {
+                const BuildingLevel& next = def.levels[lvl];
+                std::string resName = def.resource == Resource::Wood ? "wood"
+                                      : def.resource == Resource::Ore ? "ore"
+                                      : def.resource == Resource::Leather ? "leather" : "";
+                std::string costLine = "Upgrade cost: " + std::to_string(next.goldCost) + "g" +
+                    (def.resource != Resource::None ? (" + " + std::to_string(next.resourceCost) + " " + resName) : "") +
+                    "  (" + std::to_string((int)next.upgradeTimeSec) + "s)";
+                DrawUIText(costLine.c_str(), 36, panelY + 48, 13, DARKGRAY);
+
+                bool upgrading = s.upgrading.has_value();
+                if (Button({ 36, (float)(panelY + 72), 160, 34 }, "Upgrade", !upgrading))
+                    TryStartUpgrade(s, key);
+                if (upgrading && s.upgrading->buildingKey == key) {
+                    float pct = 1.0f - (s.upgrading->secondsRemaining / next.upgradeTimeSec);
+                    Rectangle bar = { 36, (float)(panelY + 112), 200, 8 };
+                    DrawRectangleRec(bar, Fade(BLACK, 0.25f));
+                    DrawRectangleRec({ bar.x, bar.y, bar.width * std::clamp(pct, 0.0f, 1.0f), bar.height }, kColorSlate);
+                }
+            } else {
+                DrawUIText("Max level reached.", 36, panelY + 48, 13, DARKGRAY);
+            }
+            // Step inside and actually use the place, instead of tabbing away to Craft
+            // by hand — jumps straight to this building's own recipe tab.
+            if (Button({ 220, (float)(panelY + 72), 160, 34 }, "Craft here", true)) {
+                s.craftBuildingTab = idx;
+                s.screen = Screen::Craft;
+                s.selectedTile.reset();
+            }
+        } else {
+            DrawUIText("(No upgrades — amenity building.)", 36, panelY + 28, 13, DARKGRAY);
+            // Same "step inside and use it" idea as the craft buildings above, for the
+            // amenities that have an actual screen of their own.
+            struct AmenityLink { const char* label; Screen target; };
+            std::optional<AmenityLink> link;
+            if (key == "bank" || key == "townhall") link = AmenityLink{ "Manage the Vaultkeep", Screen::Bank };
+            else if (key == "stable") link = AmenityLink{ "Visit the Wildkeep", Screen::Pets };
+            else if (key == "healer") link = AmenityLink{ "Rest & bandage up", Screen::Character };
+            else if (key == "house") link = AmenityLink{ "Go inside", Screen::House };
+            else if (key == "provisioner") link = AmenityLink{ "Browse the wares", Screen::Provisioner };
+            if (link) {
+                if (Button({ 36, (float)(panelY + 56), 220, 34 }, link->label, true)) {
+                    s.screen = link->target;
+                    s.selectedTile.reset();
+                }
+            }
+        }
+        DrawUIText("Walk away or press [X] to close.", 36, (int)panelBg.y + 190, 13, Fade(DARKGRAY, 0.8f));
+    }
+}
+
+// =====================================================================
+// Building interiors (2026-09-24) — walkable rooms inside each of the ten
+// town buildings. One Screen::Interior reuses the town's movement,
+// interaction, 2D/3D rendering, and camera machinery: 2D is a top-down
+// room that fills the viewport; 3D reuses Town3DGetCamFor with tighter
+// zoom limits. Enter with E at a building's door in town; exit with E at
+// the room's door. Signature furniture opens DrawBuildingDetailPanel —
+// the same panel the old exterior E-press opened — so every existing
+// link (Craft/Bank/Pets/Character/House/Provisioner) keeps working.
+// =====================================================================
+
+static const float kInteriorRoomW = 560.0f;    // room size, 2D world units
+static const float kInteriorRoomH = 760.0f;
+static const float kInteriorWallMargin = 34.0f; // player clamp from the walls
+// 2026-09-24 bugfix: was 150-520. That range reads as "close-up" numbers,
+// but interiors use the same elevated-orbit camera math as Town/Wilderness
+// (position = target + spherical offset at a steep default pitch), where
+// most of the distance becomes camera HEIGHT, not proximity to the floor.
+// At the low end of this range the camera sat almost flush with the floor,
+// close enough that the floor plane (a flat, room-sized slab right in front
+// of it) filled the *entire* frame, HUD strip included, since nothing else
+// was visible to show through — confirmed by sampling the fill color
+// against room.floor's exact RGB, then by testing a deliberately huge
+// distance (1000) and watching the whole room, HUD and all, snap into a
+// normal, clearly-legible bird's-eye view. Rescaled to comfortably frame a
+// 560x760 room from Town's own default pitch/distance, the same way Town's
+// own 150-1500 range frames a ~1000-unit-wide town.
+static const float kInt3DDistMin = 300.0f;
+static const float kInt3DDistMax = 900.0f;
+static const int kInteriorCamId = 3;            // Town3DGetCamFor id (0=town 1=wild 2=dungeon)
+
+struct InteriorPropDef {
+    const char* dir;    // assets/interiors/<dir>/ ("" = 2D shape only)
+    const char* model;  // "Anvil.gltf" ("" = 2D shape only)
+    const char* label;
+    float x, y;         // room coords, prop center
+    float rotDeg;       // 3D yaw
+    float sc;           // 3D extra scale over kT3DModScale
+    float yOff;         // 3D lift above the floor, world units (wall-hung items)
+    float bw, bh;       // blocker AABB; 0/0 = walk-through decoration
+    const char* action; // "exit" | "panel" | ""
+    Color c2d;          // 2D shape color
+    float sw, sh;       // 2D shape size
+};
+
+// --- Per-building prop tables. Room is 560x760; door at (280,700), player
+// spawns at (280,620). Blockers are furniture AABBs in room coords. ---
+
+static const InteriorPropDef kInteriorPropsSmith[] = {
+    { "smith", "Forge.gltf", "Forge", 150, 170, 0, 1, 0, 76, 56, "", Color{122,62,40,255}, 76, 56 },
+    { "smith", "Bellows.gltf", "Bellows", 235, 165, 180, 1, 0, 40, 26, "", Color{150,110,70,255}, 40, 26 },
+    { "smith", "Anvil.gltf", "Anvil", 300, 360, 20, 1, 0, 46, 30, "panel", Color{150,150,160,255}, 46, 30 },
+    { "smith", "Workbench.gltf", "Workbench", 445, 210, 90, 1, 0, 64, 36, "", Color{139,105,72,255}, 64, 36 },
+    { "smith", "WeaponStand.gltf", "Weapon Rack", 505, 130, 90, 1, 0, 42, 26, "", Color{120,90,60,255}, 42, 26 },
+    { "smith", "Barrel.gltf", "Quench Barrel", 85, 290, 0, 1, 0, 32, 32, "", Color{120,88,58,255}, 32, 32 },
+    { "smith", "Whetstone.gltf", "Whetstone", 395, 480, 0, 1, 0, 38, 30, "", Color{140,140,150,255}, 38, 30 },
+    { "smith", "Bucket_Metal.gltf", "Water Bucket", 115, 390, 0, 1, 0, 0, 0, "", Color{150,150,160,255}, 24, 24 },
+    { "smith", "Cauldron.gltf", "Crucible", 475, 340, 0, 1, 0, 38, 38, "", Color{110,70,50,255}, 38, 38 },
+    { "smith", "Peg_Rack.gltf", "Tool Rack", 505, 460, 90, 1, 0, 30, 42, "", Color{130,95,60,255}, 30, 42 },
+    { "smith", "Torch_Metal.gltf", "Torch", 60, 95, 0, 1, 55, 0, 0, "", Color{255,180,80,255}, 14, 14 },
+    { "smith", "Torch_Metal.gltf", "Torch", 500, 95, 0, 1, 55, 0, 0, "", Color{255,180,80,255}, 14, 14 },
+    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+};
+
+static const InteriorPropDef kInteriorPropsCarpenter[] = {
+    { "carpenter", "LumberPile.gltf", "Lumber Pile", 140, 180, 0, 1, 0, 64, 32, "", Color{150,112,70,255}, 64, 32 },
+    { "carpenter", "LumberPile.gltf", "Lumber Pile", 140, 280, 0, 1, 0, 64, 32, "", Color{150,112,70,255}, 64, 32 },
+    { "carpenter", "Sawhorse.gltf", "Sawhorse", 280, 300, 0, 1, 0, 46, 28, "", Color{160,125,80,255}, 46, 28 },
+    { "carpenter", "Sawhorse.gltf", "Sawhorse", 370, 300, 0, 1, 0, 46, 28, "", Color{160,125,80,255}, 46, 28 },
+    { "carpenter", "Workbench.gltf", "Workbench", 450, 190, 90, 1, 0, 64, 36, "panel", Color{139,105,72,255}, 64, 36 },
+    { "carpenter", "Peg_Rack.gltf", "Tool Rack", 510, 330, 90, 1, 0, 30, 42, "", Color{130,95,60,255}, 30, 42 },
+    { "carpenter", "Crate_Wooden.gltf", "Offcut Crate", 90, 430, 0, 1, 0, 36, 36, "", Color{150,115,70,255}, 36, 36 },
+    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+};
+
+static const InteriorPropDef kInteriorPropsTailor[] = {
+    { "tailor", "Mannequin.gltf", "Dress Form", 280, 330, 0, 1, 0, 32, 32, "panel", Color{170,130,150,255}, 32, 32 },
+    { "tailor", "ClothBolt.gltf", "Cloth Bolts", 150, 200, 0, 1, 0, 54, 36, "", Color{180,140,160,255}, 54, 36 },
+    { "tailor", "ClothBolt.gltf", "Cloth Bolts", 430, 200, 90, 1, 0, 54, 36, "", Color{160,120,150,255}, 54, 36 },
+    { "tailor", "Shelf_Small1.obj", "Fabric Shelf", 505, 410, 90, 1, 0, 42, 32, "", Color{139,105,72,255}, 42, 32 },
+    { "tailor", "Banner_1_Cloth.gltf", "Banner", 280, 55, 0, 1, 57, 0, 0, "", Color{190,90,110,255}, 30, 16 },
+    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+};
+
+static const InteriorPropDef kInteriorPropsAlchemy[] = {
+    { "alchemy", "Cauldron.gltf", "Brewing Cauldron", 280, 300, 0, 1, 0, 42, 42, "panel", Color{110,70,50,255}, 42, 42 },
+    { "alchemy", "Shelf_Small_Bottles.gltf", "Potion Shelf", 140, 150, 0, 1, 0, 54, 32, "", Color{120,90,110,255}, 54, 32 },
+    { "alchemy", "Table_RoundSmall.obj", "Work Table", 430, 200, 0, 1, 0, 46, 46, "", Color{139,105,72,255}, 46, 46 },
+    { "alchemy", "Potion_1.gltf", "Potion", 385, 290, 0, 1, 0, 0, 0, "", Color{200,80,120,255}, 16, 16 },
+    { "alchemy", "Potion_2.gltf", "Potion", 475, 290, 0, 1, 0, 0, 0, "", Color{80,160,200,255}, 16, 16 },
+    { "alchemy", "Bottle_1.gltf", "Bottle", 430, 330, 0, 1, 0, 0, 0, "", Color{140,200,160,255}, 16, 16 },
+    { "alchemy", "Torch_Metal.gltf", "Torch", 60, 95, 0, 1, 55, 0, 0, "", Color{255,180,80,255}, 14, 14 },
+    { "alchemy", "Torch_Metal.gltf", "Torch", 500, 95, 0, 1, 55, 0, 0, "", Color{255,180,80,255}, 14, 14 },
+    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+};
+
+static const InteriorPropDef kInteriorPropsBank[] = {
+    { "bank", "Table_Large.gltf", "Teller Counter", 280, 280, 0, 1, 0, 96, 46, "panel", Color{139,105,72,255}, 96, 46 },
+    { "bank", "VaultDoor.gltf", "Vault", 280, 100, 0, 1, 0, 64, 32, "", Color{120,120,130,255}, 64, 32 },
+    { "bank", "Coin_Pile.gltf", "Coin Pile", 175, 280, 0, 1, 0, 0, 0, "", Color{220,180,90,255}, 22, 22 },
+    { "bank", "Coin_Pile_2.gltf", "Coin Pile", 385, 280, 0, 1, 0, 0, 0, "", Color{220,180,90,255}, 22, 22 },
+    { "bank", "Coin.gltf", "Loose Coins", 280, 195, 0, 1, 0, 0, 0, "", Color{230,190,100,255}, 18, 18 },
+    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+};
+
+static const InteriorPropDef kInteriorPropsStable[] = {
+    { "stable", "StallDivider.gltf", "Stall", 120, 170, 90, 1, 0, 18, 96, "", Color{130,100,65,255}, 18, 96 },
+    { "stable", "StallDivider.gltf", "Stall", 280, 170, 90, 1, 0, 18, 96, "", Color{130,100,65,255}, 18, 96 },
+    { "stable", "StallDivider.gltf", "Stall", 440, 170, 90, 1, 0, 18, 96, "", Color{130,100,65,255}, 18, 96 },
+    { "stable", "HayBale.gltf", "Hay Bale", 100, 420, 0, 1, 0, 42, 36, "", Color{200,170,90,255}, 42, 36 },
+    { "stable", "HayBale.gltf", "Hay Bale", 460, 420, 0, 1, 0, 42, 36, "", Color{200,170,90,255}, 42, 36 },
+    { "stable", "WaterTrough.gltf", "Water Trough", 280, 500, 0, 1, 0, 64, 32, "panel", Color{120,90,60,255}, 64, 32 },
+    { "stable", "Bucket_Wooden_1.gltf", "Feed Bucket", 195, 500, 0, 1, 0, 0, 0, "", Color{140,105,65,255}, 22, 22 },
+    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+};
+
+static const InteriorPropDef kInteriorPropsHealer[] = {
+    { "healer", "Bed_Single.obj", "Cot", 150, 250, 90, 1, 0, 92, 46, "panel", Color{170,150,130,255}, 92, 46 },
+    { "healer", "Bed_Single.obj", "Cot", 410, 250, 90, 1, 0, 92, 46, "", Color{170,150,130,255}, 92, 46 },
+    { "healer", "Shelf_Small1.obj", "Remedy Shelf", 505, 150, 90, 1, 0, 42, 32, "", Color{139,105,72,255}, 42, 32 },
+    { "healer", "MortarPestle.gltf", "Mortar & Pestle", 280, 430, 0, 1, 0, 0, 0, "", Color{160,150,140,255}, 24, 24 },
+    { "healer", "HerbBundle.gltf", "Drying Herbs", 130, 460, 0, 1, 0, 32, 42, "", Color{120,160,90,255}, 32, 42 },
+    { "healer", "Potion_1.gltf", "Tonic", 350, 430, 0, 1, 0, 0, 0, "", Color{200,80,120,255}, 16, 16 },
+    { "healer", "SmallBottle.gltf", "Salve", 390, 430, 0, 1, 0, 0, 0, "", Color{140,200,160,255}, 16, 16 },
+    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+};
+
+static const InteriorPropDef kInteriorPropsTownhall[] = {
+    { "townhall", "Table_RoundLarge.obj", "Council Table", 280, 350, 0, 1, 0, 96, 96, "panel", Color{139,105,72,255}, 96, 96 },
+    { "townhall", "Chair_1.obj", "Chair", 180, 350, 270, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
+    { "townhall", "Chair_1.obj", "Chair", 380, 350, 90, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
+    { "townhall", "Chair_1.obj", "Chair", 280, 240, 0, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
+    { "townhall", "Chair_1.obj", "Chair", 280, 460, 180, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
+    { "townhall", "Banner_1_Cloth.gltf", "Banner", 180, 55, 0, 1, 57, 0, 0, "", Color{190,90,110,255}, 30, 16 },
+    { "townhall", "Banner_2_Cloth.gltf", "Banner", 380, 55, 0, 1, 57, 0, 0, "", Color{90,110,190,255}, 30, 16 },
+    { "townhall", "Torch_Metal.gltf", "Torch", 80, 95, 0, 1, 55, 0, 0, "", Color{255,180,80,255}, 14, 14 },
+    { "townhall", "Torch_Metal.gltf", "Torch", 480, 95, 0, 1, 55, 0, 0, "", Color{255,180,80,255}, 14, 14 },
+    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+};
+
+static const InteriorPropDef kInteriorPropsProvisioner[] = {
+    { "provisioner", "Stall_Cart_Empty.gltf", "Merchant Counter", 280, 300, 0, 1, 0, 84, 52, "panel", Color{150,115,70,255}, 84, 52 },
+    { "provisioner", "Shelf_1.obj", "Goods Shelf", 120, 150, 0, 1, 0, 46, 32, "", Color{139,105,72,255}, 46, 32 },
+    { "provisioner", "Shelf_1.obj", "Goods Shelf", 440, 150, 0, 1, 0, 46, 32, "", Color{139,105,72,255}, 46, 32 },
+    { "provisioner", "Crate_Wooden.gltf", "Crate", 120, 410, 0, 1, 0, 36, 36, "", Color{150,115,70,255}, 36, 36 },
+    { "provisioner", "Crate_Wooden.gltf", "Crate", 180, 410, 0, 1, 0, 36, 36, "", Color{150,115,70,255}, 36, 36 },
+    { "provisioner", "Barrel.gltf", "Barrel", 440, 410, 0, 1, 0, 32, 32, "", Color{120,88,58,255}, 32, 32 },
+    { "provisioner", "Barrel_Apples.gltf", "Apple Barrel", 490, 460, 0, 1, 0, 32, 32, "", Color{160,90,60,255}, 32, 32 },
+    { "provisioner", "Bag.gltf", "Grain Sack", 245, 150, 0, 1, 0, 0, 0, "", Color{170,140,100,255}, 24, 24 },
+    { "provisioner", "Bag.gltf", "Grain Sack", 315, 150, 0, 1, 0, 0, 0, "", Color{170,140,100,255}, 24, 24 },
+    { "provisioner", "Pouch_Large.gltf", "Pouch", 355, 225, 0, 1, 0, 0, 0, "", Color{150,120,85,255}, 18, 18 },
+    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+};
+
+static const InteriorPropDef kInteriorPropsHouse[] = {
+    { "house", "Bed_Single.obj", "Bed", 140, 200, 90, 1, 0, 92, 46, "panel", Color{170,150,130,255}, 92, 46 },
+    { "house", "Table_RoundSmall.obj", "Table", 330, 350, 0, 1, 0, 46, 46, "", Color{139,105,72,255}, 46, 46 },
+    { "house", "Chair_1.obj", "Chair", 265, 350, 90, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
+    { "house", "Chair_1.obj", "Chair", 395, 350, 270, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
+    { "house", "Shelf_1.obj", "Shelf", 480, 150, 0, 1, 0, 46, 32, "", Color{139,105,72,255}, 46, 32 },
+    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+};
+
+struct InteriorRoomDef {
+    const char* key;
+    const InteriorPropDef* props;
+    int propCount;
+    Color floor;
+    Color wall;
+};
+
+static const InteriorRoomDef kInteriorRooms[] = {
+    { "smith", kInteriorPropsSmith, (int)(sizeof(kInteriorPropsSmith) / sizeof(kInteriorPropsSmith[0])), Color{74,52,38,255}, Color{48,40,44,255} },
+    { "carpenter", kInteriorPropsCarpenter, (int)(sizeof(kInteriorPropsCarpenter) / sizeof(kInteriorPropsCarpenter[0])), Color{150,110,70,255}, Color{110,82,55,255} },
+    { "tailor", kInteriorPropsTailor, (int)(sizeof(kInteriorPropsTailor) / sizeof(kInteriorPropsTailor[0])), Color{168,132,100,255}, Color{120,90,110,255} },
+    { "alchemy", kInteriorPropsAlchemy, (int)(sizeof(kInteriorPropsAlchemy) / sizeof(kInteriorPropsAlchemy[0])), Color{90,78,96,255}, Color{60,52,70,255} },
+    { "townhall", kInteriorPropsTownhall, (int)(sizeof(kInteriorPropsTownhall) / sizeof(kInteriorPropsTownhall[0])), Color{132,100,68,255}, Color{88,70,60,255} },
+    { "stable", kInteriorPropsStable, (int)(sizeof(kInteriorPropsStable) / sizeof(kInteriorPropsStable[0])), Color{128,104,66,255}, Color{96,76,52,255} },
+    { "healer", kInteriorPropsHealer, (int)(sizeof(kInteriorPropsHealer) / sizeof(kInteriorPropsHealer[0])), Color{150,140,120,255}, Color{110,100,88,255} },
+    { "bank", kInteriorPropsBank, (int)(sizeof(kInteriorPropsBank) / sizeof(kInteriorPropsBank[0])), Color{140,128,110,255}, Color{96,88,74,255} },
+    { "provisioner", kInteriorPropsProvisioner, (int)(sizeof(kInteriorPropsProvisioner) / sizeof(kInteriorPropsProvisioner[0])), Color{146,116,80,255}, Color{104,84,60,255} },
+    { "house", kInteriorPropsHouse, (int)(sizeof(kInteriorPropsHouse) / sizeof(kInteriorPropsHouse[0])), Color{158,126,88,255}, Color{116,92,70,255} },
+};
+
+static const InteriorRoomDef* InteriorRoomFor(const std::string& key) {
+    for (auto& r : kInteriorRooms) if (key == r.key) return &r;
+    return nullptr;
+}
+
+// Static shop NPCs (2026-09-24 stretch goal): one named keeper per shop
+// interior, same greet-popup treatment as town townsfolk.
+struct InteriorNPCDef { const char* name; const char* greeting; float x, y; };
+static bool InteriorNPCFor(const std::string& key, InteriorNPCDef& out) {
+    if (key == "stable") { out = { "Cobb the Stableboy", "Mind the horses — they spook easy.", 280, 260 }; return true; }
+    if (key == "provisioner") { out = { "Mira the Provisioner", "Fine wares, fair prices — have a look.", 280, 225 }; return true; }
+    return false;
+}
+
+// House workshop corners: one corner per built home module (2026-09-24).
+// houseModuleLevel parallels kHomeModuleDefs; a module shows only when built,
+// with its tier in the label.
+struct InteriorHouseModuleProp { const char* dir; const char* model; float x; Color c2d; float sw, sh, bw, bh; };
+static const InteriorHouseModuleProp kInteriorHouseModules[4] = {
+    { "smith", "Anvil.gltf", 90, Color{150,150,160,255}, 40, 28, 40, 28 },
+    { "carpenter", "LumberPile.gltf", 200, Color{150,112,70,255}, 52, 28, 52, 28 },
+    { "tailor", "ClothBolt.gltf", 360, Color{180,140,160,255}, 44, 30, 44, 30 },
+    { "smith", "Cauldron.gltf", 470, Color{110,70,50,255}, 36, 36, 36, 36 },
+};
+static std::string s_houseModuleLabels[4];
+static std::vector<InteriorPropDef> InteriorPropsFor(GameState& s, const std::string& key) {
+    std::vector<InteriorPropDef> out;
+    const InteriorRoomDef* room = InteriorRoomFor(key);
+    if (!room) return out;
+    out.reserve(room->propCount + 4);
+    for (int i = 0; i < room->propCount; i++) out.push_back(room->props[i]);
+    if (key == "house") {
+        for (int i = 0; i < 4; i++) {
+            if (s.houseModuleLevel[i] <= 0) continue;
+            s_houseModuleLabels[i] = kHomeModuleDefs[i].label + " (Tier " + std::to_string(s.houseModuleLevel[i]) + ")";
+            const InteriorHouseModuleProp& mp = kInteriorHouseModules[i];
+            out.push_back({ mp.dir, mp.model, s_houseModuleLabels[i].c_str(), mp.x, 600, 0, 0.8f, 0,
+                            mp.bw, mp.bh, "", mp.c2d, mp.sw, mp.sh });
+        }
+    }
+    return out;
+}
+
+static void EnterInterior(GameState& s, const std::string& key) {
+    if (!InteriorRoomFor(key)) return; // unknown key: stay outside
+    s.interiorKey = key;
+    s.screen = Screen::Interior;
+    s.interior3DView = s.town3DView; // entering from the 3D town stays 3D (view state only)
+    s.interiorPlayerPos = { kInteriorRoomW * 0.5f, kInteriorRoomH - 140.0f };
+    s.playerFacing = { 0, -1 };
+    s.selectedTile.reset();
+    s.interiorGreeted = false;
+    s.logLine = "You step inside " + TileNameFor(key) + ".";
+}
+
+static void ExitInterior(GameState& s) {
+    std::string key = s.interiorKey;
+    s.interiorKey.clear();
+    s.screen = Screen::Town;
+    s.town3DView = s.interior3DView; // keep whatever view was used inside
+    s.selectedTile.reset();
+    s.interiorGreeted = false;
+    // Respawn just south of the building's town node, clear of its collision circle.
+    for (auto& node : kTownNodePositions) {
+        if (node.key == key) {
+            s.townPlayerPos = { node.pos.x, node.pos.y + kNodeRadius + kPlayerRadius + 12.0f };
+            break;
+        }
+    }
+    s.logLine = "You step back outside.";
+}
+
+// Cached interior models — plain LoadModel, no town shadow shader: interiors
+// render in a fixed indoor light like the dungeons' procedural props.
+static std::map<std::string, Model> g_interiorModels;
+static Model Interior3DModel(const std::string& dir, const std::string& model) {
+    if (dir.empty() || model.empty()) return Model{};
+    std::string key = dir + "/" + model;
+    auto it = g_interiorModels.find(key);
+    if (it != g_interiorModels.end()) return it->second;
+    Model m = LoadModel(("assets/interiors/" + key).c_str());
+    g_interiorModels[key] = m;
+    return m;
+}
+
+// Circle-vs-AABB push-out (axis slide comes free: the push follows the
+// shortest escape direction, so walking along furniture slides around it).
+static void ResolveCircleRectCollision(Vector2& pos, float radius, Rectangle rc) {
+    Vector2 nearest = { std::clamp(pos.x, rc.x, rc.x + rc.width),
+                        std::clamp(pos.y, rc.y, rc.y + rc.height) };
+    float dx = pos.x - nearest.x, dy = pos.y - nearest.y;
+    float d2 = dx * dx + dy * dy;
+    if (d2 >= radius * radius) return;
+    if (d2 < 0.0001f) { pos.y = rc.y - radius; return; } // center inside: push out the top
+    float d = sqrtf(d2);
+    pos.x = nearest.x + dx / d * radius;
+    pos.y = nearest.y + dy / d * radius;
+}
+
+static Vector2 InteriorCameraTopLeft(Vector2 playerPos) {
+    // The room (560x760) is nearly the viewport size (540x790): center it, with
+    // a thin dark surround where the room is smaller than the viewport.
+    Vector2 tl = { playerPos.x - kViewport.width / 2.0f, playerPos.y - kViewport.height / 2.0f };
+    float maxX = kInteriorRoomW - kViewport.width;
+    float maxY = kInteriorRoomH - kViewport.height;
+    tl.x = (maxX <= 0.0f) ? maxX * 0.5f : std::clamp(tl.x, 0.0f, maxX);
+    tl.y = (maxY <= 0.0f) ? maxY * 0.5f : std::clamp(tl.y, 0.0f, maxY);
+    return tl;
+}
+
+// --- 2D interior render: top-down room clipped to the viewport ---
+static void DrawInterior2D(GameState& s, int screenW, int screenH,
+                           const InteriorRoomDef& room,
+                           const std::vector<InteriorPropDef>& props,
+                           const std::string& prompt, const InteriorPropDef* nearest,
+                           bool npcNearest, const InteriorNPCDef* npc) {
+    (void)screenW; (void)screenH;
+    Vector2 cam = InteriorCameraTopLeft(s.interiorPlayerPos);
+    BeginScissorMode(kViewport.x, kViewport.y, kViewport.width, kViewport.height);
+    DrawRectangle(kViewport.x, kViewport.y, kViewport.width, kViewport.height, Color{ 22, 18, 16, 255 });
+    Vector2 ro = WorldToScreen({ 0, 0 }, cam); // room origin on screen
+    // Floor + plank seams.
+    DrawRectangle((int)ro.x, (int)ro.y, (int)kInteriorRoomW, (int)kInteriorRoomH, room.floor);
+    for (float y = 40; y < kInteriorRoomH; y += 40)
+        DrawLine((int)ro.x, (int)(ro.y + y), (int)(ro.x + kInteriorRoomW), (int)(ro.y + y), Fade(BLACK, 0.12f));
+    // Walls.
+    DrawRectangleLinesEx({ ro.x, ro.y, kInteriorRoomW, kInteriorRoomH }, 12, room.wall);
+    DrawRectangleLinesEx({ ro.x - 6, ro.y - 6, kInteriorRoomW + 12, kInteriorRoomH + 12 }, 4, Fade(BLACK, 0.35f));
+    // Props.
+    for (auto& p : props) {
+        Vector2 sp = WorldToScreen({ p.x, p.y }, cam);
+        bool hl = (nearest && nearest == &p);
+        Rectangle rc = { sp.x - p.sw / 2, sp.y - p.sh / 2, p.sw, p.sh };
+        bool drewSprite = false;
+        // The anvil reuses the existing 2D anvil sprite; everything else is a
+        // tidy labeled shape (no other 2D prop sprites exist for these).
+        if (p.model && std::string(p.model) == "Anvil.gltf" && g_assets.townAnvilOk) {
+            float tw = p.sw * 1.7f, th = p.sh * 1.7f;
+            DrawTexturePro(g_assets.townAnvil,
+                           { 0, 0, (float)g_assets.townAnvil.width, (float)g_assets.townAnvil.height },
+                           { sp.x - tw / 2, sp.y - th / 2, tw, th }, { 0, 0 }, 0, WHITE);
+            drewSprite = true;
+        }
+        Color hlCol = Color{ 255, 200, 90, 255 }; // warm gold: reads on every floor color
+        if (!drewSprite) {
+            DrawRectangleRounded(rc, 0.18f, 4, p.c2d);
+            DrawRectangleRoundedLines(rc, 0.18f, 4, hl ? hlCol : Fade(BLACK, 0.35f));
+        } else if (hl) {
+            DrawRectangleRoundedLines({ rc.x - 4, rc.y - 4, rc.width + 8, rc.height + 8 },
+                                      0.18f, 4, hlCol);
+        }
+        int lw = MeasureText(p.label, 11);
+        DrawUIText(p.label, (int)sp.x - lw / 2, (int)(sp.y + p.sh / 2) + 3, 11,
+                   hl ? WHITE : Fade(BLACK, 0.65f));
+    }
+    // Static shop NPC, if any.
+    if (npc) {
+        Vector2 sp = WorldToScreen({ npc->x, npc->y }, cam);
+        DrawCircleV(sp, 16, Color{ 210, 170, 130, 255 });
+        DrawCircleLinesV(sp, 16, npcNearest ? Color{ 255, 200, 90, 255 } : Fade(BLACK, 0.4f));
+        int nw = MeasureText(npc->name, 11);
+        DrawUIText(npc->name, (int)sp.x - nw / 2, (int)sp.y - 38, 11, WHITE);
+    }
+    // Player + floating interact prompt.
+    Vector2 pp = WorldToScreen(s.interiorPlayerPos, cam);
+    DrawPlayer(s, pp, s.playerFacing, prompt, 1.15f);
+    EndScissorMode();
+}
+
+// Speed-tracker ids for interior 3D (unique per creature per view, < 256;
+// the kit's own ids top out near 146).
+static const int kT3CTrackPlayerInterior = 150;
+static const int kT3CTrackNPCInterior = 151;
+
+// Interior 3D: clicks on the HUD band, joystick zone, or view buttons orbit nothing.
+static bool Interior3DPointInUI(int screenW, int screenH) {
+    Vector2 m = GetMousePosition();
+    if (m.y < 110) return true;
+    if (m.x < 170 && m.y > screenH - 220) return true; // virtual joystick
+    if (m.x > screenW - 210 && m.y < 330) return true; // 2D/3D + camera buttons
+    return false;
+}
+
+static void Interior3DDrawProp(const InteriorPropDef& p) {
+    if (!p.dir || !*p.dir || !p.model || !*p.model) return;
+    Model m = Interior3DModel(p.dir, p.model);
+    if (m.meshCount <= 0) return; // missing file: the 2D shape still shows the prop
+    float s = kT3DModScale * p.sc;
+    DrawModelEx(m, { p.x - kInteriorRoomW * 0.5f, p.yOff, p.y - kInteriorRoomH * 0.5f },
+                { 0, 1, 0 }, p.rotDeg, { s, s, s }, WHITE);
+}
+
+// --- 3D interior render: the room as a walled box, props as CC0/procedural
+// models at kT3DModScale (22 world units per meter), player + shop NPC as
+// kit humanoids. Renders unlit like the dungeons' procedural props. ---
+static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
+                                const std::vector<InteriorPropDef>& props,
+                                const InteriorNPCDef* npc, int screenW, int screenH, bool uiOpen) {
+    if (IsKeyPressed(KEY_C)) g_t3dFollowMode = !g_t3dFollowMode;
+    Town3DPinchZoom(kInt3DDistMin, kInt3DDistMax);
+    // Drag orbits (follow mode keeps the Diablo angle); no picking indoors.
+    // Drags that start on an open panel/pop-up don't orbit.
+    Vector2 mouse = GetMousePosition();
+    if (!uiOpen && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, kViewport) &&
+        !Interior3DPointInUI(screenW, screenH)) {
+        g_t3dOrbiting = true;
+        g_t3dLastMouse = mouse;
+    }
+    if (g_t3dOrbiting && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        Vector2 d = { mouse.x - g_t3dLastMouse.x, mouse.y - g_t3dLastMouse.y };
+        g_t3dLastMouse = mouse;
+        if (!g_t3dFollowMode) {
+            g_t3dYaw -= d.x * 0.006f;
+            g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
+        }
+    }
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
+
+    // 2026-09-24 bugfix: every piece of room geometry (walls/floor below,
+    // props, the NPC, the player capsule) is drawn in room-CENTERED space —
+    // shifted by (-hw, -hh) from the room-local (0..W, 0..H) coordinates
+    // s.interiorPlayerPos is actually stored in (see the prop/player/NPC draw
+    // calls below, all subtracting hw/hh). This camera target didn't apply
+    // that same shift, so it pointed at raw room-local coordinates like
+    // (280, 640) while the real geometry sits centered near (0, 0) — for the
+    // default room size that's off by hundreds of units, well outside the
+    // 150-520 unit orbit radius, so the whole room fell outside the visible
+    // frustum: a completely blank 3D view (2D HUD text still rendered, drawn
+    // outside BeginMode3D, which is what made the location label visible
+    // while nothing else was). Fixed by shifting into the same centered
+    // space before handing it to the shared camera rig.
+    float ihw = kInteriorRoomW * 0.5f, ihh = kInteriorRoomH * 0.5f;
+    Vector2 camTargetPos = { s.interiorPlayerPos.x - ihw, s.interiorPlayerPos.y - ihh };
+    Town3DCam c = Town3DGetCamFor(camTargetPos, screenW, screenH, kInteriorCamId,
+                                 kInt3DDistMin, kInt3DDistMax);
+    // Literal {0,1,0}, matching every other 3D view (Town/Wilderness/
+    // Dungeon) — c.up is a hand-computed cross-product vector Town3DCam
+    // carries for its own ray-picking/projection math, not meant to feed
+    // raylib's camera directly.
+    Camera3D cam3d = { 0 };
+    cam3d.position = c.pos; cam3d.target = c.target; cam3d.up = { 0, 1, 0 };
+    cam3d.fovy = c.fovY; cam3d.projection = CAMERA_PERSPECTIVE;
+    BeginMode3D(cam3d);
+
+    float hw = kInteriorRoomW * 0.5f, hh = kInteriorRoomH * 0.5f;
+    float wallH = 70.0f, wallT = 12.0f;
+    DrawCube({ 0, -2, 0 }, kInteriorRoomW, 4, kInteriorRoomH, room.floor); // floor
+    DrawCube({ 0, wallH / 2, -hh - wallT / 2 }, kInteriorRoomW + wallT * 2, wallH, wallT, room.wall); // north
+    float doorGap = 84.0f; // south wall keeps a door opening at the exit prop
+    float segW = (kInteriorRoomW - doorGap) * 0.5f;
+    DrawCube({ -(doorGap / 2 + segW / 2), wallH / 2, hh + wallT / 2 }, segW, wallH, wallT, room.wall);
+    DrawCube({ (doorGap / 2 + segW / 2), wallH / 2, hh + wallT / 2 }, segW, wallH, wallT, room.wall);
+    DrawCube({ 0, wallH - 12, hh + wallT / 2 }, doorGap, 24, wallT, room.wall); // lintel
+    DrawCube({ 0, 34, hh + wallT / 2 }, doorGap - 12, 68, 6, Color{ 60, 44, 30, 255 }); // door
+    DrawCube({ -hw - wallT / 2, wallH / 2, 0 }, wallT, wallH, kInteriorRoomH, room.wall); // west
+    DrawCube({ hw + wallT / 2, wallH / 2, 0 }, wallT, wallH, kInteriorRoomH, room.wall);  // east
+
+    for (auto& p : props) Interior3DDrawProp(p);
+
+    if (npc) { // static shopkeeper
+        T3CAnim na = T3CMakeAnim(kT3CTrackNPCInterior, npc->x, npc->y, true);
+        T3CDrawHumanoid(g_t3cHumans[0].parts, npc->x - hw, npc->y - hh, 0.0f, 0.95f,
+                        Color{ 150, 110, 80, 255 }, Color{ 90, 70, 55, 255 },
+                        Color{ 215, 175, 135, 255 }, na, false);
+    }
+    { // player
+        float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
+        T3CAnim pa = T3CMakeAnim(kT3CTrackPlayerInterior, s.interiorPlayerPos.x, s.interiorPlayerPos.y, true);
+        T3CDrawHumanoid(g_t3cHumans[0].parts, s.interiorPlayerPos.x - hw, s.interiorPlayerPos.y - hh,
+                        pyaw, 1.0f, Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
+                        Color{ 240, 210, 180, 255 }, pa, false);
+    }
+    EndMode3D();
+}
+
+// Runs one E/tap interaction. Returns true when it left the interior.
+static bool InteriorDoInteract(GameState& s, const InteriorPropDef* nearest, bool npcNearest) {
+    if (npcNearest) { s.interiorGreeted = true; return false; }
+    if (!nearest || !nearest->action) return false;
+    std::string a = nearest->action;
+    if (a == "exit") { ExitInterior(s); return true; }
+    if (a == "panel") { s.selectedTile = s.interiorKey; return false; }
+    return false;
+}
+
+static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
+    const InteriorRoomDef* room = InteriorRoomFor(s.interiorKey);
+    if (!room) { s.interiorKey.clear(); s.screen = Screen::Town; return; } // safety net
+    std::vector<InteriorPropDef> props = InteriorPropsFor(s, s.interiorKey);
+    InteriorNPCDef npcDef; const InteriorNPCDef* npc = nullptr;
+    if (InteriorNPCFor(s.interiorKey, npcDef)) npc = &npcDef;
+
+    bool uiOpen = s.selectedTile.has_value() || s.interiorGreeted;
+    if (IsKeyPressed(KEY_X) && uiOpen) {
+        s.selectedTile.reset(); s.interiorGreeted = false; uiOpen = false;
+    }
+
+    // --- Nearest interactable: action props + the shop NPC ---
+    const InteriorPropDef* nearest = nullptr;
+    float nearestD = kInteractRange + 34.0f;
+    for (auto& p : props) {
+        if (!p.action || !*p.action) continue;
+        float d = Dist(s.interiorPlayerPos, { p.x, p.y });
+        if (d < nearestD) { nearestD = d; nearest = &p; }
+    }
+    bool npcNearest = false;
+    if (npc) {
+        float nd = Dist(s.interiorPlayerPos, { npc->x, npc->y });
+        if (nd < nearestD && nd < kInteractRange + 34.0f) npcNearest = true;
+    }
+    std::string label, prompt;
+    if (npcNearest) label = "Greet " + std::string(npc->name);
+    else if (nearest) label = (std::string(nearest->action) == "exit") ? "Exit" : nearest->label;
+    bool inRange = !label.empty();
+    if (inRange) prompt = "[E] " + label;
+
+    if (!uiOpen) {
+        UpdatePlayerMovement(s.interiorPlayerPos, s.playerFacing, GetFrameTime(), 100000.0f);
+        for (auto& p : props) {
+            if (p.bw <= 0 || p.bh <= 0) continue;
+            ResolveCircleRectCollision(s.interiorPlayerPos, kPlayerRadius,
+                                       { p.x - p.bw / 2, p.y - p.bh / 2, p.bw, p.bh });
+        }
+        s.interiorPlayerPos.x = std::clamp(s.interiorPlayerPos.x, kInteriorWallMargin, kInteriorRoomW - kInteriorWallMargin);
+        s.interiorPlayerPos.y = std::clamp(s.interiorPlayerPos.y, kInteriorWallMargin, kInteriorRoomH - kInteriorWallMargin);
+        if (inRange && IsKeyPressed(KEY_E) && InteriorDoInteract(s, nearest, npcNearest)) return;
+    }
+
+    if (s.interior3DView) DrawInterior3DWorld(s, *room, props, npc, screenW, screenH, uiOpen);
+    else DrawInterior2D(s, screenW, screenH, *room, props, prompt, nearest, npcNearest, npc);
+
+    DrawVirtualJoystick();
+    if (inRange && !uiOpen && DrawInteractButton(prompt)) {
+        if (InteriorDoInteract(s, nearest, npcNearest)) return;
+    }
+
+    // Title + view/camera buttons (same placement language as the town HUD).
+    DrawInfoLine(TileNameFor(s.interiorKey).c_str(), 20, 118, 14);
+    if (Button({ 452, 120, 68, 30 }, s.interior3DView ? "2D [V]" : "3D [V]", true))
+        s.interior3DView = !s.interior3DView;
+    if (s.interior3DView && Button({ 528, 120, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
+        g_t3dFollowMode = !g_t3dFollowMode;
+
+    // Signature furniture opens the building's detail panel (the same panel the
+    // old exterior E-press opened); X/ESC closes it.
+    DrawBuildingDetailPanel(s, screenW);
+
+    // Shop NPC greeting popup (town townsfolk treatment, minus their wander).
+    if (s.interiorGreeted && npc) {
+        Rectangle greetBg = { 20, 500, (float)(screenW - 40), 100 };
+        DrawRectangleRounded(greetBg, 0.06f, 8, Fade(kColorPageBg, 0.97f));
+        DrawRectangleRoundedLines(greetBg, 0.06f, 8, Fade(BLACK, 0.4f));
+        DrawUIText(npc->name, (int)greetBg.x + 16, (int)greetBg.y + 14, 16, kColorHeading);
+        DrawUIText(npc->greeting, (int)greetBg.x + 16, (int)greetBg.y + 42, 13, kColorText);
+        if (Button({ greetBg.x + greetBg.width - 64, greetBg.y + greetBg.height - 38, 44, 26 }, "X", true))
+            s.interiorGreeted = false;
+    }
+}
+
 
 
 static void DrawTownScreen(GameState& s, int screenW, int screenH) {
@@ -10207,7 +11503,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     bool npcIsNearest = nearestNPCIdx >= 0;
     bool inRange = nearestDist < kNodeRadius + kInteractRange;
     std::string interactLabel = npcIsNearest ? "Greet " + activeNPCs[nearestNPCIdx].name
-                                  : gateIsNearest ? "Wilderness" : TileNameFor(nearestKey);
+                                  : gateIsNearest ? "Wilderness" : "Enter " + TileNameFor(nearestKey);
 
     if (!s.selectedTile.has_value()) {
         UpdatePlayerMovement(s.townPlayerPos, s.playerFacing, GetFrameTime(), kTownWorldSize);
@@ -10225,7 +11521,29 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
                 s.wildernessPlayerPos = (s.selectedTown == 0) ? Vector2{ 900, 1650 } : Vector2{ 2900, 1650 };
                 s.wild3DView = s.town3DView; // entering from the 3D town stays 3D (view state only)
             }
-            else s.selectedTile = nearestKey;
+            else EnterInterior(s, nearestKey);
+        }
+    }
+
+    // --- Mouse: clicking a building opens its detail panel directly (mirrors the
+    // 3D view's tap-to-select, so the panel keeps an exterior route now that E
+    // walks inside). Clicks on HUD/joystick/interact-button/popups are not selection.
+    if (!s.town3DView && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        Vector2 m = GetMousePosition();
+        bool uiZone = (m.y < 190) ||                                                  // top HUD buttons
+                      (m.x < 170 && m.y > screenH - 220) ||                           // joystick
+                      (m.x > screenW - 170 && m.y > screenH - 170) ||                  // interact button
+                      ((s.selectedTile.has_value() || s.greetedNPC.has_value()) && m.y > 480); // popups
+        if (!uiZone && CheckCollisionPointRec(m, kViewport)) {
+            Vector2 cam = CameraTopLeft(s.townPlayerPos, kTownWorldSize);
+            Vector2 w = { m.x - kViewport.x + cam.x, m.y - kViewport.y + cam.y };
+            std::string hitKey;
+            float hitD = kNodeRadius * 1.6f;
+            for (auto& node : kTownNodePositions) {
+                float d = Dist(w, node.pos);
+                if (d < hitD) { hitD = d; hitKey = node.key; }
+            }
+            if (!hitKey.empty()) s.selectedTile = hitKey;
         }
     }
 
@@ -10420,7 +11738,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
             s.wildernessPlayerPos = (s.selectedTown == 0) ? Vector2{ 900, 1650 } : Vector2{ 2900, 1650 };
             s.wild3DView = s.town3DView; // entering from the 3D town stays 3D (view state only)
         }
-        else s.selectedTile = nearestKey;
+        else EnterInterior(s, nearestKey);
     }
 
     // Greet popup — small heading+text panel modeled on DrawInnocentPanel's shape, minus
@@ -10461,71 +11779,8 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
                        20, 176, 12);
 
     // --- Detail / upgrade panel — opened by walking up + E, closed with [X]/[ESC] ---
-    if (s.selectedTile.has_value()) {
-        std::string key = *s.selectedTile;
-        Rectangle panelBg = { 20, 500, (float)(screenW - 40), 220 };
-        DrawRectangleRounded(panelBg, 0.06f, 8, Fade(kColorPageBg, 0.97f));
-        DrawRectangleRoundedLines(panelBg, 0.06f, 8, Fade(BLACK, 0.4f));
-        int panelY = (int)panelBg.y + 16;
-
-        DrawUIText(TileNameFor(key).c_str(), 36, panelY, 18, kColorText);
-        if (Button({ (float)(screenW - 80), (float)panelY - 4, 44, 26 }, "X", true)) s.selectedTile.reset();
-
-        if (int idx = FindCraftBuildingIndex(key); idx >= 0) {
-            const BuildingDef& def = kCraftBuildings[idx];
-            int lvl = s.buildingLevel[idx];
-            std::string capLine = "Skill cap: " + std::to_string(def.levels[lvl - 1].cap);
-            DrawUIText(capLine.c_str(), 36, panelY + 28, 13, DARKGRAY);
-
-            if (lvl < 5) {
-                const BuildingLevel& next = def.levels[lvl];
-                std::string resName = def.resource == Resource::Wood ? "wood"
-                                      : def.resource == Resource::Ore ? "ore"
-                                      : def.resource == Resource::Leather ? "leather" : "";
-                std::string costLine = "Upgrade cost: " + std::to_string(next.goldCost) + "g" +
-                    (def.resource != Resource::None ? (" + " + std::to_string(next.resourceCost) + " " + resName) : "") +
-                    "  (" + std::to_string((int)next.upgradeTimeSec) + "s)";
-                DrawUIText(costLine.c_str(), 36, panelY + 48, 13, DARKGRAY);
-
-                bool upgrading = s.upgrading.has_value();
-                if (Button({ 36, (float)(panelY + 72), 160, 34 }, "Upgrade", !upgrading))
-                    TryStartUpgrade(s, key);
-                if (upgrading && s.upgrading->buildingKey == key) {
-                    float pct = 1.0f - (s.upgrading->secondsRemaining / next.upgradeTimeSec);
-                    Rectangle bar = { 36, (float)(panelY + 112), 200, 8 };
-                    DrawRectangleRec(bar, Fade(BLACK, 0.25f));
-                    DrawRectangleRec({ bar.x, bar.y, bar.width * std::clamp(pct, 0.0f, 1.0f), bar.height }, kColorSlate);
-                }
-            } else {
-                DrawUIText("Max level reached.", 36, panelY + 48, 13, DARKGRAY);
-            }
-            // Step inside and actually use the place, instead of tabbing away to Craft
-            // by hand — jumps straight to this building's own recipe tab.
-            if (Button({ 220, (float)(panelY + 72), 160, 34 }, "Craft here", true)) {
-                s.craftBuildingTab = idx;
-                s.screen = Screen::Craft;
-                s.selectedTile.reset();
-            }
-        } else {
-            DrawUIText("(No upgrades — amenity building.)", 36, panelY + 28, 13, DARKGRAY);
-            // Same "step inside and use it" idea as the craft buildings above, for the
-            // amenities that have an actual screen of their own.
-            struct AmenityLink { const char* label; Screen target; };
-            std::optional<AmenityLink> link;
-            if (key == "bank" || key == "townhall") link = AmenityLink{ "Manage the Vaultkeep", Screen::Bank };
-            else if (key == "stable") link = AmenityLink{ "Visit the Wildkeep", Screen::Pets };
-            else if (key == "healer") link = AmenityLink{ "Rest & bandage up", Screen::Character };
-            else if (key == "house") link = AmenityLink{ "Go inside", Screen::House };
-            else if (key == "provisioner") link = AmenityLink{ "Browse the wares", Screen::Provisioner };
-            if (link) {
-                if (Button({ 36, (float)(panelY + 56), 220, 34 }, link->label, true)) {
-                    s.screen = link->target;
-                    s.selectedTile.reset();
-                }
-            }
-        }
-        DrawUIText("Walk away or press [X] to close.", 36, (int)panelBg.y + 190, 13, Fade(DARKGRAY, 0.8f));
-    } else {
+    DrawBuildingDetailPanel(s, screenW);
+    if (!s.selectedTile.has_value()) {
         DrawUIText("WASD/arrows (or drag bottom-left) to move. Walk up to a building and press [E].", 20, screenH - 66, 13, Fade(DARKGRAY, 0.8f));
     }
 }
@@ -10538,6 +11793,275 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
 // (with a "tame" pendingEncounterCheck added alongside "gather" for the same ambush
 // roll — see UpdateTameAttempt), and a Town Gate node walks you back out.
 // ---------------------------------------------------------------------
+
+// ---------------------------------------------------------------------
+// Death / ghost / corpse / respawn — full definitions (forward-declared above
+// the loss functions; defined here, after the wilderness tables they use).
+// ---------------------------------------------------------------------
+static float RollWildRespawn() { return kWildRespawnMin + RandUnit() * (kWildRespawnMax - kWildRespawnMin); }
+static float RollDungeonRespawn(bool boss) {
+    return boss ? kDungeonBossRespawnMin + RandUnit() * (kDungeonBossRespawnMax - kDungeonBossRespawnMin)
+                : kDungeonRespawnMin + RandUnit() * (kDungeonRespawnMax - kDungeonRespawnMin);
+}
+// Extra dungeon slots (5,6,7) reuse the 5 curated monster types in order.
+static const DungeonMonster& DungeonSlotMonster(const DungeonDef& dungeon, int slotIdx) {
+    return dungeon.monsters[slotIdx % 5];
+}
+
+// Which town the ghost returns to — the closest gate to where death happened.
+// For dungeon deaths the dungeon's wilderness entrance is the reference point.
+static bool GhostResurrectSaltmere(const GameState& s) {
+    Vector2 ref = s.wildernessPlayerPos;
+    if (s.ghostZone == 1 && s.ghostDungeonIdx >= 0 && s.ghostDungeonIdx < 5)
+        ref = kWildernessDungeonEntrances[s.ghostDungeonIdx].pos;
+    return Dist(ref, kWildernessTown2GatePos) < Dist(ref, kWildernessReturnGatePos);
+}
+
+// Death-system 2D player rendering (2026-09-24): during the death animation the
+// body sinks/fades; as a ghost the player is a translucent pale wisp that can
+// walk but touch nothing. Otherwise draws the normal player.
+static void DrawPlayerLifeState(const GameState& s, Vector2 screenPos, Vector2 facing,
+                                const std::string& interactPrompt, float visualScale = 1.0f,
+                                ActorAnim combatAnim = ActorAnim::Idle) {
+    float kPlayerRadius = ::kPlayerRadius * visualScale;
+    if (s.playerDeathAnimT > 0.0f) {
+        // Body collapsing: draw the normal player, then sink it under a growing
+        // dark fade — reads as falling even without a dedicated prone sprite.
+        float fade = 1.0f - std::max(0.0f, s.playerDeathAnimT / kPlayerDeathAnimTime);
+        DrawPlayer(s, screenPos, facing, "", visualScale, ActorAnim::Idle);
+        DrawCircleV(screenPos, kPlayerRadius * 1.4f, Fade(BLACK, 0.75f * fade));
+    } else if (s.playerIsGhost) {
+        // Ghost: no body, just a drifting translucent wisp with a faint ring.
+        float pulse = 0.5f + 0.2f * std::sin(s.worldTime * 3.0f);
+        DrawCircleV(screenPos, kPlayerRadius * 1.1f, Fade(Color{ 170, 205, 255, 255 }, 0.28f * pulse));
+        DrawCircleV(screenPos, kPlayerRadius * 0.7f, Fade(Color{ 215, 235, 255, 255 }, 0.35f * pulse));
+        DrawCircleLines((int)screenPos.x, (int)screenPos.y, kPlayerRadius * 1.1f, Fade(Color{ 200, 225, 255, 255 }, 0.6f));
+    } else {
+        DrawPlayer(s, screenPos, facing, interactPrompt, visualScale, combatAnim);
+    }
+}
+
+// Draws world corpses (the purely visual markers from the death system) in a 2D
+// view: the monster's sprite dark-tinted and fading for wilderness kills, a dark
+// mound for everything else.
+static void DrawWorldCorpses2D(const GameState& s, int zone, Vector2 camera) {
+    for (const GameState::WorldCorpse& c : s.worldCorpses) {
+        if (c.zone != zone) continue;
+        float fade = std::clamp(c.timer / c.duration, 0.0f, 1.0f);
+        Vector2 sp = WorldToScreen(c.pos, camera);
+        if (c.iconIdx >= 0 && c.iconIdx < 5 && g_assets.wildMonsterTex[c.iconIdx].ok) {
+            const DirSpriteSheet& sheet = g_assets.wildMonsterTex[c.iconIdx];
+            Rectangle src = ActorSrcRect(sheet, { 0, 1 }, ActorAnim::Idle, s.worldTime);
+            Color tint = Fade(Color{ 90, 85, 80, 255 }, 0.75f * fade); // dark, drained, fading
+            DrawIconCenteredRect(sheet.tex, src, sp, kNodeRadius * 1.1f, tint);
+        } else {
+            DrawCircleV(sp, kNodeRadius * 0.5f, Fade(Color{ 70, 62, 58, 255 }, 0.8f * fade));
+            DrawCircleLines((int)sp.x, (int)sp.y, kNodeRadius * 0.5f, Fade(Color{ 40, 36, 32, 255 }, 0.8f * fade));
+        }
+    }
+}
+
+static void BeginPlayerDeath(GameState& s) {
+    // Called at the END of every player-loss path, AFTER that path's gold/item/
+    // Shaken/Rival-loot logic has resolved — this only handles the death itself:
+    // HP to 0, everything hostile cleared, ghost placed. The loss functions no
+    // longer restore 20% HP; resurrection (full HP, closest town) happens when
+    // the ghost timer expires.
+    s.hp = 0;
+    // Stop anything in progress — a ghost can't be mid-gather or mid-tame.
+    s.autoGather = false;
+    s.gatheringResource.reset();
+    s.tamingAttempt.reset();
+    // Clear anything that could re-engage or pop a panel over the death.
+    s.ambush.reset();
+    s.innocentEncounter.reset();
+    s.combat.reset();
+    s.wildEngaged.reset();
+    s.dungeonEngaged.reset();
+    s.dyingMonster.reset();
+    CancelEscort(s, "flees as you fall — the escort is broken."); // a ghost can't be escorting anyone
+    // The ghost walks where it died. Panel-combat deaths (ambush panel over town,
+    // the Hunt picker, etc.) manifest in the wilderness at the last wilderness
+    // position — never stranded on a picker screen.
+    if (s.screen == Screen::Hunt && s.selectedDungeon.has_value()) {
+        s.ghostZone = 1;
+        s.ghostDungeonIdx = *s.selectedDungeon;
+    } else {
+        s.ghostZone = 0;
+        s.ghostDungeonIdx = -1;
+        s.screen = Screen::Wilderness;
+    }
+    s.playerDeathAnimT = kPlayerDeathAnimTime;
+    s.playerIsGhost = false;
+    s.ghostTimer = 0.0f;
+    s.logLine += " You collapse...";
+}
+
+static void FinishPlayerDeathAnim(GameState& s) {
+    s.playerDeathAnimT = 0.0f;
+    s.playerIsGhost = true;
+    s.ghostTimer = kGhostDuration;
+    s.logLine += " You are a ghost. Walk where you will — nothing can touch you, and you can touch nothing, for a little while.";
+}
+
+static void ResurrectPlayer(GameState& s) {
+    bool saltmere = GhostResurrectSaltmere(s);
+    s.selectedTown = saltmere ? 1 : 0;
+    s.townPlayerPos = { 450, 830 }; // town gate/healer area, same as a fresh arrival
+    s.screen = Screen::Town;
+    if (s.wild3DView) s.town3DView = true; // stay in 3D across the resurrection (view state only)
+    s.hp = s.maxHp;
+    s.mana = MaxMana(s);
+    s.playerIsGhost = false;
+    s.ghostTimer = 0.0f;
+    s.ghostZone = 0;
+    s.ghostDungeonIdx = -1;
+    s.logLine = std::string("You wake in ") + (saltmere ? kTown2Name : "Town") + ", whole once more.";
+}
+
+// Starts a monster's death animation. The fight is over NOW (engagement cleared,
+// spot immediately on respawn cooldown so nothing else can engage it); the old
+// win body (corpse, rewards, ambush chaining) runs in FinishMonsterDeath when the
+// animation completes.
+static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& am,
+                                  const std::string& name, int baseGold, int baseLeather) {
+    GameState::DyingMonster dm;
+    dm.zone = 0;
+    dm.pos = am.pos;
+    dm.timer = dm.duration = kMonsterDeathAnimTime;
+    dm.spotIdx = am.spotIdx;
+    dm.isRival = am.isRival;
+    dm.bladeIdx = am.bladeIdx;
+    dm.name = name; dm.baseGold = baseGold; dm.baseLeather = baseLeather;
+    dm.iconIdx = (am.spotIdx >= 0 && am.spotIdx < (int)kWildernessMonsterSpots.size())
+        ? kWildernessMonsterSpots[am.spotIdx].iconIdx : -1;
+    if (am.spotIdx >= 0) s.wildSpotRespawn[am.spotIdx] = RollWildRespawn();
+    s.dyingMonster = dm;
+    s.wildEngaged.reset();
+}
+
+static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeonMonster& am,
+                                     int dungeonIdx, bool wasBoss, const std::string& name,
+                                     int level, int baseGold, int baseLeather) {
+    GameState::DyingMonster dm;
+    dm.zone = 1;
+    dm.pos = am.pos;
+    dm.timer = dm.duration = kMonsterDeathAnimTime;
+    dm.dungeonIdx = dungeonIdx;
+    dm.monsterIdx = am.isBoss ? kDungeonBossSlot : am.monsterIdx;
+    dm.isBoss = wasBoss;
+    dm.name = name; dm.level = level; dm.baseGold = baseGold; dm.baseLeather = baseLeather;
+    s.dungeonSpawnRespawn[dungeonIdx][dm.monsterIdx] = RollDungeonRespawn(wasBoss);
+    s.dyingMonster = dm;
+    s.dungeonEngaged.reset();
+}
+
+// The deferred half of the old EndWildMonsterWin/EndDungeonMonsterWin bodies —
+// runs when the death animation completes: corpse (visual + lootable), rewards,
+// Shaken relief, ambush/innocent chaining. Economy behavior is unchanged, only
+// delayed by the animation.
+static void FinishMonsterDeath(GameState& s) {
+    GameState::DyingMonster dm = *s.dyingMonster; // copy — handlers below touch state
+    s.dyingMonster.reset();
+    float corpseDur = (dm.isRival || dm.bladeIdx >= 0) ? kRivalCorpseFadeTime : kCorpseFadeTime;
+    s.worldCorpses.push_back({ dm.pos, corpseDur, corpseDur, dm.zone, dm.iconIdx, dm.name });
+    int goldFound = std::max(1, dm.baseGold + (std::rand() % 3) - 1);
+    s.corpses.push_back({ dm.name, dm.baseLeather, goldFound });
+    std::string msg = "Defeated the " + dm.name + "! Corpse left behind with leather and " +
+                      std::to_string(goldFound) + " gold to loot.";
+    if (dm.zone == 1 && !dm.isBoss && dm.dungeonIdx >= 0) {
+        // Dungeon XP / boss ladder — the old EndDungeonMonsterWin block.
+        s.dungeonXP[dm.dungeonIdx] += dm.level;
+        const DungeonDef& dungeon = kDungeons[dm.dungeonIdx];
+        if (s.dungeonXP[dm.dungeonIdx] >= dungeon.bossUnlockXp &&
+            s.dungeonXP[dm.dungeonIdx] - dm.level < dungeon.bossUnlockXp)
+            msg += " " + dungeon.boss.name + " is now available!";
+    }
+    LiveMaybeGainMagicResist(s);
+    s.logLine = msg;
+    DecrementShaken(s); // JS: every win eases Shaken by one fight
+    AddWeeklyProgress(s, kGoalDefeat, 1);
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) return; // can't happen, but never chain an encounter onto a ghost
+    if (dm.zone == 1) { if (!TryTriggerAmbush(s, "dungeon")) TryTriggerInnocentEncounter(s, "dungeon"); }
+    else { if (!TryTriggerAmbush(s, "wilderness")) TryTriggerInnocentEncounter(s, "wilderness"); }
+}
+
+// Per-frame tick for the whole system — called from UpdateDrawFrame's global
+// update block so it runs on every screen, in 2D and 3D alike.
+static void UpdateDeathAndRespawn(GameState& s, float dt) {
+    if (s.playerDeathAnimT > 0.0f) {
+        s.playerDeathAnimT -= dt;
+        if (s.playerDeathAnimT <= 0.0f) FinishPlayerDeathAnim(s);
+    } else if (s.playerIsGhost) {
+        s.ghostTimer -= dt;
+        if (s.ghostTimer <= 0.0f) ResurrectPlayer(s);
+    }
+    if (s.dyingMonster.has_value()) {
+        s.dyingMonster->timer -= dt;
+        if (s.dyingMonster->timer <= 0.0f) FinishMonsterDeath(s);
+    }
+    for (float& t : s.wildSpotRespawn) if (t > 0.0f) t -= dt;
+    for (auto& d : s.dungeonSpawnRespawn) for (float& t : d) if (t > 0.0f) t -= dt;
+    for (auto& c : s.worldCorpses) c.timer -= dt;
+    s.worldCorpses.erase(std::remove_if(s.worldCorpses.begin(), s.worldCorpses.end(),
+        [](const GameState::WorldCorpse& c) { return c.timer <= 0.0f; }), s.worldCorpses.end());
+}
+
+// Spawns just the visible corpse for a panel-combat win (ambush/bloodstained) —
+// there's no world sprite to play a fall animation on, so the corpse appears at
+// the player's position. The lootable corpse list + rewards are handled by the
+// existing panel win logic, unchanged.
+static void SpawnPanelKillCorpse(GameState& s, const std::string& name) {
+    int zone = 0;
+    Vector2 pos = s.wildernessPlayerPos;
+    if (s.screen == Screen::Hunt && s.selectedDungeon.has_value()) {
+        zone = 1;
+        pos = s.dungeonPlayerPos;
+    }
+    s.worldCorpses.push_back({ pos, kCorpseFadeTime, kCorpseFadeTime, zone, -1, name });
+}
+
+// Ghost/death status banner (2026-09-24): shows while the death animation plays
+// and through the ghost walk, including the "Returning to <town>..." notice in
+// the final seconds. Drawn in both wilderness and dungeon, 2D and 3D.
+static void DrawGhostStatus(const GameState& s) {
+    if (s.playerDeathAnimT <= 0.0f && !s.playerIsGhost) return;
+    std::string text;
+    if (s.playerDeathAnimT > 0.0f) {
+        text = "You collapse...";
+    } else if (s.ghostTimer <= kGhostReturnNotice) {
+        text = std::string("Returning to ") + (GhostResurrectSaltmere(s) ? kTown2Name : "Town") + "...";
+    } else {
+        text = "GHOST — " + std::to_string((int)std::ceil(s.ghostTimer)) +
+               "s until resurrection. You can walk, but touch nothing.";
+    }
+    int fsz = 14;
+    int w = MeasureUIText(text.c_str(), fsz);
+    int sx = (int)(kViewport.x + (kViewport.width - w) / 2), sy = (int)(kViewport.y + kViewport.height - 130);
+    DrawRectangle(sx - 10, sy - 6, w + 20, fsz + 12, Fade(BLACK, 0.65f));
+    DrawUIText(text.c_str(), sx, sy, fsz, Color{ 190, 215, 255, 255 });
+}
+
+// Innocent world sprite (2D wilderness, 2026-09-24) — dedicated pixel-art portrait
+// per identity, drawn at a readable world size; falls back to the old neutral
+// circle if the texture didn't load.
+static void DrawInnocentSprite2D(Vector2 screenPos, int id, const std::string& label, bool near) {
+    id = std::clamp(id, 0, 3);
+    if (g_assets.innocentTexOk[id]) {
+        const Texture2D& tex = g_assets.innocentTex[id];
+        float hgt = 52.0f;
+        float wdt = hgt * (float)tex.width / (float)tex.height;
+        Rectangle src = { 0, 0, (float)tex.width, (float)tex.height };
+        Rectangle dst = { screenPos.x - wdt / 2, screenPos.y - hgt, wdt, hgt };
+        DrawTexturePro(tex, src, dst, { 0, 0 }, 0.0f, WHITE);
+        int w = MeasureUIText(label.c_str(), 12);
+        DrawUIText(label.c_str(), (int)(screenPos.x - w / 2), (int)(screenPos.y + 4), 12,
+                   near ? kColorAccent : DARKGRAY);
+        if (near) DrawCircleLines((int)screenPos.x, (int)screenPos.y - 20, 30, kColorAccent);
+    } else {
+        DrawWorldNode(screenPos, kNodeRadius * 0.6f, Color{ 150, 140, 110, 255 }, label, near);
+    }
+}
 
 static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     DrawUIText("The Wilderness — gather wood/ore or tame a creature. Watch for trouble.", 20, 112, 13, kColorAccent);
@@ -10566,6 +12090,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // The engaged slot's live (moving) position takes over from its wander loop
         // once you're fighting it — everything else still searches by its own wander
         // position (WildernessMonsterLivePos), not a fixed spawn point.
+        if (s.wildSpotRespawn[i] > 0.0f) continue; // empty — waiting to respawn
         Vector2 pos = (wasEngaged && s.wildEngaged->spotIdx == (int)i) ? s.wildEngaged->pos : WildernessMonsterLivePos((int)i, s.worldTime);
         float d = Dist(s.wildernessPlayerPos, pos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Monster; nearestIdx = (int)i; }
@@ -10610,6 +12135,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // above kWildernessMonsterSpots. Same monsterMaxHP() formula StartCombat uses
     // (level*3) for starting HP.
     auto tryEngageWildMonster = [&](int idx) {
+        if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
+        if (s.wildSpotRespawn[idx] > 0.0f) return; // empty — waiting to respawn
         const WildernessMonsterSpot& spot = kWildernessMonsterSpots[idx];
         GameState::ActiveMonster am;
         am.spotIdx = idx;
@@ -10621,6 +12148,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         s.logLine = "You engage the " + spot.name + "!";
     };
     auto tryEngageRival = [&]() {
+        if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
         GameState::ActiveMonster am;
         am.spotIdx = -1;
         am.isRival = true;
@@ -10632,6 +12160,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         s.logLine = "The " + RivalEpithetName(s) + " turns to face you!";
     };
     auto tryEngageBlade = [&](int bi) {
+        if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
         GameState::ActiveMonster am;
         am.spotIdx = -1;
         am.isRival = false;
@@ -10650,11 +12179,17 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // in the panel doesn't change that (all four already call innocentEncounter.reset()
     // on their own, this just handles the world-spot side of it).
     auto tryEngageInnocentSpot = [&](int idx) {
+        if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
         if (s.ambush.has_value() || s.innocentEncounter.has_value() || s.combat.has_value() ||
             s.wildEngaged.has_value() || s.dungeonEngaged.has_value()) return;
         GameState::InnocentSpotState& spot = s.innocentSpots[idx];
-        s.innocentEncounter = GameState::InnocentEncounter{ spot.name, spot.gold, false, "wilderness_npc" };
-        s.logLine = spot.name + " notices you approaching.";
+        int id = spot.identity;
+        GameState::InnocentEncounter enc;
+        enc.identity = id; enc.gold = spot.gold; enc.source = "wilderness_npc"; enc.spotIdx = idx;
+        s.innocentEncounter = enc;
+        s.innocentMem[id].met++;
+        MaybeOfferRequest(s, id);
+        s.logLine = InnocentName(id) + " notices you approaching.";
         spot.present = false;
         spot.respawnTimer = kInnocentRespawnSeconds;
     };
@@ -10663,7 +12198,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // mid-panel with an ambush or innocent encounter. (If the moment passes, it passes.)
     if (s.rivalAutoEngage) {
         s.rivalAutoEngage = false;
-        if (!s.wildEngaged.has_value() && !s.ambush.has_value() && !s.innocentEncounter.has_value() &&
+        if (!s.playerIsGhost && s.playerDeathAnimT <= 0.0f && !s.wildEngaged.has_value() && !s.ambush.has_value() && !s.innocentEncounter.has_value() &&
             Dist(s.rivalPos, s.wildernessPlayerPos) < kRivalCatchRange * 1.5f)
             tryEngageRival();
     }
@@ -10672,7 +12207,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     for (int bi = 0; bi < kBladeCount; bi++) {
         if (!s.blades[bi].autoEngage) continue;
         s.blades[bi].autoEngage = false;
-        if (!s.wildEngaged.has_value() && !s.ambush.has_value() && !s.innocentEncounter.has_value() &&
+        if (!s.playerIsGhost && s.playerDeathAnimT <= 0.0f && !s.wildEngaged.has_value() && !s.ambush.has_value() && !s.innocentEncounter.has_value() &&
             Dist(s.blades[bi].pos, s.wildernessPlayerPos) < kRivalCatchRange * 1.5f)
             tryEngageBlade(bi);
     }
@@ -10755,7 +12290,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             std::string mname = spot.name; int mgold = spot.baseGold, mleather = spot.baseLeather;
             int level = spot.level;
             ResolvePetTurnLive(s, am.hp, level);
-            if (am.hp <= 0) { EndWildMonsterWin(s, mname, mgold, mleather); return; }
+            if (am.hp <= 0) { BeginWildMonsterDeath(s, am, mname, mgold, mleather); return; }
         }
     };
     // The tactical opponent's own AI (2026-09-22, "AI players" plan Part 3) — confirmed
@@ -10907,7 +12442,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             if (am.hp <= 0) {
                 bool wasMurdererTier = s.rivalHasBeatenPlayer;
                 RivalFightEnded(s, am);
-                EndWildMonsterWin(s, mname, mgold, mleather);
+                BeginWildMonsterDeath(s, am, mname, mgold, mleather);
                 if (wasMurdererTier) { GainFame(s, 10.0f); s.notoriety = std::max(0.0f, s.notoriety - 10.0f); }
                 return;
             }
@@ -10938,13 +12473,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 if (am.isRival) {
                     bool wasMurdererTier = s.rivalHasBeatenPlayer;
                     RivalFightEnded(s, am);
-                    EndWildMonsterWin(s, mname, mgold, mleather);
+                    BeginWildMonsterDeath(s, am, mname, mgold, mleather);
                     if (wasMurdererTier) { GainFame(s, 10.0f); s.notoriety = std::max(0.0f, s.notoriety - 10.0f); }
                 } else if (am.bladeIdx >= 0) {
                     BladeFightEnded(s, am.bladeIdx, am); // persist position + slow level growth
-                    EndWildMonsterWin(s, mname, mgold, mleather);
+                    BeginWildMonsterDeath(s, am, mname, mgold, mleather);
                 } else {
-                    EndWildMonsterWin(s, mname, mgold, mleather);
+                    BeginWildMonsterDeath(s, am, mname, mgold, mleather);
                 }
             }
         } else {
@@ -10986,13 +12521,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 if (am.isRival) {
                     bool wasMurdererTier = s.rivalHasBeatenPlayer;
                     RivalFightEnded(s, am);
-                    EndWildMonsterWin(s, mname, mgold, mleather);
+                    BeginWildMonsterDeath(s, am, mname, mgold, mleather);
                     if (wasMurdererTier) { GainFame(s, 10.0f); s.notoriety = std::max(0.0f, s.notoriety - 10.0f); }
                 } else if (am.bladeIdx >= 0) {
                     BladeFightEnded(s, am.bladeIdx, am); // persist position + slow level growth
-                    EndWildMonsterWin(s, mname, mgold, mleather);
+                    BeginWildMonsterDeath(s, am, mname, mgold, mleather);
                 } else {
-                    EndWildMonsterWin(s, mname, mgold, mleather);
+                    BeginWildMonsterDeath(s, am, mname, mgold, mleather);
                 }
             }
         } else {
@@ -11006,10 +12541,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (!s.selectedDungeon.has_value() || *s.selectedDungeon != idx) s.dungeonPlayerPos = { 900, 1300 };
         s.selectedDungeon = idx;
         s.huntSubView = 0;
+        CancelEscort(s, "won't follow you into the dark — the escort is broken.");
         s.screen = Screen::Hunt;
         s.hunt3DView = s.wild3DView; // entering from the 3D wilderness stays 3D (view state only)
     };
     auto tryInteract = [&]() {
+        if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
         if (nearestKind == WildNodeKind::Gather) TryStartGather(s, kWildernessGatherNodes[nearestIdx].resource, 5.0f);
         else if (nearestKind == WildNodeKind::Creature) TryStartTameAttempt(s, kWildernessCreatureSpots[nearestIdx].creatureIdx);
         else if (nearestKind == WildNodeKind::Monster) tryEngageWildMonster(nearestIdx);
@@ -11018,12 +12555,14 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         else if (nearestKind == WildNodeKind::Innocent) tryEngageInnocentSpot(nearestIdx);
         else if (nearestKind == WildNodeKind::DungeonEntrance) tryEnterDungeon(kWildernessDungeonEntrances[nearestIdx].dungeonIdx);
         else if (nearestKind == WildNodeKind::Town2Gate) {
+            CancelEscort(s, "parts ways at the gate — the escort is broken.");
             s.selectedTown = 1;
             s.screen = Screen::Town;
             s.townPlayerPos = { 450, 830 }; // same relative spawn every town uses, just south of its own gate
             if (s.wild3DView) s.town3DView = true; // stay in 3D across the gate (view state only)
         }
         else {
+            CancelEscort(s, "parts ways at the gate — the escort is broken.");
             s.selectedTown = 0; s.screen = Screen::Town; s.townPlayerPos = { 450, 830 };
             if (s.wild3DView) s.town3DView = true; // walking back through the gate returns to 3D town
         } // just south of kWildernessGatePos
@@ -11048,27 +12587,34 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         else if (nearestKind == WildNodeKind::Monster) prompt = "[E] Fight " + kWildernessMonsterSpots[nearestIdx].name;
         else if (nearestKind == WildNodeKind::Rival) prompt = "[E] Fight Rival Adventurer";
         else if (nearestKind == WildNodeKind::Blade) prompt = "[E] Fight " + BladeName(nearestIdx);
-        else if (nearestKind == WildNodeKind::Innocent) prompt = "[E] Approach " + s.innocentSpots[nearestIdx].name;
+        else if (nearestKind == WildNodeKind::Innocent) prompt = "[E] Approach " + InnocentName(s.innocentSpots[nearestIdx].identity);
         else if (nearestKind == WildNodeKind::DungeonEntrance)
             prompt = "[E] Enter " + kDungeons[kWildernessDungeonEntrances[nearestIdx].dungeonIdx].name;
         else if (nearestKind == WildNodeKind::Town2Gate) prompt = "[E] Enter " + std::string(kTown2Name);
         else prompt = "[E] Return to Town";
     }
+    // Ghosts and the dying get no prompts — they can't touch anything.
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) prompt.clear();
 
-    UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GetFrameTime(), kWildernessWorldSize);
-    if (ActivePet(s)) UpdateCompanionFollow(s, s.wildernessPlayerPos, s.playerFacing, GetFrameTime());
+    // No movement during the death animation — the body isn't going anywhere.
+    if (s.playerDeathAnimT <= 0.0f) {
+        UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GetFrameTime(), kWildernessWorldSize);
+        if (ActivePet(s)) UpdateCompanionFollow(s, s.wildernessPlayerPos, s.playerFacing, GetFrameTime());
+    }
     for (auto& node : kWildernessGatherNodes)
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, node.pos, kNodeRadius * 0.7f);
     for (auto& spot : kWildernessCreatureSpots)
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, spot.pos, kNodeRadius * 0.8f);
     for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
-        // The engaged one collides against its live position (below); the other 4
+        // The engaged one collides against its live position (below); the others
         // wander in a small loop (WildernessMonsterLivePos) and auto-engage the player
         // on contact — bumping into one starts the fight, no E press required (walking
         // up and pressing E while in range still works too, via tryInteract).
+        if (s.wildSpotRespawn[i] > 0.0f) continue; // empty — waiting to respawn
         if (wasEngaged && s.wildEngaged->spotIdx == (int)i) continue;
         Vector2 livePos = WildernessMonsterLivePos((int)i, s.worldTime);
-        if (!s.wildEngaged.has_value() && Dist(s.wildernessPlayerPos, livePos) < kPlayerRadius + kNodeRadius * 0.7f)
+        if (!s.wildEngaged.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
+            Dist(s.wildernessPlayerPos, livePos) < kPlayerRadius + kNodeRadius * 0.7f)
             tryEngageWildMonster((int)i);
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, livePos, kNodeRadius * 0.7f);
     }
@@ -11164,6 +12710,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             DrawWorldNode(screenPos, kNodeRadius * 0.8f, Color{ 96, 72, 54, 255 }, creature.name, near, sub);
         }
     }
+    bool wildDying2D = s.dyingMonster.has_value() && s.dyingMonster->zone == 0;
     for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
         // The engaged slot is drawn separately below, at its live position with an HP
         // bar, instead of here at its idle spawn spot. Checks s.wildEngaged fresh
@@ -11171,16 +12718,26 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // have just ended the fight this same frame — wasEngaged would still be true
         // then, and dereferencing an emptied optional is undefined behavior.
         if (s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->spotIdx == (int)i) continue;
+        // Empty slots (waiting to respawn) draw nothing — except a slot mid-death-
+        // animation, which draws the fading body instead.
+        bool isDying = wildDying2D && !s.dyingMonster->isRival && s.dyingMonster->spotIdx == (int)i;
+        if (!isDying && s.wildSpotRespawn[i] > 0.0f) continue;
         const WildernessMonsterSpot& spot = kWildernessMonsterSpots[i];
         const DirSpriteSheet& sheet = g_assets.wildMonsterTex[spot.iconIdx];
         bool near = nearestKind == WildNodeKind::Monster && nearestIdx == (int)i && inRange;
         std::string sub = TextFormat("lvl %d - %.0f%%", spot.level, WinChancePreview(s, spot.level));
-        Vector2 screenPos = WorldToScreen(WildernessMonsterLivePos((int)i, s.worldTime), camera);
+        Vector2 screenPos = WorldToScreen(isDying ? s.dyingMonster->pos : WildernessMonsterLivePos((int)i, s.worldTime), camera);
         if (sheet.ok) {
             Rectangle src = ActorSrcRect(sheet, { 0, 1 }, ActorAnim::Idle, s.worldTime);
-            DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, near, sub, &sheet.tex, WHITE, &src);
+            if (isDying) {
+                float fade = std::max(0.0f, s.dyingMonster->timer / s.dyingMonster->duration);
+                DrawDyingWorldNode(screenPos, kNodeRadius * 0.7f, &sheet.tex, Fade(WHITE, fade), &src,
+                                   1.0f + 0.25f * (1.0f - fade));
+            } else {
+                DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, near, sub, &sheet.tex, WHITE, &src);
+            }
         } else {
-            DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, near, sub);
+            if (!isDying) DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, near, sub);
         }
     }
     if (s.wildEngaged.has_value()) {
@@ -11212,21 +12769,39 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // Roaming, not currently fought — patrolling or actively hunting the player
         // (2026-09-23, "Rival hunts you" plan). Sub-label surfaces which, both for
         // legibility and because "Hunting..." is a genuinely useful warning.
-        Vector2 screenPos = WorldToScreen(s.rivalPos, camera);
-        bool near = nearestKind == WildNodeKind::Rival && inRange;
-        std::string sub = s.rivalActivity == GameState::RivalActivity::Hunting ? "Hunting..."
-            : s.rivalActivity == GameState::RivalActivity::Stalking ? "Stalking..." : "Patrolling";
-        const DirSpriteSheet& sheet = g_assets.rivalAdventurerSheet;
-        if (sheet.ok) {
-            Vector2 dir = s.rivalActivity == GameState::RivalActivity::Patrol
-                ? Vector2{ s.rivalPatrolTarget.x - s.rivalPos.x, s.rivalPatrolTarget.y - s.rivalPos.y }
-                : Vector2{ s.wildernessPlayerPos.x - s.rivalPos.x, s.wildernessPlayerPos.y - s.rivalPos.y };
-            float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-            Vector2 facing = len > 0.001f ? Vector2{ dir.x / len, dir.y / len } : Vector2{ 0, 1 };
-            Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
-            DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, RivalEpithetName(s), near, sub, &sheet.tex, WHITE, &src);
-        } else {
-            DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, RivalEpithetName(s), near, sub);
+        // While their death animation plays, the fading body at the kill site is
+        // drawn instead of the patrolling rival (no double-draw) — they retreat
+        // rather than die, see RivalFightEnded.
+        bool rivalDying2D = wildDying2D && s.dyingMonster->isRival && s.dyingMonster->bladeIdx < 0;
+        {
+            const DirSpriteSheet& sheet = g_assets.rivalAdventurerSheet;
+            Vector2 screenPos = WorldToScreen(rivalDying2D ? s.dyingMonster->pos : s.rivalPos, camera);
+            if (rivalDying2D) {
+                float fade = std::max(0.0f, s.dyingMonster->timer / s.dyingMonster->duration);
+                if (sheet.ok) {
+                    Vector2 dir = { s.wildernessPlayerPos.x - s.rivalPos.x, s.wildernessPlayerPos.y - s.rivalPos.y };
+                    float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+                    Vector2 facing = len > 0.001f ? Vector2{ dir.x / len, dir.y / len } : Vector2{ 0, 1 };
+                    Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
+                    DrawDyingWorldNode(screenPos, kNodeRadius * 0.7f, &sheet.tex, Fade(WHITE, fade), &src,
+                                       1.0f + 0.25f * (1.0f - fade));
+                }
+            } else {
+                bool near = nearestKind == WildNodeKind::Rival && inRange;
+                std::string sub = s.rivalActivity == GameState::RivalActivity::Hunting ? "Hunting..."
+                    : s.rivalActivity == GameState::RivalActivity::Stalking ? "Stalking..." : "Patrolling";
+                if (sheet.ok) {
+                    Vector2 dir = s.rivalActivity == GameState::RivalActivity::Patrol
+                        ? Vector2{ s.rivalPatrolTarget.x - s.rivalPos.x, s.rivalPatrolTarget.y - s.rivalPos.y }
+                        : Vector2{ s.wildernessPlayerPos.x - s.rivalPos.x, s.wildernessPlayerPos.y - s.rivalPos.y };
+                    float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+                    Vector2 facing = len > 0.001f ? Vector2{ dir.x / len, dir.y / len } : Vector2{ 0, 1 };
+                    Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
+                    DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, RivalEpithetName(s), near, sub, &sheet.tex, WHITE, &src);
+                } else {
+                    DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, RivalEpithetName(s), near, sub);
+                }
+            }
         }
     }
     // Murder Inc. blades — drawn like the champion's node but a darker dried-blood
@@ -11235,8 +12810,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // pair-hunt partner closing in never surprises you unfairly.
     for (int bi = 0; bi < kBladeCount; bi++) {
         if (s.wildEngaged.has_value() && s.wildEngaged->bladeIdx == bi) continue; // drawn above with its HP bar
+        // While a blade's death animation plays, the fading body at the kill site
+        // is drawn instead of the patrolling blade (no double-draw) — same
+        // retreat-not-death treatment as the champion.
+        bool bladeDying2D = wildDying2D && s.dyingMonster->isRival && s.dyingMonster->bladeIdx == bi;
         const auto& b = s.blades[bi];
-        Vector2 bScreenPos = WorldToScreen(b.pos, camera);
+        Vector2 bScreenPos = WorldToScreen(bladeDying2D ? s.dyingMonster->pos : b.pos, camera);
         bool bNear = nearestKind == WildNodeKind::Blade && nearestIdx == bi && inRange;
         std::string bSub = b.activity == GameState::RivalActivity::Hunting ? "Hunting..."
             : b.activity == GameState::RivalActivity::Stalking ? "Stalking..." : "Patrolling";
@@ -11248,19 +12827,28 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             float bLen = std::sqrt(bDir.x * bDir.x + bDir.y * bDir.y);
             Vector2 bFacing = bLen > 0.001f ? Vector2{ bDir.x / bLen, bDir.y / bLen } : Vector2{ 0, 1 };
             Rectangle bSrc = ActorSrcRect(bSheet, bFacing, ActorAnim::Walk, s.worldTime);
-            DrawWorldNode(bScreenPos, kNodeRadius * 0.7f, Color{ 96, 28, 34, 255 }, BladeName(bi), bNear, bSub, &bSheet.tex, WHITE, &bSrc);
+            if (bladeDying2D) {
+                float fade = std::max(0.0f, s.dyingMonster->timer / s.dyingMonster->duration);
+                DrawDyingWorldNode(bScreenPos, kNodeRadius * 0.7f, &bSheet.tex, Fade(WHITE, fade), &bSrc,
+                                   1.0f + 0.25f * (1.0f - fade));
+            } else {
+                DrawWorldNode(bScreenPos, kNodeRadius * 0.7f, Color{ 96, 28, 34, 255 }, BladeName(bi), bNear, bSub, &bSheet.tex, WHITE, &bSrc);
+            }
         } else {
-            DrawWorldNode(bScreenPos, kNodeRadius * 0.7f, Color{ 96, 28, 34, 255 }, BladeName(bi), bNear, bSub);
+            if (!bladeDying2D) DrawWorldNode(bScreenPos, kNodeRadius * 0.7f, Color{ 96, 28, 34, 255 }, BladeName(bi), bNear, bSub);
         }
     }
     for (size_t i = 0; i < kWildernessInnocentSpots.size(); i++) {
         if (!s.innocentSpots[i].present) continue;
         bool near = nearestKind == WildNodeKind::Innocent && nearestIdx == (int)i && inRange;
         Vector2 screenPos = WorldToScreen(WildernessInnocentLivePos((int)i, s.worldTime), camera);
-        // No dedicated art for these — a neutral (not monster-red) colored circle reads
-        // as "not a threat," same fallback DrawWorldNode already uses for icon-less
-        // nodes elsewhere.
-        DrawWorldNode(screenPos, kNodeRadius * 0.6f, Color{ 150, 140, 110, 255 }, s.innocentSpots[i].name, near);
+        int id = s.innocentSpots[i].identity;
+        DrawInnocentSprite2D(screenPos, id, InnocentName(id), near);
+    }
+    // An innocent you're escorting walks beside you in the world.
+    if (s.escortInnocent >= 0) {
+        Vector2 screenPos = WorldToScreen(s.escortPos, camera);
+        DrawInnocentSprite2D(screenPos, s.escortInnocent, InnocentName(s.escortInnocent), false);
     }
     for (size_t i = 0; i < kWildernessDungeonEntrances.size(); i++) {
         const WildernessDungeonEntrance& entrance = kWildernessDungeonEntrances[i];
@@ -11315,7 +12903,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (s.wildEngaged->swingEffectTimer > 0.0f) wildCombatAnim = ActorAnim::Attack;
         else if (s.wildEngaged->castEffectTimer > 0.0f) wildCombatAnim = ActorAnim::Cast;
     }
-    DrawPlayer(s, WorldToScreen(s.wildernessPlayerPos, camera), s.playerFacing, prompt, 1.0f, wildCombatAnim);
+    DrawWorldCorpses2D(s, 0, camera); // fallen monsters linger where they died
+    DrawPlayerLifeState(s, WorldToScreen(s.wildernessPlayerPos, camera), s.playerFacing, prompt, 1.0f, wildCombatAnim);
     EndScissorMode();
     } // end else: 2D world view (3D renders via DrawWilderness3DWorld above)
     DrawVirtualJoystick();
@@ -11327,9 +12916,10 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // anything drawn here earlier in the frame.
         DrawLiveCombatHud(s, 20, 116);
         DrawLiveCombatQuickItems(s);
-    } else if (inRange && DrawInteractButton(prompt)) {
+    } else if (inRange && !prompt.empty() && DrawInteractButton(prompt)) {
         tryInteract();
     }
+    DrawGhostStatus(s); // death animation / ghost walk banner
 
     // Spell hotbar — only while actually engaged (2026-09-22 fix: it used to also show
     // while just exploring "so it could be configured between fights," but that spot
@@ -11707,17 +13297,19 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // The engaged monster (if any) is drawn/handled separately below at its live
     // position with an HP bar, same as Wilderness — exclude it from this search.
     bool wasDungeonEngaged = s.dungeonEngaged.has_value();
-    std::string nearestKey; // "0".."4" for regular monsters, "boss"
+    std::string nearestKey; // "0".."7" for regular monsters, "boss"
     float nearestDist = 1e9f;
     bool nearestIsBoss = false;
     bool nearestIsExit = false;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < kDungeonRegularSlots; i++) {
         if (wasDungeonEngaged && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
+        if (s.dungeonSpawnRespawn[*s.selectedDungeon][i] > 0.0f) continue; // empty — waiting to respawn
         float d = Dist(s.dungeonPlayerPos, DungeonMonsterLivePos(*s.selectedDungeon, i, s.worldTime));
         if (d < nearestDist) { nearestDist = d; nearestKey = std::to_string(i); nearestIsBoss = false; nearestIsExit = false; }
     }
-    if (bossUnlocked && !(wasDungeonEngaged && s.dungeonEngaged->isBoss)) {
-        float d = Dist(s.dungeonPlayerPos, DungeonMonsterLivePos(*s.selectedDungeon, 5, s.worldTime));
+    if (bossUnlocked && !(wasDungeonEngaged && s.dungeonEngaged->isBoss) &&
+        s.dungeonSpawnRespawn[*s.selectedDungeon][kDungeonBossSlot] <= 0.0f) {
+        float d = Dist(s.dungeonPlayerPos, DungeonMonsterLivePos(*s.selectedDungeon, kDungeonBossSlot, s.worldTime));
         if (d < nearestDist) { nearestDist = d; nearestIsBoss = true; nearestIsExit = false; }
     }
     // Same spot every dungeon spawns you at ({900,1300}, set on entry above and on the
@@ -11741,12 +13333,15 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // rooms are generous (160+ units) relative to the leash range, so this reads fine
     // without needing real pathfinding.
     auto tryEngageDungeonMonster = [&](int monsterIdx, bool isBoss) {
-        const DungeonMonster& m = isBoss ? dungeon.boss : dungeon.monsters[monsterIdx];
+        if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
+        int slot = isBoss ? kDungeonBossSlot : monsterIdx;
+        if (s.dungeonSpawnRespawn[*s.selectedDungeon][slot] > 0.0f) return; // empty — waiting to respawn
+        const DungeonMonster& m = isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, monsterIdx);
         GameState::ActiveDungeonMonster am;
         am.monsterIdx = monsterIdx;
         am.isBoss = isBoss;
-        am.pos = DungeonMonsterLivePos(*s.selectedDungeon, isBoss ? 5 : monsterIdx, s.worldTime); // wherever it wandered to, no snap
-        am.spawnPos = DungeonMonsterNodePos(*s.selectedDungeon, isBoss ? 5 : monsterIdx);
+        am.pos = DungeonMonsterLivePos(*s.selectedDungeon, slot, s.worldTime); // wherever it wandered to, no snap
+        am.spawnPos = DungeonMonsterNodePos(*s.selectedDungeon, slot);
         am.maxHp = std::max(1.0f, m.level * 3.0f);
         am.hp = am.maxHp;
         s.dungeonEngaged = am;
@@ -11754,18 +13349,19 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     };
 
     auto tryDungeonInteract = [&]() {
+        if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
         if (nearestIsExit) {
             s.screen = Screen::Wilderness;
             s.wild3DView = s.hunt3DView; // leaving in 3D returns to the 3D wilderness (view state only)
         }
-        else if (nearestIsBoss) tryEngageDungeonMonster(5, true);
+        else if (nearestIsBoss) tryEngageDungeonMonster(kDungeonBossSlot, true);
         else tryEngageDungeonMonster(std::stoi(nearestKey), false);
     };
 
     auto updateEngagedDungeonMonsterAI = [&]() {
         if (!s.dungeonEngaged.has_value()) return;
         GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
-        const DungeonMonster& m = am.isBoss ? dungeon.boss : dungeon.monsters[am.monsterIdx];
+        const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
         float dtF = GetFrameTime();
 
         float distNow = Dist(am.pos, s.dungeonPlayerPos);
@@ -11821,14 +13417,14 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             std::string mname = m.name; int mgold = m.baseGold, mleather = m.baseLeather;
             bool wasBoss = am.isBoss; int dungeonIdx = *s.selectedDungeon; int level = m.level;
             ResolvePetTurnLive(s, am.hp, level);
-            if (am.hp <= 0) { EndDungeonMonsterWin(s, dungeonIdx, wasBoss, mname, level, mgold, mleather); return; }
+            if (am.hp <= 0) { BeginDungeonMonsterDeath(s, am, dungeonIdx, wasBoss, mname, level, mgold, mleather); return; }
         }
     };
 
     auto trySwingAtEngagedDungeonMonster = [&]() {
         if (!s.dungeonEngaged.has_value()) return;
         GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
-        const DungeonMonster& m = am.isBoss ? dungeon.boss : dungeon.monsters[am.monsterIdx];
+        const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
         if (Dist(am.pos, s.dungeonPlayerPos) >= kWildMeleeRange || am.playerAttackCooldown > 0) return;
         am.playerAttackCooldown = PlayerSwingCooldown(s);
         am.swingEffectTimer = kSwingEffectDuration;
@@ -11842,7 +13438,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             int dmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
             am.hp -= dmg;
             s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage";
-            if (am.hp <= 0) EndDungeonMonsterWin(s, dungeonIdx, wasBoss, mname, level, mgold, mleather);
+            if (am.hp <= 0) BeginDungeonMonsterDeath(s, am, dungeonIdx, wasBoss, mname, level, mgold, mleather);
         } else {
             s.logLine = "Your attack misses";
         }
@@ -11862,7 +13458,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         am.castEffectTimer = kCastEffectDuration;
         s.mana -= spell.manaCost;
         s.reagents -= kLiveCombatReagentCost;
-        const DungeonMonster& m = am.isBoss ? dungeon.boss : dungeon.monsters[am.monsterIdx];
+        const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
         std::string mname = m.name; int mgold = m.baseGold, mleather = m.baseLeather;
         bool wasBoss = am.isBoss; int dungeonIdx = *s.selectedDungeon; int level = m.level;
         std::string note;
@@ -11872,30 +13468,37 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             int dmg = std::max(1, (int)std::round(SpellPowerFor(s, spell) * (0.85f + RandUnit() * 0.3f)));
             am.hp -= dmg;
             s.logLine = spell.name + " hits the " + mname + " for " + std::to_string(dmg) + " damage" + note;
-            if (am.hp <= 0) EndDungeonMonsterWin(s, dungeonIdx, wasBoss, mname, level, mgold, mleather);
+            if (am.hp <= 0) BeginDungeonMonsterDeath(s, am, dungeonIdx, wasBoss, mname, level, mgold, mleather);
         } else {
             s.logLine = spell.name + " fizzles!" + note;
         }
     };
 
     Vector2 prevDungeonPos = s.dungeonPlayerPos; // wall-slide against this if the move ends in a wall
-    UpdatePlayerMovement(s.dungeonPlayerPos, s.playerFacing, GetFrameTime(), kDungeonWorldSize);
-    if (ActivePet(s)) UpdateCompanionFollow(s, s.dungeonPlayerPos, s.playerFacing, GetFrameTime());
-    for (int i = 0; i < 5; i++) {
-        // The engaged one collides against its live position (below); the other 4
+    // No movement during the death animation — the body isn't going anywhere.
+    if (s.playerDeathAnimT <= 0.0f) {
+        UpdatePlayerMovement(s.dungeonPlayerPos, s.playerFacing, GetFrameTime(), kDungeonWorldSize);
+        if (ActivePet(s)) UpdateCompanionFollow(s, s.dungeonPlayerPos, s.playerFacing, GetFrameTime());
+    }
+    for (int i = 0; i < kDungeonRegularSlots; i++) {
+        // The engaged one collides against its live position (below); the rest
         // wander (DungeonMonsterLivePos) and auto-engage the player on contact — same
         // bump-to-engage treatment as Wilderness. Walking up and pressing E still works
         // too, via tryDungeonInteract.
+        if (s.dungeonSpawnRespawn[*s.selectedDungeon][i] > 0.0f) continue; // empty — waiting to respawn
         if (wasDungeonEngaged && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
         Vector2 livePos = DungeonMonsterLivePos(*s.selectedDungeon, i, s.worldTime);
-        if (!s.dungeonEngaged.has_value() && Dist(s.dungeonPlayerPos, livePos) < kPlayerRadius + kNodeRadius * 0.8f)
+        if (!s.dungeonEngaged.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
+            Dist(s.dungeonPlayerPos, livePos) < kPlayerRadius + kNodeRadius * 0.8f)
             tryEngageDungeonMonster(i, false);
         ResolveCircleCollision(s.dungeonPlayerPos, kPlayerRadius, livePos, kNodeRadius * 0.8f);
     }
-    if (!(wasDungeonEngaged && s.dungeonEngaged->isBoss)) {
-        Vector2 bossLivePos = DungeonMonsterLivePos(*s.selectedDungeon, 5, s.worldTime);
-        if (bossUnlocked && !s.dungeonEngaged.has_value() && Dist(s.dungeonPlayerPos, bossLivePos) < kPlayerRadius + kNodeRadius)
-            tryEngageDungeonMonster(5, true);
+    if (!(wasDungeonEngaged && s.dungeonEngaged->isBoss) &&
+        s.dungeonSpawnRespawn[*s.selectedDungeon][kDungeonBossSlot] <= 0.0f) {
+        Vector2 bossLivePos = DungeonMonsterLivePos(*s.selectedDungeon, kDungeonBossSlot, s.worldTime);
+        if (bossUnlocked && !s.dungeonEngaged.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
+            Dist(s.dungeonPlayerPos, bossLivePos) < kPlayerRadius + kNodeRadius)
+            tryEngageDungeonMonster(kDungeonBossSlot, true);
         ResolveCircleCollision(s.dungeonPlayerPos, kPlayerRadius, bossLivePos, kNodeRadius); // boss, locked or not
     }
     if (wasDungeonEngaged)
@@ -11929,24 +13532,26 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     std::string prompt;
     if (s.dungeonEngaged.has_value()) {
         // Melee is automatic now — just naming who you're fighting, no button needed.
-        const DungeonMonster& m = s.dungeonEngaged->isBoss ? dungeon.boss : dungeon.monsters[s.dungeonEngaged->monsterIdx];
+        const DungeonMonster& m = s.dungeonEngaged->isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, s.dungeonEngaged->monsterIdx);
         prompt = "Fighting " + m.name;
     } else if (inRange) {
         if (nearestIsExit) prompt = "[E] Leave dungeon";
         else prompt = nearestIsBoss ? "[E] Fight " + dungeon.boss.name
-                                      : "[E] Fight " + dungeon.monsters[std::stoi(nearestKey)].name;
+                                      : "[E] Fight " + DungeonSlotMonster(dungeon, std::stoi(nearestKey)).name;
     }
+    // Ghosts and the dying get no prompts — they can't touch anything.
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) prompt.clear();
     Vector2 nearest3DPos = s.dungeonPlayerPos;
     std::string nearest3DLabel;
     if (inRange && !s.dungeonEngaged.has_value()) {
         if (nearestIsExit) { nearest3DPos = { 900, 1300 }; nearest3DLabel = "Exit"; }
         else if (nearestIsBoss) {
-            nearest3DPos = DungeonMonsterLivePos(*s.selectedDungeon, 5, s.worldTime);
+            nearest3DPos = DungeonMonsterLivePos(*s.selectedDungeon, kDungeonBossSlot, s.worldTime);
             nearest3DLabel = dungeon.boss.name;
         } else if (!nearestKey.empty()) {
             int mi = std::stoi(nearestKey);
             nearest3DPos = DungeonMonsterLivePos(*s.selectedDungeon, mi, s.worldTime);
-            nearest3DLabel = dungeon.monsters[mi].name;
+            nearest3DLabel = DungeonSlotMonster(dungeon, mi).name;
         }
     }
 
@@ -12015,34 +13620,62 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // integration). WanderFacing is that motion's own analytical derivative, so this
     // costs nothing beyond what Town NPCs already do with it.
     const DirSpriteSheet* monsterSheet = MonsterFamilySheet(*s.selectedDungeon);
-    for (int i = 0; i < 5; i++) {
+    bool dyingHere2D = s.dyingMonster.has_value() && s.dyingMonster->zone == 1 &&
+                       s.dyingMonster->dungeonIdx == *s.selectedDungeon;
+    for (int i = 0; i < kDungeonRegularSlots; i++) {
         // The engaged slot is drawn separately below, at its live position with an HP
         // bar — same convention as Wilderness. Checks s.dungeonEngaged fresh (not
         // wasDungeonEngaged) since updateEngagedDungeonMonsterAI() above may have just
         // ended the fight this same frame.
         if (s.dungeonEngaged.has_value() && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
-        const DungeonMonster& m = dungeon.monsters[i];
-        Vector2 screenPos = WorldToScreen(DungeonMonsterLivePos(*s.selectedDungeon, i, s.worldTime), camera);
+        // Empty slots show nothing while their respawn timer runs — except a slot
+        // mid-death-animation, which draws the sinking body below instead.
+        bool isDying2D = dyingHere2D && !s.dyingMonster->isBoss && s.dyingMonster->monsterIdx == i;
+        if (!isDying2D && s.dungeonSpawnRespawn[*s.selectedDungeon][i] > 0.0f) continue;
+        const DungeonMonster& m = DungeonSlotMonster(dungeon, i);
+        Vector2 screenPos = WorldToScreen(isDying2D ? s.dyingMonster->pos :
+                                          DungeonMonsterLivePos(*s.selectedDungeon, i, s.worldTime), camera);
         bool near = !nearestIsBoss && nearestKey == std::to_string(i) && inRange;
         std::string sub = TextFormat("lvl %d - %.0f%%", m.level, WinChancePreview(s, m.level));
         Rectangle monsterSrc{};
         if (monsterSheet && monsterSheet->ok) monsterSrc = ActorSrcRect(*monsterSheet, WanderFacing(i, s.worldTime), ActorAnim::Walk, s.worldTime);
-        DrawWorldNode(screenPos, kNodeRadius * 0.8f, Color{ 122, 46, 46, 255 }, m.name, near, sub,
-                       monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr, WHITE,
-                       monsterSheet && monsterSheet->ok ? &monsterSrc : nullptr);
+        if (isDying2D) {
+            float fade = std::max(0.0f, s.dyingMonster->timer / s.dyingMonster->duration);
+            DrawDyingWorldNode(screenPos, kNodeRadius * 0.8f,
+                               monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr,
+                               Fade(WHITE, fade), monsterSheet && monsterSheet->ok ? &monsterSrc : nullptr,
+                               1.0f + 0.25f * (1.0f - fade));
+        } else {
+            DrawWorldNode(screenPos, kNodeRadius * 0.8f, Color{ 122, 46, 46, 255 }, m.name, near, sub,
+                           monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr, WHITE,
+                           monsterSheet && monsterSheet->ok ? &monsterSrc : nullptr);
+        }
     }
     bool engagedIsBossNow = s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss;
-    if (!engagedIsBossNow) {
-        Vector2 bossScreenPos = WorldToScreen(DungeonMonsterLivePos(*s.selectedDungeon, 5, s.worldTime), camera);
+    bool bossDying2D = dyingHere2D && s.dyingMonster->isBoss;
+    if (!engagedIsBossNow && !bossDying2D && s.dungeonSpawnRespawn[*s.selectedDungeon][kDungeonBossSlot] > 0.0f) {
+        // boss slot empty — nothing to draw
+    } else if (!engagedIsBossNow) {
+        Vector2 bossScreenPos = WorldToScreen(bossDying2D ? s.dyingMonster->pos :
+                                              DungeonMonsterLivePos(*s.selectedDungeon, kDungeonBossSlot, s.worldTime), camera);
         if (bossUnlocked) {
             const Texture2D* bossTex = BossFamilyTexture(*s.selectedDungeon);
             Rectangle bossFallbackSrc{};
-            if (!bossTex && monsterSheet && monsterSheet->ok) bossFallbackSrc = ActorSrcRect(*monsterSheet, WanderFacing(5, s.worldTime), ActorAnim::Walk, s.worldTime);
-            DrawWorldNode(bossScreenPos, kNodeRadius, kColorSlate, dungeon.boss.name, nearestIsBoss && inRange,
-                           "BOSS lvl " + std::to_string(dungeon.boss.level),
-                           bossTex ? bossTex : (monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr),
-                           bossTex ? WHITE : kColorSlate, // distinct boss art if loaded; gold-tinted regular monster as fallback
-                           bossTex ? nullptr : (monsterSheet && monsterSheet->ok ? &bossFallbackSrc : nullptr));
+            if (!bossTex && monsterSheet && monsterSheet->ok) bossFallbackSrc = ActorSrcRect(*monsterSheet, WanderFacing(kDungeonBossSlot, s.worldTime), ActorAnim::Walk, s.worldTime);
+            if (bossDying2D) {
+                float fade = std::max(0.0f, s.dyingMonster->timer / s.dyingMonster->duration);
+                DrawDyingWorldNode(bossScreenPos, kNodeRadius,
+                                   bossTex ? bossTex : (monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr),
+                                   Fade(WHITE, fade),
+                                   bossTex ? nullptr : (monsterSheet && monsterSheet->ok ? &bossFallbackSrc : nullptr),
+                                   1.0f + 0.25f * (1.0f - fade));
+            } else {
+                DrawWorldNode(bossScreenPos, kNodeRadius, kColorSlate, dungeon.boss.name, nearestIsBoss && inRange,
+                               "BOSS lvl " + std::to_string(dungeon.boss.level),
+                               bossTex ? bossTex : (monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr),
+                               bossTex ? WHITE : kColorSlate, // distinct boss art if loaded; gold-tinted regular monster as fallback
+                               bossTex ? nullptr : (monsterSheet && monsterSheet->ok ? &bossFallbackSrc : nullptr));
+            }
         } else {
             DrawWorldNode(bossScreenPos, kNodeRadius, Fade(GRAY, 0.6f), "???",
                            false, std::to_string(xp) + "/" + std::to_string(dungeon.bossUnlockXp) + " XP");
@@ -12057,7 +13690,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // s.wildEngaged draw block.
     if (s.dungeonEngaged.has_value()) {
         const GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
-        const DungeonMonster& m = am.isBoss ? dungeon.boss : dungeon.monsters[am.monsterIdx];
+        const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
         const Texture2D* bossTex = am.isBoss ? BossFamilyTexture(*s.selectedDungeon) : nullptr;
         const Texture2D* tex = bossTex ? bossTex : (monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr);
         // Faces the player during the actual fight — same "face the player directly"
@@ -12100,7 +13733,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (s.dungeonEngaged->swingEffectTimer > 0.0f) dungeonCombatAnim = ActorAnim::Attack;
         else if (s.dungeonEngaged->castEffectTimer > 0.0f) dungeonCombatAnim = ActorAnim::Cast;
     }
-    DrawPlayer(s, WorldToScreen(s.dungeonPlayerPos, camera), s.playerFacing, prompt, 1.0f, dungeonCombatAnim);
+    DrawWorldCorpses2D(s, 1, camera); // fallen monsters linger where they died
+    DrawPlayerLifeState(s, WorldToScreen(s.dungeonPlayerPos, camera), s.playerFacing, prompt, 1.0f, dungeonCombatAnim);
     EndScissorMode();
     } // end 2D arena branch — the touch/combat HUD below is shared with the 3D view
 
@@ -12111,9 +13745,10 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     if (wasDungeonEngaged) {
         // Melee is fully automatic now — no interact button needed here anymore for it.
         DrawLiveCombatQuickItems(s);
-    } else if (inRange && DrawInteractButton(prompt)) {
+    } else if (inRange && !prompt.empty() && DrawInteractButton(prompt)) {
         tryDungeonInteract();
     }
+    DrawGhostStatus(s); // death animation / ghost walk banner
 
     // Spell hotbar — only while actually engaged (2026-09-22 fix, same reason as
     // Wilderness: this spot overlaps the interact button used for "[E] Fight/Leave"
@@ -12604,23 +14239,147 @@ static void DrawAmbushPanel(GameState& s, int screenW) {
     if (Button({ 150, 220, 120, 40 }, "Flee", true)) AmbushFlee(s);
 }
 
+// Simple word-wrap for panel text; returns the y just past the last line.
+static int DrawWrappedText(const std::string& text, int x, int y, int size, Color color, int maxChars) {
+    int yy = y;
+    std::string line;
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t j = text.find(' ', i);
+        if (j == std::string::npos) j = text.size();
+        std::string word = text.substr(i, j - i);
+        if (!line.empty() && (int)(line.size() + 1 + word.size()) > maxChars) {
+            DrawUIText(line.c_str(), x, yy, size, color);
+            yy += size + 7;
+            line.clear();
+        }
+        if (!line.empty()) line += ' ';
+        line += word;
+        i = (j == text.size()) ? j : j + 1;
+    }
+    if (!line.empty()) { DrawUIText(line.c_str(), x, yy, size, color); yy += size + 7; }
+    return yy;
+}
+
+// Innocent encounter panel (2026-09-24 deep-dive): portrait, memory-aware
+// greeting, the four classic actions (Spare/Snoop/Steal/Murder — mechanics
+// unchanged), plus Silas's shop, request listen/hand-over, and a farewell beat
+// after Spare or a completed fetch so the thanks/rumor actually gets read.
 static void DrawInnocentPanel(GameState& s, int screenW) {
     GameState::InnocentEncounter& enc = *s.innocentEncounter;
-    DrawUIText((enc.name + " passes by...").c_str(), 20, 140, 20, kColorHeading);
-    if (enc.canSteal) {
-        DrawUIText(("You know they're carrying " + std::to_string(enc.gold) + " gold.").c_str(),
-                   20, 172, 13, DARKGRAY);
-    } else {
-        DrawUIText("You could Spare, Snoop, or take a darker path.", 20, 172, 13, DARKGRAY);
+    int id = std::clamp(enc.identity, 0, 3);
+    const InnocentDef& def = kInnocentDefs[id];
+
+    DrawUIText((InnocentName(id) + " — " + def.role).c_str(), 20, 140, 20, kColorHeading);
+    if (g_assets.innocentTexOk[id]) {
+        const Texture2D& tex = g_assets.innocentTex[id];
+        float hgt = 150.0f, wdt = hgt * (float)tex.width / (float)tex.height;
+        Rectangle src = { 0, 0, (float)tex.width, (float)tex.height };
+        Rectangle dst = { (float)screenW - 40.0f - wdt, 140, wdt, hgt };
+        DrawTexturePro(tex, src, dst, Vector2{ 0, 0 }, 0.0f, WHITE);
     }
-    int y = 210;
+
+    if (enc.resolved) {
+        DrawWrappedText(enc.farewell, 20, 175, 13, kColorText, 72);
+        if (Button({ 20, 420, 120, 36 }, "Walk on", true)) s.innocentEncounter.reset();
+        return;
+    }
+
+    if (enc.shopOpen) { // --- Silas's traveling shop ---
+        DrawUIText("Silas's pack — road prices, friend.", 20, 172, 13, kColorAccent);
+        DrawUIText(("Your gold: " + std::to_string(s.gold)).c_str(), screenW - 220, 172, 13, kColorText);
+        int y = 200;
+        for (int si = 0; si < 5; si++) {
+            int price = MerchantPrice(s, si);
+            std::string row = std::string(kMerchantStockDefs[si].label) + "  x" +
+                              std::to_string(s.merchantStock[si]) + "  —  " +
+                              std::to_string(price) + "g";
+            DrawUIText(row.c_str(), 20, y + 6, 13, kColorText);
+            if (Button({ (float)screenW - 140, (float)y, 120, 26 },
+                       "Buy", s.merchantStock[si] > 0 && s.gold >= price))
+                MerchantBuy(s, si);
+            y += 32;
+        }
+        DrawUIText("Your pack (sell):", 20, y + 4, 13, kColorAccent);
+        y += 26;
+        int shown = 0;
+        for (size_t bi = 0; bi < s.backpack.size() && shown < 4; bi++, shown++) {
+            DrawUIText(s.backpack[bi].name.c_str(), 20, y + 4, 12, kColorText);
+            int val = std::max(1, (int)std::round(s.backpack[bi].power * 2.0f));
+            if (Button({ (float)screenW - 140, (float)y, 120, 24 },
+                       ("Sell (" + std::to_string(val) + "g)").c_str(), true))
+                SellFromBackpack(s, (int)bi);
+            y += 30;
+        }
+        if (s.backpack.size() > 4)
+            DrawUIText("(+ more in your pack — the Provisioner buys in bulk.)", 20, y, 12, Fade(DARKGRAY, 0.8f));
+        if (Button({ 20, (float)(y + 24), 120, 32 }, "Back", true)) enc.shopOpen = false;
+        return;
+    }
+
+    if (enc.reqView) { // --- request offer ---
+        int kind = s.innocentReqKind[id];
+        DrawWrappedText(InnocentRequestOffer(id, kind), 20, 175, 13, kColorText, 72);
+        DrawUIText(("Reward: " + std::to_string(kind == 3 ? 45 : kind == 0 ? 30 : 35) + " gold, plus Karma and Fame.").c_str(),
+                   20, 300, 13, kColorAccent);
+        if (Button({ 20, 340, 120, 36 }, "Accept", true)) {
+            enc.reqView = false;
+            if (kind == 3) {
+                Vector2 from = (enc.spotIdx >= 0)
+                    ? WildernessInnocentLivePos(enc.spotIdx, s.worldTime)
+                    : Vector2{ s.wildernessPlayerPos.x + 40.0f, s.wildernessPlayerPos.y };
+                StartEscort(s, id, from);
+            } else {
+                s.innocentReqState[id] = 2; // active fetch
+                s.logLine = "You agree to bring " + InnocentName(id) + " " +
+                            InnocentRequestNeed(kind) + ".";
+            }
+        }
+        if (Button({ 150, 340, 120, 36 }, "Decline", true)) {
+            enc.reqView = false;
+            s.innocentReqState[id] = 0;
+            s.innocentReqCooldown[id] = kInnocentRequestCooldown;
+            s.logLine = "You decline politely.";
+        }
+        return;
+    }
+
+    // --- main view: greeting + actions ---
+    int gy = DrawWrappedText(InnocentGreeting(s, id), 20, 175, 13, DARKGRAY, 72);
+    if (enc.canSteal)
+        DrawUIText(("You know they're carrying " + std::to_string(enc.gold) + " gold.").c_str(),
+                   20, gy + 4, 13, kColorAccent);
+    else
+        DrawUIText("You could Spare, Snoop, or take a darker path.", 20, gy + 4, 13, Fade(DARKGRAY, 0.8f));
+
+    int y = 320;
     if (Button({ 20, (float)y, 100, 36 }, "Spare", true)) SpareInnocent(s);
     if (Button({ 130, (float)y, 100, 36 }, "Snoop", true)) SnoopInnocent(s);
     y += 46;
     if (Button({ 20, (float)y, 100, 36 }, "Steal", enc.canSteal)) StealFromInnocent(s);
     if (Button({ 130, (float)y, 100, 36 }, "Murder", true)) MurderInnocent(s);
+    y += 46;
+    // Contextual row: trade / requests.
+    int bx = 20;
+    if (id == 2) { // Silas
+        if (s.innocentMem[2].murdered > 0) {
+            DrawUIText("Silas wants nothing to do with you.", 20, y + 8, 13, Fade(DARKGRAY, 0.8f));
+        } else if (Button({ (float)bx, (float)y, 100, 36 }, "Trade", true)) enc.shopOpen = true;
+        bx += 110;
+    }
+    if (s.innocentReqState[id] == 1) {
+        if (Button({ (float)bx, (float)y, 100, 36 }, "Listen", true)) enc.reqView = true;
+        bx += 110;
+    } else if (s.innocentReqState[id] == 2 && s.innocentReqKind[id] < 3) {
+        DrawUIText(("They asked for " + InnocentRequestNeed(s.innocentReqKind[id]) + ".").c_str(),
+                   bx, y + 8, 13, kColorAccent);
+        if (InnocentRequestFulfilled(s, id) &&
+            Button({ (float)bx + 210, (float)y, 120, 36 }, "Hand over", true))
+            CompleteFetchRequest(s, id);
+    }
     y += 50;
-    DrawUIText("Snoop reveals what they're carrying and unlocks Steal.", 20, y, 13, Fade(DARKGRAY, 0.8f));
+    DrawUIText("Snoop reveals what they're carrying and unlocks Steal. Sparing earns their gratitude.",
+               20, y, 13, Fade(DARKGRAY, 0.8f));
 }
 
 // Shared footer: Notoriety/Fame/Karma/Shaken, drawn on every screen when any of
@@ -13180,6 +14939,7 @@ static void UpdateDrawFrame() {
         RegenNotoriety(state, dt);
         state.worldTime += dt;
         UpdateCombatAnim(state, dt);
+        UpdateDeathAndRespawn(state, dt); // death anims, ghost timer, monster respawns, corpse fades
 
         // JS: autosave every 2 seconds (setInterval(() => { render(); save(); }, 2000)).
         autosaveTimer += dt;
@@ -13226,6 +14986,17 @@ static void UpdateDrawFrame() {
         }
         if (!encounterPending && state.screen == Screen::Wilderness) {
             if (IsKeyPressed(KEY_V)) state.wild3DView = !state.wild3DView; // 3D wilderness view toggle
+        }
+        if (!encounterPending && state.screen == Screen::Interior) {
+            // Interiors stay part of the town: V toggles the indoor 2D/3D view,
+            // ESC closes a popup or steps back outside through the door.
+            if (IsKeyPressed(KEY_V)) state.interior3DView = !state.interior3DView;
+            if (IsKeyPressed(KEY_ESCAPE)) {
+                if (state.selectedTile.has_value() || state.interiorGreeted) {
+                    state.selectedTile.reset();
+                    state.interiorGreeted = false;
+                } else ExitInterior(state);
+            }
         }
         if (!encounterPending && state.screen == Screen::Hunt && !state.combat.has_value()) {
             if (IsKeyPressed(KEY_V)) state.hunt3DView = !state.hunt3DView; // 3D dungeon view toggle
@@ -13293,7 +15064,8 @@ static void UpdateDrawFrame() {
 
         // Top tab bar (mirrors the JS bottom-nav tabs), on its own row now that
         // there are 9 of them.
-        bool tabsEnabled = !state.combat.has_value() && !encounterPending;
+        bool tabsEnabled = !state.combat.has_value() && !encounterPending &&
+                             !state.playerIsGhost && state.playerDeathAnimT <= 0.0f; // ghosts can't tab-travel
         // Hunt tab hidden 2026-09-23 at Mark's request — now that every dungeon has a
         // real Wilderness entrance you can walk to (see kWildernessDungeonEntrances),
         // the tab was just a redundant "teleport straight to a dungeon picker"
@@ -13338,6 +15110,8 @@ static void UpdateDrawFrame() {
             DrawCharacterScreen(state, screenW, screenH);
         } else if (state.screen == Screen::Town) {
             DrawTownScreen(state, screenW, screenH);
+        } else if (state.screen == Screen::Interior) {
+            DrawInteriorScreen(state, screenW, screenH);
         } else if (state.screen == Screen::Hunt) {
             DrawHuntScreen(state, screenW, screenH);
         } else if (state.screen == Screen::Craft) {
