@@ -1,11 +1,11 @@
-// Town Forge — raylib/C++ port of the town-building core
+// Town Forge - raylib/C++ port of the town-building core
 // -----------------------------------------------------------------------
 // Ported from town-forge-prototype.html (a single-page JS idle RPG).
 // That file is ~5600 lines covering town building, gathering, crafting,
 // combat, magic, taming, notoriety, etc. Porting all of it 1:1 is a
 // multi-week project on its own, so this file focuses on the piece you
 // asked for explicitly: the main game loop, input handling, and cell
-// rendering for the Town Map — i.e. the `BUILDINGS` object and the
+// rendering for the Town Map - i.e. the `BUILDINGS` object and the
 // `renderTownMap()` function from the original JS, rebuilt as real,
 // running C++.
 //
@@ -50,7 +50,7 @@
 //     hard ceiling (dragons never become a sure thing), petSlotCapacity()
 //     from Taming+Lore+Veterinary, and a tamed pet's real turn in combat
 //     (casts if it's a Caster with mana, otherwise a wrestling-style
-//     bite) — including the monster sometimes targeting the pet instead
+//     bite) - including the monster sometimes targeting the pet instead
 //     of you, at the same role-based chance as the JS. Healing, instant
 //     gold-for-skill training (to 30), release, and selling all use the
 //     JS's real formulas. See "Taming & pets" below for what's simplified.
@@ -76,14 +76,14 @@
 //   - Alchemy potions (added in this revision): all 12 potion recipes
 //     (Lesser/Regular/Greater Heal, Refresh, Poison, Explosion) on a 4th
 //     Alchemy tab in Craft, using reagents rather than a resource pool
-//     and — matching the JS exactly — NOT quality-scaled, only skill-
+//     and - matching the JS exactly - NOT quality-scaled, only skill-
 //     gated. Heal potions restore HP anytime; Poison Potions coat your
 //     weapon for real bonus damage over N charges; Explosion Potions
 //     Throw as a free action in combat (no monster counter-attack
 //     follows, exactly like throwExplosionPotion()). See "Alchemy
 //     potions" below for what's simplified (Refresh potions have
-//     nothing to restore — no stamina stat here).
-//   - Banking (added in this revision): the Vaultkeep — deposit/withdraw
+//     nothing to restore - no stamina stat here).
+//   - Banking (added in this revision): the Vaultkeep - deposit/withdraw
 //     gold and items on their own Bank tab, completely safe from every
 //     danger system above (a murderer loss, a failed Snoop, or a
 //     guard-zone confiscation never touches the bank).
@@ -91,7 +91,7 @@
 //     defeat/tame plus the 3 Bloodstained Road bounties) on a real 7-day
 //     cycle tracked by elapsed time, each claimable for gold once met,
 //     and a Weekly Blessing (+10% combat power) for clearing the
-//     original five in the same week — wired into every system that
+//     original five in the same week - wired into every system that
 //     reports progress into it.
 //   - Weapon-category combat skills (added in this revision):
 //     Swordsmanship/Fencing/Macing/Archery/Wrestling all train for real
@@ -103,12 +103,12 @@
 //   - Bandages & Healing (added in this revision): a plain consumable
 //     count (not a backpack item), crafted by the Tailor (2 leather -> 5,
 //     no skill required) or bought from the Provisioner stand-in; using
-//     one — in or out of combat — always trains Healing (and a 30% chance
+//     one - in or out of combat - always trains Healing (and a 30% chance
 //     of Anatomy), with the heal itself a skill-scaled coin flip, matching
 //     useBandageOutOfCombat()/combatBandage() exactly.
 //   - The Echo system (added in this revision): all 18 capped combat/
 //     magic/animal/rogue skills share a real 700-point active budget
-//     (kTotalSkillCap) on the new Skills tab — every skill still trains
+//     (kTotalSkillCap) on the new Skills tab - every skill still trains
 //     freely to its own 100 cap regardless, but only "Active" skills
 //     apply to actual gameplay (EffectiveSkill()), and benching one frees
 //     room to activate another without losing any trained progress.
@@ -125,7 +125,7 @@
 //
 // What's intentionally NOT ported here (flagged so nothing is silently
 // dropped): Debuff/Buff/Summon spell effects (listed with real data but
-// not castable — no status-effect system here), a pet's bleed/poison
+// not castable - no status-effect system here), a pet's bleed/poison
 // attacks (only its base bite/spell damage is ported), ore
 // tiers/quality (a single "ore" pool stands in for Iron through
 // Valorite), rarity-item corpse drops (murderer and Bloodstained kills
@@ -158,17 +158,17 @@
 #endif
 
 // ---------------------------------------------------------------------
-// Shared UI palette — a deliberate 60/30/10 scheme: soft cream dominates as the page
+// Shared UI palette - a deliberate 60/30/10 scheme: soft cream dominates as the page
 // background (60%), sage green marks secondary structure like panels/cards/plates
-// (30%), and warm slate is reserved for highlight/focus — buttons, selection, "in
+// (30%), and warm slate is reserved for highlight/focus - buttons, selection, "in
 // range" rings (10%). Replaces the earlier gold/parchment scheme entirely (every bare
 // `kColorSlate` use in the file was swapped to kColorSlate in the same pass, except the two
 // boss-node color literals, which got the same swap for full consistency too).
 // ---------------------------------------------------------------------
-static const Color kColorText    = { 26, 23, 20, 255 };    // primary body text — dark warm neutral, reads on both cream and sage (darkened 2026-09-22)
+static const Color kColorText    = { 26, 23, 20, 255 };    // primary body text - dark warm neutral, reads on both cream and sage (darkened 2026-09-22)
 static const Color kColorHeading = { 45, 40, 34, 255 };    // screen titles / "Fighting: X" etc. (darkened 2026-09-22)
-static const Color kColorAccent  = { 55, 62, 46, 255 };    // sub-headers, labels, section titles — dark sage, ties to the card color (darkened 2026-09-22)
-static const Color kColorPanelBg = { 163, 177, 143, 255 }; // secondary structure — panels/cards/plates (30%): sage green
+static const Color kColorAccent  = { 55, 62, 46, 255 };    // sub-headers, labels, section titles - dark sage, ties to the card color (darkened 2026-09-22)
+static const Color kColorPanelBg = { 163, 177, 143, 255 }; // secondary structure - panels/cards/plates (30%): sage green
 static const Color kColorPageBg  = { 248, 244, 234, 255 }; // dominant page/world background (60%): soft cream
 static const Color kColorSlate   = { 122, 110, 98, 255 };  // highlight/focus accent (10%): warm slate
 
@@ -179,7 +179,7 @@ static const Color kColorSlate   = { 122, 110, 98, 255 };  // highlight/focus ac
 
 enum class Resource { Wood, Ore, Leather, None };
 
-// A craftable recipe (weapon or armor) — ported from each building's `recipes:[...]`
+// A craftable recipe (weapon or armor) - ported from each building's `recipes:[...]`
 // list in the JS BUILDINGS table. `slot` is only meaningful for armor; `handed` only
 // for weapons.
 enum class ItemType { Weapon, Armor, Potion }; // Potion recipes store their effect in
@@ -188,7 +188,7 @@ enum class ItemType { Weapon, Armor, Potion }; // Potion recipes store their eff
 struct Recipe {
     std::string name;
     ItemType type;
-    std::string category;   // "Swordsmanship", "Plate Mail", etc. — matches JS `category`
+    std::string category;   // "Swordsmanship", "Plate Mail", etc. - matches JS `category`
     std::string slot;        // armor only: "helmet","gorget","gloves","arms","legs","chest"
     std::string handed;      // weapon only: "1h" or "2h"
     int reqSkill;
@@ -216,7 +216,7 @@ struct BuildingDef {
 
 // Craft-building costs copied verbatim from the JS BUILDINGS table. Recipe lists are
 // also copied verbatim (name/category/slot/handed/reqSkill/cost/power) from the
-// Smith/Carpenter/Tailor `recipes:[...]` arrays — the Alchemy potion list is left out
+// Smith/Carpenter/Tailor `recipes:[...]` arrays - the Alchemy potion list is left out
 // since potions belong to the Alchemy/magic system, not weapons & armor.
 static const std::array<BuildingDef, 4> kCraftBuildings = {{
     { "smith", "The Cinderforge", Resource::Ore, {180, 70, 40, 255}, {{
@@ -247,18 +247,18 @@ static const std::array<BuildingDef, 4> kCraftBuildings = {{
         {"Maul", ItemType::Weapon, "Macing", "", "1h", 50, 18, 10},
         {"War Axe", ItemType::Weapon, "Macing", "", "1h", 70, 24, 13},
         {"War Hammer", ItemType::Weapon, "Macing", "", "2h", 100, 34, 20},
-        // Armor — Ring Mail
+        // Armor - Ring Mail
         {"Ring Mail Sleeves", ItemType::Armor, "Ring Mail", "arms", "", 10, 8, 2},
         {"Ring Mail Gloves", ItemType::Armor, "Ring Mail", "gloves", "", 15, 6, 2},
         {"Ring Mail Tunic", ItemType::Armor, "Ring Mail", "chest", "", 20, 14, 4},
         {"Ring Mail Leggings", ItemType::Armor, "Ring Mail", "legs", "", 25, 10, 3},
-        // Armor — Chain Mail
+        // Armor - Chain Mail
         {"Chain Coif", ItemType::Armor, "Chain Mail", "helmet", "", 40, 10, 4},
         {"Chainmail Sleeves", ItemType::Armor, "Chain Mail", "arms", "", 42, 9, 3},
         {"Chainmail Gloves", ItemType::Armor, "Chain Mail", "gloves", "", 44, 7, 3},
         {"Chainmail Leggings", ItemType::Armor, "Chain Mail", "legs", "", 46, 16, 6},
         {"Chain Tunic", ItemType::Armor, "Chain Mail", "chest", "", 50, 20, 7},
-        // Armor — Plate Mail
+        // Armor - Plate Mail
         {"Plate Helm", ItemType::Armor, "Plate Mail", "helmet", "", 70, 18, 6},
         {"Plate Gorget", ItemType::Armor, "Plate Mail", "gorget", "", 75, 14, 5},
         {"Plate Gloves", ItemType::Armor, "Plate Mail", "gloves", "", 80, 16, 6},
@@ -292,14 +292,14 @@ static const std::array<BuildingDef, 4> kCraftBuildings = {{
         {4, 100, 150, 65, 20.0f},
         {5, 100, -1,  -1, 0.0f},
     }}, true, {
-        // Armor — Leather
+        // Armor - Leather
         {"Leather Cap", ItemType::Armor, "Leather", "helmet", "", 0, 6, 2},
         {"Leather Gorget", ItemType::Armor, "Leather", "gorget", "", 10, 6, 2},
         {"Leather Gloves", ItemType::Armor, "Leather", "gloves", "", 15, 6, 2},
         {"Leather Sleeves", ItemType::Armor, "Leather", "arms", "", 20, 8, 3},
         {"Leather Leggings", ItemType::Armor, "Leather", "legs", "", 25, 10, 3},
         {"Leather Tunic", ItemType::Armor, "Leather", "chest", "", 30, 14, 5},
-        // Armor — Studded Leather
+        // Armor - Studded Leather
         {"Studded Cap", ItemType::Armor, "Studded Leather", "helmet", "", 50, 10, 5},
         {"Studded Gorget", ItemType::Armor, "Studded Leather", "gorget", "", 55, 10, 5},
         {"Studded Gloves", ItemType::Armor, "Studded Leather", "gloves", "", 60, 10, 5},
@@ -318,7 +318,7 @@ static const std::array<BuildingDef, 4> kCraftBuildings = {{
     }}, true, {
         // Potion recipes copied verbatim from BUILDINGS.alchemy.recipes in the JS.
         // `slot`/`handed` are unused for potions; `category` carries the effect and
-        // `power` carries baseAmount (potion potency — see TryCraftPotion below).
+        // `power` carries baseAmount (potion potency - see TryCraftPotion below).
         {"Lesser Heal Potion", ItemType::Potion, "heal", "", "", 0, 3, 15},
         {"Heal Potion", ItemType::Potion, "heal", "", "", 40, 6, 30},
         {"Greater Heal Potion", ItemType::Potion, "heal", "", "", 80, 10, 50},
@@ -349,12 +349,12 @@ static const std::array<StaticTile, 9> kStaticTiles = {{
 }};
 
 // ---------------------------------------------------------------------
-// Player housing — ported from the JS's HOUSE_TIERS/HOUSE_HUES/HOME_MODULE_DEF/
+// Player housing - ported from the JS's HOUSE_TIERS/HOUSE_HUES/HOME_MODULE_DEF/
 // HOME_MODULE_LEVELS (state.house/state.houseModules), which this C++ port never
 // wired up until now (see GameState::kBackpackCap's old comment). Numbers copied
-// verbatim, not invented — same porting convention as everything else here.
-// "none" (index 0, houseTierIdx's default) is the JS's starting state — no house yet,
-// capBonus/hueOptions/moduleSlots all 0 — the building itself still stands on the Town
+// verbatim, not invented - same porting convention as everything else here.
+// "none" (index 0, houseTierIdx's default) is the JS's starting state - no house yet,
+// capBonus/hueOptions/moduleSlots all 0 - the building itself still stands on the Town
 // map so there's something to walk up to and buy a Cottage from.
 // ---------------------------------------------------------------------
 struct HouseTier { std::string key, name; int cost, capBonus, hueOptions, moduleSlots; };
@@ -373,7 +373,7 @@ static const std::array<HouseHue, 8> kHouseHues = {{
     {"Royal Purple", {107, 74,  138, 255}}, {"Gilded Gold",  {184, 147, 58,  255}},
     {"Teal",         {58,  138, 130, 255}}, {"Ash Gray",     {106, 106, 106, 255}},
 }};
-// buildingIdx indexes kCraftBuildings directly (smith=0/carpenter=1/tailor=2/alchemy=3) —
+// buildingIdx indexes kCraftBuildings directly (smith=0/carpenter=1/tailor=2/alchemy=3) -
 // a home wing is the same craft building, just capped lower and reached without a trip
 // to town.
 struct HomeModuleDef { int buildingIdx; std::string label; };
@@ -381,7 +381,7 @@ static const std::array<HomeModuleDef, 4> kHomeModuleDefs = {{
     {0, "Blacksmith Wing"}, {1, "Carpenter Wing"}, {2, "Tailor Wing"}, {3, "Alchemist Corner"},
 }};
 // A home module always sits one tier behind its real-building counterpart (JS comment,
-// kept verbatim) — the point is genuine convenience without erasing the reason to go
+// kept verbatim) - the point is genuine convenience without erasing the reason to go
 // into town (the real buildings cap at 100, these cap at 85).
 struct HomeModuleLevel { int level, cap, cost; };
 static const std::array<HomeModuleLevel, 5> kHomeModuleLevels = {{
@@ -401,7 +401,7 @@ static const int kHouseDoorCost = 50;
 static const int kHouseChestCap = 60;
 
 // ---------------------------------------------------------------------------
-// Phase 0: region scaffolding (2026-09-25) — see region-build-plan.md.
+// Phase 0: region scaffolding (2026-09-25) - see region-build-plan.md.
 // The wilderness is divided into four regions. RegionAt() derives a region from
 // any wilderness position; every town gate, dungeon entrance, monster spot,
 // gather node, house plot, and innocent spawn carries an explicit RegionId tag
@@ -425,7 +425,7 @@ static const char* RegionName(RegionId r) {
     }
     return "Whisperwood";
 }
-// King's Road — the trade road between the towns, defined as waypoints so
+// King's Road - the trade road between the towns, defined as waypoints so
 // later phases can extend it (Phase 3: north to Frostmere; Phase 4: west to
 // Cragmoor). Both the 2D and 3D views draw it from this one table.
 static const std::array<Vector2, 14> kKingsRoadWaypoints = {{
@@ -435,18 +435,18 @@ static const std::array<Vector2, 14> kKingsRoadWaypoints = {{
     {2300, 1720},  // Saltmere corridor
     {2600, 1700},  // Saltmere corridor
     {2900, 1750},  // Saltmere gate
-    // Phase 3 — the road turns north from Saltmere toward Frostmere.
+    // Phase 3 - the road turns north from Saltmere toward Frostmere.
     {2560, 1350},  // north out of the Saltmere corridor (clear of the tidal pools)
     {2200, 1080},  // Salt Coast corridor, west of the Sunken Vault approach
     {1750, 820},   // Whisperwood north edge, east of the Weavers' Nest (Phase 5: was Bloodtusk Hold)
     {1400, 640},   // Frostmere gate
-    // Phase 4 — the road switchbacks west from Frostmere into the Stonepeaks.
+    // Phase 4 - the road switchbacks west from Frostmere into the Stonepeaks.
     {1050, 760},   // down off the northern shelf
     {700, 900},    // Stonepeaks foothills (west of the Emberveil approach)
     {450, 1000},   // mountain pass
     {300, 1050},   // Cragmoor gate
 }};
-// Distance from p to the nearest King's Road segment — reserved for Phase 6
+// Distance from p to the nearest King's Road segment - reserved for Phase 6
 // patrol logic; Phase 0 keeps it for road-proximity checks.
 static float DistToKingsRoad(Vector2 p) {
     float best = 1e9f;
@@ -463,13 +463,13 @@ static float DistToKingsRoad(Vector2 p) {
     return best;
 }
 static constexpr float kRoadWardRadius = 150.0f; // within this of the King's Road, patrols keep monsters wary
-// Phase 6 — road patrols: the King's Road is warded. Monsters must get twice as
+// Phase 6 - road patrols: the King's Road is warded. Monsters must get twice as
 // close to engage a player walking the road; off-road, the wilds stay dangerous.
 static bool PlayerRoadWarded(Vector2 playerPos) {
     return DistToKingsRoad(playerPos) < kRoadWardRadius;
 }
 // ---------------------------------------------------------------------
-// Phase 6 — connective tissue landmarks. The King's Road is complete; now the
+// Phase 6 - connective tissue landmarks. The King's Road is complete; now the
 // wilds get their own geography: virtue shrines (high-karma heal), the Fields
 // of Sorrow (haunted battlefield), the Rival's relocating camp, and the hidden
 // outlaw refuge (black market for reds).
@@ -559,7 +559,7 @@ static std::string HousePlotPrompt(int ownedPlotIdx, const std::string& layout, 
 
 
 // ---------------------------------------------------------------------
-// Combat / dungeons — ported from DUNGEONS, startCombat(), playerAttackRoll(),
+// Combat / dungeons - ported from DUNGEONS, startCombat(), playerAttackRoll(),
 // monsterAttackRoll(), endCombatWin()/endCombatLoss() in the JS.
 //
 // Simplifications from the original (flagged, not silently dropped):
@@ -570,12 +570,12 @@ static std::string HousePlotPrompt(int ownedPlotIdx, const std::string& layout, 
 //     Sword) so the numbers you'd end up with by crafting them for real
 //     later will feel familiar.
 //   - No armor, so monster damage isn't reduced by totalDefense() yet.
-//   - No magic items/rarity drops from rollCorpseDrop() — kills grant
+//   - No magic items/rarity drops from rollCorpseDrop() - kills grant
 //     gold + leather only, same amounts as the JS's baseGold/baseLeather.
 //   - Str/Dex are fixed at their state.ts defaults (10) rather than
 //     trainable stats, since there's no stat-training UI here yet.
-// Everything else — monster levels, dungeon XP thresholds for unlocking
-// bosses, and the hit-chance/damage formulas — matches the JS exactly.
+// Everything else - monster levels, dungeon XP thresholds for unlocking
+// bosses, and the hit-chance/damage formulas - matches the JS exactly.
 // ---------------------------------------------------------------------
 
 struct DungeonMonster {
@@ -584,11 +584,11 @@ struct DungeonMonster {
     int baseLeather;
     int baseGold;
     bool isBoss = false;
-    bool isMurderer = false; // true for ambush encounters — see "Notoriety & murderers"
+    bool isMurderer = false; // true for ambush encounters - see "Notoriety & murderers"
     int bloodstainedPathIdx = -1; // -1 = not a Bloodstained Road fight; see that section below
     int bloodstainedTierIdx = -1;
     // Set for Wilderness monsters (dungeonIdx -1, like ambushes/Bloodstained, but with
-    // real art instead of a plain circle) — the combat panel checks this before falling
+    // real art instead of a plain circle) - the combat panel checks this before falling
     // back to MonsterFamilySheet(dungeonIdx), which returns null for any negative index.
     const Texture2D* icon = nullptr;
 };
@@ -601,7 +601,7 @@ struct DungeonDef {
     DungeonMonster boss;
 };
 
-// Copied verbatim (level/baseLeather/baseGold/bossUnlockXp) from DUNGEONS in the JS —
+// Copied verbatim (level/baseLeather/baseGold/bossUnlockXp) from DUNGEONS in the JS -
 // except The Hollow (slot 4, Phase 5: was "The Hollow Warrens"), which doesn't exist in the JS prototype (added directly in
 // the C++ port, see the "Dungeon Tileset" art entry in memory/CLAUDE.md history). Its
 // numbers aren't copied from anywhere; they extend the existing 4 dungeons' escalating
@@ -609,13 +609,13 @@ struct DungeonDef {
 // the new 5th/hardest tier, rather than being an exact-formula port like the other 4.
 static const std::array<DungeonDef, 6> kDungeons = {{
 // The six-dungeon ladder (region-build-plan.md): Crypt -> Nest -> Vault ->
-// Depths -> Tomb -> Hollow. (Emberveil Hollow was removed 2026-09-25 — it was
+// Depths -> Tomb -> Hollow. (Emberveil Hollow was removed 2026-09-25 - it was
 // never part of the plan; the Ember Depths carries the volcanic theme.)
     { "The Whisper Crypt", "A flooded tomb where the dead whisper and do not rest", 300, {{
         {"Bonewalker", 6, 3, 4}, {"Rotbound Corpse", 12, 5, 8}, {"Gravewretch", 18, 8, 13},
         {"Grave Warden", 25, 12, 20}, {"Crypt Sovereign", 32, 17, 30},
     }}, {"The Whisper King", 42, 28, 110, true} }, // renamed Phase 1: "The Hollow King" collided with the planned endgame dungeon The Hollow
-    // Phase 5 — The Weavers' Nest: mid-hard tier, deep Whisperwood, spider themed.
+    // Phase 5 - The Weavers' Nest: mid-hard tier, deep Whisperwood, spider themed.
     // Reuses dungeon slot 1 (was "Bloodtusk Hold"); dedicated spider art in
     // monsters_v2/weaversnest.png, monsters_boss_v2/weaversnest.png,
     // wilderness_entrances/weaversnest.png, dungeon_themed/weaversnest_*.
@@ -626,23 +626,23 @@ static const std::array<DungeonDef, 6> kDungeons = {{
     { "The Sunken Vault", "A drowned vault beneath the tide, its halls claimed by the sea", 400, {{
         {"Fen Serpent", 8, 4, 5}, {"Scalekin Raider", 15, 6, 9}, {"Brine Drake", 22, 10, 16},
         {"Stormwyrm", 30, 15, 26}, {"Abyssal Wyrm", 38, 22, 42},
-    }}, {"The Sunken King", 50, 35, 160, true} }, // Phase 2: was "Wyrmscar Depths" — relocated to the Salt Coast as the mid-tier coastal dungeon; wyrm body plans kept, names re-themed
-    // Phase 4 — The Ember Depths: hard tier, slotting between the Sunken Vault
+    }}, {"The Sunken King", 50, 35, 160, true} }, // Phase 2: was "Wyrmscar Depths" - relocated to the Salt Coast as the mid-tier coastal dungeon; wyrm body plans kept, names re-themed
+    // Phase 4 - The Ember Depths: hard tier, slotting between the Sunken Vault
     // (boss 50) and the Frostbound Tomb (boss 54). Volcanic forge-deep; 2D art
-    // reuses the Emberveil Hollow's living-element sheets (no tint needed — the
+    // reuses the Emberveil Hollow's living-element sheets (no tint needed - the
     // ember art already reads volcanic).
     { "The Ember Depths", "A volcanic forge-deep where the mountain's heart still burns", 440, {{
         {"Cinder Imp", 10, 4, 6}, {"Magma Hound", 17, 7, 11}, {"Obsidian Mauler", 25, 11, 17},
         {"Ash Revenant", 33, 16, 25}, {"Pyroclast Titan", 41, 23, 36},
     }}, {"The Emberlord", 52, 30, 175, true} },
-    // Phase 3 — The Frostbound Tomb: hard tier, slotting between the Sunken Vault
+    // Phase 3 - The Frostbound Tomb: hard tier, slotting between the Sunken Vault
     // (boss 50) and The Hollow (boss 64, Phase 5: was the Hollow Warrens). Frostbitten undead; 2D art reuses
     // the Whisper Crypt's undead sheets with an icy tint (see DungeonMonsterTint).
     { "The Frostbound Tomb", "A glacier-sealed tomb where the frostbitten dead do not rest", 480, {{
         {"Frostbite Husk", 12, 5, 7}, {"Glacier Wight", 20, 8, 12}, {"Rimebound Horror", 28, 12, 18},
         {"Hoarfrost Revenant", 36, 17, 26}, {"Winter's Maw", 44, 24, 38},
     }}, {"The Frostbound King", 54, 32, 200, true} },
-    // Phase 5 — The Hollow: endgame tier, beneath Emberhold. Reuses dungeon slot 4
+    // Phase 5 - The Hollow: endgame tier, beneath Emberhold. Reuses dungeon slot 4
     // (was "The Hollow Warrens"); the existing warren art already reads as a lightless
     // abyss, and the boss reclaims the name Phase 1 set aside: The Hollow King.
     { "The Hollow", "Beneath Emberhold lies a lightless abyss where the dark itself hunts", 520, {{
@@ -651,10 +651,10 @@ static const std::array<DungeonDef, 6> kDungeons = {{
     }}, {"The Hollow King", 64, 42, 260, true} },
 }};
 
-// The Bloodstained Road — three permanent, always-climbable ladders, one per
+// The Bloodstained Road - three permanent, always-climbable ladders, one per
 // notoriety color, ported from BLOODSTAINED_PATHS. Each is 5 tiers, the 5th a named
 // boss; defeating a boss is a one-time unlock that opens a recurring weekly bounty
-// for that path at the Hearthmoot (see kWeeklyGoals' *Bounty entries) — separate
+// for that path at the Hearthmoot (see kWeeklyGoals' *Bounty entries) - separate
 // from, and never required for, the core Weekly Blessing.
 struct BloodstainedTier { std::string label; float mult; bool isBoss = false; };
 struct BloodstainedPathDef {
@@ -663,16 +663,16 @@ struct BloodstainedPathDef {
     std::array<BloodstainedTier, 5> tiers;
 };
 static const std::array<BloodstainedPathDef, 3> kBloodstainedPaths = {{
-    { "Bounty Hunter", "Hunt the wanted — Fame and Karma for cleaning up the road", {63, 126, 201, 255}, {{
+    { "Bounty Hunter", "Hunt the wanted - Fame and Karma for cleaning up the road", {63, 126, 201, 255}, {{
         {"Petty Thief", 0.75f}, {"Highway Robber", 0.95f}, {"Hired Blade", 1.15f},
         {"Blood Warrant", 1.35f}, {"The Kingslayer", 1.6f, true},
     }} },
-    { "Mercenary", "Fight for hire, then work the pockets — Stealing decides your real payday here",
+    { "Mercenary", "Fight for hire, then work the pockets - Stealing decides your real payday here",
       {122, 122, 122, 255}, {{
         {"Cutpurse Contract", 0.8f}, {"Smuggler's Job", 1.0f}, {"Fence's Target", 1.2f},
         {"Black Market Enforcer", 1.4f}, {"The Shadow Broker", 1.65f, true},
     }} },
-    { "Outlaw", "Bigger risk, bigger reward — climbing this path raises your Notoriety",
+    { "Outlaw", "Bigger risk, bigger reward - climbing this path raises your Notoriety",
       {201, 63, 63, 255}, {{
         {"Cutpurse Rival", 0.85f}, {"Blade for Hire", 1.05f}, {"Ruthless Duelist", 1.25f},
         {"Crime Lord's Enforcer", 1.45f}, {"The Kingpin", 1.7f, true},
@@ -681,16 +681,16 @@ static const std::array<BloodstainedPathDef, 3> kBloodstainedPaths = {{
 enum BloodstainedPathIdx { kPathBlue = 0, kPathGray = 1, kPathRed = 2 };
 
 
-// Item/quality/equipment system — ported from qualityFor()/craftItem()/equipItem() in
+// Item/quality/equipment system - ported from qualityFor()/craftItem()/equipItem() in
 // the JS. An Item is what a Recipe becomes once crafted: same shape (power/type/slot/
 // handed/category) plus a quality-scaled final power and a unique id.
-// Bottom tier renamed "Flimsy" -> "Standard" 2026-09-21 (Mark's call — vendor-bought
+// Bottom tier renamed "Flimsy" -> "Standard" 2026-09-21 (Mark's call - vendor-bought
 // gear from the new Buy tabs is always this tier, and "Standard" reads better for a
 // shop-bought item than "Flimsy" did). Thresholds/multipliers unchanged from
 // QUALITY_TIERS. Mark separately floated renaming the whole ladder (fewer/renamed
-// tiers) — deliberately NOT done here, out of scope for this pass.
+// tiers) - deliberately NOT done here, out of scope for this pass.
 const std::array<std::pair<int, std::pair<const char*, float>>, 6> kQualityTiersData = {{
-    // max skill (exclusive), {label, power multiplier} — copied verbatim from QUALITY_TIERS
+    // max skill (exclusive), {label, power multiplier} - copied verbatim from QUALITY_TIERS
     {50, {"Standard", 0.5f}}, {70, {"Adeptly built", 0.7f}}, {90, {"Well-crafted", 0.85f}},
     {100, {"Master quality", 1.0f}}, {120, {"Grandmaster quality", 1.15f}}, {999999, {"Legendary quality", 1.3f}},
 }};
@@ -707,7 +707,7 @@ struct Item {
     std::string slot;    // armor only
     std::string handed;   // weapon only
     int power;
-    std::string category; // weapon only: "Swordsmanship"/"Fencing"/"Macing"/"Archery" —
+    std::string category; // weapon only: "Swordsmanship"/"Fencing"/"Macing"/"Archery" -
                             // drives which combat skill trains/applies (see ActiveWeaponSkillField)
 };
 
@@ -718,21 +718,21 @@ struct Equipment {
 };
 
 // ---------------------------------------------------------------------
-// Magic / spellcasting — ported from SPELLS, spellSuccessChance(),
+// Magic / spellcasting - ported from SPELLS, spellSuccessChance(),
 // spellPowerFor(), applySpellTraining(), rollSpellDisrupted(), and the
 // combat-cast branch of playerAttackRoll()/combatHealSpell() in the JS.
 //
 // Simplifications from the original (flagged, not silently dropped):
 //   - Only Offensive (damage) and Utility (the two Mending heal spells)
 //     types are actually castable here. Debuff/Buff/Summon spells are
-//     listed with real data but not wired into combat — those need the
+//     listed with real data but not wired into combat - those need the
 //     status-effect and pet/summon systems this scaffold doesn't have.
 //   - Magic Resistance isn't a trained stat here, so spell-disruption
 //     chance uses the JS formula with magicResist fixed at 0 (a flat 30%
 //     chance to disrupt a cast after being hit, instead of tapering down
 //     as Magic Resistance trains).
 //   - INT is fixed at its state.ts default (10) rather than trainable,
-//     matching how STR/DEX are already handled — so max mana is a fixed
+//     matching how STR/DEX are already handled - so max mana is a fixed
 //     10 rather than growing over time.
 // ---------------------------------------------------------------------
 
@@ -746,13 +746,14 @@ struct Spell {
     int baseDamage; // also doubles as heal amount for Utility (heal) spells
 };
 
-// Copied verbatim from SPELLS in the JS (all 16, across 8 circles), except Circle
+// Copied verbatim from SPELLS in the JS (all 16, across 8 circles), plus Recall
+// (2026-09-25, UO-style travel) appended as index 16 - except Circle
 // 1's minSkill: was 10 in the JS (like every other circle's minSkill being
 // (circle)*10), dropped to 0 here specifically so TryPracticeSpell's hard skill
 // gate (added 2026-09-21, see its comment) doesn't lock a starting Magery-0
-// character out of practicing anything at all — a deliberate deviation from the
+// character out of practicing anything at all - a deliberate deviation from the
 // port, not a formula mismatch.
-static const std::array<Spell, 16> kSpells = {{
+static const std::array<Spell, 17> kSpells = {{
     {"Spark Dart", 1, SpellType::Offensive, 0, 50, 4, 1, 4},
     {"Mending Word", 1, SpellType::Utility, 0, 50, 4, 1, 4},
     {"Sap Strength", 1, SpellType::Debuff, 0, 50, 4, 1, 4},
@@ -769,10 +770,22 @@ static const std::array<Spell, 16> kSpells = {{
     {"Detonation", 6, SpellType::Offensive, 60, 100, 20, 3, 24},
     {"Inferno Strike", 7, SpellType::Offensive, 70, 100, 40, 4, 28},
     {"Summon Fiend", 8, SpellType::Summon, 80, 100, 50, 5, 32},
+    // UO-style travel (2026-09-25): Recall. Utility type so the existing hotbar/
+    // picker/list plumbing treats it as castable; the Recall spell index is
+    // special-cased wherever travel needs different handling (costs, picker).
+    // Circle 4 conventions: minSkill 40, 12 mana, 2 reagents.
+    {"Recall", 4, SpellType::Utility, 40, 80, 12, 2, 0},
 }};
+// kSpells index of Recall - keep last in the array.
+static const int kRecallSpellIdx = 16;
+// Leave-dungeon (2026-09-25): Magery-gated escape from any dungeon. A 3s cast
+// interrupted by damage, so it can't trivially blank a boss mid-swing.
+static const float kLeaveDungeonCastTime = 3.0f;
+static const int kLeaveDungeonMana = 8; // no reagents - cheaper than Recall
+static const float kLeaveDungeonMinMagery = 25.0f;
 
 // --- SFX (2026-09-25): tiny synthesized sound-effect system ------------------
-// 15 WAVs live in assets/sfx/. Loaded once at startup with file-exists guards —
+// 15 WAVs live in assets/sfx/. Loaded once at startup with file-exists guards -
 // a missing file is a silent no-op, never a crash. Plain LoadSound/PlaySound so
 // the Emscripten build works unchanged. Volumes kept modest (0.55).
 enum class SfxId {
@@ -820,7 +833,7 @@ static void PlaySfx(SfxId id) {
 
 enum class CombatPhase { PlayerTurn, Won, Lost };
 
-// Which knight sprite-sheet is currently playing on the combat panel — Idle loops
+// Which knight sprite-sheet is currently playing on the combat panel - Idle loops
 // forever; every other value is a one-shot that reverts to Idle once its strip has
 // played through once (see UpdateCombatAnim). Not persisted across save/load, same as
 // the rest of CombatState.
@@ -833,10 +846,10 @@ struct CombatState {
     DungeonMonster monster; // copy, since it may be the boss (not in the .monsters array)
     std::vector<std::string> log; // last few lines, like state.combat.log in the JS
     CombatPhase phase = CombatPhase::PlayerTurn;
-    bool playerWasHit = false; // JS state.combat.playerWasHit — feeds rollSpellDisrupted()
+    bool playerWasHit = false; // JS state.combat.playerWasHit - feeds rollSpellDisrupted()
     float spellScroll = 0;      // mouse-wheel scroll offset for the in-combat spell list
     CombatAnim anim = CombatAnim::Idle;
-    float animTime = 0.0f; // seconds elapsed in the current anim — drives frame index
+    float animTime = 0.0f; // seconds elapsed in the current anim - drives frame index
     CombatAnim monsterAnim = CombatAnim::Idle; // only Idle/Attack1/Hurt are meaningful here
     float monsterAnimTime = 0.0f;
 
@@ -847,7 +860,7 @@ struct CombatState {
 };
 
 // ---------------------------------------------------------------------
-// Taming & pets — ported from WILD_CREATURES, tameChance(), petSlotCapacity(),
+// Taming & pets - ported from WILD_CREATURES, tameChance(), petSlotCapacity(),
 // resolveTameAttempt(), the pet's turn inside combatRound(), and
 // healPet()/sellPet()/trainPetSkill() in the JS.
 //
@@ -859,7 +872,7 @@ struct CombatState {
 //     flagged as out of scope).
 //   - Pet mana regenerates continuously every frame here (like the
 //     player's), rather than only being recalculated once per combat
-//     round from a stored timestamp — same formula, simpler plumbing.
+//     round from a stored timestamp - same formula, simpler plumbing.
 // ---------------------------------------------------------------------
 
 enum class PetRole { Melee, Tank, Caster };
@@ -903,7 +916,7 @@ struct TamingAttempt {
 };
 
 // ---------------------------------------------------------------------
-// Game state — mirrors `let state = {...}` in the JS (trimmed to what
+// Game state - mirrors `let state = {...}` in the JS (trimmed to what
 // this scaffold actually uses).
 // ---------------------------------------------------------------------
 
@@ -912,7 +925,7 @@ struct UpgradeInProgress {
     float secondsRemaining;
 };
 
-// Wilderness is deliberately not in the Tab-cycle order and has no tab-bar button —
+// Wilderness is deliberately not in the Tab-cycle order and has no tab-bar button -
 // it's reached by walking to a gate at the edge of Town, not by clicking a tab, so
 // it's excluded wherever the other 8 screens are enumerated for that UI.
 enum class Screen { Character, Town, Hunt, Craft, Magic, Pets, Bank, House, Skills, Wilderness, Provisioner, FurTrader, MinersGuild, Interior, Refuge, Guide }; // Phase 6: Refuge = outlaw black market; Guide = newbie walkthrough (2026-09-25)
@@ -923,7 +936,7 @@ struct Corpse {
     int gold;
 };
 
-// A stack of one brewed potion type — mirrors state.potions[name] = {count,effect,potency}.
+// A stack of one brewed potion type - mirrors state.potions[name] = {count,effect,potency}.
 struct PotionStack {
     std::string name;
     std::string effect; // "heal" | "stamina" | "poison" | "damage"
@@ -931,9 +944,9 @@ struct PotionStack {
     int count;
 };
 
-// JS WEEKLY_GOALS — fixed 5-goal list, indices used throughout instead of string keys.
-// JS: WEEKLY_GOALS (the first 5 — count toward the Weekly Blessing) plus
-// BLOODSTAINED_WEEKLY_BONUSES (the last 3 — separate, path-specific, never
+// JS WEEKLY_GOALS - fixed 5-goal list, indices used throughout instead of string keys.
+// JS: WEEKLY_GOALS (the first 5 - count toward the Weekly Blessing) plus
+// BLOODSTAINED_WEEKLY_BONUSES (the last 3 - separate, path-specific, never
 // required for the Blessing). kCoreWeeklyGoalCount marks the boundary.
 enum WeeklyGoalIdx {
     kGoalGather = 0, kGoalCraft, kGoalBrew, kGoalDefeat, kGoalTame,
@@ -953,11 +966,11 @@ static const std::array<WeeklyGoalDef, kWeeklyGoalCount> kWeeklyGoals = {{
 }};
 static const long long kWeekSeconds = 7LL * 24 * 60 * 60;
 
-// Murder Inc. guild size (2026-09-24) — declared up here because GameState's
+// Murder Inc. guild size (2026-09-24) - declared up here because GameState's
 // blades array, SaveGame, and LoadGame all need it, and they sit well above the
 // PK tuning block below.
 static const int kBladeCount = 3;
-// Death/ghost/respawn slot counts (2026-09-24) — same forward-declaration need:
+// Death/ghost/respawn slot counts (2026-09-24) - same forward-declaration need:
 // GameState's respawn-timer arrays are sized by these, and the spot tables they
 // must match (kWildernessMonsterSpots, kCenters in DungeonMonsterNodePos) are
 // declared much later. static_asserts next to those tables verify the match.
@@ -970,7 +983,7 @@ struct GameState {
     int wood = 10;
     int ore = 0;
     int leather = 5;
-    int fish = 0; // Phase 2: Salt Coast fishery — gathered at tidal pools, spent on innocent fish requests
+    int fish = 0; // Phase 2: Salt Coast fishery - gathered at tidal pools, spent on innocent fish requests
     int furs = 0; // Phase 3: skinned from Ice Wolves in the Frostwastes; the Fur Trader pays premium
     int ice = 0;  // Phase 3: ice crystals gathered in the Frostwastes (Mining skill)
 
@@ -982,7 +995,7 @@ struct GameState {
     float gatherSecondsRemaining = 0.0f;
 
     std::optional<std::string> selectedTile; // key of selected grid tile (any tile)
-    // Which kTownNPCs index is currently greeted (open name+greeting popup), if any —
+    // Which kTownNPCs index is currently greeted (open name+greeting popup), if any -
     // transient UI state, not saved, same as selectedTile above.
     std::optional<int> greetedNPC;
     // 3D town view toggle (2026-09-24, first 3D milestone) - switches DrawTownScreen's
@@ -993,7 +1006,7 @@ struct GameState {
     // same deal for DrawWildernessScreen: the 3D view is a pure view layer, all game
     // logic stays in the shared DrawWildernessScreen code. Transient, not saved.
     bool wild3DView = false;
-    // 3D dungeon view toggle (2026-09-24, Phase 2 — dungeons 3D) - same deal for
+    // 3D dungeon view toggle (2026-09-24, Phase 2 - dungeons 3D) - same deal for
     // DrawHuntScreen's explorable dungeon arena: the 3D view is a pure view layer,
     // all game logic stays in the shared DrawHuntScreen code. Transient, not saved.
     bool hunt3DView = false;
@@ -1001,12 +1014,12 @@ struct GameState {
     // behind a single MENU toggle while inside a dungeon so the dungeon gets
     // nearly the full screen. Transient, not saved.
     bool dungeonMenuOpen = false;
-    // Towns (2026-09-22 "second town" plan, 2026-09-25 Phase 3) — 0 = Emberhold,
+    // Towns (2026-09-22 "second town" plan, 2026-09-25 Phase 3) - 0 = Emberhold,
     // 1 = Saltmere, 2 = Frostmere. Towns 1-2 reuse the same 9-node layout; Frostmere
     // has its own 5-node set (see ActiveTownNodes). Only the building set/tint/
     // building tint/texture, ground texture, and NPC flavor differ per town, per the
     // confirmed shared-economy design (same kCraftBuildings/Bank/Pets underneath either
-    // way — FindCraftBuildingIndex etc. are keyed by building type, never by town).
+    // way - FindCraftBuildingIndex etc. are keyed by building type, never by town).
     int selectedTown = 0;
 
     std::string logLine = "Welcome to Town Forge.";
@@ -1024,14 +1037,23 @@ struct GameState {
     int guidePage = 0;            // transient: current walkthrough page
     bool guideNoShowAgain = true; // transient: overlay checkbox, default checked
 
+    // UO-style travel (2026-09-25): town marking + Recall + leave-dungeon.
+    // markedTowns is PERSISTED (bit i = town i has been visited); the rest is
+    // transient UI/cast state, not saved - same as the other transient fields.
+    int markedTowns = 0;
+    int lastTownMarkedIdx = -1;      // transient: town index already auto-marked
+    bool recallPickerOpen = false;   // transient: recall destination modal showing
+    float leaveDungT = -1.0f;        // transient: >=0 while the 3s leave-dungeon cast runs
+    float leaveDungHurtSnap = -1.0f; // transient: playerHurtT captured at cast start
+
     // --- Combat/dungeon state (see the section above for what's simplified) ---
     Screen screen = Screen::Character; // matches the HTML's default/first tab
     int str = 50, dex = 20;                 // starting defaults (Mark's own numbers, not the
-                                               // JS's 10/10/10 — a "finished" character is meant
+                                               // JS's 10/10/10 - a "finished" character is meant
                                                // to land around 100/100/60 or 100/90/70); grow via
                                                // MaybeGainStat, capped at kStatCapIndividual/Total
     int maxHp = 50;                           // literal STR=HP (Mark's call, overriding the
-                                               // JS's "50 + str" maxHP() formula) — kept in
+                                               // JS's "50 + str" maxHP() formula) - kept in
                                                // sync with str by MaybeGainStat since this is
                                                // a stored field here, not a live function
     int hp = 50;
@@ -1039,7 +1061,7 @@ struct GameState {
     std::optional<int> selectedDungeon;      // index into kDungeons
     std::optional<CombatState> combat;
 
-    // --- Crafting/equipment state — mirrors state.smithSkill/carpSkill/tailorSkill,
+    // --- Crafting/equipment state - mirrors state.smithSkill/carpSkill/tailorSkill,
     // state.backpack, and state.equipped in the JS ---
     std::array<float, kCraftBuildings.size()> buildingSkill = {0, 0, 0, 0}; // smith/carpenter/tailor/(alchemy unused)
     std::vector<Item> backpack;
@@ -1049,7 +1071,7 @@ struct GameState {
     int craftModeTab = 0;        // 0 = Craft (existing UI), 1 = Buy pre-made gear (2026-09-21)
     float craftScroll = 0;       // mouse-wheel scroll offset for the recipe list
     // Transient UI state for the live-combat spell hotbar's assignment picker (2026-09-22)
-    // — which slot (0-4, into combatHotbar) is currently open for reassignment, if any.
+    // - which slot (0-4, into combatHotbar) is currently open for reassignment, if any.
     // Not saved, same as the other transient UI fields on this line.
     std::optional<int> hotbarPickerSlot;
     float backpackScroll = 0;    // mouse-wheel scroll offset for the backpack list
@@ -1057,12 +1079,12 @@ struct GameState {
     int furTraderTab = 0;        // 0 = Buy, 1 = Sell (Screen::FurTrader, Phase 3)
     int minersGuildTab = 0;      // 0 = Buy, 1 = Sell (Screen::MinersGuild, Phase 4)
 
-    static const int kBackpackCap = 20; // JS BASE_BACKPACK_CAP — see BackpackCap(s) for the
+    static const int kBackpackCap = 20; // JS BASE_BACKPACK_CAP - see BackpackCap(s) for the
                                           // house-tier bonus on top of this (now ported, see
                                           // kHouseTiers)
 
-    // --- Player housing — ported from the JS's HOUSE_TIERS/HOUSE_HUES/HOME_MODULE_*
-    // (state.house/state.houseModules) — see kHouseTiers/kHouseHues/kHomeModuleDefs. ---
+    // --- Player housing - ported from the JS's HOUSE_TIERS/HOUSE_HUES/HOME_MODULE_*
+    // (state.house/state.houseModules) - see kHouseTiers/kHouseHues/kHomeModuleDefs. ---
     int houseTierIdx = 0;          // index into kHouseTiers; 0 = "none", no house yet
     int houseHue = -1;              // index into kHouseHues; -1 = no hue chosen (base tint)
     std::string houseName;
@@ -1078,18 +1100,18 @@ struct GameState {
     bool interiorFromWild = false;  // ExitInterior returns to the wilderness house plot
     bool houseDesignerOpen = false; // grid designer overlay active on the wilderness screen
     int houseDesignerTool = 0;      // 0=floor 1=wall 2=door 3=erase
-    bool houseDemolishArmed = false;// demolish button pressed once — second press confirms
+    bool houseDemolishArmed = false;// demolish button pressed once - second press confirms
     bool houseChestOpen = false;    // storage chest panel open inside the wilderness house
 
 
-    // --- Gathering skills / auto-gather — mirrors state.lumberjacking/mining/skinning
+    // --- Gathering skills / auto-gather - mirrors state.lumberjacking/mining/skinning
     // and state.autoGather in the JS ---
     float lumberjacking = 0, mining = 0, skinning = 0; // trade skills, capped at 100
     float fishing = 0; // Phase 2: Salt Coast fishery, capped at 100 like the other trade skills
     bool autoGather = false;
     std::vector<Corpse> corpses; // left behind by combat wins, skinned for leather+gold
 
-    // --- Death / ghost / corpse / respawn (2026-09-24) — all transient, never saved ---
+    // --- Death / ghost / corpse / respawn (2026-09-24) - all transient, never saved ---
     float playerDeathAnimT = 0.0f; // >0 while the player's death animation plays (counts down)
     bool playerIsGhost = false;    // true during the 15s ghost walk before resurrection
     float ghostTimer = 0.0f;        // counts down from kGhostDuration while a ghost
@@ -1113,10 +1135,10 @@ struct GameState {
         int iconIdx = -1; // wilderness monster icon (for the corpse visual), -1 = generic
     };
     // Simultaneous deaths (2026-09-25): melee cleaves and AoE spells can kill
-    // several monsters in one hit, so the death pipeline is a list — each entry
+    // several monsters in one hit, so the death pipeline is a list - each entry
     // ticks down and resolves independently via FinishMonsterDeath.
     std::vector<DyingMonster> dyingMonsters;
-    // Visible world corpses — purely visual markers that fade; the actual lootable
+    // Visible world corpses - purely visual markers that fade; the actual lootable
     // corpse list above (skinned on the Hunt screen) is unchanged.
     struct WorldCorpse {
         Vector2 pos;
@@ -1129,7 +1151,7 @@ struct GameState {
     std::array<float, kWildMonsterSpotCount> wildSpotRespawn{}; // 0 = available, else seconds until the spot refills
     std::array<std::array<float, kDungeonSlotCount>, kDungeons.size()> dungeonSpawnRespawn{}; // [dungeon][slot], 0 = available
 
-    // --- Magic / spellcasting — mirrors state.magery/evalInt/meditation/mana/reagents ---
+    // --- Magic / spellcasting - mirrors state.magery/evalInt/meditation/mana/reagents ---
     float magery = 0, evalInt = 0, meditation = 0; // capped at 100
     int intStat = 20; // starting default (Mark's own number, not the JS's 10); grows via MaybeGainStat
     float mana = 20;   // starts at the real cap (= intStat), same reasoning as before this
@@ -1138,19 +1160,19 @@ struct GameState {
     int magicScreenTab = 0;      // 0 = Spellcraft practice list
     float magicScroll = 0;        // mouse-wheel scroll offset for the practice spell list
 
-    // --- The Character page — mirrors state.characterName/titleLordEarned and the
+    // --- The Character page - mirrors state.characterName/titleLordEarned and the
     // titleFor()/karmaAdjective()/topVocationTitle()/characterDisplayName() naming
     // system (titleLordEarned itself already exists in the Notoriety section below).
     std::string characterName;
 
-    // --- Taming & pets — mirrors state.animalTaming/animalLore/veterinary/pets ---
+    // --- Taming & pets - mirrors state.animalTaming/animalLore/veterinary/pets ---
     float animalTaming = 0, animalLore = 0, veterinary = 0; // capped at 100
     std::vector<Pet> pets;
     int nextPetId = 1;
     std::optional<TamingAttempt> tamingAttempt;
     float petsScroll = 0;    // mouse-wheel scroll offset for the pet roster list
     float creatureScroll = 0; // mouse-wheel scroll offset for the wild-creature list
-    // AI companion (2026-09-22, "AI players" plan Part 2) — the active Pet's world
+    // AI companion (2026-09-22, "AI players" plan Part 2) - the active Pet's world
     // position on the Wilderness/dungeon screens. Not saved, same as the player
     // position fields below (purely runtime, resets on relaunch); snapped rather than
     // eased in on first use or after a screen change, see UpdateCompanionFollow.
@@ -1158,29 +1180,29 @@ struct GameState {
     bool companionFollowInitialized = false;
     float companionAttackCooldown = 0.0f;
 
-    // The Rival Adventurer (2026-09-23, "Rival hunts you" plan) — no longer a static
+    // The Rival Adventurer (2026-09-23, "Rival hunts you" plan) - no longer a static
     // kWildernessMonsterSpots row, since it now roams and grows persistently instead of
     // sitting at one fixed spot forever. rivalLevel/rivalPos/rivalHasBeatenPlayer are
-    // saved (see SaveGame/LoadGame — offline growth catch-up reuses the existing
+    // saved (see SaveGame/LoadGame - offline growth catch-up reuses the existing
     // lastActiveEpoch/elapsed calculation already there for ApplyOfflineAutoGather,
     // rather than tracking a second, redundant epoch just for the Rival); the rest is
     // transient, same reasoning as companionPos above.
     float rivalLevel = 16.0f; // starting value matches the old static spot's level
     Vector2 rivalPos = { 900, 900 }; // the old spot's position, now just a starting point
     bool rivalHasBeatenPlayer = false; // once true, losing to it again is a harsher "murderer" loss
-    int rivalKillsOnPlayer = 0; // PERSISTED — drives the epithet ladder (Ruthless/Relentless/Merciless/Bane)
+    int rivalKillsOnPlayer = 0; // PERSISTED - drives the epithet ladder (Ruthless/Relentless/Merciless/Bane)
     enum class RivalActivity { Patrol, Stalking, Hunting };
     RivalActivity rivalActivity = RivalActivity::Patrol;
     Vector2 rivalPatrolTarget = { 900, 900 };
     float rivalActivityTimer = 0.0f; // counts down to the next patrol-target pick, or the next hunt attempt
-    // Phase 6 — connective tissue landmarks. rivalCampIdx/rivalCampTimer/refugeKnown
+    // Phase 6 - connective tissue landmarks. rivalCampIdx/rivalCampTimer/refugeKnown
     // are PERSISTED (the camp's spot and the refuge discovery survive sessions);
     // sorrowCooldown is transient (a per-session anti-spam timer).
-    int rivalCampIdx = 2; // index into kRivalCampSpots — Murder Inc.'s current camp
+    int rivalCampIdx = 2; // index into kRivalCampSpots - Murder Inc.'s current camp
     float rivalCampTimer = 1500.0f; // seconds until the camp relocates
     float sorrowCooldown = 0.0f; // seconds until the Fields of Sorrow can ambush again
     bool refugeKnown = false; // the player has found the outlaw refuge
-    // --- UO player-killer transients (2026-09-24) — not saved, same reasoning as above ---
+    // --- UO player-killer transients (2026-09-24) - not saved, same reasoning as above ---
     float rivalStalkTimer = 0.0f;      // counts down a stalk before the commit/break-off roll
     bool rivalSprinting = false;       // current hunt gait: sprint vs recover
     float rivalSprintTimer = 0.0f;     // time left in the current gait phase
@@ -1189,28 +1211,28 @@ struct GameState {
     Vector2 rivalPlayerVel = { 0, 0 }; // smoothed player velocity, for intercept steering
     Vector2 rivalPrevPlayerPos = { 0, 0 }; // previous frame's player pos, for velocity computation
 
-    // --- Murder Inc. guild blades (2026-09-24) — the champion's crew. Three
+    // --- Murder Inc. guild blades (2026-09-24) - the champion's crew. Three
     // weaker PKs with their own persistent levels/positions. Activity state is
     // transient like the champion's; levels/positions save like the champion's.
     struct BladeState {
-        float level = 12.0f; // PERSISTED — grows slowly, capped below the champion
+        float level = 12.0f; // PERSISTED - grows slowly, capped below the champion
         Vector2 pos = { 400.0f, 900.0f }; // PERSISTED
         RivalActivity activity = RivalActivity::Patrol; // transient
         Vector2 patrolTarget = { 400.0f, 900.0f };      // transient
-        float activityTimer = 0.0f;  // transient — patrol pause / hunt give-up countdown
-        float stalkTimer = 0.0f;     // transient — counts down a stalk before commit/break-off
-        bool autoEngage = false;     // transient — set when a hunt closes to catch range
+        float activityTimer = 0.0f;  // transient - patrol pause / hunt give-up countdown
+        float stalkTimer = 0.0f;     // transient - counts down a stalk before commit/break-off
+        bool autoEngage = false;     // transient - set when a hunt closes to catch range
     };
     std::array<BladeState, kBladeCount> blades = {{ // persistent levels/positions; activities transient
-        { 12.0f, { 400.0f, 900.0f } },    // Blade II — west woods
-        { 12.0f, { 1400.0f, 1200.0f } },  // Blade III — central wilds
-        { 12.0f, { 2200.0f, 1500.0f } }, // Blade IV — Saltmere corridor
+        { 12.0f, { 400.0f, 900.0f } },    // Blade II - west woods
+        { 12.0f, { 1400.0f, 1200.0f } },  // Blade III - central wilds
+        { 12.0f, { 2200.0f, 1500.0f } }, // Blade IV - Saltmere corridor
     }};
     bool rivalAutoEngage = false;      // set by UpdateRivalRoaming when a hunt closes to catch range
     std::string rivalBanner;           // unmissable center-screen banner text (hunt/stalk warnings)
     float rivalBannerTimer = 0.0f;     // seconds remaining on the banner
 
-    // --- Notoriety, murderers & innocents — mirrors state.notoriety/fame/karma/
+    // --- Notoriety, murderers & innocents - mirrors state.notoriety/fame/karma/
     // shaken/ambush/innocentEncounter in the JS ---
     float notoriety = 0;
     float fame = 0, karma = 0;
@@ -1233,9 +1255,9 @@ struct GameState {
     };
     std::optional<InnocentEncounter> innocentEncounter;
 
-    // Per-spot runtime state for the roaming Innocent NPCs (2026-09-23) — parallel to
+    // Per-spot runtime state for the roaming Innocent NPCs (2026-09-23) - parallel to
     // kWildernessInnocentSpots by index. Transient (not saved), same reasoning as
-    // companionPos/rivalActivity — respawns fresh each session rather than trying to
+    // companionPos/rivalActivity - respawns fresh each session rather than trying to
     // preserve "who was standing where" across a save. `present=false` with
     // `respawnTimer=0` on a fresh GameState means every spot rolls its first traveler
     // immediately on entering the Wilderness rather than waiting out a cooldown that
@@ -1243,33 +1265,33 @@ struct GameState {
     struct InnocentSpotState { bool present = false; int identity = 0; int gold = 0; float respawnTimer = 0.0f; };
     std::array<InnocentSpotState, 4> innocentSpots;
 
-    // Innocent memory (2026-09-24) — PERSISTED. Each of the four travelers remembers
+    // Innocent memory (2026-09-24) - PERSISTED. Each of the four travelers remembers
     // YOUR history with them specifically; greeting lines, rumors, shop attitude and
     // request availability all read this.
     struct InnocentMemory { int met = 0, spared = 0, snooped = 0, stolenFrom = 0, murdered = 0, helped = 0; };
     std::array<InnocentMemory, 4> innocentMem;
-    std::array<int, 6> deathsByDungeon = {}; // PERSISTED — feeds "restless dungeon" rumors (Phase 4: sized to kDungeons)
-    // Silas's traveling shop (2026-09-24) — PERSISTED stock counts + restock timer.
+    std::array<int, 6> deathsByDungeon = {}; // PERSISTED - feeds "restless dungeon" rumors (Phase 4: sized to kDungeons)
+    // Silas's traveling shop (2026-09-24) - PERSISTED stock counts + restock timer.
     std::array<int, 5> merchantStock = { 3, 5, 5, 1, 1 };
     float merchantRestockT = 600.0f;
-    // Small requests (2026-09-24) — PERSISTED per innocent: 0 none, 1 offered, 2 active.
+    // Small requests (2026-09-24) - PERSISTED per innocent: 0 none, 1 offered, 2 active.
     // Kind: 0 = fetch 5 wood, 1 = fetch 4 ore, 2 = fetch 4 leather, 3 = escort to a gate.
     std::array<int, 4> innocentReqState = {};
     std::array<int, 4> innocentReqKind = {};
     std::array<float, 4> innocentReqCooldown = {};
-    int escortInnocent = -1;          // transient — identity currently being escorted, -1 none
-    Vector2 escortPos = { 0, 0 };    // transient — the escorted innocent's world position
-    float escortTimer = 0.0f;        // transient — escort times out eventually
+    int escortInnocent = -1;          // transient - identity currently being escorted, -1 none
+    Vector2 escortPos = { 0, 0 };    // transient - the escorted innocent's world position
+    float escortTimer = 0.0f;        // transient - escort times out eventually
 
-    std::string pendingEncounterCheck; // "gather" | "" — see UpdateGathering + main()
+    std::string pendingEncounterCheck; // "gather" | "" - see UpdateGathering + main()
 
-    // --- Alchemy potions — mirrors state.potions/state.poisoning/state.weaponPoisoned.
+    // --- Alchemy potions - mirrors state.potions/state.poisoning/state.weaponPoisoned.
     // buildingSkill[3] (already declared above) is Alchemy's skill, now put to use. ---
     std::vector<PotionStack> potions;
     float poisoning = 0; // capped at 100
     int weaponPoisonCharges = 0, weaponPoisonPotency = 0;
 
-    // --- Banking (the Vaultkeep) — mirrors state.bank.gold/state.bank.items. Safe from
+    // --- Banking (the Vaultkeep) - mirrors state.bank.gold/state.bank.items. Safe from
     // every danger system above: murderer losses and guard-zone confiscation never
     // touch these. ---
     int bankGold = 0;
@@ -1278,7 +1300,7 @@ struct GameState {
     float bankItemsScroll = 0; // mouse-wheel scroll offset for the bank's own item list
     float houseScroll = 0; // mouse-wheel scroll offset for the House screen's workshop-wing list
 
-    // --- The Hearthmoot's weekly goals — mirrors state.weeklyGoals. Tracked by
+    // --- The Hearthmoot's weekly goals - mirrors state.weeklyGoals. Tracked by
     // elapsed real time (epoch seconds), not a server calendar, matching the JS. ---
     std::array<int, kWeeklyGoalCount> weeklyProgress = {0, 0, 0, 0, 0, 0, 0, 0};
     std::array<bool, kWeeklyGoalCount> weeklyClaimed = {false, false, false, false, false, false, false, false};
@@ -1286,27 +1308,27 @@ struct GameState {
     bool blessingClaimedThisWeek = false;
     long long blessingUntilEpoch = 0; // hasWeeklyBlessing(): now < this
 
-    // --- Weapon-category combat skills + Tactics/Anatomy/Magic Resistance/Healing —
+    // --- Weapon-category combat skills + Tactics/Anatomy/Magic Resistance/Healing -
     // mirrors state.weaponSkills/tactics/anatomy/magicResist/healing. All 18 of these
     // (5 weapon skills + these 4 + Magery/EvalInt/Meditation + Taming/Lore/Vet +
     // Stealing/Snooping/Poisoning) share the Echo system's 700-point active budget
-    // below — trade skills (Lumberjacking..Alchemy) are NOT part of it and stay
+    // below - trade skills (Lumberjacking..Alchemy) are NOT part of it and stay
     // always-active, matching the JS exactly. ---
     float swordsmanship = 0, fencing = 0, macing = 0, archery = 0, wrestling = 0;
     float tactics = 0, anatomy = 0, magicResist = 0, healing = 0; // capped at 100 each
 
-    // --- Bandages — mirrors state.bandages. A plain consumable count, not a backpack
+    // --- Bandages - mirrors state.bandages. A plain consumable count, not a backpack
     // item; crafted by the Tailor or bought from the Provisioner stand-in (see
     // "Bandages & Healing" below), and trains the Healing skill above on use. ---
     int bandages = 3;
 
-    // --- The Echo system — mirrors state.skillActive. true = contributing to
+    // --- The Echo system - mirrors state.skillActive. true = contributing to
     // gameplay right now; false = benched (still fully trained, just inactive).
-    // Indexed by WeeklyGoalIdx... no — indexed by position in kCappedSkills below. ---
+    // Indexed by WeeklyGoalIdx... no - indexed by position in kCappedSkills below. ---
     std::array<bool, 18> skillActive = { true, true, true, true, true, true, true, true,
                                           true, true, true, true, true, true, true, true, true, true };
 
-    // --- The Bloodstained Road — mirrors state.bloodstainedProgress/bloodstainedLoop/
+    // --- The Bloodstained Road - mirrors state.bloodstainedProgress/bloodstainedLoop/
     // bloodstainedBossDefeated/grayEncounter. Tier index 0-4 = current rung; reaching
     // 5 (i.e. having beaten tier 4, the boss) loops back to 0 with loop+1 and marks
     // the boss permanently defeated. ---
@@ -1314,22 +1336,22 @@ struct GameState {
     std::array<int, 3> bloodstainedLoop = {0, 0, 0};
     std::array<bool, 3> bloodstainedBossDefeated = {false, false, false};
 
-    // Configurable live-combat spell hotbar (2026-09-22) — indices into kSpells, -1 =
+    // Configurable live-combat spell hotbar (2026-09-22) - indices into kSpells, -1 =
     // empty slot. Real player configuration (unlike the transient UI-tab fields below),
     // so it's saved/loaded like any other persistent field.
     std::array<int, 5> combatHotbar = {-1, -1, -1, -1, -1};
     // Deny-flash timers per hotbar slot (2026-09-25, combat feel): when a tap/key
     // on a slot can't fire (cooldown, no mana/reagents), the slot flashes red and
-    // a floater explains why — a swallowed tap must never feel like "one cast".
+    // a floater explains why - a swallowed tap must never feel like "one cast".
     // Purely visual, transient, not saved.
     float hotbarDenyT[5] = {};
 
     struct GrayEncounter { std::string name; int level, baseGold, tierIdx; bool canSteal = false; int previewGold = 0; };
     std::optional<GrayEncounter> grayEncounter;
 
-    int huntSubView = 0; // 0 = Dungeons, 1 = Bloodstained Road — sub-tab within the Hunt screen
+    int huntSubView = 0; // 0 = Dungeons, 1 = Bloodstained Road - sub-tab within the Hunt screen
 
-    // --- Free-movement exploration — the player's world position in each explorable
+    // --- Free-movement exploration - the player's world position in each explorable
     // space. Only one is "active" at a time depending on state.screen/selectedDungeon,
     // but both persist independently so leaving and returning keeps your spot. ---
     Vector2 townPlayerPos = {450, 600}; // on the main north-south street, clear of Townhall/Bank's collision radius
@@ -1337,17 +1359,17 @@ struct GameState {
     Vector2 bloodstainedPlayerPos = {450, 700};
     Vector2 wildernessPlayerPos = {900, 1650}; // just inside the gate from Town
     Vector2 playerFacing = {0, 1}; // last nonzero movement direction, for a facing indicator
-    float worldTime = 0; // elapsed seconds, ticks every frame — drives monster wander motion
+    float worldTime = 0; // elapsed seconds, ticks every frame - drives monster wander motion
 
     // --- Building interiors (2026-09-24): walkable rooms inside each town
-    // building. Transient like the other free-move positions — not saved; leaving
+    // building. Transient like the other free-move positions - not saved; leaving
     // the interior (or re-entering) just resets the spawn. ---
     std::string interiorKey;                 // building key whose room we're inside ("" = not inside)
     Vector2 interiorPlayerPos = {280, 640};  // room-local position
     bool interior3DView = false;             // 3D/2D view inside interiors (mirrors town3DView on entry, V toggles)
     bool interiorGreeted = false;            // greeting popup open for the room's static NPC (if any)
 
-    // --- Live Wilderness combat (first slice of the real-time combat rework — see
+    // --- Live Wilderness combat (first slice of the real-time combat rework - see
     // kWildernessMonsterSpots/DrawWildernessScreen for the rest). Unlike every other
     // monster in the game, an engaged Wilderness monster needs real per-instance state
     // (it moves and has its own HP) instead of being derived statelessly from
@@ -1367,27 +1389,27 @@ struct GameState {
         // Not DEX-scaled like the sword swing.
         float spellCooldowns[kSpells.size()] = {};
         float castLockT = 0.0f;
-        // Purely visual, not gameplay — see kSwingEffectDuration. Ticks down independently
+        // Purely visual, not gameplay - see kSwingEffectDuration. Ticks down independently
         // of playerAttackCooldown (which can be much longer/shorter depending on DEX) so
         // the flash duration stays consistent regardless of swing speed.
         float swingEffectTimer = 0.0f;
         // Same idea as swingEffectTimer but for spellcasting (2026-09-23, once the hero
-        // sheet got a real Cast pose) — set alongside the per-spell cooldowns, drives
+        // sheet got a real Cast pose) - set alongside the per-spell cooldowns, drives
         // DrawPlayer's ActorAnim::Cast selection while live.
         float castEffectTimer = 0.0f;
-        // Used only by the one tactical opponent — harmless unused defaults for every
+        // Used only by the one tactical opponent - harmless unused defaults for every
         // other monster.
         bool isFleeing = false;
         float fleeTimer = 0.0f;
         float monsterSpecialCooldown = 0.0f; // the opponent's own ranged-strike cooldown
         // World-space combat FX (2026-09-24): monster attack lunge / hit-reaction
         // timers and the live-combat debuff state for Sap Strength, Cloud Mind, and
-        // Fumbling Curse. Purely visual/steering — no damage or economy rules here.
+        // Fumbling Curse. Purely visual/steering - no damage or economy rules here.
         float monsterAttackT = -1.0f; // >=0: seconds since this fight's last monster attack started
         float monsterHurtT = -1.0f;  // >=0: seconds since the player last hurt this monster
         int debuffKind = 0;          // 0 none, 1 Sap Strength, 2 Cloud Mind, 3 Fumbling Curse
         float debuffT = 0.0f;        // seconds remaining on debuffKind
-        // True for the Rival Adventurer specifically (2026-09-23) — it no longer has a
+        // True for the Rival Adventurer specifically (2026-09-23) - it no longer has a
         // kWildernessMonsterSpots row at all (see GameState::rivalLevel's comment), so
         // `spotIdx` is meaningless for it (left at -1) and every lookup that used to go
         // through kWildernessMonsterSpots[spotIdx] checks this flag first instead.
@@ -1404,13 +1426,13 @@ struct GameState {
     // Transient like wildEngaged, not saved.
     float duelStuckT = 0.0f;
     // Pack attackers (2026-09-25, multi-enemy combat): normal monsters that joined
-    // the fight after the primary engagement — same-faction monsters within
+    // the fight after the primary engagement - same-faction monsters within
     // kPackAggroRadius of a damaged packmate. They chase and melee the player
     // alongside the primary (capped by kMaxMeleeAttackers); transient like
     // wildEngaged, not saved.
     std::vector<ActiveMonster> wildExtraAttackers;
 
-    // --- Live dungeon combat (2026-09-22 — porting the Wilderness pattern above to all
+    // --- Live dungeon combat (2026-09-22 - porting the Wilderness pattern above to all
     // 5 dungeons, per the "Live combat for Wilderness + all 5 dungeons" plan). Same
     // shape as ActiveMonster; kept as a separate struct/field rather than reused since
     // dungeon monsters are indexed 0-4 (+5=boss) within the *current* selectedDungeon,
@@ -1433,11 +1455,11 @@ struct GameState {
         float debuffT = 0.0f;        // seconds remaining on debuffKind
     };
     std::optional<ActiveDungeonMonster> dungeonEngaged;
-    // Dungeon pack attackers (2026-09-25) — same pattern as wildExtraAttackers.
+    // Dungeon pack attackers (2026-09-25) - same pattern as wildExtraAttackers.
     std::vector<ActiveDungeonMonster> dungeonExtraAttackers;
 
     // UO-style attack flagging + world-space combat FX state (2026-09-24). All of
-    // this is visual or steering state — no damage numbers, economy, notoriety, or
+    // this is visual or steering state - no damage numbers, economy, notoriety, or
     // karma rules live here. Flagging lets the player deliberately pick a target;
     // projectiles/impacts are the visible half of spell casts and ranged strikes
     // whose mechanical outcomes are unchanged.
@@ -1480,7 +1502,7 @@ struct GameState {
     };
     SpellImpact spellImpacts[8];
     // Floating combat text (2026-09-25, combat feel): damage numbers / MISS
-    // floaters over struck enemies. Purely visual — spawned wherever the player's
+    // floaters over struck enemies. Purely visual - spawned wherever the player's
     // melee or spells deal (or fail to deal) damage. Transient, not saved.
     struct FloatText {
         bool active = false;
@@ -1503,7 +1525,7 @@ struct GameState {
 };
 
 // ---------------------------------------------------------------------
-// Free-movement exploration — a small top-down world layer over the Town
+// Free-movement exploration - a small top-down world layer over the Town
 // and Hunt (dungeon) screens. This has no equivalent in the original JS,
 // which was entirely menu/tab based; it's new territory built to give
 // the player a character that actually walks around, per request.
@@ -1513,20 +1535,20 @@ struct GameState {
 // clamps to the world edges, and proximity-based interaction (walk up to
 // something, press E) instead of clicking a button for it. Once an
 // interaction opens a panel (a building's upgrade panel, a combat panel),
-// movement pauses until it closes — the world is still visible underneath
+// movement pauses until it closes - the world is still visible underneath
 // but input goes to the panel instead.
 // ---------------------------------------------------------------------
 
 static const float kPlayerSpeed = 220.0f;   // world units/sec
 static const float kPlayerRadius = 17.0f;     // bumped from 14 for a less cramped, more legible view
 static const float kInteractRange = 54.0f;   // distance at which "[E] interact" becomes available
-static const float kNodeRadius = 50.0f;       // world/building/monster node radius — bumped from 40;
+static const float kNodeRadius = 50.0f;       // world/building/monster node radius - bumped from 40;
                                                 // moved up here
                                                 // (rather than by its original kTownNodePositions
                                                 // table further down) since DrawBuildingNode needs
                                                 // it and is defined earlier in the file
 static const float kPlayerEdgeMargin = 70.0f; // how close the player's world position can get to any
-                                                // world edge — bigger than kPlayerRadius (the actual
+                                                // world edge - bigger than kPlayerRadius (the actual
                                                 // collision hitbox) because the hero sprite is drawn
                                                 // much larger than that hitbox (kHeroSpriteScale); a
                                                 // margin as small as kPlayerRadius let the sprite's top
@@ -1535,48 +1557,48 @@ static const float kPlayerEdgeMargin = 70.0f; // how close the player's world po
                                                 // each time) as the sprite itself grew 25% twice, to
                                                 // keep the same buffer.
 static const float kWorldSize = 900.0f;       // Bloodstained Road world size (Town used to share
-                                                // this too — see kTownWorldSize below for why it
+                                                // this too - see kTownWorldSize below for why it
                                                 // doesn't anymore)
 // Town's own world size, separate from kWorldSize above (2026-09-21: Mark asked for buildings
 // spaced further apart; bumping the shared kWorldSize would have also grown the Bloodstained
-// Road, which wasn't asked for — same reasoning as kTownVisualScale not touching kNodeRadius).
+// Road, which wasn't asked for - same reasoning as kTownVisualScale not touching kNodeRadius).
 static const float kTownWorldSize = 1000.0f;
-static const float kDungeonWorldSize = 1800.0f; // dungeons get their own, much bigger world — real
+static const float kDungeonWorldSize = 1800.0f; // dungeons get their own, much bigger world - real
                                                    // room-and-corridor space to actually walk and explore
 // Wilderness's own world size, separate from kDungeonWorldSize above (2026-09-22,
-// "second town" plan) — Mark wants the walk from Town 1 to the new Town 2 to feel like
+// "second town" plan) - Mark wants the walk from Town 1 to the new Town 2 to feel like
 // a real journey, not an instant blip. Bumping kDungeonWorldSize directly would also
-// enlarge every dungeon interior's usable bounds, which wasn't asked for — same
+// enlarge every dungeon interior's usable bounds, which wasn't asked for - same
 // reasoning as kTownWorldSize being split out from the shared kWorldSize earlier this
 // session. All of Wilderness's existing content (gather/tame/monster nodes, the 5
 // dungeon entrances, foliage, the Town 1 gate) keeps its original 0-1800 coordinates
 // unchanged; the extra space is new territory toward Town 2's gate.
 static const float kWildernessWorldSize = 3200.0f;
-// Town 2's name and its gate position out in the newly added Wilderness space — a
+// Town 2's name and its gate position out in the newly added Wilderness space - a
 // straight-line ~2000 units from the Town 1 return gate (kWildernessReturnGatePos,
 // {900,1750}), well past the original 1800-unit map's edge, so reaching it is a real
 // walk. Declared here (rather than near kTown2NPCs) since DrawWildernessScreen needs it
 // and is defined well before that point in the file.
-// Phase 1: the central town's proper name — Emberhold, capital of the Whisperwood.
+// Phase 1: the central town's proper name - Emberhold, capital of the Whisperwood.
 static const char* kTown1Name = "Emberhold";
 static const char* kTown2Name = "Saltmere";
 static const Vector2 kWildernessTown2GatePos = { 2900, 1750 };
-// Phase 3: Frostmere, the northern town — its wilderness gate sits just inside the
+// Phase 3: Frostmere, the northern town - its wilderness gate sits just inside the
 // Frostwastes (y < 700), at the end of the King's Road's northern extension.
 static const char* kTown3Name = "Frostmere";
 static const Vector2 kWildernessTown3GatePos = { 1400, 640 };
-// Phase 4: Cragmoor, the western mountain town — its wilderness gate sits in the
+// Phase 4: Cragmoor, the western mountain town - its wilderness gate sits in the
 // Stonepeaks (x < 500, y >= 700), at the end of the King's Road's western extension.
 static const char* kTown4Name = "Cragmoor";
 static const Vector2 kWildernessTown4GatePos = { 300, 1050 };
 // Mark asked for "everything in Town a little larger" since the camera scrolls with
-// the player anyway — rather than bumping kNodeRadius/kPlayerRadius/kWorldSize above
+// the player anyway - rather than bumping kNodeRadius/kPlayerRadius/kWorldSize above
 // (which would also resize Hunt's dungeons and the Bloodstained Road, neither of which
 // was asked for), this scales only Town's own visual draw sizes (buildings, ground
 // tile, fences, foliage, props, the player sprite) via optional scale parameters on
 // DrawBuildingNode/DrawPlayer and by multiplying Town's own DrawTiledGround/
 // DrawWallBand/DrawIconCentered call sites. World positions/spacing
-// (kTownNodePositions, kTownPlaza) are untouched — buildings are 250 units apart on
+// (kTownNodePositions, kTownPlaza) are untouched - buildings are 250 units apart on
 // the grid with ~155 units of clearance today, comfortably more than the ~14px this
 // adds to each building's footprint, so nothing overlaps.
 static const float kTownVisualScale = 1.15f;
@@ -1600,7 +1622,7 @@ static Vector2 WorldToScreen(Vector2 worldPos, Vector2 cameraTopLeft) {
 }
 
 // ---------------------------------------------------------------------
-// Touch/mouse-drag virtual joystick — a WASD alternative for builds with no keyboard
+// Touch/mouse-drag virtual joystick - a WASD alternative for builds with no keyboard
 // (the web/mobile build in particular: raylib's Emscripten GLFW3 layer maps a single
 // touch to the left mouse button, so this works unmodified on a phone). Touching down
 // inside kJoystickZone (bottom-left corner of the viewport, clear of every screen's
@@ -1610,7 +1632,7 @@ static Vector2 WorldToScreen(Vector2 worldPos, Vector2 cameraTopLeft) {
 // single touch point can't hold multiple buttons at once for diagonal movement.
 // Input (VirtualJoystickDir) and drawing (DrawVirtualJoystick) are split because the
 // input has to be read before movement is resolved, but the drawing has to happen
-// after the world is drawn (else the ground/buildings would paint over it) — see the
+// after the world is drawn (else the ground/buildings would paint over it) - see the
 // DrawVirtualJoystick() call near the end of each movement screen's draw function.
 // ---------------------------------------------------------------------
 static const float kJoystickMaxDrag = 50.0f;
@@ -1630,15 +1652,15 @@ static Vector2 VirtualJoystickDir() {
     if (!g_joystickActive) return { 0, 0 };
     Vector2 delta = { mouse.x - g_joystickOrigin.x, mouse.y - g_joystickOrigin.y };
     float len = std::sqrt(delta.x * delta.x + delta.y * delta.y);
-    if (len < 8.0f) return { 0, 0 }; // dead zone — avoids jitter right at the touch point
+    if (len < 8.0f) return { 0, 0 }; // dead zone - avoids jitter right at the touch point
     return { delta.x / len, delta.y / len };
 }
 // Mirrors VirtualJoystickDir()'s own dead-zone check using the globals it just updated
-// this frame (called from UpdatePlayerMovement before this runs) — lets DrawPlayer's
+// this frame (called from UpdatePlayerMovement before this runs) - lets DrawPlayer's
 // walk-animation gate see touch-driven movement too. Needed because AnyMoveKeyDown()
 // below only checks physical keys: on a phone with no keyboard, that always returned
 // false, so the player visibly moved via the on-screen joystick but the walk animation
-// never advanced past its standing frame — reported as "feet don't move on my phone."
+// never advanced past its standing frame - reported as "feet don't move on my phone."
 static bool VirtualJoystickIsMoving() {
     if (!g_joystickActive) return false;
     Vector2 delta = { g_joystickCurrent.x - g_joystickOrigin.x, g_joystickCurrent.y - g_joystickOrigin.y };
@@ -1682,60 +1704,60 @@ static bool UpdatePlayerMovement(Vector2& pos, Vector2& facing, float dt, float 
 static float Dist(Vector2 a, Vector2 b) { return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y)); }
 
 // ---------------------------------------------------------------------
-// World art — optional. Every draw call below falls back to the original
+// World art - optional. Every draw call below falls back to the original
 // colored-circle placeholder if a texture failed to load (missing file,
 // bad path, etc.), so a partially-filled assets/ folder never crashes or
-// blanks anything out — it just shows circles for whatever's missing.
+// blanks anything out - it just shows circles for whatever's missing.
 //
 // Expected files (all optional, checked individually):
-//   assets/player.png                     — the player character (single
+//   assets/player.png                     - the player character (single
 //                                            forward-facing sprite; swap in
 //                                            directional frames later by
 //                                            loading more textures and
 //                                            picking one from s.playerFacing)
-//   assets/buildings/<key>.png            — one per Town building; <key> is
+//   assets/buildings/<key>.png            - one per Town building; <key> is
 //                                            smith/carpenter/tailor/alchemy/
 //                                            provisioner/stable/healer/bank/
 //                                            townhall
-//   assets/monsters_v2/emberveil.png       — The Ember Depths (dungeon 3), volcanic elementals
-//   assets/monsters_v2/weaversnest.png      — The Weavers' Nest (dungeon 1), spider monsters (Phase 5: was bloodtusk.png)
-//   assets/monsters/sunkencrypt.png       — The Sunken Crypt (dungeon 2), regular monsters
-//   assets/monsters/wyrmscar.png          — Wyrmscar Depths (dungeon 3), regular monsters
-//   assets/monsters_boss/<same 4 names>   — that dungeon's boss specifically (falls back
+//   assets/monsters_v2/emberveil.png       - The Ember Depths (dungeon 3), volcanic elementals
+//   assets/monsters_v2/weaversnest.png      - The Weavers' Nest (dungeon 1), spider monsters (Phase 5: was bloodtusk.png)
+//   assets/monsters/sunkencrypt.png       - The Sunken Crypt (dungeon 2), regular monsters
+//   assets/monsters/wyrmscar.png          - Wyrmscar Depths (dungeon 3), regular monsters
+//   assets/monsters_boss/<same 4 names>   - that dungeon's boss specifically (falls back
 //                                            to the regular-monster texture, gold-tinted,
 //                                            if a boss-specific file isn't found)
-//   assets/ground/grass.png, dirt.png     — Town's tiled ground + plaza
-//   assets/dungeon/floor.png, wall.png    — generic dungeon look (fallback if a themed
+//   assets/ground/grass.png, dirt.png     - Town's tiled ground + plaza
+//   assets/dungeon/floor.png, wall.png    - generic dungeon look (fallback if a themed
 //                                            texture below isn't found)
-//   assets/dungeon_themed/<theme>_floor.png, <theme>_wall.png — per-dungeon theming;
+//   assets/dungeon_themed/<theme>_floor.png, <theme>_wall.png - per-dungeon theming;
 //                                            <theme> is emberveil/bloodtusk/sunkencrypt/
 //                                            wyrmscar, same order as kDungeons
-//   assets/buildings/door.png             — shared door art for every Town building
+//   assets/buildings/door.png             - shared door art for every Town building
 // ---------------------------------------------------------------------
 
 // ---------------------------------------------------------------------
-// Paper doll — layered character art. Originally built entirely from the
+// Paper doll - layered character art. Originally built entirely from the
 // CC0-licensed Dungeon Crawl Stone Soup tileset (assets/paperdoll/, curated
-// from the full pack under assets/dungeon crawl/ — see its LICENSE.txt:
+// from the full pack under assets/dungeon crawl/ - see its LICENSE.txt:
 // public domain, no attribution required), pre-aligned 32x32 equipment
 // layers (bare body, then boots/legs/chest/head/glove/weapon overlays).
 // Still true for Helmet/weapons (kept temporarily even though they no longer
-// align — see DrawPaperdollLayers' comment).
+// align - see DrawPaperdollLayers' comment).
 //
 // 2026-09-21: Mark asked for higher-quality paperdoll art across the board.
 // base/hair/boots/Arms/Gorget/Chest/Legs/Gloves are now Gemini-generated art
 // (originally on a 64x64 canvas, doubled to 128x128 same day after Mark
-// reported the result still looked blurry — the blur was downscaling
+// reported the result still looked blurry - the blur was downscaling
 // ~600-1000px source art all the way down to 64px; rebuilt every piece above
 // from the same already-cleaned source crops at 2x the target size/position,
-// no new art needed) — DrawTexturePro stretches every layer to the same
+// no new art needed) - DrawTexturePro stretches every layer to the same
 // destination square regardless of native resolution, so mixing canvas sizes
 // is fine, but pieces MUST be authored against the same reference body
 // proportions to land correctly (confirmed
 // the hard way: the new taller body with angled-out arms does not line up
 // with the old compact/arms-close-to-torso DCSS pieces at all). The new
 // base was itself built from 3 separate Gemini renders (bald+barefoot,
-// +hair, +hair+boots) rather than isolated transparent layers — hair/boots
+// +hair, +hair+boots) rather than isolated transparent layers - hair/boots
 // were extracted by isolating their distinct color region (hue/luminance
 // threshold) from each full-body render, not by diffing images against each
 // other (confirmed those 3 renders aren't pixel-aligned to each other, only
@@ -1743,7 +1765,7 @@ static float Dist(Vector2 a, Vector2 b) { return std::sqrt((a.x - b.x) * (a.x - 
 // base as the alignment reference. Next up: Helmet (4 materials), then
 // weapons.
 //
-// Each entry is keyed either by a fixed slot name ("base"/"hair"/"boots" —
+// Each entry is keyed either by a fixed slot name ("base"/"hair"/"boots" -
 // always drawn, no game slot backs them) or by the exact Recipe::name of a
 // craftable weapon/armor item, so finding the layer for an equipped item
 // is just a name lookup (see FindPaperdollTexture/DrawPaperdollLayers
@@ -1753,8 +1775,8 @@ static const std::vector<std::pair<std::string, std::string>> kPaperdollManifest
     {"base", "base/human_male.png"},
     {"hair", "hair/brown_1.png"},
     {"boots", "boots/middle_brown.png"},
-    // Helmets — all 4 materials now have new 128x128 Gemini art (2026-09-21).
-    // Studded Cap deliberately reuses Leather Cap's art (Mark's call — no separate
+    // Helmets - all 4 materials now have new 128x128 Gemini art (2026-09-21).
+    // Studded Cap deliberately reuses Leather Cap's art (Mark's call - no separate
     // studded-leather helm generated).
     {"Leather Cap", "head/hood_ybrown.png"},
     {"Studded Cap", "head/hood_ybrown.png"},
@@ -1778,9 +1800,9 @@ static const std::vector<std::pair<std::string, std::string>> kPaperdollManifest
     {"Plate Chest", "body/plate.png"},
     {"Leather Tunic", "body/leather_armor.png"},
     {"Studded Tunic", "body/leather_stud.png"},
-    // Arms/Gorget — Gemini-generated (not from the DCSS pack, which has no
+    // Arms/Gorget - Gemini-generated (not from the DCSS pack, which has no
     // arms/gorget layer at all), downscaled from the original ~600x1000
-    // painterly art onto a 128x128 canvas (4x this pack's native 32x32 —
+    // painterly art onto a 128x128 canvas (4x this pack's native 32x32 -
     // DrawTexturePro stretches every layer to the same destination square
     // regardless of its source resolution, so mixing canvas sizes across
     // layers is safe).
@@ -1792,7 +1814,7 @@ static const std::vector<std::pair<std::string, std::string>> kPaperdollManifest
     {"Plate Gorget", "gorget/plate.png"},
     {"Leather Gorget", "gorget/leather.png"},
     {"Studded Gorget", "gorget/studded.png"},
-    // Weapons — Smith (Swordsmanship/Fencing/Macing)
+    // Weapons - Smith (Swordsmanship/Fencing/Macing)
     {"Cutlass", "hand_right/sabre.png"},
     {"Scimitar", "hand_right/scimitar_new.png"},
     {"Katana", "hand_right/katana.png"},
@@ -1811,7 +1833,7 @@ static const std::vector<std::pair<std::string, std::string>> kPaperdollManifest
     {"Maul", "hand_right/large_mace.png"},
     {"War Axe", "hand_right/war_axe_new.png"},
     {"War Hammer", "hand_right/great_mace.png"},
-    // Weapons — Carpenter (Macing staves / Archery)
+    // Weapons - Carpenter (Macing staves / Archery)
     {"Shepherd's Crook", "hand_right/staff_plain.png"},
     {"Gnarled Staff", "hand_right/staff_organic.png"},
     {"Quarterstaff", "hand_right/quarterstaff.png"},
@@ -1824,16 +1846,16 @@ static const std::vector<std::pair<std::string, std::string>> kPaperdollManifest
 };
 
 // ---------------------------------------------------------------------
-// Backpack-list item icons — real classic UO art (CorvaeOboro's "ultima_online_mods",
+// Backpack-list item icons - real classic UO art (CorvaeOboro's "ultima_online_mods",
 // CC0 1.0, see the spell-icon comment above GameAssets.spellIconPerSpell for the same
-// source/license). Unlike the paperdoll manifest above (exact-name keyed, and — found
-// while building this — apparently never actually matches since equipped items' names
+// source/license). Unlike the paperdoll manifest above (exact-name keyed, and - found
+// while building this - apparently never actually matches since equipped items' names
 // always carry a quality prefix like "Fine Broadsword", not the bare "Broadsword" the
 // manifest keys expect; a pre-existing latent bug, not fixed here, out of scope for
 // this pass), GearIconForItem below does a *suffix* match against these keys so the
 // quality prefix doesn't break the lookup. Coverage: every weapon has a real match;
 // armor has real UO icons for glove/arms/legs/chest pieces where the source pack has
-// them (18 of the 20 possible material+slot combos — missing Ring Mail gloves and
+// them (18 of the 20 possible material+slot combos - missing Ring Mail gloves and
 // Chainmail arms, which fall back to the generic gauntlet/shield2 icons same as
 // before), but this pack has no helmet or gorget icons at all, so those 7 recipes
 // (Chain Coif/Plate Helm/Leather Cap/Studded Cap/Plate Gorget/Leather Gorget/Studded
@@ -1861,19 +1883,19 @@ static const std::vector<std::pair<std::string, std::string>> kItemIconManifest 
     {"Leather Tunic", "LeatherTunic.bmp"}, {"Studded Gloves", "StuddedGloves.bmp"},
     {"Studded Sleeves", "StuddedSleeves.bmp"}, {"Studded Leggings", "StuddedLeggings.bmp"},
     {"Studded Tunic", "StuddedTunic.bmp"},
-    // Potions (keyed by PotionStack::effect, looked up directly — not a suffix match)
+    // Potions (keyed by PotionStack::effect, looked up directly - not a suffix match)
     {"heal", "PotionHeal.bmp"}, {"stamina", "PotionStamina.bmp"},
     {"poison", "PotionPoison.bmp"}, {"damage", "PotionDamage.bmp"},
 };
 
 // ---------------------------------------------------------------------
-// Combat sprite animations — CraftPix "Knight" pack (assets/knight/, curated
+// Combat sprite animations - CraftPix "Knight" pack (assets/knight/, curated
 // from assets/Knight character/Knight_1/). Licensed for personal/commercial
 // use per assets/Knight character/License.txt (craftpix.net/file-licenses/);
 // only reselling the raw art files is restricted. Each sheet is a single
 // horizontal strip of 128x128 frames. It's a side-view character (faces
 // right only), which fits the stationary combat panel but not the top-down
-// overworld — the overworld keeps the paper doll from DrawPaperdollLayers.
+// overworld - the overworld keeps the paper doll from DrawPaperdollLayers.
 // ---------------------------------------------------------------------
 struct SpriteSheet {
     Texture2D tex{};
@@ -1882,17 +1904,17 @@ struct SpriteSheet {
 };
 
 // A true top-down (viewed-from-above) character sheet: `rows` rows of `frameW`x`frameH`
-// frames, one row per facing direction in Down/Left/Right/Up order — originally the
+// frames, one row per facing direction in Down/Left/Right/Up order - originally the
 // CraftPix "4 direction male" pack's layout (assets/hero/, fixed 64x64), generalized
 // 2026-09-23 to support Mark's own commissioned art (assets/Carl/...), which uses much
 // bigger, per-sheet-varying frame dimensions and richer per-direction frame counts.
 // The walk/attack/cast column ranges are PER ROW (indexed 0=Down,1=Left,2=Right,3=Up),
-// not one global range — the hero-replacement sheet is the reason why: each direction
+// not one global range - the hero-replacement sheet is the reason why: each direction
 // splits its 8 columns differently (Down: 6 walk + 1 attack frame; Left/Right: 3 walk +
 // 4 attack; Up: a dedicated 1-frame Cast pose + 4 walk + 3 attack), found by actually
 // viewing all 32 source frames rather than assumed uniform. They default to "the whole
 // row is one cycle, idle holds frame 0" (LoadDirSpriteSheet sets every row's walkCount
-// = framesPerRow) — exactly matching the original hero-only behavior for any sheet that
+// = framesPerRow) - exactly matching the original hero-only behavior for any sheet that
 // doesn't override them, so generalizing this struct changed nothing until the hero-
 // replacement sheet became the first to actually narrow these ranges per row.
 enum class ActorAnim { Idle, Walk, Attack, Cast };
@@ -1908,16 +1930,16 @@ struct DirSpriteSheet {
     std::array<int, 4> attackStart{0, 0, 0, 0}, attackCount{1, 1, 1, 1};
     std::array<int, 4> castStart{0, 0, 0, 0}, castCount{1, 1, 1, 1};
     // Which actual texture row each logical direction (0=Down,1=Left,2=Right,3=Up)
-    // reads from, and whether that row is drawn horizontally mirrored — added
+    // reads from, and whether that row is drawn horizontally mirrored - added
     // 2026-09-23 for Mark's monster/creature art, which (unlike the hero sheet) is
     // stored Down/Up/Left/Left-again rather than Down/Left/Right/Up, and has no real
     // Right-facing content at all. Rather than physically rebuild each sheet (the
     // hero's approach, needed there because its "Right" row was a genuine content
     // mess, not just reordered), this indirection lets a sheet reuse another row's
-    // pixels — e.g. rowMap={0,2,2,1}, rowFlip={f,f,true,f} reads Up from texture row 1
+    // pixels - e.g. rowMap={0,2,2,1}, rowFlip={f,f,true,f} reads Up from texture row 1
     // and Right from texture row 2 mirrored, leaving the pixels untouched. Defaults to
     // identity (no remap, no flip) so any sheet that already IS in Down/Left/Right/Up
-    // order — the hero, and anything else laid out that way — is unaffected.
+    // order - the hero, and anything else laid out that way - is unaffected.
     std::array<int, 4> rowMap{0, 1, 2, 3};
     std::array<bool, 4> rowFlip{false, false, false, false};
 };
@@ -1928,43 +1950,43 @@ struct GameAssets {
     std::array<std::pair<std::string, Texture2D>, 10> building{};
     std::array<bool, 10> buildingOk{};
     // Real building art (assets/town_buildings/, CraftPix "Tropical Medieval City" set)
-    // shown in place of the generic wall+roof+door composite when present — see
+    // shown in place of the generic wall+roof+door composite when present - see
     // DrawBuildingNode's realBuildingTex branch. House's is from the same pack's larger
     // "mid city" source sheet (assets/mid city/), a building never cropped into this
     // folder until now.
     std::array<std::pair<std::string, Texture2D>, 10> townBuilding{};
     std::array<bool, 10> townBuildingOk{};
     // Saltmere's own real building art (assets/saltmere_buildings/, Mark's "Carl" art
-    // drop, 2026-09-23) — same kBuildingKeys, same role as townBuilding above but for
+    // drop, 2026-09-23) - same kBuildingKeys, same role as townBuilding above but for
     // Town 2. Before this, Town 2 had no dedicated building art at all and fell back to
     // a slate-blue-tinted generic composite (see DrawTownScreen's old bodyTint comment).
     std::array<std::pair<std::string, Texture2D>, 10> saltmereBuilding{};
     std::array<bool, 10> saltmereBuildingOk{};
-    // Frostmere's own building art (assets/frostmere_buildings/) — 5 keys only
+    // Frostmere's own building art (assets/frostmere_buildings/) - 5 keys only
     // ("bank","healer","provisioner","furtrader","smith"), matching kTown3NodePositions.
     // Same role as townBuilding above but for Town 3 (Phase 3).
     std::array<std::pair<std::string, Texture2D>, 5> frostmereBuilding{};
     std::array<bool, 5> frostmereBuildingOk{};
-    // Cragmoor's own building art (assets/cragmoor_buildings/) — 5 keys only
+    // Cragmoor's own building art (assets/cragmoor_buildings/) - 5 keys only
     // ("bank","healer","provisioner","smith","minersguild"), matching kTown4NodePositions.
     // Same role as frostmereBuilding above but for Town 4 (Phase 4).
     std::array<std::pair<std::string, Texture2D>, 5> cragmoorBuilding{};
     std::array<bool, 5> cragmoorBuildingOk{};
-    // Regular dungeon monster, indexed by dungeon (0=Emberveil..4=The Hollow, Phase 5: was Hollow Warrens) — a
+    // Regular dungeon monster, indexed by dungeon (0=Emberveil..4=The Hollow, Phase 5: was Hollow Warrens) - a
     // DirSpriteSheet since 2026-09-23 (Mark's "Carl" art drop gave these real
     // directional idle/walk frames instead of one static Texture2D each; DirSpriteSheet
     // already carries its own `.ok`, so no separate *Ok array is needed here anymore).
     std::array<DirSpriteSheet, 6> monsterFamily{}; // index 5 = Frostbound Tomb (Phase 3, icy-tinted Whisper Crypt undead); index 6 = Ember Depths (Phase 4, aliases the emberveil elemental sheets)
-    std::array<Texture2D, 6> bossFamily{}; // distinct art per dungeon's boss, not just a tinted regular monster — stays a single static Texture2D, bosses don't move
+    std::array<Texture2D, 6> bossFamily{}; // distinct art per dungeon's boss, not just a tinted regular monster - stays a single static Texture2D, bosses don't move
     std::array<bool, 6> bossFamilyOk{}; // index 5 = Frostbound King (Phase 3, icy-tinted crypt boss); index 6 = The Emberlord (Phase 4, aliases the emberveil boss)
     Texture2D groundGrass{}, groundDirt{}, dungeonWall{}, dungeonFloor{}, buildingDoor{}, foliage{};
     bool groundGrassOk = false, groundDirtOk = false, dungeonWallOk = false, dungeonFloorOk = false, buildingDoorOk = false, foliageOk = false;
-    // Per-dungeon themed floor/wall — falls back to the generic dungeonFloor/dungeonWall
+    // Per-dungeon themed floor/wall - falls back to the generic dungeonFloor/dungeonWall
     // above (and from there to a flat color) if a themed texture isn't found.
     std::array<Texture2D, 6> dungeonFloorThemed{}, dungeonWallThemed{};
     std::array<bool, 6> dungeonFloorThemedOk{}, dungeonWallThemedOk{}; // index 5 = Frostbound Tomb (Phase 3, sunkencrypt tiles); index 6 = Ember Depths (Phase 4, emberveil tiles)
     // Per-building interior backdrop, added 2026-09-21 (Mark: buildings should "open
-    // into a space that looks like the building type" — a static themed backdrop, not
+    // into a space that looks like the building type" - a static themed backdrop, not
     // a walkable room, drawn behind the Craft screen's existing UI). Same pattern and
     // same DCSS source pack as the per-dungeon theming above; 4 entries indexed the
     // same way kCraftBuildings already is (0=Smith/1=Carpenter/2=Tailor/3=Alchemy).
@@ -1974,7 +1996,7 @@ struct GameAssets {
     // gets its own pair rather than a 5th array slot.
     Texture2D provisionerFloor{}, provisionerWall{};
     bool provisionerFloorOk = false, provisionerWallOk = false;
-    // The Hollow's boss-room rug and scattered torch decoration (Phase 5: was the Hollow Warrens) — see the
+    // The Hollow's boss-room rug and scattered torch decoration (Phase 5: was the Hollow Warrens) - see the
     // room-layout section below (same pattern as Sunken Crypt's water/Emberveil's braziers).
     Texture2D hollowWarrensRug{}, hollowWarrensTorch{};
     bool hollowWarrensRugOk = false, hollowWarrensTorchOk = false;
@@ -1984,35 +2006,35 @@ struct GameAssets {
     // Parallel to kItemIconManifest above, loaded in the same order.
     std::vector<Texture2D> itemIconTex;
     std::vector<bool> itemIconOk;
-    // Player-side combat animations — see "Combat sprite animations" above.
+    // Player-side combat animations - see "Combat sprite animations" above.
     SpriteSheet knightIdle, knightAttack1, knightAttack2, knightHurt, knightDefend, knightProtect;
     // Monster-side combat animations, Sunken Crypt only for now (assets/skeleton/,
-    // curated from the CraftPix "skeleton monster" pack's Skeleton_Warrior — same
+    // curated from the CraftPix "skeleton monster" pack's Skeleton_Warrior - same
     // license/format as the knight). Other dungeons still show a static icon.
     SpriteSheet skeletonIdle, skeletonAttack1, skeletonHurt;
-    // Overworld hero — see "DirSpriteSheet" above.
-    DirSpriteSheet heroSheet; // was heroWalk — renamed 2026-09-23 once it grew real
+    // Overworld hero - see "DirSpriteSheet" above.
+    DirSpriteSheet heroSheet; // was heroWalk - renamed 2026-09-23 once it grew real
                                 // idle/walk/attack/cast ranges, not just a walk cycle.
-    // Town dressing — see "Village dressing" above: per-craft-building animated doors
+    // Town dressing - see "Village dressing" above: per-craft-building animated doors
     // (open on approach), scattered fence posts, and farmland ground patches.
     SpriteSheet doorSmith, doorCarpenter, doorTailor, doorAlchemy;
     Texture2D fencePost{}; bool fencePostOk = false;
     Texture2D farmland{}; bool farmlandOk = false;
-    // Town flavor props — fountain/streetlamp/signage/stalls/clutter, same "top down
+    // Town flavor props - fountain/streetlamp/signage/stalls/clutter, same "top down
     // village" CraftPix pack as the doors/farmland above. See kTownProps.
     Texture2D townFountain{}, townLamp{}, townSignSmith{}, townStall1{}, townStall2{},
               townStall3{}, townLumberpile{}, townBarrel{}, townCrate{}, townAnvil{};
     bool townFountainOk = false, townLampOk = false, townSignSmithOk = false, townStall1Ok = false,
          townStall2Ok = false, townStall3Ok = false, townLumberpileOk = false, townBarrelOk = false,
          townCrateOk = false, townAnvilOk = false;
-    // Plaza statue + a splash of autumn-colored foliage — "Mage City Arcanos" by
+    // Plaza statue + a splash of autumn-colored foliage - "Mage City Arcanos" by
     // Hyptosis (CC0, opengameart.org/content/mage-city-arcanos), a different pixel-art
     // hand from the rest of Town's dressing, used only for standalone accent props
     // (not ground/wall tiles, which stay in the already-matched "top down village" set).
     Texture2D townStatue{}, townAutumnBush{};
     bool townStatueOk = false, townAutumnBushOk = false;
     // Trade-themed prop dressing, added 2026-09-21 (Mark asked whether other buildings
-    // could get something as trade-fitting as the Smith's anvil) — two more Kenney CC0
+    // could get something as trade-fitting as the Smith's anvil) - two more Kenney CC0
     // "Tiny" packs already sitting in assets/ unused all project (tiny farm, tiny
     // dungeon; see kTownProps), individual 16x16 tiles cropped out and copied flat into
     // assets/village/ alongside the CraftPix props for one consistent loading spot,
@@ -2021,86 +2043,86 @@ struct GameAssets {
               townChest{}, townBookshelf{};
     bool townSheepOk = false, townCowOk = false, townChickenOk = false, townPotionPurpleOk = false,
          townPotionRedOk = false, townChestOk = false, townBookshelfOk = false;
-    // Spell-type icons — "Moderna Graphical Interface" by Jorge Avila (CC-BY 3.0/LGPL,
+    // Spell-type icons - "Moderna Graphical Interface" by Jorge Avila (CC-BY 3.0/LGPL,
     // opengameart.org/content/moderna-graphical-interface; attribution owed if this game
     // is ever published). The source PSD only has 4 finished icons (not one per spell),
     // so they're reused by SpellType (see SpellTypeIcon) the same way dungeons already
-    // share one monster-family icon across every monster in that dungeon — Summon
+    // share one monster-family icon across every monster in that dungeon - Summon
     // reuses the Debuff icon since neither the source file nor this game's spell list
     // has anything dedicated to it.
     Texture2D spellIconOffensive{}, spellIconDebuff{}, spellIconBuff{}, spellIconUtility{};
     bool spellIconOffensiveOk = false, spellIconDebuffOk = false, spellIconBuffOk = false, spellIconUtilityOk = false;
-    // Real per-spell icons, one per kSpells entry — CorvaeOboro's "ultima_online_mods"
+    // Real per-spell icons, one per kSpells entry - CorvaeOboro's "ultima_online_mods"
     // (CC0 1.0, github.com/CorvaeOboro/ultima_online_mods), classic UO magery spell
     // icons picked by thematic match since kSpells' names are original, not UO's own
     // (e.g. "Ember Burst" -> Fireball, "Sap Strength" -> Weaken). Falls back to the
     // 4 type-based Moderna icons above (see SpellIcon) if one of these fails to load.
     std::array<Texture2D, 16> spellIconPerSpell{};
     std::array<bool, 16> spellIconPerSpellOk{};
-    // Gear icons for the backpack/inventory list — AI-generated (Gemini) by Mark, reused by
+    // Gear icons for the backpack/inventory list - AI-generated (Gemini) by Mark, reused by
     // item type/slot (see GearIconForItem) the same way spell icons are shared by SpellType.
     Texture2D gearIconSword{}, gearIconShield{}, gearIconShield2{}, gearIconHelmet{}, gearIconGauntlet{}, gearIconAmulet{};
     bool gearIconSwordOk = false, gearIconShieldOk = false, gearIconShield2Ok = false, gearIconHelmetOk = false, gearIconGauntletOk = false, gearIconAmuletOk = false;
-    // Sunken Crypt's boss-room water pool — see the room-layout section above.
+    // Sunken Crypt's boss-room water pool - see the room-layout section above.
     Texture2D sunkenCryptWater{}; bool sunkenCryptWaterOk = false;
-    // The Ember Depths' scattered fire braziers — see the room-layout section above.
+    // The Ember Depths' scattered fire braziers - see the room-layout section above.
     Texture2D emberveilBrazier{}; bool emberveilBrazierOk = false;
-    // The Wilderness — see kWildernessGatherNodes/kWildernessCreatureSpots above.
+    // The Wilderness - see kWildernessGatherNodes/kWildernessCreatureSpots above.
     Texture2D wildTree{}; bool wildTreeOk = false;
     Texture2D wildRock{}; bool wildRockOk = false;
-    // Parallel to kWildCreatures (not kWildernessCreatureSpots) — creatureIdx indexes
+    // Parallel to kWildCreatures (not kWildernessCreatureSpots) - creatureIdx indexes
     // this directly (see kWildernessCreatureSpots for the history of why that wasn't
     // always safe).
     // Originally only 5 of 11 creatures had art (Dog/Wolf/Bear/Griffin/Dragon); Mark
     // generated the other 6 (Panther/Bison/Horse/Sabertooth/Drake/Wyvern) with Gemini
     // for the wilderness overhaul, filling the full roster. Upgraded to real directional
-    // DirSpriteSheets 2026-09-23 ("Carl" art drop) — also what the AI companion now
+    // DirSpriteSheets 2026-09-23 ("Carl" art drop) - also what the AI companion now
     // renders as, closing the "no dedicated art" gap from the weapon-swing session.
     std::array<DirSpriteSheet, 11> wildCreatureTex{};
     // Decorative wilderness props (water/deerskull/chest/bush/rocks/cactus/fence/grass/
-    // haybale/plant) — same Gemini "Medieval Animal Set" batch as the creatures above.
+    // haybale/plant) - same Gemini "Medieval Animal Set" batch as the creatures above.
     // See WildFoliageIcon (variants 5-14) for how these attach to kWildernessFoliage.
     std::array<Texture2D, 10> wildPropTex{};
     std::array<bool, 10> wildPropTexOk{};
-    // Rock variety for the 3 ore nodes (CraftPix "Rocks & Bushes", assets/wilderness/) —
+    // Rock variety for the 3 ore nodes (CraftPix "Rocks & Bushes", assets/wilderness/) -
     // was a single flat rock.png for all 3; ore1/2/3 give each a distinct look.
     std::array<Texture2D, 3> wildOreTex{};
     std::array<bool, 3> wildOreTexOk{};
-    // Purely decorative scatter, no collision — same role as Town's kFoliagePositions.
+    // Purely decorative scatter, no collision - same role as Town's kFoliagePositions.
     Texture2D wildBush1{}, wildBush2{}, wildFern1{};
     bool wildBush1Ok = false, wildBush2Ok = false, wildFern1Ok = false;
-    // Fightable Wilderness monsters — parallel to kWildernessMonsterSpots. Originally
+    // Fightable Wilderness monsters - parallel to kWildernessMonsterSpots. Originally
     // single frames cropped from OpenGameArt animation sheets (Redshrike's LPC Goblin/
     // Imp/Wolf Howl, bagzie's bat, Calciumtrice's Animated Rogue), replaced 2026-09-23
-    // with real directional DirSpriteSheets from Mark's "Carl" art drop — these chase
+    // with real directional DirSpriteSheets from Mark's "Carl" art drop - these chase
     // the player, so a real walk cycle that turns to face movement is a genuine
     // improvement over the old static icon, not just a style refresh.
     std::array<DirSpriteSheet, 5> wildMonsterTex{};
     // The Rival Adventurer's own dedicated sheet (previously reused the Bandit's
     // wildMonsterTex entry). Used both while it's engaged in combat and while it's
-    // roaming/hunting (see GameState::rivalLevel's comment) — no longer tied to a
+    // roaming/hunting (see GameState::rivalLevel's comment) - no longer tied to a
     // kWildernessMonsterSpots row at all.
     DirSpriteSheet rivalAdventurerSheet{};
-    // Town NPCs (2026-09-23, Mark's "Carl" art drop) — parallel to kTownNPCs/kTown2NPCs
+    // Town NPCs (2026-09-23, Mark's "Carl" art drop) - parallel to kTownNPCs/kTown2NPCs
     // by index, same DirSpriteSheet convention as the monsters/creatures above. Before
     // this, every Town NPC was a plain colored circle (see the "AI players" session).
     std::array<DirSpriteSheet, 6> townNPCSheets{};
     std::array<DirSpriteSheet, 6> saltmereNPCSheets{};
-    // Dungeon entrance markers on the Wilderness map — parallel to
+    // Dungeon entrance markers on the Wilderness map - parallel to
     // kWildernessDungeonEntrances (same order: Emberveil/WeaversNest(Phase 5)/WhisperCrypt/SunkenVault/
-    // HollowWarrens). Dungeon Crawl Stone Soup (CC0), assets/wilderness_entrances/ —
+    // HollowWarrens). Dungeon Crawl Stone Soup (CC0), assets/wilderness_entrances/ -
     // picked by name match to each dungeon's theme (stone_arch_hell for the fire hollow,
     // weaversnest for the spider nest (Phase 5: was enter_orc for the tusked hold),
     // enter_crypt, enter_lair for the wyrm's den, plain entrance for the warrens).
     // Falls back to the existing flat color circle if missing.
     std::array<Texture2D, 6> wildEntranceTex{}; // Phase 4: index 6 = Ember Depths aliases the emberveil entrance // [5] Frostbound Tomb (Phase 3) aliases the crypt entrance
     std::array<bool, 6> wildEntranceTexOk{};
-    // Innocent traveler portraits (2026-09-24) — parallel to kInnocentDefs by identity
+    // Innocent traveler portraits (2026-09-24) - parallel to kInnocentDefs by identity
     // idx: dedicated pixel-art sprites (assets/innocents/*.png) drawn in the 2D
     // wilderness and in the encounter panel. Falls back to the old neutral circle.
     std::array<Texture2D, 4> innocentTex{};
     std::array<bool, 4> innocentTexOk{};
-    // UI text font — see UiFont()/DrawUIText()/MeasureUIText() below. Falls back to
+    // UI text font - see UiFont()/DrawUIText()/MeasureUIText() below. Falls back to
     // raylib's default bitmap font (blocky, hard to read at UI sizes) if this fails to
     // load, same "never crash on missing art" convention as every texture here.
     Font uiFont{}; bool uiFontOk = false;
@@ -2109,10 +2131,10 @@ static GameAssets g_assets;
 
 // Mark found raylib's built-in default font hard to read across every text-heavy
 // screen (Town/Skills/Magic/Craft in particular). Nunito (Google Fonts, OFL-licensed,
-// assets/fonts/) is a clean, highly legible rounded sans-serif — swapped in everywhere
+// assets/fonts/) is a clean, highly legible rounded sans-serif - swapped in everywhere
 // via these three wrappers instead of raylib's raw DrawText/MeasureText, so every one of
 // the 130+ existing call sites just needed its function name changed (DrawText ->
-// DrawUIText, MeasureText -> MeasureUIText), not its argument list — same signatures,
+// DrawUIText, MeasureText -> MeasureUIText), not its argument list - same signatures,
 // same argument order, just backed by uiFont instead of GetFontDefault().
 static inline Font UiFont() { return g_assets.uiFontOk ? g_assets.uiFont : GetFontDefault(); }
 static inline void DrawUIText(const char* text, int posX, int posY, int fontSize, Color color) {
@@ -2145,7 +2167,7 @@ static DirSpriteSheet LoadDirSpriteSheet(const std::string& path, int frameW = 6
     if (sheet.ok) {
         sheet.framesPerRow = std::max(1, sheet.tex.width / frameW);
         // Whole row = one walk cycle, idle = frame 0, attack/cast reuse the same cycle
-        // — the default for every row, for any sheet that doesn't narrow these ranges
+        // - the default for every row, for any sheet that doesn't narrow these ranges
         // per row after loading (see the hero-replacement sheet for one that does).
         sheet.walkCount.fill(sheet.framesPerRow);
         sheet.attackCount.fill(sheet.framesPerRow);
@@ -2156,12 +2178,12 @@ static DirSpriteSheet LoadDirSpriteSheet(const std::string& path, int frameW = 6
 
 // Loads one of Mark's "Carl" art drop's monster/creature sheets (2026-09-23). Unlike
 // the hero sheet, these DO have a working merged "-clean.png" (no reassembly needed),
-// but they're laid out Down/Up/Left/Left-again rather than Down/Left/Right/Up — checked
-// by directly viewing several of them, not assumed — and none have a usable 4th row (the
+// but they're laid out Down/Up/Left/Left-again rather than Down/Left/Right/Up - checked
+// by directly viewing several of them, not assumed - and none have a usable 4th row (the
 // last row is either a duplicate of Left, or in a couple of cases just missing, giving a
 // 3-row sheet). `srcRows` is 3 or 4 depending on which; `walkColsOverride`, when >0,
 // narrows the walk cycle to fewer columns than the sheet's full width divided by
-// `cols` — needed for a handful of sheets (creature-panther, creature-wyvern,
+// `cols` - needed for a handful of sheets (creature-panther, creature-wyvern,
 // monster-wyrmscar-regular) whose side-view rows only have 5 real frames trailed by
 // blank padding out to the sheet's full column count, found by viewing them directly
 // rather than trusting the frame count blindly.
@@ -2177,7 +2199,7 @@ static DirSpriteSheet LoadCarlActorSheet(const std::string& path, int cols, int 
         sheet.walkCount.fill(walkCols);
         sheet.attackCount.fill(walkCols);
         sheet.castCount.fill(walkCols);
-        // Down/Left/Right/Up (dest) <- Down/Up/Left/Left (src rows 0,1,2,2) — Right is
+        // Down/Left/Right/Up (dest) <- Down/Up/Left/Left (src rows 0,1,2,2) - Right is
         // a horizontally-mirrored read of Left's row, since no sheet has real Right art.
         sheet.rowMap = {0, 2, 2, 1};
         sheet.rowFlip = {false, false, true, false};
@@ -2186,10 +2208,10 @@ static DirSpriteSheet LoadCarlActorSheet(const std::string& path, int cols, int 
 }
 
 static void LoadGameAssets() {
-    // Loaded at 48px (0/nullptr = default codepoints, just standard ASCII — every string
+    // Loaded at 48px (0/nullptr = default codepoints, just standard ASCII - every string
     // in the game is plain English) so it covers the largest UI text (title, 22px)
     // without much upscale blur while not needing an extreme downscale for the smallest
-    // (11px). Mipmaps + trilinear are what actually keep that small text legible — plain
+    // (11px). Mipmaps + trilinear are what actually keep that small text legible - plain
     // bilinear with no mipmap chain let thin strokes on a heavily-minified glyph atlas
     // alias away to near-nothing, which was less readable than raylib's default font,
     // the opposite of the goal.
@@ -2223,7 +2245,7 @@ static void LoadGameAssets() {
         g_assets.saltmereBuilding[i] = { kBuildingKeys[i], t };
         g_assets.saltmereBuildingOk[i] = ok;
     }
-    // Phase 3 — Frostmere's building art (5 keys matching kTown3NodePositions).
+    // Phase 3 - Frostmere's building art (5 keys matching kTown3NodePositions).
     static const char* kFrostmereBuildingKeys[5] = {
         "bank", "healer", "provisioner", "furtrader", "smith"
     };
@@ -2233,7 +2255,7 @@ static void LoadGameAssets() {
         g_assets.frostmereBuilding[i] = { kFrostmereBuildingKeys[i], t };
         g_assets.frostmereBuildingOk[i] = ok;
     }
-    // Phase 4 — Cragmoor's building art (5 keys matching kTown4NodePositions).
+    // Phase 4 - Cragmoor's building art (5 keys matching kTown4NodePositions).
     static const char* kCragmoorBuildingKeys[5] = {
         "bank", "healer", "provisioner", "smith", "minersguild"
     };
@@ -2247,7 +2269,7 @@ static void LoadGameAssets() {
     // File names match dungeon theme (emberveil/bloodtusk/sunkencrypt/wyrmscar/
     // hollowwarrens), in the same 0-4 order as kDungeons, for both the regular-monster
     // and boss sets. Regular-monster art replaced 2026-09-23 (Mark's "Carl" art drop)
-    // with real directional sheets (assets/monsters_v2/) — bosses stay a single static
+    // with real directional sheets (assets/monsters_v2/) - bosses stay a single static
     // Texture2D each (assets/monsters_boss_v2/, also refreshed) since they don't move.
     // Column counts and the one 3-row exception (The Hollow, slot 4) were determined by
     // viewing each sheet directly, not assumed from the file name; the Wyrmscar sheet's
@@ -2281,7 +2303,7 @@ static void LoadGameAssets() {
     g_assets.buildingDoor = TryLoadTexture("assets/buildings/door.png", g_assets.buildingDoorOk);
     g_assets.foliage = TryLoadTexture("assets/ground/foliage.png", g_assets.foliageOk);
 
-    // Per-dungeon theming — same 0-4 order as kDungeons/kMonsterFiles above.
+    // Per-dungeon theming - same 0-4 order as kDungeons/kMonsterFiles above.
     static const char* kThemedFloorFiles[6] = {
         "assets/dungeon_themed/sunkencrypt_floor.png", "assets/dungeon_themed/weaversnest_floor.png", // [1] Phase 5
         "assets/dungeon_themed/wyrmscar_floor.png", "assets/dungeon_themed/emberveil_floor.png", // [3] Ember Depths uses emberveil tiles
@@ -2301,7 +2323,7 @@ static void LoadGameAssets() {
     g_assets.hollowWarrensRug = TryLoadTexture("assets/dungeon_themed/hollowwarrens_rug.png", g_assets.hollowWarrensRugOk);
     g_assets.hollowWarrensTorch = TryLoadTexture("assets/dungeon_themed/hollowwarrens_torch.png", g_assets.hollowWarrensTorchOk);
 
-    // Per-building interior backdrop — same 0-3 order as kCraftBuildings.
+    // Per-building interior backdrop - same 0-3 order as kCraftBuildings.
     static const char* kCraftFloorFiles[4] = {
         "assets/dungeon_themed/smith_floor.png", "assets/dungeon_themed/carpenter_floor.png",
         "assets/dungeon_themed/tailor_floor.png", "assets/dungeon_themed/alchemy_floor.png"
@@ -2343,20 +2365,20 @@ static void LoadGameAssets() {
     g_assets.skeletonAttack1 = LoadSpriteSheet("assets/skeleton/attack1.png", 128);
     g_assets.skeletonHurt = LoadSpriteSheet("assets/skeleton/hurt.png", 128);
 
-    // Hero replacement (2026-09-23, Mark's "Carl" art drop) — assets/hero/hero_v2.png,
+    // Hero replacement (2026-09-23, Mark's "Carl" art drop) - assets/hero/hero_v2.png,
     // reassembled from 32 loose extracted frames (hero-sprite-sheet-v1) since the
     // cleanup tool never produced a merged sheet for this one. Built as Down/Left/Up
     // from their own clean 8-frame rows; Right has no clean source (the sheet's 4th
     // row turned out to be a mix of leftover Left poses and only 3 genuine Right-facing
     // attack frames with no idle/walk) so Right's row is a horizontally-mirrored copy
-    // of Left's, baked into the sheet at build time rather than flipped at draw time —
+    // of Left's, baked into the sheet at build time rather than flipped at draw time -
     // keeps DrawActorSprite completely generic for sheets that DO have real Right art.
     // Column ranges below were determined by viewing all 32 source frames directly, not
-    // assumed — each direction splits its 8 columns differently:
+    // assumed - each direction splits its 8 columns differently:
     // 2026-09-24: replaced with Carl's green-hooded-rogue sheet (hero_v3.png) at Mark's
-    // request. This sheet's native texture rows are Down/Up/Left/[no Right] — the same
+    // request. This sheet's native texture rows are Down/Up/Left/[no Right] - the same
     // Down/Up/Left ordering LoadCarlActorSheet already handles for every monster/creature
-    // sheet — rather than hero_v2's pre-reassembled Down/Left/Right/Up order, so instead
+    // sheet - rather than hero_v2's pre-reassembled Down/Left/Right/Up order, so instead
     // of physically reordering the image this uses the same rowMap/rowFlip trick: Right
     // reads Left's texture row mirrored. Confirmed by slicing the sheet into its 32 cells
     // and measuring each frame's pixel bounding box directly, not assumed:
@@ -2376,7 +2398,7 @@ static void LoadGameAssets() {
     //  - Right: no usable native row. Row 3 looks like Left at a glance but pixel-diffing
     //    row3 vs row2 (col 0 nearly identical, cols 1-3 diverge ~90%+ even mirrored) and
     //    zooming the attack frames' head silhouettes showed row 3's walk still faces left
-    //    while only its attack spins to face right mid-swing — not a clean independent
+    //    while only its attack spins to face right mid-swing - not a clean independent
     //    Right direction. Same call as hero_v2: Right is Left's texture row mirrored via
     //    rowFlip rather than drawn from row 3.
     g_assets.heroSheet = LoadDirSpriteSheet("assets/hero/hero_v3.png", 276, 264, 4);
@@ -2397,7 +2419,7 @@ static void LoadGameAssets() {
         g_assets.heroSheet.walkStart[2] = 1; g_assets.heroSheet.walkCount[2] = 3;
         g_assets.heroSheet.attackStart[2] = 4; g_assets.heroSheet.attackCount[2] = 4;
         g_assets.heroSheet.castStart[2] = 0; g_assets.heroSheet.castCount[2] = 1;
-        // Up: walk is now 3 real stride frames (cols 1-3) — see comment above.
+        // Up: walk is now 3 real stride frames (cols 1-3) - see comment above.
         g_assets.heroSheet.idleCol[3] = 0;
         g_assets.heroSheet.walkStart[3] = 1; g_assets.heroSheet.walkCount[3] = 3;
         g_assets.heroSheet.attackStart[3] = 5; g_assets.heroSheet.attackCount[3] = 3;
@@ -2433,7 +2455,7 @@ static void LoadGameAssets() {
     g_assets.spellIconDebuff = TryLoadTexture("assets/spellbook_icons/spell_debuff.png", g_assets.spellIconDebuffOk);
     g_assets.spellIconBuff = TryLoadTexture("assets/spellbook_icons/spell_buff.png", g_assets.spellIconBuffOk);
     g_assets.spellIconUtility = TryLoadTexture("assets/spellbook_icons/spell_utility.png", g_assets.spellIconUtilityOk);
-    // Parallel to kSpells (index 0-15) — see the GameAssets field comment above.
+    // Parallel to kSpells (index 0-15) - see the GameAssets field comment above.
     static const char* kSpellIconFiles[16] = {
         "assets/spell_icons/SparkDart.bmp", "assets/spell_icons/MendingWord.bmp",
         "assets/spell_icons/SapStrength.bmp", "assets/spell_icons/CloudMind.bmp",
@@ -2461,8 +2483,8 @@ static void LoadGameAssets() {
     g_assets.wildTree = TryLoadTexture("assets/wilderness/tree.png", g_assets.wildTreeOk);
     g_assets.wildRock = TryLoadTexture("assets/wilderness/rock.png", g_assets.wildRockOk);
     // Replaced 2026-09-23 with real directional sheets (Mark's "Carl" art drop,
-    // assets/wilderness_v2/creatures/) — also what the AI companion now renders as.
-    // Column counts and the two walkColsOverride cases (Panther, Wyvern — side-view
+    // assets/wilderness_v2/creatures/) - also what the AI companion now renders as.
+    // Column counts and the two walkColsOverride cases (Panther, Wyvern - side-view
     // rows only have 5 real frames trailed by blank padding) came from viewing each
     // sheet directly, same as the dungeon monsters above.
     static const char* kWildCreatureFiles[11] = {
@@ -2499,7 +2521,7 @@ static void LoadGameAssets() {
     g_assets.wildBush1 = TryLoadTexture("assets/wilderness/bush1.png", g_assets.wildBush1Ok);
     g_assets.wildBush2 = TryLoadTexture("assets/wilderness/bush2.png", g_assets.wildBush2Ok);
     g_assets.wildFern1 = TryLoadTexture("assets/wilderness/fern1.png", g_assets.wildFern1Ok);
-    // Replaced 2026-09-23 with real directional sheets, same drop as above — these
+    // Replaced 2026-09-23 with real directional sheets, same drop as above - these
     // chase the player, so DrawWildernessScreen derives real facing from movement now.
     static const char* kWildMonsterFiles[5] = {
         "assets/wilderness_v2/monsters/bat.png", "assets/wilderness_v2/monsters/goblin.png", "assets/wilderness_v2/monsters/wolf.png",
@@ -2511,7 +2533,7 @@ static void LoadGameAssets() {
     }
     g_assets.rivalAdventurerSheet = LoadCarlActorSheet("assets/wilderness_v2/rival_adventurer.png", 8);
 
-    // Town NPCs — order matches kTownNPCs/kTown2NPCs exactly (see those arrays' own
+    // Town NPCs - order matches kTownNPCs/kTown2NPCs exactly (see those arrays' own
     // declaration for the name list). walkColsOverride covers two sheets whose Left row
     // has fewer real frames than their nominal column count, found by viewing them
     // directly, same as the monster/creature sheets above: Cobb (8 nominal, 6 real) and
@@ -2560,7 +2582,7 @@ static const Texture2D* FindPaperdollTexture(const std::string& key) {
         if (g_assets.paperdollOk[i] && kPaperdollManifest[i].first == key) return &g_assets.paperdollTex[i];
     return nullptr;
 }
-// Suffix match — same reasoning/fix as FindItemIconTextureBySuffix (see its comment):
+// Suffix match - same reasoning/fix as FindItemIconTextureBySuffix (see its comment):
 // an equipped Item's name always carries a quality prefix ("Fine Broadsword"), so the
 // plain exact-match FindPaperdollTexture above never actually hit for real crafted
 // gear. Used for the 5 equipped-item layers in DrawPaperdollLayers; "base"/"boots"/
@@ -2578,13 +2600,13 @@ static const Texture2D* FindPaperdollTextureBySuffix(const std::string& itemName
     }
     return best;
 }
-// Exact match — used directly for potions (keyed by effect, e.g. "heal").
+// Exact match - used directly for potions (keyed by effect, e.g. "heal").
 static const Texture2D* FindItemIconTexture(const std::string& key) {
     for (size_t i = 0; i < kItemIconManifest.size(); i++)
         if (g_assets.itemIconOk[i] && kItemIconManifest[i].first == key) return &g_assets.itemIconTex[i];
     return nullptr;
 }
-// Suffix match — used for gear, since a crafted Item's name always carries a quality
+// Suffix match - used for gear, since a crafted Item's name always carries a quality
 // prefix ("Fine Broadsword"), not the bare recipe name the manifest keys use. Returns
 // the LONGEST matching key's texture so a specific match ("Composite Bow") wins over a
 // shorter one that's also technically a suffix ("Bow").
@@ -2603,7 +2625,7 @@ static const Texture2D* FindItemIconTextureBySuffix(const std::string& itemName)
 }
 
 // Draws the equipped-gear stack centered at `center`, scaled so the 32x32-native art
-// fills a `size`x`size` square — shared by the small in-world sprite (DrawPlayer) and
+// fills a `size`x`size` square - shared by the small in-world sprite (DrawPlayer) and
 // the full-size Character screen paper doll, same layer order both places.
 static void DrawPaperdollLayers(const GameState& s, Vector2 center, float size) {
     Rectangle dest = { center.x - size / 2.0f, center.y - size / 2.0f, size, size };
@@ -2619,7 +2641,7 @@ static void DrawPaperdollLayers(const GameState& s, Vector2 center, float size) 
     // Legs draws AFTER boots (not before) so materials whose art includes its own
     // sabaton/boot (Plate, Studded) naturally cover the default boots layer at the
     // feet, while materials that stop at the ankle (Ring Mail, Chain Mail) leave the
-    // default boots showing through below them — verified visually for both cases.
+    // default boots showing through below them - verified visually for both cases.
     drawItemLayer(s.equipped.legs);
     drawItemLayer(s.equipped.gorget);
     drawItemLayer(s.equipped.arms);
@@ -2637,7 +2659,7 @@ static void DrawPaperdollLayers(const GameState& s, Vector2 center, float size) 
     // (compact, arms close to the torso). base/boots/hair/Arms/Gorget/Chest/Legs/
     // Gloves/Helmet(Leather Cap) above were just replaced with new, higher-detail
     // Gemini-generated art built for a taller, differently-posed body (arms angled
-    // out and down) — see the "everything, bigger native size" paperdoll upgrade in
+    // out and down) - see the "everything, bigger native size" paperdoll upgrade in
     // memory. Because DrawTexturePro stretches every layer to the same destination
     // square, this old piece now lands badly distorted/misplaced against the new base
     // (verified visually, not assumed) rather than just "a bit off". Suppressed here
@@ -2647,7 +2669,7 @@ static void DrawPaperdollLayers(const GameState& s, Vector2 center, float size) 
 }
 
 // ---------------------------------------------------------------------
-// Combat sprite playback — see "Combat sprite animations" above for what
+// Combat sprite playback - see "Combat sprite animations" above for what
 // these sheets are and where they came from. Idle loops forever; every
 // other CombatAnim is a one-shot triggered by a specific combat action
 // (see the TriggerCombatAnim call sites: ResolveCombatRound, CastOffensiveSpell,
@@ -2671,7 +2693,7 @@ static void TriggerMonsterAnim(CombatState& c, CombatAnim anim) { c.monsterAnim 
 
 // Monster side only ever plays Idle/Attack1/Hurt (see CombatState::monsterAnim); every
 // other CombatAnim value falls back to Idle since the monster never casts/bandages.
-// Only wired up for the Sunken Crypt (Skeleton Warrior) so far — see kDungeons.
+// Only wired up for the Sunken Crypt (Skeleton Warrior) so far - see kDungeons.
 static const SpriteSheet& MonsterSheetFor(CombatAnim anim) {
     switch (anim) {
         case CombatAnim::Attack1: return g_assets.skeletonAttack1;
@@ -2711,7 +2733,7 @@ static void DrawSpriteFrame(const SpriteSheet& sheet, float animTime, Vector2 ce
     DrawTexturePro(sheet.tex, src, dest, { 0, 0 }, 0.0f, WHITE);
 }
 
-// One icon per SpellType, reused across every spell of that type — the source PSD
+// One icon per SpellType, reused across every spell of that type - the source PSD
 // ("Moderna Graphical Interface", see GameAssets' spellIcon* fields) only has 4
 // finished icons, not one per spell. Summon shares Debuff's.
 static const Texture2D* SpellTypeIcon(SpellType type) {
@@ -2725,7 +2747,7 @@ static const Texture2D* SpellTypeIcon(SpellType type) {
     }
 }
 // Real per-spell icon (see GameAssets.spellIconPerSpell) with a graceful fallback to
-// the old shared type icon if the specific one didn't load — never a hard failure.
+// the old shared type icon if the specific one didn't load - never a hard failure.
 static const Texture2D* SpellIcon(int spellIdx) {
     if (spellIdx >= 0 && spellIdx < (int)g_assets.spellIconPerSpell.size() && g_assets.spellIconPerSpellOk[spellIdx])
         return &g_assets.spellIconPerSpell[spellIdx];
@@ -2733,10 +2755,10 @@ static const Texture2D* SpellIcon(int spellIdx) {
     return nullptr;
 }
 
-// One icon per gear category, reused across every item of that category — same sharing
+// One icon per gear category, reused across every item of that category - same sharing
 // pattern as SpellTypeIcon. Item/Recipe carry no icon field, so this derives the icon from
 // existing type/slot data rather than adding one. Amulet has no equip slot in Equipment
-// today (see struct Item/Equipment) so it's unused by GearIconForItem — kept for a future
+// today (see struct Item/Equipment) so it's unused by GearIconForItem - kept for a future
 // cosmetic/rare-drop use.
 enum class GearIcon { Sword, Shield, Shield2, Helmet, Gauntlet, Amulet };
 static const Texture2D* GearIconTexture(GearIcon icon) {
@@ -2751,9 +2773,9 @@ static const Texture2D* GearIconTexture(GearIcon icon) {
     }
 }
 static const Texture2D* GearIconForItem(const Item& item) {
-    // Real UO icon by exact weapon/piece name first (see kItemIconManifest) — falls
+    // Real UO icon by exact weapon/piece name first (see kItemIconManifest) - falls
     // through to the generic category icons below for anything the UO pack doesn't
-    // cover (helmets, gorgets, Ring Mail gloves, Chainmail arms — see the manifest's
+    // cover (helmets, gorgets, Ring Mail gloves, Chainmail arms - see the manifest's
     // own comment for the exact gaps).
     if (const Texture2D* real = FindItemIconTextureBySuffix(item.name)) return real;
     if (item.type == ItemType::Weapon) return GearIconTexture(GearIcon::Sword);
@@ -2811,7 +2833,7 @@ static const Texture2D* FindCragmoorBuildingTexture(const std::string& key) { //
     return nullptr;
 }
 // One of the 4 CraftPix "village" animated doors per craft building, for a little visual
-// distinction beyond just roof color — see "Village dressing" above. Amenity buildings
+// distinction beyond just roof color - see "Village dressing" above. Amenity buildings
 // (Provisioner/Stable/Healer/Bank/Townhall) still use the plain generic door.
 static const SpriteSheet* DoorAnimForBuilding(const std::string& key) {
     if (key == "smith") return &g_assets.doorSmith;
@@ -2820,7 +2842,7 @@ static const SpriteSheet* DoorAnimForBuilding(const std::string& key) {
     if (key == "alchemy") return &g_assets.doorAlchemy;
     return nullptr;
 }
-// Picks one kWildCreatures index as a visual stand-in for a Pet of the given role —
+// Picks one kWildCreatures index as a visual stand-in for a Pet of the given role -
 // used to render the AI companion (2026-09-23). Not the pet's exact tamed species:
 // `Pet` only records role/stats/name, not which of the 11 creatures it came from, so
 // this is "a believable creature for a Melee/Tank/Caster companion" rather than a
@@ -2837,7 +2859,7 @@ static const DirSpriteSheet* MonsterFamilySheet(int dungeonIdx) {
     if (dungeonIdx < 0 || dungeonIdx > 5 || !g_assets.monsterFamily[dungeonIdx].ok) return nullptr;
     return &g_assets.monsterFamily[dungeonIdx];
 }
-// Phase 3 — the Frostbound Tomb (index 5) reuses the Whisper Crypt's undead sheets
+// Phase 3 - the Frostbound Tomb (index 5) reuses the Whisper Crypt's undead sheets
 // with an icy tint, so the glacier tomb reads cold without new art.
 static Color DungeonMonsterTint(int dungeonIdx) {
     if (dungeonIdx == 4) return Color{ 190, 220, 245, 255 }; // Frostbound Tomb
@@ -2856,7 +2878,7 @@ static void DrawIconCentered(const Texture2D& tex, Vector2 center, float targetS
     DrawTextureEx(tex, { center.x - w / 2.0f, center.y - h / 2.0f }, 0.0f, scale, tint);
 }
 // Same as above but for one cropped frame of a sheet (srcRect, e.g. from ActorSrcRect)
-// rather than the whole texture — used by DrawWorldNode's icon path for animated
+// rather than the whole texture - used by DrawWorldNode's icon path for animated
 // monster/creature/NPC sprites, which still want its ring/plate/label chrome.
 static void DrawIconCenteredRect(const Texture2D& tex, Rectangle srcRect, Vector2 center, float targetSize, Color tint) {
     float srcW = std::fabs(srcRect.width), srcH = std::fabs(srcRect.height);
@@ -2867,10 +2889,10 @@ static void DrawIconCenteredRect(const Texture2D& tex, Rectangle srcRect, Vector
 }
 
 // Tiles `tex` across `screenArea` at `worldTileSize` world-units per tile, scrolling
-// correctly with the camera (tiles wrap seamlessly as the camera moves — no popping or
-// sliding artifacts — since each tile's screen position is derived from its world grid
+// correctly with the camera (tiles wrap seamlessly as the camera moves - no popping or
+// sliding artifacts - since each tile's screen position is derived from its world grid
 // cell minus the camera offset, wrapped with fmod). Falls back to a flat fillColor if
-// the texture is missing. Does NOT set up its own scissor/clip region — the caller is
+// the texture is missing. Does NOT set up its own scissor/clip region - the caller is
 // expected to already have one active (every screen that uses this wraps its whole
 // world-render block in one BeginScissorMode/EndScissorMode pair); nesting scissor
 // calls would break clipping, since raylib's EndScissorMode() just disables scissoring
@@ -2886,11 +2908,11 @@ static void DrawTiledGround(const Texture2D* tex, Rectangle screenArea, Vector2 
             DrawTextureEx(*tex, { x, y }, 0.0f, scale, tint);
 }
 
-// Draws one wall band — a rectangle given in WORLD coordinates — tiled with `tex`,
+// Draws one wall band - a rectangle given in WORLD coordinates - tiled with `tex`,
 // converted to screen space via the camera. Used four times (one per side) to frame a
 // room; each call is a no-op if that band is currently scrolled off-screen. Tiles from
 // the band's own resolved screen position (NOT via DrawTiledGround's camera-relative
-// math — that would double-apply the camera offset, since WorldToScreen already baked
+// math - that would double-apply the camera offset, since WorldToScreen already baked
 // it in here). No internal scissor (see DrawTiledGround's note).
 static void DrawWallBand(Rectangle worldBand, Vector2 cameraTopLeft, const Texture2D* tex,
                            float worldTileSize, Color fillColor) {
@@ -2905,38 +2927,38 @@ static void DrawWallBand(Rectangle worldBand, Vector2 cameraTopLeft, const Textu
             for (float x = screenBand.x; x < screenBand.x + screenBand.width; x += worldTileSize)
                 DrawTextureEx(*tex, { x, y }, 0.0f, scale, WHITE);
     }
-    // A 1px solid black outline used to be drawn here (road/path/plaza edges) — Mark
+    // A 1px solid black outline used to be drawn here (road/path/plaza edges) - Mark
     // went back and forth on it a few times this project (2px/faded -> too thick,
     // thinnest-possible 1px -> still didn't read right) and asked for it gone entirely.
 }
 
-// A static "you're inside this building" backdrop, added 2026-09-21 — a thin wall
+// A static "you're inside this building" backdrop, added 2026-09-21 - a thin wall
 // band along the top plus a floor fill for the rest of the content area, drawn behind
 // whatever UI the caller draws next (raylib is immediate-mode, so draw order is
-// z-order — this just needs to run first). No camera/scrolling since nothing walks
+// z-order - this just needs to run first). No camera/scrolling since nothing walks
 // around back here; tiling always starts from {0,0}. `topY` is where the screen's
 // persistent header (title/resources/tab bar) ends.
 static void DrawInteriorBackdrop(const Texture2D* wallTex, const Texture2D* floorTex, int screenW, int screenH, int topY) {
     const float kWallBandHeight = 60.0f;
     Rectangle wallArea = { 0, (float)topY, (float)screenW, kWallBandHeight };
     Rectangle floorArea = { 0, topY + kWallBandHeight, (float)screenW, (float)screenH - topY - kWallBandHeight };
-    // Drawn faded over the page's existing cream ClearBackground, not at full opacity —
+    // Drawn faded over the page's existing cream ClearBackground, not at full opacity -
     // these DCSS textures are dark dungeon-arena art meant to fill a screen with nothing
     // else on it. At full brightness they drowned every button/text drawn on top of them
     // (2026-09-22 fix); a light wash still reads as "themed room" without fighting the UI
-    // for contrast. The dark Color args from the original version were a bug — they went
+    // for contrast. The dark Color args from the original version were a bug - they went
     // to DrawTiledGround's unused `fillColor` (missing-texture fallback) instead of its
     // `tint` parameter, so they never actually affected the loaded textures at all.
     // Floor gets an extra-light wash relative to the wall band: it sits behind the entire
     // scrollable recipe/backpack list, whose per-row text has no backing plate of its own
-    // (unlike DrawInfoLine's standalone status lines just above) — a tiled texture's own
+    // (unlike DrawInfoLine's standalone status lines just above) - a tiled texture's own
     // internal light/dark variation can still hurt contrast at low opacity if a text row
     // happens to land on its darkest patch, so the floor needs more headroom than the wall.
     DrawTiledGround(wallTex, wallArea, { 0, 0 }, 48.0f, kColorPageBg, Fade(WHITE, 0.3f));
     DrawTiledGround(floorTex, floorArea, { 0, 0 }, 48.0f, kColorPageBg, Fade(WHITE, 0.16f));
 }
 
-// A standalone status/info line, backed by a light solid plate — for text drawn directly
+// A standalone status/info line, backed by a light solid plate - for text drawn directly
 // on a themed backdrop (see DrawInteriorBackdrop) with no button/panel of its own behind
 // it. A tiled wall/floor texture has enough internal light/dark variation that plain text
 // can land on its darkest patch and nearly vanish there even at low overall opacity; a
@@ -2950,7 +2972,7 @@ static void DrawInfoLine(const char* text, int x, int y, int fontSize, Color col
     DrawUIText(text, x, y, fontSize, color);
 }
 
-// Stretches a texture to exactly fill `dest`, no tiling — used for small composite
+// Stretches a texture to exactly fill `dest`, no tiling - used for small composite
 // pieces (a building's wall panel, its door) where a single stretched image reads
 // fine at this scale and avoids any tiling/clipping complexity.
 static void DrawStretched(const Texture2D& tex, Rectangle dest, Color tint) {
@@ -2959,14 +2981,14 @@ static void DrawStretched(const Texture2D& tex, Rectangle dest, Color tint) {
 }
 
 // A Town building: a stone wall panel with a door, a colored roof (keeps each
-// building's existing color identity), and its shop-icon "sign" floating above —
+// building's existing color identity), and its shop-icon "sign" floating above -
 // replacing the flat colored-circle-with-icon look used for monsters/paths. Falls
 // back to plain shapes for any piece whose texture didn't load.
 static void DrawBuildingNode(Vector2 screenPos, Color roofColor, const std::string& label, bool nearPlayer,
                                const std::string& sublabel, const Texture2D* signIcon,
                                const SpriteSheet* doorAnim = nullptr, const Texture2D* realBuildingTex = nullptr,
                                Color bodyTint = WHITE, float scale = 1.0f) {
-    float kNodeRadius = ::kNodeRadius * scale; // shadows the global on purpose — every size
+    float kNodeRadius = ::kNodeRadius * scale; // shadows the global on purpose - every size
                                                  // below already reads "kNodeRadius", so scaling
                                                  // it locally scales the whole function for free
                                                  // without duplicating every line.
@@ -2974,7 +2996,7 @@ static void DrawBuildingNode(Vector2 screenPos, Color roofColor, const std::stri
         // Real building art (CraftPix "Tropical Medieval City" set, assets/town_buildings/)
         // in place of the generic wall+roof+door composite below. Scaled to a consistent
         // on-screen footprint regardless of each building's native aspect ratio, and
-        // anchored at its bottom-center — screenPos is the tile's ground point, and
+        // anchored at its bottom-center - screenPos is the tile's ground point, and
         // these images have a roof going up from there, not a centered blob. bodyTint
         // defaults to WHITE (no change) for every existing building; the House uses it
         // for its chosen hue (see kHouseHues/DrawTownScreen).
@@ -3009,7 +3031,7 @@ static void DrawBuildingNode(Vector2 screenPos, Color roofColor, const std::stri
     if (g_assets.dungeonWallOk) DrawStretched(g_assets.dungeonWall, wallRect, WHITE);
     else DrawRectangleRec(wallRect, Fade(GRAY, 0.6f));
 
-    // Roof — a plain triangle, no texture needed; keeps the building's original color
+    // Roof - a plain triangle, no texture needed; keeps the building's original color
     // as an at-a-glance identity, same role the colored circle used to play.
     Vector2 roofLeft = { wallRect.x - 8, wallRect.y };
     Vector2 roofRight = { wallRect.x + wallRect.width + 8, wallRect.y };
@@ -3018,7 +3040,7 @@ static void DrawBuildingNode(Vector2 screenPos, Color roofColor, const std::stri
 
     if (doorAnim && doorAnim->ok) {
         // A little life on approach: shows its closed (first) frame from a distance and
-        // its open (last) frame once you're actually near — see the CraftPix "village"
+        // its open (last) frame once you're actually near - see the CraftPix "village"
         // animated door sheets this is built from, assets/village/door_*.png.
         float doorW = w * 0.3f, doorH = h * 0.55f;
         int frame = nearPlayer ? doorAnim->frames - 1 : 0;
@@ -3038,14 +3060,14 @@ static void DrawBuildingNode(Vector2 screenPos, Color roofColor, const std::stri
 
     if (signIcon) {
         // Backing plate removed 2026-09-23 at Mark's request ("remove the circle behind
-        // all of the images") — was originally added because a translucent backing let
+        // all of the images") - was originally added because a translucent backing let
         // grass bleed through and muddy contrast; if a specific icon turns out hard to
         // read against a specific ground color again, that's the thing to revisit.
         Vector2 signPos = { screenPos.x, wallRect.y - h * 0.78f };
         DrawIconCentered(*signIcon, signPos, kNodeRadius * 0.7f, WHITE);
     }
 
-    // Label text on its own solid plate too, for the same reason — dark text alone
+    // Label text on its own solid plate too, for the same reason - dark text alone
     // reads inconsistently against a busy grass texture.
     int tw = MeasureUIText(label.c_str(), 13);
     Rectangle labelBg = { screenPos.x - tw / 2.0f - 4, (float)(wallRect.y + wallRect.height + 2), (float)tw + 8, 14 };
@@ -3057,7 +3079,7 @@ static void DrawBuildingNode(Vector2 screenPos, Color roofColor, const std::stri
     }
 }
 
-// Connects a building to the town plaza with a simple cardinal-direction dirt path —
+// Connects a building to the town plaza with a simple cardinal-direction dirt path -
 // a straight line if the building already lines up with the plaza on one axis, an
 // L-shaped bend (horizontal then vertical) otherwise. No road drawn if the building
 // is already inside the plaza. Avoids any rotation math by only ever using
@@ -3079,13 +3101,13 @@ static void DrawRoadToPlaza(Vector2 buildingPos, Rectangle plaza, Vector2 camera
         float left = std::min(buildingPos.x, plazaEdgeX), right = std::max(buildingPos.x, plazaEdgeX);
         DrawWallBand({ left, buildingPos.y - kRoadWidth / 2, right - left, kRoadWidth }, camera, dirtTex, 48.0f * kTownVisualScale, kRoadFallback);
     } else {
-        // Bend at the plaza's CENTER x, not its edge — this lands exactly on the
+        // Bend at the plaza's CENTER x, not its edge - this lands exactly on the
         // straight spoke already drawn by the edge-mid building sharing this row
         // (e.g. Carpenter's spoke for the grid used today), so a corner's road
         // merges into that spoke instead of running its own parallel line a few
         // tiles away. Without this, each side of the grid drew 3 near-parallel
         // road strips (the straight spoke plus each corner's own edge-bend) in a
-        // narrow gap — reads as a cluttered "road pile-up," not a real network.
+        // narrow gap - reads as a cluttered "road pile-up," not a real network.
         float plazaCenterX = plaza.x + plaza.width / 2.0f;
         float plazaEdgeY = (buildingPos.y < plaza.y) ? plaza.y : plaza.y + plaza.height;
         float left = std::min(buildingPos.x, plazaCenterX), right = std::max(buildingPos.x, plazaCenterX);
@@ -3096,7 +3118,7 @@ static void DrawRoadToPlaza(Vector2 buildingPos, Rectangle plaza, Vector2 camera
 }
 
 // Same L-bend idea as DrawRoadToPlaza but between two arbitrary points instead of a
-// point and a rectangle — used to connect the Wilderness's Return Gate to each dungeon
+// point and a rectangle - used to connect the Wilderness's Return Gate to each dungeon
 // entrance, so the map reads as a place with real paths through it (matching Town's
 // road network) instead of open grass with icons scattered on it.
 static void DrawWildPath(Vector2 from, Vector2 to, Vector2 camera, const Texture2D* dirtTex) {
@@ -3113,15 +3135,15 @@ static void DrawWildPath(Vector2 from, Vector2 to, Vector2 camera, const Texture
 // top of or blocks them. Bumped from 10 to 44 (Mark wanted the town to feel more
 // lush/alive) by filling out the 3x3 grid's 4 open quadrants more densely and adding
 // four outer bands (north/south/west/east of the whole grid, where there's no road or
-// building at all) — see kTownNodePositions/kTownPlaza for the grid this is placed
+// building at all) - see kTownNodePositions/kTownPlaza for the grid this is placed
 // around. `variant` picks the icon (0=ground bush, 1=Wilderness tree, 2/3=Wilderness
-// bush1/bush2, 4=Wilderness fern — the latter four textures already loaded for the
+// bush1/bush2, 4=Wilderness fern - the latter four textures already loaded for the
 // Wilderness screen, just reused here for variety instead of one repeated bush;
-// 5=autumn bush, "Mage City Arcanos" pack, see the GameAssets comment above — a splash
+// 5=autumn bush, "Mage City Arcanos" pack, see the GameAssets comment above - a splash
 // of warm color instead of one more green bush).
 struct TownFoliage { Vector2 pos; int variant; };
 // Repositioned 2026-09-21 for the 250->300-unit grid spacing bump (see kTownNodePositions'
-// comment) — every coordinate run through the same piecewise transform used for the grid
+// comment) - every coordinate run through the same piecewise transform used for the grid
 // itself (unchanged below 200, scaled 1.2x between 200-700, shifted +100 beyond 700) so
 // each piece's relationship to its original landmark (a road spoke, a plaza corner, a
 // quadrant's open ground) is preserved exactly rather than left stale against the old grid.
@@ -3145,20 +3167,20 @@ static const std::array<TownFoliage, 44> kFoliagePositions = {{
 }};
 
 // Hand-placed town-flavor props, same "top down village" CraftPix pack as the doors/
-// farmland/foliage above (assets/village/*.png) — purely decorative, no collision, same
+// farmland/foliage above (assets/village/*.png) - purely decorative, no collision, same
 // role as kFoliagePositions just with a curated small set instead of a repeated icon.
 // `kind` indexes the switch in DrawTownScreen's render loop: 0=fountain, 1=streetlamp,
 // 2=Smith's sign, 3/4/5=market stalls, 6=lumber pile, 7=barrel, 8=crate, 9=anvil,
 // 10=statue.
 struct TownProp { Vector2 pos; int kind; float size; };
-// Repositioned 2026-09-21 alongside kFoliagePositions — same piecewise transform, same
+// Repositioned 2026-09-21 alongside kFoliagePositions - same piecewise transform, same
 // reasoning (grid spacing 250->300; every prop's relationship to its original landmark
 // preserved exactly, not left stale). Also grew 18->26 the same day (Gemini's "open green
-// spaces feel a bit empty" note, which Mark asked to act on) — Tailor/Alchemy/Healer/
+// spaces feel a bit empty" note, which Mark asked to act on) - Tailor/Alchemy/Healer/
 // Stable/Bank previously had no prop clutter of their own at all (only Smith/Carpenter/
 // Provisioner did); those entries give each of those a small barrel/crate/lumberpile
 // cluster, reusing existing icon kinds rather than sourcing new art. Grew again 26->33
-// same day once Mark asked for genuinely trade-fitting dressing (like Smith's anvil) —
+// same day once Mark asked for genuinely trade-fitting dressing (like Smith's anvil) -
 // kinds 11-17 are new textures, not reused ones (see GameAssets' comment on
 // townSheep/etc.): Stable gets real farm animals, Alchemy gets potions, Bank gets a
 // chest, Townhall gets a bookshelf, all cropped from two more already-on-disk CC0
@@ -3167,23 +3189,23 @@ static const std::array<TownProp, 33> kTownProps = {{
     // Fountain, tucked in a corner of the plaza clear of Town Hall and the crossroads
     // running through the plaza's center.
     {{446, 560}, 0, 40.0f},
-    // Statue in the NW quadrant's open ground — "Mage City Arcanos" pack, see the
+    // Statue in the NW quadrant's open ground - "Mage City Arcanos" pack, see the
     // GameAssets comment above. (Originally placed in the plaza itself, but that spot
     // sat behind Town Hall's tall roof sprite from most camera angles since props draw
-    // before buildings — moved out to open ground instead of fighting the draw order.)
+    // before buildings - moved out to open ground instead of fighting the draw order.)
     {{344, 344}, 10, 44.0f},
-    // Street lamps flanking each of the 4 road spokes at its midpoint — reinforces the
+    // Street lamps flanking each of the 4 road spokes at its midpoint - reinforces the
     // crossroads shape from the road-merge fix (see DrawRoadToPlaza).
     {{452, 302}, 1, 32.0f}, {{548, 302}, 1, 32.0f},
     {{452, 698}, 1, 32.0f}, {{548, 698}, 1, 32.0f},
     {{302, 452}, 1, 32.0f}, {{302, 548}, 1, 32.0f},
     {{698, 452}, 1, 32.0f}, {{698, 548}, 1, 32.0f},
-    // Cinderforge (Smith) gets a hanging anvil sign plus a physical anvil prop — the one
+    // Cinderforge (Smith) gets a hanging anvil sign plus a physical anvil prop - the one
     // building whose available sign icon happens to match its trade exactly.
     {{266, 230}, 2, 30.0f}, {{150, 230}, 9, 26.0f},
     // A lumber pile beside the Hewnwood Hall (Carpenter), plus a crate of fittings.
     {{548, 254}, 6, 32.0f}, {{430, 270}, 8, 20.0f},
-    // A small market cluster south of the Provisioner — 3 stall colors plus a barrel
+    // A small market cluster south of the Provisioner - 3 stall colors plus a barrel
     // and a crate, reading as a little market square rather than a lone building.
     {{740, 860}, 3, 48.0f}, {{800, 880}, 4, 48.0f}, {{850, 860}, 5, 48.0f},
     {{704, 830}, 7, 24.0f}, {{880, 830}, 8, 24.0f},
@@ -3197,7 +3219,7 @@ static const std::array<TownProp, 33> kTownProps = {{
     {{870, 560}, 7, 24.0f}, {{870, 440}, 8, 24.0f},
     // A strongbox crate outside the Vaultkeep (Bank).
     {{560, 870}, 8, 24.0f},
-    // A small pen of farm animals beside the Stable — sheep, cow, chicken (kinds 11-13).
+    // A small pen of farm animals beside the Stable - sheep, cow, chicken (kinds 11-13).
     {{740, 570}, 11, 22.0f}, {{740, 430}, 12, 24.0f}, {{770, 600}, 13, 18.0f},
     // A pair of brewing potions outside Alchemy (kinds 14-15).
     {{270, 440}, 14, 18.0f}, {{170, 570}, 15, 18.0f},
@@ -3208,8 +3230,8 @@ static const std::array<TownProp, 33> kTownProps = {{
 }};
 
 // ---------------------------------------------------------------------
-// Phase 1 — Emberhold capital dressing (town 1 only).
-// Banners (kind 18) and braziers (kind 19) drawn with primitives — no new
+// Phase 1 - Emberhold capital dressing (town 1 only).
+// Banners (kind 18) and braziers (kind 19) drawn with primitives - no new
 // art. kTownProps is shared with Saltmere, so these live in their own table,
 // drawn only when selectedTown == 0, in both the 2D and 3D town views.
 // ---------------------------------------------------------------------
@@ -3273,9 +3295,9 @@ static void DrawCapitalProp3D(int kind, float x, float z, float size, float t) {
 }
 
 // ---------------------------------------------------------------------
-// Phase 2 — Saltmere coastal dressing (town 2 only, selectedTown == 1).
+// Phase 2 - Saltmere coastal dressing (town 2 only, selectedTown == 1).
 // Pier, beached boat, rope coils, drying-net racks, anchor monument, and
-// waving pennant poles — all primitive-drawn, no new art. Mirrors the
+// waving pennant poles - all primitive-drawn, no new art. Mirrors the
 // Phase 1 kCapitalProps approach: own table, drawn only for Saltmere,
 // in both the 2D and 3D town views (plus the wilderness docks landmark).
 // ---------------------------------------------------------------------
@@ -3293,7 +3315,7 @@ static const std::array<CoastProp, 9> kCoastProps = {{
     {{830, 500}, 23, 36.0f},
 }};
 
-// "Saltmere Docks" — wilderness landmark on the Salt Coast near the town gate.
+// "Saltmere Docks" - wilderness landmark on the Salt Coast near the town gate.
 // Decorative only (the tidal-pool fishing nodes nearby are the interactables).
 static const std::array<CoastProp, 3> kSaltDocks = {{
     {{2800, 1450}, 20, 48.0f}, {{2720, 1480}, 21, 44.0f}, {{2760, 1420}, 22, 20.0f},
@@ -3383,57 +3405,57 @@ static void DrawCoastProp3D(int kind, float x, float z, float size, float t) {
 }
 
 // ---------------------------------------------------------------------
-// Wandering, interactable townsfolk (2026-09-22, "AI players" plan, Part 1) — purely
+// Wandering, interactable townsfolk (2026-09-22, "AI players" plan, Part 1) - purely
 // decorative NPCs that give Town its first-ever ambient motion (previously fully
-// static — only the player ever moved). Walking up and pressing E shows a name +
+// static - only the player ever moved). Walking up and pressing E shows a name +
 // greeting, dismissed the same way. No combat, no branching dialogue, no collision
-// (walking through one is fine — they're atmosphere, not obstacles).
+// (walking through one is fine - they're atmosphere, not obstacles).
 // ---------------------------------------------------------------------
 struct TownNPC { Vector2 homePos; std::string name, greeting; };
 static const std::array<TownNPC, 6> kTownNPCs = {{
     { {350, 350}, "Old Miran", "Fine morning for it, isn't it?" },
-    { {650, 350}, "Young Petra", "Careful past the gate — I hear the wolves have been bold lately." },
+    { {650, 350}, "Young Petra", "Careful past the gate - I hear the wolves have been bold lately." },
     { {350, 650}, "Wystan the Baker", "Bread's fresh if you've got the coin." },
     { {650, 650}, "Widow Aelith", "You look like you could use a good meal." },
     { {150, 500}, "Cobb the Stableboy", "Mind the horses, they spook easy." },
     { {850, 650}, "Sister Meraude", "May your travels be safe, traveler." },
 }};
-// Town 2's own flavor (2026-09-22, "second town" plan) — same 6 wander spots (reuses
+// Town 2's own flavor (2026-09-22, "second town" plan) - same 6 wander spots (reuses
 // Town 1's exact layout, see DrawTownScreen), different names/greetings for a coastal
 // trade-port identity (echoing the UO Outlands "Horseshoe Bay" research).
 static const std::array<TownNPC, 6> kTown2NPCs = {{
-    { {350, 350}, "Harbormaster Thane", "Tide's good today — ships are making fine time." },
-    { {650, 350}, "Salty Bjorn", "Careful past the gate — the wilds don't care about your coin." },
+    { {350, 350}, "Harbormaster Thane", "Tide's good today - ships are making fine time." },
+    { {650, 350}, "Salty Bjorn", "Careful past the gate - the wilds don't care about your coin." },
     { {350, 650}, "Nessa the Netmender", "Torn nets don't mend themselves, but talk's free." },
     { {650, 650}, "Old Corwin", "Been trading gems out of this bay longer than you've been alive." },
     { {150, 500}, "Dockhand Fenn", "Mind the crates, they shift when the tide turns." },
     { {850, 650}, "Captain Ysolde", "Every port's got a story. This one's got a few too many." },
 }};
-// Phase 3 — Frostmere's townsfolk: fur traders, trappers, and hardy northerners.
+// Phase 3 - Frostmere's townsfolk: fur traders, trappers, and hardy northerners.
 // Wander spots are Frostmere's own (open ground between its 5 buildings).
 static const std::array<TownNPC, 6> kTown3NPCs = {{
-    { {500, 430}, "Trapper Sella", "Pelts are prime this season — the Frostbound Tomb keeps the wolves bold." },
+    { {500, 430}, "Trapper Sella", "Pelts are prime this season - the Frostbound Tomb keeps the wolves bold." },
     { {280, 800}, "Old Jorunn", "Bundle up past the gate. The Wastes don't forgive the careless." },
     { {720, 800}, "Brand the Smith", "Cold iron for a cold land. My forge never goes out." },
     { {150, 430}, "Little Anka", "Have you seen the ice crystals glow at dusk? Pretty, aren't they?" },
     { {850, 430}, "Halla Furwife", "Bring me furs, hunter, and I'll dress you for the deep cold." },
     { {500, 120}, "Sentry Oddvar", "Tomb's been restless. King stirs beneath the ice, they say." },
 }};
-// Phase 4 — Cragmoor's townsfolk: miners, smiths, and mountain folk.
+// Phase 4 - Cragmoor's townsfolk: miners, smiths, and mountain folk.
 // Wander spots are Cragmoor's own (open ground between its 5 buildings).
 static const std::array<TownNPC, 6> kTown4NPCs = {{
-    { {500, 430}, "Foreman Durgan", "Rich veins in the deep south — the Ember Depths keep the golems restless." },
+    { {500, 430}, "Foreman Durgan", "Rich veins in the deep south - the Ember Depths keep the golems restless." },
     { {280, 800}, "Old Tam", "Mind the loose rock past the gate. The peaks don't forgive the careless." },
     { {720, 800}, "Sella Ironside", "My forge burns hotter than the Depths. Bring me ore, I'll bring you steel." },
     { {150, 430}, "Pip Pickaxe", "Found a shiny one yesterday! Well... shiny-ish. Mostly rock." },
-    { {850, 430}, "Guildmaster Harl", "The Guild pays top coin for ore — bulk, no questions, no haggling." },
+    { {850, 430}, "Guildmaster Harl", "The Guild pays top coin for ore - bulk, no questions, no haggling." },
     { {500, 120}, "Sentry Corva", "Depths have been rumbling. Emberlord stirs below, they say." },
 }};
 // TownNPCLivePos (their wander position) is defined later, right after
-// WildernessMonsterLivePos — it needs MonsterWanderOffset, which isn't declared yet at
+// WildernessMonsterLivePos - it needs MonsterWanderOffset, which isn't declared yet at
 // this point in the file.
 
-// Pushes `pos` out of a circular obstacle if it's overlapping — simple circle-circle
+// Pushes `pos` out of a circular obstacle if it's overlapping - simple circle-circle
 // collision, called once per obstacle after movement so the player can walk right up
 // to a building or monster but never through it.
 static void ResolveCircleCollision(Vector2& pos, float radius, Vector2 obstaclePos, float obstacleRadius) {
@@ -3453,21 +3475,21 @@ static int DirRowForFacing(Vector2 facing) {
     return facing.x < 0 ? 1 : 2; // Left : Right
 }
 static const float kHeroWalkFps = 8.0f;
-static const float kHeroSpriteScale = 2.625f; // visual size only (x kPlayerRadius) — doesn't affect collision/movement;
+static const float kHeroSpriteScale = 2.625f; // visual size only (x kPlayerRadius) - doesn't affect collision/movement;
                                               // was 5.25 (a deliberate +25% bump for the old CraftPix sprite), dropped
                                               // to 4.2 (pre-bump value) for the new "character options" sprites, then
-                                              // halved again to 2.1 — still read as too big at 4.2 in Town — then
+                                              // halved again to 2.1 - still read as too big at 4.2 in Town - then
                                               // +25% again to 2.625 for the AI-generated knight sprite (see
                                               // kPlayerEdgeMargin, bumped the same 1.25x to match)
 // Computes the source-rect crop for one frame of a DirSpriteSheet-backed actor (hero,
-// NPCs, monsters, creatures, the companion, the rival adventurer — see the "Carl art"
+// NPCs, monsters, creatures, the companion, the rival adventurer - see the "Carl art"
 // integration plan). Picks the row from facing, the column from `anim`'s range on
 // `sheet` (Idle holds `idleCol`; Walk/Attack/Cast each cycle their own
 // [start, start+count) range at `fps`), and maps through `rowMap`/`rowFlip` for sheets
 // whose texture rows aren't already in Down/Left/Right/Up order (see that field's
-// comment). Factored out from DrawActorSprite so DrawWorldNode's icon path — used by
+// comment). Factored out from DrawActorSprite so DrawWorldNode's icon path - used by
 // monsters/creatures/NPCs, which need the ring/plate/label chrome DrawActorSprite
-// doesn't have — can compute the same crop without duplicating this logic.
+// doesn't have - can compute the same crop without duplicating this logic.
 static Rectangle ActorSrcRect(const DirSpriteSheet& sheet, Vector2 facing, ActorAnim anim, float worldTime,
                                 float fps = 8.0f) {
     int row = DirRowForFacing(facing);
@@ -3490,14 +3512,14 @@ static Rectangle ActorSrcRect(const DirSpriteSheet& sheet, Vector2 facing, Actor
     float fw = (float)sheet.frameW, fh = (float)sheet.frameH;
     int texRow = sheet.rowMap[row];
     bool flip = sheet.rowFlip[row];
-    // A negative source width tells raylib to sample the frame mirrored horizontally —
-    // start at the frame's right edge and read backwards — used for rows synthesized
+    // A negative source width tells raylib to sample the frame mirrored horizontally -
+    // start at the frame's right edge and read backwards - used for rows synthesized
     // from another direction's art rather than physically flipped pixels on disk.
     return { frame * fw + (flip ? fw : 0.0f), texRow * fh, flip ? -fw : fw, fh };
 }
 // Draws one DirSpriteSheet-backed actor frame centered on `center` at `size`, rotated
 // by `rotationDeg` around its own middle if given (dest.x/y is the rotation pivot in
-// screen space once `origin` is nonzero, not the rect's top-left corner — a real gotcha
+// screen space once `origin` is nonzero, not the rect's top-left corner - a real gotcha
 // the first time this was wired up for the weapon-swing rotation effect, kept here
 // since some callers may still pass a nonzero rotation during the transition off that
 // effect).
@@ -3522,13 +3544,13 @@ static bool AnyMoveKeyDown() {
 // `combatAnim` (2026-09-23, replacing the old rotation-arc swing hack now that the
 // hero sheet has real attack/cast frames) forces Attack or Cast whenever a swing or
 // spell-cast is live, taking priority over the normal movement-based Idle/Walk choice
-// — Idle is used as the "no override" sentinel since nothing ever needs to force Idle
-// specifically over the movement-based choice. Only the heroSheet path uses it — the
+// - Idle is used as the "no override" sentinel since nothing ever needs to force Idle
+// specifically over the movement-based choice. Only the heroSheet path uses it - the
 // paperdoll/icon/circle fallbacks are static art with no equivalent animation states.
 static void DrawPlayer(const GameState& s, Vector2 screenPos, Vector2 facing, const std::string& interactPrompt,
                          float visualScale = 1.0f, ActorAnim combatAnim = ActorAnim::Idle,
                          Color tint = WHITE) {
-    float kPlayerRadius = ::kPlayerRadius * visualScale; // shadows the global on purpose — see
+    float kPlayerRadius = ::kPlayerRadius * visualScale; // shadows the global on purpose - see
                                                            // DrawBuildingNode's identical trick.
     if (g_assets.heroSheet.ok) {
         bool moving = AnyMoveKeyDown() || VirtualJoystickIsMoving();
@@ -3553,13 +3575,13 @@ static void DrawPlayer(const GameState& s, Vector2 screenPos, Vector2 facing, co
 
 
 // ---------------------------------------------------------------------
-// The Hearthmoot's weekly goals — ported from checkWeeklyReset()/
+// The Hearthmoot's weekly goals - ported from checkWeeklyReset()/
 // addWeeklyProgress()/claimWeeklyGoal()/checkAllWeeklyGoalsComplete()/
 // hasWeeklyBlessing() in the JS. Placed early since combat, gathering,
 // crafting, and taming all report progress into it.
 //
 // Simplification: the Weekly Blessing's "+10% combat power" is applied
-// (see CombatPower() below), but its "faster recovery" half is not —
+// (see CombatPower() below), but its "faster recovery" half is not -
 // this scaffold still has no passive out-of-combat regen system for it
 // to speed up (same gap noted for Shaken in the notoriety section).
 // ---------------------------------------------------------------------
@@ -3587,7 +3609,7 @@ static void CheckAllWeeklyGoalsComplete(GameState& s) {
     if (allDone && !s.blessingClaimedThisWeek) {
         s.blessingClaimedThisWeek = true;
         s.blessingUntilEpoch = s.weekStartEpoch + kWeekSeconds;
-        s.logLine = "The Hearthmoot grants its Weekly Blessing — +10% combat power until next week's reset!";
+        s.logLine = "The Hearthmoot grants its Weekly Blessing - +10% combat power until next week's reset!";
     }
 }
 static void ClaimWeeklyGoal(GameState& s, int goalIdx) {
@@ -3605,7 +3627,7 @@ static bool HasWeeklyBlessing(const GameState& s) {
 }
 
 // ---------------------------------------------------------------------
-// The Echo system — ported from CAPPED_SKILL_KEYS/isSkillActive()/
+// The Echo system - ported from CAPPED_SKILL_KEYS/isSkillActive()/
 // effectiveSkill()/activeSkillTotal()/setSkillActive() in the JS. Every
 // skill still trains freely to its own 100 cap regardless of anything
 // here; this only governs whether that skill's value actually counts
@@ -3634,7 +3656,7 @@ static int CappedSkillIndex(float GameState::* field) {
 // system (trade skills) aren't looked up this way and are just read directly.
 static float EffectiveSkill(const GameState& s, float GameState::* field) {
     int idx = CappedSkillIndex(field);
-    if (idx < 0) return s.*field; // not a capped skill — always fully active
+    if (idx < 0) return s.*field; // not a capped skill - always fully active
     return s.skillActive[idx] ? s.*field : 0.0f;
 }
 static float ActiveSkillTotal(const GameState& s) {
@@ -3649,7 +3671,7 @@ static bool SetSkillActive(GameState& s, int idx, bool active) {
         float val = s.*(kCappedSkills[idx].field);
         if (ActiveSkillTotal(s) + val > kTotalSkillCap) {
             s.logLine = "No room in your active build for that (" + std::to_string((int)ActiveSkillTotal(s)) +
-                         "/" + std::to_string((int)kTotalSkillCap) + " active) — bench something else first.";
+                         "/" + std::to_string((int)kTotalSkillCap) + " active) - bench something else first.";
             return false;
         }
         s.skillActive[idx] = true;
@@ -3678,13 +3700,13 @@ static std::string ActiveWeaponCategoryLabel(const GameState& s) {
 }
 
 // ---------------------------------------------------------------------
-// Character titles & naming — ported from titleFor()/karmaAdjective()/
+// Character titles & naming - ported from titleFor()/karmaAdjective()/
 // topVocationTitle()/characterDisplayName() in the JS. Skill-tier titles
 // (Novice..Legendary) are based on your single highest skill; vocation
 // titles (Warrior/Mage/Tamer/Craftsman/Gatherer) group skills into broad
 // archetypes the same way, so the two combine into things like "Kind
 // Grandmaster Warrior." Rogue skills (Stealing/Snooping/Poisoning) are
-// deliberately excluded from both — matches the JS exactly, which has no
+// deliberately excluded from both - matches the JS exactly, which has no
 // "vocation" for them either.
 // ---------------------------------------------------------------------
 
@@ -3755,7 +3777,7 @@ static int FindCraftBuildingIndex(const std::string& key) {
 static float RandUnit() { return (float)std::rand() / (float)RAND_MAX; } // [0,1)
 
 // ---------------------------------------------------------------------
-// Update (non-render) logic — gathering + upgrade timers.
+// Update (non-render) logic - gathering + upgrade timers.
 // Mirrors tickGather()/tickUpgrade() in the JS, minus offline catch-up
 // (that needs a save/load system, which this scaffold doesn't have yet).
 // ---------------------------------------------------------------------
@@ -3785,29 +3807,30 @@ static float GainSkillCapped(float& skill, float amount, float cap = 100.0f) {
     return actual;
 }
 
-// STR/DEX/INT growth (2026-09-20, Mark's own design — the JS prototype's live stat-gain
+// STR/DEX/INT growth (2026-09-20, Mark's own design - the JS prototype's live stat-gain
 // path, maybeGainStat(), has no combined cap at all, just 100 per stat; a second,
 // more UO-faithful 225-total/125-individual version exists in the JS but was dead code,
 // never actually wired to anything). Mark asked for a cap "slightly higher than UO":
-// 260 combined, 100 individual — a finished character lands around 100/100/60 or
+// 260 combined, 100 individual - a finished character lands around 100/100/60 or
 // 100/90/70, never a single-stat extreme dump.
 static const int kStatCapIndividual = 100;
 static const int kStatCapTotal = 260;
 // A small chance for a successful action to raise a stat by 1, same shape as the JS's
-// maybeGainStat() — capped both individually and against the combined total above.
+// maybeGainStat() - capped both individually and against the combined total above.
 // Keeps `maxHp` (a stored field here, not a live function like the JS's maxHP()) in
 // sync whenever `str` itself grows, since nothing else would notice the change.
-// Rate multiplier (2026-09-22) — Mark reported stat growth (STR/DEX/INT) feeling far
+// Rate multiplier (2026-09-22) - Mark reported stat growth (STR/DEX/INT) feeling far
 // too slow relative to skill growth: he GM'd Meditation and Eval Int (~150-200 clicks,
 // since RollGatherSkillGain is nearly guaranteed below skill 80) in the time INT moved
 // from 20 to 26. At the original flat per-call chances, raising a stat 80 points needs
-// on the order of 1000+ successful actions (e.g. 80 / 0.06) — an 8-9x disparity versus
+// on the order of 1000+ successful actions (e.g. 80 / 0.06) - an 8-9x disparity versus
 // a skill reaching Grandmaster, which matches what he saw almost exactly. Applied here
 // (not at each of the dozen individual MaybeGainStat call sites) so their existing
-// relative pacing — gathering's 0.10 vs. combat/craft's 0.06 vs. taming's 0.08 — stays
+// relative pacing - gathering's 0.10 vs. combat/craft's 0.06 vs. taming's 0.08 - stays
 // intact; a single tunable knob if this number needs revisiting again.
 static const float kStatGainRateMultiplier = 3.0f;
 static void Journal(GameState& s, const std::string& text); // defined with the float-text helpers below
+static Rectangle RecallPickerRect(); // UO-style travel (2026-09-25): defined with the travel helpers below
 
 static bool MaybeGainStat(GameState& s, int GameState::*statField, float chance) {
     if (s.*statField >= kStatCapIndividual) return false;
@@ -3815,7 +3838,7 @@ static bool MaybeGainStat(GameState& s, int GameState::*statField, float chance)
     if (RandUnit() >= chance * kStatGainRateMultiplier) return false;
     s.*statField += 1;
     if (statField == &GameState::str) { s.maxHp += 1; s.hp += 1; }
-    // Stat gains are the game's "level-ups" — announce them in the journal.
+    // Stat gains are the game's "level-ups" - announce them in the journal.
     const char* statName = (statField == &GameState::str) ? "Strength" :
                            (statField == &GameState::dex) ? "Dexterity" : "Intelligence";
     Journal(s, std::string("Your ") + statName + " increases! (" + std::to_string(s.*statField) + ")");
@@ -3848,7 +3871,7 @@ static const float kAutoGatherMinSkill = 30.0f; // JS AUTO_GATHER_MIN_SKILL
 
 // `seconds` defaults to the JS-matched Town rate (8s per action); the Wilderness's
 // walk-up-to-a-node gather nodes pass 5s instead, rewarding active play with a faster
-// rate than Town's passive/idle HUD buttons — see the call site in DrawWildernessScreen.
+// rate than Town's passive/idle HUD buttons - see the call site in DrawWildernessScreen.
 static void TryStartGather(GameState& s, const std::string& resourceKey, float seconds = 8.0f) {
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
     if (s.gatheringResource.has_value()) { s.logLine = "Already gathering."; return; }
@@ -3865,7 +3888,7 @@ static void ToggleAutoGather(GameState& s) {
     float skillVal = (next == "wood") ? s.lumberjacking : s.mining;
     if (skillVal < kAutoGatherMinSkill) {
         s.logLine = "Auto-gather requires " + std::to_string((int)kAutoGatherMinSkill) +
-                     " " + (next == "wood" ? "Lumberjacking" : "Mining") + " — gather manually until then.";
+                     " " + (next == "wood" ? "Lumberjacking" : "Mining") + " - gather manually until then.";
         return;
     }
     s.autoGather = true;
@@ -3888,17 +3911,17 @@ static void UpdateGathering(GameState& s, float dt) {
             s.wood += gained;
             gainNote = gain > 0 ? " (Lumberjacking +" + std::to_string(gain).substr(0, 4) + ")" : "";
             s.logLine = "Gathered " + std::to_string(gained) + " wood." + gainNote;
-        } else if (type == "fish") { // Phase 2: Salt Coast fishery — tidal pools
+        } else if (type == "fish") { // Phase 2: Salt Coast fishery - tidal pools
             float gain = GainSkillCapped(s.fishing, rawGain, 100.0f);
             s.fish += gained;
             gainNote = gain > 0 ? " (Fishing +" + std::to_string(gain).substr(0, 4) + ")" : "";
             s.logLine = "Caught " + std::to_string(gained) + " fish." + gainNote;
-        } else if (type == "ice") { // Phase 3: Frostwastes ice crystals — Mining skill
+        } else if (type == "ice") { // Phase 3: Frostwastes ice crystals - Mining skill
             float gain = GainSkillCapped(s.mining, rawGain, 100.0f);
             s.ice += gained;
             gainNote = gain > 0 ? " (Mining +" + std::to_string(gain).substr(0, 4) + ")" : "";
             s.logLine = "Chipped " + std::to_string(gained) + " ice crystals free." + gainNote;
-        } else if (type == "richore") { // Phase 4: Stonepeaks rich ore vein — ore at a richer rate
+        } else if (type == "richore") { // Phase 4: Stonepeaks rich ore vein - ore at a richer rate
             float gain = GainSkillCapped(s.mining, rawGain, 100.0f);
             s.ore += gained;
             gainNote = gain > 0 ? " (Mining +" + std::to_string(gain).substr(0, 4) + ")" : "";
@@ -3961,7 +3984,7 @@ static void TryStartUpgrade(GameState& s, const std::string& key) {
 }
 
 // ---------------------------------------------------------------------
-// Combat resolution — ported from getCombatPower()/winChanceAgainst()/
+// Combat resolution - ported from getCombatPower()/winChanceAgainst()/
 // playerAttackRoll()/monsterAttackRoll()/endCombatWin()/endCombatLoss().
 // ---------------------------------------------------------------------
 
@@ -4020,8 +4043,8 @@ static void ResolvePetTurn(GameState& s) {
     GainSkillCapped(pet->anatomy, RollGatherSkillGain(pet->anatomy), 100.0f);
 }
 
-// Live-combat counterpart of ResolvePetTurn above (2026-09-22, AI companion — "AI
-// players" plan Part 2) — identical formulas (Caster spell-cast branch preferred,
+// Live-combat counterpart of ResolvePetTurn above (2026-09-22, AI companion - "AI
+// players" plan Part 2) - identical formulas (Caster spell-cast branch preferred,
 // wrestling-bite fallback, same skill gains) but writes to s.logLine and a passed-in
 // target hp/level instead of CombatState&, mirroring exactly how this session's earlier
 // live-combat work adapted ApplyWeaponTraining/CheckMonsterDefeatedAndHandleWin into
@@ -4071,17 +4094,17 @@ static void ResolvePetTurnLive(GameState& s, float& targetHp, int targetLevel) {
     GainSkillCapped(pet->anatomy, RollGatherSkillGain(pet->anatomy), 100.0f);
 }
 
-// Follows the player continuously on the Wilderness/dungeon screens — no leash-to-spawn
+// Follows the player continuously on the Wilderness/dungeon screens - no leash-to-spawn
 // needed (unlike monster AI), a companion never "loses interest". Snaps directly to
 // position (rather than easing from wherever it happened to be) on first use or after a
 // screen change (detected by an implausibly large jump), so it never visibly flies in
 // from {0,0} or across the map.
 static const float kCompanionFollowSpeed = 140.0f; // faster than kWildMonsterChaseSpeed (90) so it doesn't lag behind
 static const float kCompanionFollowDistance = 36.0f;
-// Moderate pace — a helper, not a second player dominating the fight.
+// Moderate pace - a helper, not a second player dominating the fight.
 static const float kCompanionAttackCooldown = 1.5f;
 // The tactical opponent's ranged-strike cooldown (2026-09-22, "AI players" plan Part 3)
-// — longer than a plain melee swing so alternating melee/ranged still feels paced, not
+// - longer than a plain melee swing so alternating melee/ranged still feels paced, not
 // spammy.
 static const float kTacticalRangedCooldown = 3.0f;
 static void UpdateCompanionFollow(GameState& s, Vector2 playerPos, Vector2 playerFacing, float dt) {
@@ -4136,7 +4159,7 @@ static int TotalDefense(const GameState& s) {
     return def;
 }
 
-// JS: winChanceAgainst() — used for the % shown on each "Hunt" button before you commit.
+// JS: winChanceAgainst() - used for the % shown on each "Hunt" button before you commit.
 static float WinChancePreview(const GameState& s, int monsterLevel) {
     int power = CombatPower(s);
     float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
@@ -4144,13 +4167,13 @@ static float WinChancePreview(const GameState& s, int monsterLevel) {
     return std::clamp(chance, 5.0f, 95.0f);
 }
 
-// JS: monsterHitChance() — 50 - dex*0.2, clamped 20-90.
+// JS: monsterHitChance() - 50 - dex*0.2, clamped 20-90.
 static float MonsterHitChance(const GameState& s) {
     return std::clamp(50.0f - s.dex * 0.2f, 20.0f, 90.0f);
 }
 
 // ---------------------------------------------------------------------
-// Notoriety, murderers & innocents — ported from notorietyTier()/
+// Notoriety, murderers & innocents - ported from notorietyTier()/
 // regenNotoriety()/maybeTriggerAmbush()/maybeTriggerInnocentEncounter()/
 // snoopInnocent()/stealFromInnocent()/spareInnocent()/murderInnocent()/
 // endMurdererWin()/endMurdererLoss()/isShaken() and the guard-zone check
@@ -4158,18 +4181,18 @@ static float MonsterHitChance(const GameState& s) {
 //
 // Simplifications from the original (flagged, not silently dropped):
 //   - A failed Snoop away from town normally spins up a full "theft duo"
-//     counter-fight (startTheftDuoFight()) in the JS — a whole separate
+//     counter-fight (startTheftDuoFight()) in the JS - a whole separate
 //     2-attacker combat variant. That's out of scope here, so a failed
 //     field Snoop instead applies the same gold/item penalty as a failed
 //     town Snoop, just without a fight.
 //   - The Bloodstained Road (a separate weekly bounty path for fighting
-//     murderers on your own terms) isn't ported — only the random ambush
+//     murderers on your own terms) isn't ported - only the random ambush
 //     encounters are.
 //   - Being Shaken halves HP/mana regen in the JS; this scaffold has no
 //     passive out-of-combat HP regen yet, so only the -15% combat power
 //     half of the penalty applies.
 //   - Vendor price surcharges and the Healer/Bank notoriety penalties
-//     aren't ported — those tie to shop systems (Provisioner/Healer/Bank)
+//     aren't ported - those tie to shop systems (Provisioner/Healer/Bank)
 //     that don't exist yet in this scaffold.
 // ---------------------------------------------------------------------
 
@@ -4241,21 +4264,21 @@ static int RollMurdererLevel(const GameState& s) {
     return std::max(1, (int)std::round(power * variance));
 }
 
-// On hold (2026-09-23) — Mark reported getting "caught in a loop" a few times from
-// these firing (7% base chance after nearly every action — gathering, every monster
-// kill — stacking up fast over a normal play session; multiplied up to 2.2x at
+// On hold (2026-09-23) - Mark reported getting "caught in a loop" a few times from
+// these firing (7% base chance after nearly every action - gathering, every monster
+// kill - stacking up fast over a normal play session; multiplied up to 2.2x at
 // Murderer notoriety tier, which is also exactly when a string of ambushes is most
 // punishing). No structural runaway bug found (every trigger site is gated behind "no
 // encounter already pending"), so this reads as a frequency/feel problem rather than a
-// bug to hunt down further — flip back to true to re-enable once retuned, rather than
+// bug to hunt down further - flip back to true to re-enable once retuned, rather than
 // deleting the system.
 static const bool kAmbushSystemEnabled = false;
 // Returns true if an ambush was triggered (sets s.ambush). Called after gathering
-// completes and after a dungeon fight ends — never while something else is pending.
+// completes and after a dungeon fight ends - never while something else is pending.
 static bool TryTriggerAmbush(GameState& s, const std::string& /*source*/) {
     if (!kAmbushSystemEnabled) return false;
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) return false; // the dead can't be ambushed
-    // Also guards against an active live fight (Wilderness/dungeon) — without this, a
+    // Also guards against an active live fight (Wilderness/dungeon) - without this, a
     // live fight left running while the player tabbed to another screen (it pauses,
     // since updateEngaged*MonsterAI only runs inside its own Draw*Screen) could end up
     // coexisting with an ambush triggered elsewhere in the meantime.
@@ -4273,7 +4296,7 @@ static bool TryTriggerAmbush(GameState& s, const std::string& /*source*/) {
 static std::string InnocentName(int id);
 static void MaybeOfferRequest(GameState& s, int id);
 static int BackpackCap(const GameState& s);
-// Respawn delay for a vacated innocent spot — defined here because MurderInnocent
+// Respawn delay for a vacated innocent spot - defined here because MurderInnocent
 // (just below) multiplies it for murder, and UpdateInnocentSpots uses it too.
 static const float kInnocentRespawnSeconds = 45.0f;
 
@@ -4294,14 +4317,14 @@ static bool TryTriggerInnocentEncounter(GameState& s, const std::string& source)
 }
 // JS endMurdererWin(): direct gold reward (no corpse/skinning step), notoriety eases,
 // Fame and Karma both rise.
-// The Bloodstained Road — ported from bloodstainedTargetFor()/
+// The Bloodstained Road - ported from bloodstainedTargetFor()/
 // fightBloodstainedTier()/graySnoopChoice()/grayStealChoice()/
 // endBloodstainedWin() in the JS. Losing a Bloodstained fight (or
-// breaking off mid-fight) uses the ordinary EndMurdererLoss() above —
+// breaking off mid-fight) uses the ordinary EndMurdererLoss() above -
 // only winning is special-cased, matching endMurdererWin()'s dispatch.
 //
 // Simplification: no rarity-item corpse drop (rollCorpseDrop()) on a win
-// — same "no rarity items" gap already flagged for ordinary murderers.
+// - same "no rarity items" gap already flagged for ordinary murderers.
 // ---------------------------------------------------------------------
 
 static DungeonMonster BloodstainedTargetFor(GameState& s, int pathIdx) {
@@ -4328,22 +4351,22 @@ static DungeonMonster BloodstainedTargetFor(GameState& s, int pathIdx) {
 // ---------------------------------------------------------------------
 // Death / ghost / corpse / respawn (2026-09-24)
 // ---------------------------------------------------------------------
-// Grouped tuning for the whole system — one place to adjust the feel.
+// Grouped tuning for the whole system - one place to adjust the feel.
 static const float kPlayerDeathAnimTime = 1.2f;   // player fall+fade before the ghost rises
 static const float kGhostDuration = 15.0f;        // ghost walk seconds before resurrection (Mark's spec)
 static const float kGhostReturnNotice = 2.0f;     // "Returning to <town>..." shows this long before resurrect
 static const float kMonsterDeathAnimTime = 0.9f;  // slain monster fall+fade before the corpse settles
 static const float kCorpseFadeTime = 20.0f;       // world corpse visual lifetime (the lootable list on the Hunt screen is untouched)
-static const float kRivalCorpseFadeTime = 8.0f;   // rival/blade "corpse" is brief — they retreat, not die
+static const float kRivalCorpseFadeTime = 8.0f;   // rival/blade "corpse" is brief - they retreat, not die
 static const float kWildRespawnMin = 60.0f;       // wilderness spot respawn window (seconds)
 static const float kWildRespawnMax = 120.0f;
 static const float kDungeonRespawnMin = 60.0f;    // dungeon regular-slot respawn window
 static const float kDungeonRespawnMax = 120.0f;
 static const float kDungeonBossRespawnMin = 240.0f; // boss respawn window (4-6 min)
 static const float kDungeonBossRespawnMax = 360.0f;
-static const int kDungeonRegularSlots = 8; // regular spawn points per dungeon (was 5 — raised so respawn timers don't empty dungeons)
+static const int kDungeonRegularSlots = 8; // regular spawn points per dungeon (was 5 - raised so respawn timers don't empty dungeons)
 
-// Forward declarations — the full definitions live just before DrawWildernessScreen,
+// Forward declarations - the full definitions live just before DrawWildernessScreen,
 // after the wilderness tables they depend on (kWildernessMonsterSpots, gates, MaxMana).
 static void BeginPlayerDeath(GameState& s);
 static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& am,
@@ -4383,8 +4406,8 @@ static void EndBloodstainedWin(GameState& s) {
         s.bloodstainedLoop[pathIdx] += 1;
         s.bloodstainedProgress[pathIdx] = 0;
         msg += firstTime
-            ? " You have broken the " + path.name + " path — a new weekly bounty opens at the Hearthmoot!"
-            : " " + c.monster.name + " falls again — the " + path.name + " path resets, tougher than before.";
+            ? " You have broken the " + path.name + " path - a new weekly bounty opens at the Hearthmoot!"
+            : " " + c.monster.name + " falls again - the " + path.name + " path resets, tougher than before.";
     }
     s.logLine = msg;
     SpawnPanelKillCorpse(s, c.monster.name); // visible corpse at the player's position
@@ -4455,13 +4478,13 @@ static float StealChance(const GameState& s) {
 // ---------------------------------------------------------------------
 // Innocent identities deep-dive (2026-09-24)
 // ---------------------------------------------------------------------
-// The four wilderness travelers are now fixed people — Tam Alder (lone
+// The four wilderness travelers are now fixed people - Tam Alder (lone
 // traveler), Sister Liora (wandering pilgrim), Silas Brack (tired merchant),
-// Garran Moss (humble farmer) — each with a name, personality, dialogue, and
+// Garran Moss (humble farmer) - each with a name, personality, dialogue, and
 // persistent memory of YOUR history with them (met/spared/snooped/stolen
 // from/murdered/helped). Wilderness spot i always hosts identity i.
 // The morality mechanics are UNCHANGED: Spare/Snoop/Steal/Murder move
-// notoriety/karma/gold exactly as before — this only adds memory, dialogue,
+// notoriety/karma/gold exactly as before - this only adds memory, dialogue,
 // rumors, small gifts/blessings, fetch/escort requests, and Silas's traveling
 // shop on top. Grouped tuning for the whole system lives in the kInnocent*
 // constants just below.
@@ -4470,7 +4493,7 @@ static float StealChance(const GameState& s) {
 static std::string RivalEpithetName(const GameState& s); // defined with the rival
 static std::string BladeName(int bi);                    // defined with Murder Inc.
 
-// Grouped tuning — one place to adjust the feel.
+// Grouped tuning - one place to adjust the feel.
 static const float kInnocentMurderRespawnMult = 3.0f; // murdered travelers take longer to be "replaced"
 static const float kInnocentRequestCooldown = 300.0f; // seconds between request offers, per innocent
 static const float kInnocentRequestChance = 0.5f;      // chance a visit produces a request offer
@@ -4513,7 +4536,7 @@ static std::string InnocentGreeting(const GameState& s, int id) {
     if (m.murdered > 0) {
         if (id == 0) return "You. You left me in the dirt once. The road spat me back out. Don't try it twice.";
         if (id == 1) return "They say I died on this road. The road gave me back. I pray you never give it cause again.";
-        if (id == 2) return "You again — the one who left me bleeding on the road. I don't trade with killers.";
+        if (id == 2) return "You again - the one who left me bleeding on the road. I don't trade with killers.";
         return "They buried me, you know. Shallow grave. I dug myself out. Just... keep walking.";
     }
     if (notorious) {
@@ -4542,9 +4565,9 @@ static std::string InnocentGreeting(const GameState& s, int id) {
     }
     if (id == 0) return Pick2("Road's long. Mind yourself.", "Tam Alder. I walk, I watch, I don't trouble folk.");
     if (id == 1) return "Blessings on your road, traveler. I am Liora.";
-    if (id == 2) return "Silas Brack! Finest pack on the road — well, the only pack. Buying? Browsing?";
+    if (id == 2) return "Silas Brack! Finest pack on the road - well, the only pack. Buying? Browsing?";
     return Pick2("Garran Moss. Got turnips to sell and weather to complain about.",
-                "Ho there. Garran Moss — mind the mud, it's been raining.");
+                "Ho there. Garran Moss - mind the mud, it's been raining.");
 }
 
 // Spared-thanks, in their voice.
@@ -4555,15 +4578,15 @@ static std::string InnocentThanks(int id) {
     return Pick2("Much obliged, friend. The farm thanks you.", "Kindness! There's still some left in the world.");
 }
 
-// Failed snoop — they catch you, in their voice. (Mechanics unchanged.)
+// Failed snoop - they catch you, in their voice. (Mechanics unchanged.)
 static std::string InnocentCaughtLine(int id) {
     if (id == 0) return "Tam's hand is on his knife before you blink. \"Touch my pack again and you'll draw back a stump.\"";
     if (id == 1) return "\"I see you, child. The light sees you too. Step away.\"";
-    if (id == 2) return "\"THIEF! Guards! GUARDS! ...Oh. No guards. Fine — take the fine and GO!\"";
+    if (id == 2) return "\"THIEF! Guards! GUARDS! ...Oh. No guards. Fine - take the fine and GO!\"";
     return "\"Oi! Hands off! You'll lose those fingers in my turnip patch!\"";
 }
 
-// Rumors — the star sparing reward. Every specific reads REAL game state:
+// Rumors - the star sparing reward. Every specific reads REAL game state:
 // rival position/activity, blade hunts, your dungeon deaths, your notoriety.
 // The last line is pure flavor (no fake specifics).
 static std::string InnocentRumor(const GameState& s, int id) {
@@ -4580,27 +4603,27 @@ static std::string InnocentRumor(const GameState& s, int id) {
     for (int bi = 0; bi < kBladeCount; bi++) {
         if (s.blades[bi].activity == GameState::RivalActivity::Hunting ||
             s.blades[bi].activity == GameState::RivalActivity::Stalking) {
-            options.push_back("Murder Inc. blades were seen on the roads — " + BladeName(bi) + " has the scent, they say.");
+            options.push_back("Murder Inc. blades were seen on the roads - " + BladeName(bi) + " has the scent, they say.");
             break;
         }
     }
     int worst = 0;
     for (int d = 0; d < (int)kDungeons.size(); d++) if (s.deathsByDungeon[d] > s.deathsByDungeon[worst]) worst = d; // 6-dungeon ladder: all six feed the rumor
     if (s.deathsByDungeon[worst] > 0)
-        options.push_back("Folks say " + kDungeons[worst].name + "'s gone restless — " +
+        options.push_back("Folks say " + kDungeons[worst].name + "'s gone restless - " +
                           std::to_string(s.deathsByDungeon[worst]) + " poor soul" +
                           (s.deathsByDungeon[worst] == 1 ? "" : "s") + " never walked back out.");
     if (s.notoriety > 1.0f)
         options.push_back("The town guard's asking after someone matching your description. Lie low a while, friend.");
-    // Phase 6 — connective tissue rumors, all reading real state.
-    options.push_back("The Fields of Sorrow lie in the deep southern wilds — the dead don't rest where that battle was fought.");
+    // Phase 6 - connective tissue rumors, all reading real state.
+    options.push_back("The Fields of Sorrow lie in the deep southern wilds - the dead don't rest where that battle was fought.");
     {
         Vector2 campPos = kRivalCampSpots[s.rivalCampIdx];
         std::string campRegion = RegionName(RegionAt(campPos));
-        options.push_back(std::string("Word is Murder Inc. made camp in the ") + campRegion + ". Best give it a wide berth — or walk in ready.");
+        options.push_back(std::string("Word is Murder Inc. made camp in the ") + campRegion + ". Best give it a wide berth - or walk in ready.");
     }
     {
-        // Point at the nearest shrine by name — real position, no fake specifics.
+        // Point at the nearest shrine by name - real position, no fake specifics.
         int best = 0; float bd = 1e9f;
         for (size_t si = 0; si < kShrines.size(); si++) {
             float d = Dist(s.wildernessPlayerPos, kShrines[si].pos);
@@ -4610,19 +4633,19 @@ static std::string InnocentRumor(const GameState& s, int id) {
                           RegionName(RegionAt(kShrines[best].pos)) + ". The virtuous find healing there.");
     }
     if (s.notoriety > 1.0f)
-        options.push_back("Reds whisper of a refuge in the far southeast — no questions asked, and pardons for sale. If you've got the gold.");
+        options.push_back("Reds whisper of a refuge in the far southeast - no questions asked, and pardons for sale. If you've got the gold.");
     options.push_back("Rain's coming. My knees never lie about rain.");
-    // Phase 2 — Salt Coast flavor (pure local color, no fake specifics).
-    options.push_back("Saltmere's docks are hiring haulers — tide's been kind and the boats are full.");
+    // Phase 2 - Salt Coast flavor (pure local color, no fake specifics).
+    options.push_back("Saltmere's docks are hiring haulers - tide's been kind and the boats are full.");
     options.push_back("The Sunken Vault's been grumbling under the tide. Sailors swear they hear it through the hulls.");
     const std::string& rumor = options[std::rand() % options.size()];
     if (id == 0) return "Tam mutters: \"" + rumor + "\"";
     if (id == 1) return "Liora smiles softly: \"" + rumor + "\"";
-    if (id == 2) return "Silas leans in close: \"Psst — " + rumor + "\"";
+    if (id == 2) return "Silas leans in close: \"Psst - " + rumor + "\"";
     return "Garran scratches his beard: \"" + rumor + "\"";
 }
 
-// Small gift reward for sparing. Modest by design — a thank-you, not an income.
+// Small gift reward for sparing. Modest by design - a thank-you, not an income.
 static std::string InnocentGift(GameState& s, int id) {
     (void)id;
     int roll = std::rand() % 3;
@@ -4640,7 +4663,7 @@ static std::string InnocentGift(GameState& s, int id) {
 static std::string InnocentBlessing(GameState& s, int id) {
     if (id == 1) {
         s.hp = std::min((float)s.maxHp, s.hp + 15.0f);
-        return "She lays a hand on your brow — you feel your wounds mend (+15 HP).";
+        return "She lays a hand on your brow - you feel your wounds mend (+15 HP).";
     }
     GainKarma(s, 5.0f); GainFame(s, 3.0f);
     return "They'll speak well of you to the next travelers. (+5 Karma, +3 Fame)";
@@ -4651,38 +4674,38 @@ static std::string InnocentBlessing(GameState& s, int id) {
 static std::string InnocentRequestOffer(int id, int kind) {
     if (kind == 0) {
         if (id == 0) return "My staff's about to give out. Fetch me 5 wood and I'll make it worth your while.";
-        if (id == 1) return "The shrine down the road needs firewood. 5 wood, if your heart moves you — I'll pay.";
+        if (id == 1) return "The shrine down the road needs firewood. 5 wood, if your heart moves you - I'll pay.";
         if (id == 2) return "Pack frames! I need 5 wood to mend them. Good gold for honest wood.";
         return "Fence is falling over. Bring me 5 wood and there's coin in it.";
     }
     if (kind == 1) {
         if (id == 0) return "Need 4 ore to re-tip my spear. Paying well.";
-        if (id == 1) return "The chapel bell needs mending — 4 ore, and I'll bless the giver.";
+        if (id == 1) return "The chapel bell needs mending - 4 ore, and I'll bless the giver.";
         if (id == 2) return "Pots to patch! 4 ore and I'll pay proper merchant rates.";
         return "Plowshare's cracked. 4 ore, friend, and I'll pay.";
     }
     if (kind == 2) {
         if (id == 0) return "My boots are more hole than leather. 4 leather, if you're hunting.";
-        if (id == 1) return "Sandals for the pilgrims — 4 leather would clothe two of us.";
+        if (id == 1) return "Sandals for the pilgrims - 4 leather would clothe two of us.";
         if (id == 2) return "Straps and belts! 4 leather, best price on the road.";
         return "Harness is worn through. 4 leather and you've a friend for life.";
     }
     if (kind == 4) { // Phase 2: fish request
         if (id == 0) return "Haven't eaten since yesterday's dawn. 4 fish from the tidal pools, and I'll pay.";
-        if (id == 1) return "The shrine feeds whoever comes hungry — 4 fish would fill the pot. Will you help?";
+        if (id == 1) return "The shrine feeds whoever comes hungry - 4 fish would fill the pot. Will you help?";
         if (id == 2) return "Saltmere pays good coin for fresh catch! Bring me 4 fish, straight from the pools.";
         return "My old bones can't work the nets anymore. 4 fish, friend, and there's coin in it.";
     }
     if (id == 0) return "These roads aren't safe for a lone walker. See me to the town gate and I'll pay.";
     if (id == 1) return "Bandits on the road, they say. Walk with me to the gate? The light will reward you.";
-    if (id == 2) return "This pack's too heavy to run with! Escort me to the gate — gold in it for you.";
+    if (id == 2) return "This pack's too heavy to run with! Escort me to the gate - gold in it for you.";
     return "My knees can't outrun trouble anymore. Walk me to the gate, there's coin in it.";
 }
 static std::string InnocentRequestNeed(int kind) {
     if (kind == 0) return "5 wood";
     if (kind == 1) return "4 ore";
     if (kind == 2) return "4 leather";
-    if (kind == 4) return "4 fish"; // Phase 2: Salt Coast fishery — "the docks pay better than charity"
+    if (kind == 4) return "4 fish"; // Phase 2: Salt Coast fishery - "the docks pay better than charity"
     return "an escort to the town gate";
 }
 static std::string InnocentRequestThanks(int id) {
@@ -4753,7 +4776,7 @@ static void CompleteEscort(GameState& s) {
     s.logLine = "You see " + InnocentName(id) + " safely to the gate. \"" +
                 InnocentRequestThanks(id) + "\" (+" + std::to_string(pay) + " gold, Karma and Fame rise.)";
 }
-// Per-frame escort follow — declared here, defined after kWildernessReturnGatePos.
+// Per-frame escort follow - declared here, defined after kWildernessReturnGatePos.
 static void UpdateEscort(GameState& s, float dt);
 // An escort can't survive leaving the wilderness (no teleport exploit, no
 // stranded request). Death, ghosting, dungeon entry, and town gates all cancel.
@@ -4795,7 +4818,7 @@ static void MerchantBuy(GameState& s, int stockIdx) {
     }
     s.gold -= price;
     s.merchantStock[stockIdx]--;
-    if (kind == 0) { // heal potion — mirrors TryBuyHealPotion
+    if (kind == 0) { // heal potion - mirrors TryBuyHealPotion
         auto it = std::find_if(s.potions.begin(), s.potions.end(),
                                [](const PotionStack& p) { return p.name == "Heal Potion"; });
         if (it == s.potions.end()) s.potions.push_back({ "Heal Potion", "heal", 30, 1 });
@@ -4819,7 +4842,7 @@ static void SnoopInnocent(GameState& s) {
     if (succeeded) {
         s.innocentMem[id].snooped++;
         s.innocentEncounter->canSteal = true;
-        s.logLine = "You quietly check " + InnocentName(id) + "'s belongings — exactly " +
+        s.logLine = "You quietly check " + InnocentName(id) + "'s belongings - exactly " +
                      std::to_string(enc.gold) + " gold, and you've got a read on them now." + gainNote;
         return;
     }
@@ -4851,7 +4874,7 @@ static void StealFromInnocent(GameState& s) {
         s.logLine = "You lift " + std::to_string(enc.gold) + " gold from " + InnocentName(id) +
                      " without them noticing." + gainNote;
     } else {
-        s.logLine = "Your nerve fails you at the last second — you let " + InnocentName(id) +
+        s.logLine = "Your nerve fails you at the last second - you let " + InnocentName(id) +
                      " walk on, empty-handed but unnoticed." + gainNote;
     }
 }
@@ -4862,7 +4885,7 @@ static void SpareInnocent(GameState& s) {
     bool reduced = s.notoriety > 0.0f;
     s.notoriety = std::max(0.0f, s.notoriety - 5.0f);
     GainKarma(s, 10.0f);
-    // Sparing pays: a rumor, a small gift, or a blessing — in their voice.
+    // Sparing pays: a rumor, a small gift, or a blessing - in their voice.
     float roll = RandUnit();
     std::string reward = (roll < 0.55f) ? InnocentRumor(s, id)
                        : (roll < 0.80f) ? InnocentGift(s, id)
@@ -4889,14 +4912,14 @@ static void MurderInnocent(GameState& s) {
 }
 
 // JS switchTab(): a Murderer-tier character gets confiscated and bounced out the
-// moment they try to enter the crafting buildings — mapped here onto the Craft tab.
+// moment they try to enter the crafting buildings - mapped here onto the Craft tab.
 static void GuardZoneConfiscateIfMurderer(GameState& s, Screen& targetScreen) {
     if (targetScreen != Screen::Craft || GetNotorietyTier(s) != NotorietyTier::Murderer) return;
     int goldLost = s.gold;
     int itemsLost = (int)s.backpack.size();
     s.gold = 0;
     s.backpack.clear();
-    s.logLine = "Emberhold guards spot you at the gate and drive you out — you flee, dropping everything you carried (" +
+    s.logLine = "Emberhold guards spot you at the gate and drive you out - you flee, dropping everything you carried (" +
                  std::to_string(goldLost) + " gold, " + std::to_string(itemsLost) + " items).";
     targetScreen = Screen::Town;
 }
@@ -4947,7 +4970,7 @@ static void GraySnoopChoice(GameState& s) {
     if (success) {
         s.grayEncounter->canSteal = true;
         s.grayEncounter->previewGold = (int)std::round(enc.baseGold * 0.65f);
-        s.logLine = "You get a good read on " + enc.name + " — carrying about " +
+        s.logLine = "You get a good read on " + enc.name + " - carrying about " +
                      std::to_string(s.grayEncounter->previewGold) + " gold." + gainNote;
         return;
     }
@@ -4961,9 +4984,9 @@ static void GraySnoopChoice(GameState& s) {
             float raw = target.level * (0.8f + RandUnit() * 0.6f);
             int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
             s.hp = std::max(1, s.hp - dmg); // JS: floored at 1, can't die from the surprise hit itself
-            s.combat->Log("Caught off guard — hit for " + std::to_string(dmg) + " damage");
+            s.combat->Log("Caught off guard - hit for " + std::to_string(dmg) + " damage");
         } else {
-            s.combat->Log("Caught off guard — but they miss");
+            s.combat->Log("Caught off guard - but they miss");
         }
     }
     s.logLine = enc.name + " spots you sizing them up and comes in swinging." + gainNote;
@@ -4980,13 +5003,13 @@ static void GrayStealChoice(GameState& s) {
         s.logLine = "You slip away with " + std::to_string(enc.previewGold) + " gold from " + enc.name +
                      " without a fight." + gainNote;
     } else {
-        s.logLine = "Your nerve fails you — you let " + enc.name + " pass, empty-handed but unnoticed." + gainNote;
+        s.logLine = "Your nerve fails you - you let " + enc.name + " pass, empty-handed but unnoticed." + gainNote;
     }
 }
 
 
 // Handles a monster win (corpse drop, dungeon XP) when called with monsterHP <= 0.
-// Mirrors endCombatWin() — gold+leather sit on a corpse until skinned, rather than
+// Mirrors endCombatWin() - gold+leather sit on a corpse until skinned, rather than
 // being granted immediately (rarity-item drops remain out of scope). Returns true if
 // the monster was in fact defeated (and thus combat has ended).
 // JS: both endCombatWin() and endCombatLoss() give a 25% chance at a small Magic
@@ -5010,7 +5033,7 @@ static bool CheckMonsterDefeatedAndHandleWin(GameState& s) {
     std::string msg = "Defeated the " + c.monster.name + "! Corpse left behind with leather and " +
                         std::to_string(goldFound) + " gold to loot.";
     // dungeonIdx < 0 means this isn't one of the 4 curated dungeons (Wilderness
-    // monsters use -1, same sentinel as ambushes/Bloodstained) — no dungeon XP/boss
+    // monsters use -1, same sentinel as ambushes/Bloodstained) - no dungeon XP/boss
     // ladder to update, and indexing either array below with a negative index would be
     // out of bounds.
     if (!c.monster.isBoss && c.dungeonIdx >= 0) {
@@ -5031,7 +5054,7 @@ static bool CheckMonsterDefeatedAndHandleWin(GameState& s) {
 }
 
 // The monster's counter-attack, shared by every player action (physical, offensive
-// spell, or heal spell) — mirrors monsterAttackRoll() plus the loss check from
+// spell, or heal spell) - mirrors monsterAttackRoll() plus the loss check from
 // endCombatLoss(). Also updates playerWasHit for the next round's rollSpellDisrupted().
 static void MonsterCounterAndMaybeEnd(GameState& s) {
     if (!s.combat.has_value()) return; // combat already ended (e.g. a win, above)
@@ -5067,7 +5090,7 @@ static void MonsterCounterAndMaybeEnd(GameState& s) {
         }
         // --- Loss: mirrors endCombatLoss() ---
         MaybeGainMagicResist(s, c);
-        s.logLine = "You were defeated by the " + c.monster.name + " — you retreat, battered.";
+        s.logLine = "You were defeated by the " + c.monster.name + " - you retreat, battered.";
         s.combat.reset();
         ApplyShaken(s);
         if (!TryTriggerAmbush(s, "dungeon")) TryTriggerInnocentEncounter(s, "dungeon");
@@ -5077,11 +5100,11 @@ static void MonsterCounterAndMaybeEnd(GameState& s) {
 
 // ---------------------------------------------------------------------
 // Live Wilderness combat (GameState::ActiveMonster/wildEngaged, first slice of the
-// real-time combat rework) — resolved separately from the panel-based state.combat
+// real-time combat rework) - resolved separately from the panel-based state.combat
 // system above rather than shoehorned into it, since CombatState's win/loss handlers
 // are written around a scrolling combat log (CombatState::Log) that doesn't exist out
 // on the map. These three mirror the exact same formulas/rewards as the functions
-// above (hit chance, damage, corpse drop, loss retreat, ambush/innocent chaining) —
+// above (hit chance, damage, corpse drop, loss retreat, ambush/innocent chaining) -
 // only the "where does this state live and how is it presented" part differs. Dungeon
 // monsters and ambushes are untouched, still resolved by CheckMonsterDefeatedAndHandleWin/
 // MonsterCounterAndMaybeEnd/ResolveCombatRound above.
@@ -5095,7 +5118,7 @@ static void LiveMaybeGainMagicResist(GameState& s) {
 }
 
 // Same three skill-gain rolls as ApplyWeaponTraining (active weapon category, Tactics,
-// Anatomy), minus the combat-log lines — there's no scrolling log panel out on the map.
+// Anatomy), minus the combat-log lines - there's no scrolling log panel out on the map.
 static void LiveApplyWeaponTraining(GameState& s) {
     float GameState::* skillField = ActiveWeaponSkillField(s);
     GainSkillCapped(s.*skillField, RollGatherSkillGain(s.*skillField), 100.0f);
@@ -5106,16 +5129,16 @@ static void LiveApplyWeaponTraining(GameState& s) {
 }
 
 // Same reward shape as CheckMonsterDefeatedAndHandleWin's non-boss branch with
-// dungeonIdx<0 (no dungeon XP/boss ladder — Wilderness monsters aren't part of any of
+// dungeonIdx<0 (no dungeon XP/boss ladder - Wilderness monsters aren't part of any of
 // the 4 curated dungeons' progression).
-// (Win handling moved to BeginWildMonsterDeath/FinishMonsterDeath — the fight now
+// (Win handling moved to BeginWildMonsterDeath/FinishMonsterDeath - the fight now
 // ends with a death animation; rewards/corpse/ambush chaining run when it completes.)
 
-// Same shape as MonsterCounterAndMaybeEnd's loss branch (the ordinary-monster path —
+// Same shape as MonsterCounterAndMaybeEnd's loss branch (the ordinary-monster path -
 // Wilderness monsters are never murderers).
 static void EndWildMonsterLoss(GameState& s, const std::string& name) {
     LiveMaybeGainMagicResist(s);
-    s.logLine = "You were defeated by the " + name + " — you retreat, battered.";
+    s.logLine = "You were defeated by the " + name + " - you retreat, battered.";
     s.wildEngaged.reset();
     s.wildExtraAttackers.clear(); // the pack scatters
     ApplyShaken(s);
@@ -5123,10 +5146,10 @@ static void EndWildMonsterLoss(GameState& s, const std::string& name) {
     BeginPlayerDeath(s);
 }
 // Harsher loss consequence once the Rival has proven it can beat the player (see
-// GameState::rivalHasBeatenPlayer) — same stakes as the Notoriety system's
+// GameState::rivalHasBeatenPlayer) - same stakes as the Notoriety system's
 // EndMurdererLoss (40% gold + whole backpack on outright defeat) but built on
 // EndWildMonsterLoss's live-combat foundation instead, since the real EndMurdererLoss
-// needs a CombatState (state.combat) this live-combat path doesn't have — confirmed by
+// needs a CombatState (state.combat) this live-combat path doesn't have - confirmed by
 // reading its body, which reads combat.monster.* fields with no live-combat
 // equivalent. See the "Rival hunts you" plan for why these can't just be merged.
 static void EndWildMonsterMurdererLoss(GameState& s, const std::string& name) {
@@ -5143,18 +5166,18 @@ static void EndWildMonsterMurdererLoss(GameState& s, const std::string& name) {
     if (!TryTriggerAmbush(s, "dungeon")) TryTriggerInnocentEncounter(s, "dungeon");
     BeginPlayerDeath(s);
 }
-// Dungeon counterparts of the two functions above (2026-09-22) — same reward shape as
+// Dungeon counterparts of the two functions above (2026-09-22) - same reward shape as
 // CheckMonsterDefeatedAndHandleWin/MonsterCounterAndMaybeEnd's ordinary-monster paths,
 // just without a CombatState::Log to write to. Unlike Wilderness monsters, a dungeon
 // monster's dungeonIdx is always valid, so a non-boss win also advances dungeonXP and
-// can unlock the boss — mirrors CheckMonsterDefeatedAndHandleWin's dungeon branch
+// can unlock the boss - mirrors CheckMonsterDefeatedAndHandleWin's dungeon branch
 // exactly (main.cpp, CheckMonsterDefeatedAndHandleWin).
-// (Win handling moved to BeginDungeonMonsterDeath/FinishMonsterDeath — same deal.)
+// (Win handling moved to BeginDungeonMonsterDeath/FinishMonsterDeath - same deal.)
 static void EndDungeonMonsterLoss(GameState& s, const std::string& name) {
     LiveMaybeGainMagicResist(s);
     if (s.selectedDungeon.has_value())
         s.deathsByDungeon[std::clamp(*s.selectedDungeon, 0, (int)kDungeons.size() - 1)]++; // feeds "restless dungeon" rumors (Phase 4: was clamped to 4)
-    s.logLine = "You were defeated by the " + name + " — you retreat, battered.";
+    s.logLine = "You were defeated by the " + name + " - you retreat, battered.";
     s.dungeonEngaged.reset();
     s.dungeonExtraAttackers.clear(); // the pack scatters
     ApplyShaken(s);
@@ -5167,7 +5190,7 @@ static void EndDungeonMonsterLoss(GameState& s, const std::string& name) {
 // combatRound()'s core melee exchange plus the pet branch.
 // JS applyWeaponTraining(): trains the active weapon-category skill (or Wrestling
 // unarmed) plus Tactics and Anatomy, every round regardless of hit or miss. Training
-// always writes the raw skill value — only usage (hit chance, CombatPower) is
+// always writes the raw skill value - only usage (hit chance, CombatPower) is
 // Echo-gated, matching the JS where benching never blocks training.
 static void ApplyWeaponTraining(GameState& s, CombatState& c) {
     float GameState::* skillField = ActiveWeaponSkillField(s);
@@ -5225,7 +5248,7 @@ static void FleeCombat(GameState& s) {
             float raw = c.monster.level * (0.8f + RandUnit() * 0.6f);
             int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
             s.hp = std::max(0, s.hp - dmg);
-            s.logLine = "You flee — the " + c.monster.name + " hits you for " + std::to_string(dmg) + " damage.";
+            s.logLine = "You flee - the " + c.monster.name + " hits you for " + std::to_string(dmg) + " damage.";
         } else {
             s.logLine = "You flee safely.";
         }
@@ -5254,7 +5277,7 @@ static void AmbushFight(GameState& s) {
     // The combat panel only exists inside DrawHuntScreen, but an ambush can trigger from
     // any screen (gathering on Town, gathering/taming in the Wilderness, ending a
     // dungeon fight, ...). Without this, choosing Fight silently started combat in state
-    // with no screen able to render it — looked exactly like "Fight did nothing".
+    // with no screen able to render it - looked exactly like "Fight did nothing".
     s.screen = Screen::Hunt;
 }
 static void AmbushFlee(GameState& s) {
@@ -5264,12 +5287,12 @@ static void AmbushFlee(GameState& s) {
 }
 
 // ---------------------------------------------------------------------
-// Bandages & Healing — ported from craftBandages()/buyProvisionerItem()/
+// Bandages & Healing - ported from craftBandages()/buyProvisionerItem()/
 // useBandageOutOfCombat()/combatBandage() in the JS. Bandages are a plain
 // consumable count (not a backpack item): the Tailor crafts 5 from 2
 // leather for free (no skill required), and a Provisioner-stand-in
 // purchase (same simplification as TryBuyReagents above) tops them up
-// with gold at the JS's real prices. Using one — in or out of combat —
+// with gold at the JS's real prices. Using one - in or out of combat -
 // always trains Healing (and a 30% chance of Anatomy) regardless of
 // success, and counts as your turn in combat exactly like a heal spell.
 // ---------------------------------------------------------------------
@@ -5296,7 +5319,7 @@ static int BandageHealAmount(const GameState& s) {
 }
 // Shared by both use-sites. Matches the JS's exact ordering: the success roll uses
 // the skill value *before* this use's training gain, but the heal amount (computed
-// only if it succeeded) uses the value *after* — quirky, but faithful to the original.
+// only if it succeeded) uses the value *after* - quirky, but faithful to the original.
 static std::string ApplyBandage(GameState& s) {
     s.bandages -= 1;
     bool succeeded = RandUnit() * 100.0f < BandageSuccessChance(s);
@@ -5309,7 +5332,7 @@ static std::string ApplyBandage(GameState& s) {
     if (succeeded) {
         int healAmt = BandageHealAmount(s);
         s.hp = std::min(s.maxHp, s.hp + healAmt);
-        return "Bandage successful — healed " + std::to_string(healAmt) + "." + note;
+        return "Bandage successful - healed " + std::to_string(healAmt) + "." + note;
     }
     return "The bandage fails to help." + note;
 }
@@ -5320,7 +5343,7 @@ static void UseBandageOutOfCombat(GameState& s) {
     s.logLine = ApplyBandage(s);
 }
 // Mirrors combatBandage(): healing yourself still counts as your turn, so the pet
-// and monster still take theirs afterward — same shape as CastHealSpell above.
+// and monster still take theirs afterward - same shape as CastHealSpell above.
 static void UseBandageInCombat(GameState& s) {
     if (!s.combat.has_value() || s.combat->phase != CombatPhase::PlayerTurn) return;
     if (s.bandages < 1) { s.logLine = "No bandages left."; return; }
@@ -5333,7 +5356,7 @@ static void UseBandageInCombat(GameState& s) {
 }
 
 // ---------------------------------------------------------------------
-// Magic / spellcasting logic — see the "Magic / spellcasting" data section
+// Magic / spellcasting logic - see the "Magic / spellcasting" data section
 // above for what's simplified. Ported from evalIntMultiplier()/
 // spellPowerFor()/spellSuccessChance()/rollSpellDisrupted()/
 // applySpellTraining()/regenMana() and the spell branches of
@@ -5342,7 +5365,7 @@ static void UseBandageInCombat(GameState& s) {
 
 // Flat reagent cost for any spell cast in live combat (Wilderness or dungeons),
 // overriding the panel system's per-circle Spell::reagentCost (1-4) for this system
-// specifically — Mark's explicit ask, a deliberate simplification "for now" rather than
+// specifically - Mark's explicit ask, a deliberate simplification "for now" rather than
 // scaling reagent cost by spell circle the way the turn-based panel does.
 static const int kLiveCombatReagentCost = 1;
 static float MaxMana(const GameState& s) { return (float)s.intStat; } // JS currentMaxMana()
@@ -5427,7 +5450,7 @@ static void CastOffensiveSpell(GameState& s, int spellIdx) {
 }
 
 // Casts a heal spell (Mending Word / Greater Mending) in combat. Mirrors
-// combatHealSpell() — healing yourself still counts as your turn, so the pet and
+// combatHealSpell() - healing yourself still counts as your turn, so the pet and
 // monster still take theirs afterward.
 static void CastHealSpell(GameState& s, int spellIdx) {
     if (!s.combat.has_value() || s.combat->phase != CombatPhase::PlayerTurn) return;
@@ -5462,27 +5485,27 @@ static void CastHealSpell(GameState& s, int spellIdx) {
     MonsterCounterAndMaybeEnd(s);
 }
 
-// Live-combat counterpart of CastHealSpell above (2026-09-22, spell hotbar) — shared by
+// Live-combat counterpart of CastHealSpell above (2026-09-22, spell hotbar) - shared by
 // both Wilderness and dungeon live combat since it has no monster targeting at all, so
 // unlike the offensive live-cast functions it needs no per-screen variant. The engaged
 // monster's own attack cooldown keeps ticking independently regardless of what the
 // player does, so there's nothing else to resolve here (no RollSpellDisrupted either,
-// same simplification the offensive live casts already make — no equivalent state to
+// same simplification the offensive live casts already make - no equivalent state to
 // read out on the map). Cooldown/affordability are checked by the caller (the hotbar
 // row), same division of responsibility as tryCastSpellAtEngagedMonster's call sites.
 // (CastLiveUtilitySpell moved down to the world-combat FX section, next to the
-// other live-cast routers — it needs kCastEffectDuration/kSpellCooldown.)
+// other live-cast routers - it needs kCastEffectDuration/kSpellCooldown.)
 
-// Risk-free practice outside combat — mirrors startCast()/tickCast(): spends mana
+// Risk-free practice outside combat - mirrors startCast()/tickCast(): spends mana
 // (not reagents) purely to train Magery/Eval Int/Meditation, no combat effect.
 //
 // 2026-09-21: Mark reported being able to practice a Circle 7 spell at only 10
-// Magery, calling it out as a bug — the original JS this was ported from has the
+// Magery, calling it out as a bug - the original JS this was ported from has the
 // exact same gap (mana-only gate, no skill check at all), so this is a deliberate
 // deviation from the port, not a fix to a porting mistake. Added the same hard
 // skill gate combat casting already uses (EffectiveSkill >= spell.minSkill); this
 // only works because Circle 1's minSkill was also dropped from 10 to 0 in kSpells
-// below (a starting-Magery-0 character could never practice ANYTHING otherwise —
+// below (a starting-Magery-0 character could never practice ANYTHING otherwise -
 // found and flagged before implementing, not discovered after).
 static bool CanPracticeSpell(const GameState& s, const Spell& spell) {
     return EffectiveSkill(s, &GameState::magery) >= (float)spell.minSkill;
@@ -5506,14 +5529,14 @@ static void TryPracticeSpell(GameState& s, int spellIdx) {
 // Simplification stand-in for the Provisioner (not ported): buy reagents for gold
 // so Magic doesn't get permanently stuck once the starting 5 run out.
 static void TryBuyReagents(GameState& s, int amount) {
-    int cost = amount; // 1 gold per reagent — arbitrary, flagged as a stand-in
+    int cost = amount; // 1 gold per reagent - arbitrary, flagged as a stand-in
     if (s.gold < cost) { s.logLine = "Not enough gold to buy reagents."; return; }
     s.gold -= cost;
     s.reagents += amount;
     s.logLine = "Bought " + std::to_string(amount) + " reagents for " + std::to_string(cost) + " gold.";
 }
 
-// Phase 3 — the Frostmere Fur Trader. Sells fur-lined armor (real wearable armor
+// Phase 3 - the Frostmere Fur Trader. Sells fur-lined armor (real wearable armor
 // items with cold-themed names; no cold-survival stat exists, per the assignment)
 // and buys the player's furs at a premium. Gear is mid-tier (Chain Mail is power
 // 40-50), priced for the road to the Frostbound Tomb.
@@ -5532,7 +5555,7 @@ static void TryBuyFurGear(GameState& s, const FurGear& gear) {
     s.backpack.push_back(Item{ s.nextItemId++, gear.name, ItemType::Armor, gear.slot, "", gear.power, "" });
     s.logLine = "Bought " + std::string(gear.name) + " for " + std::to_string(gear.price) + " gold.";
 }
-static void TrySellFurs(GameState& s) { // Fur Trader pays 15g per fur — the premium price
+static void TrySellFurs(GameState& s) { // Fur Trader pays 15g per fur - the premium price
     if (s.furs <= 0) { s.logLine = "You have no furs to sell."; return; }
     int gained = s.furs * 15;
     s.gold += gained;
@@ -5541,7 +5564,7 @@ static void TrySellFurs(GameState& s) { // Fur Trader pays 15g per fur — the p
     PlaySfx(SfxId::Coin);
 }
 
-// JS meditate(): a single instant click, not a channeled/repeating action — the C++
+// JS meditate(): a single instant click, not a channeled/repeating action - the C++
 // port previously had this wrong (a toggle that looped forever training a flat 5-6
 // point Meditation gain every 8s and never restored any mana at all; see memory/commit
 // history). One press: no-ops in combat, no-ops at full mana (just a log line, no skill
@@ -5567,7 +5590,7 @@ static void Meditate(GameState& s) {
 }
 
 // ---------------------------------------------------------------------
-// Taming & pets logic — see the "Taming & pets" data section above for
+// Taming & pets logic - see the "Taming & pets" data section above for
 // what's simplified. Ported from tameChance()/petSlotCapacity()/
 // resolveTameAttempt()/healPet()/sellPet()/trainPetSkill() and the pet's
 // turn inside combatRound() in the JS.
@@ -5641,7 +5664,7 @@ static void ResolveTameAttempt(GameState& s) {
     if (succeeded) {
         if (MaybeGainStat(s, &GameState::str, 0.08f)) gainNote += " (STR +1)";
         if ((int)s.pets.size() >= PetSlotCapacity(s)) {
-            s.logLine = "You tame a " + creature.name + ", but your stable has no free slots — it wanders off." + gainNote;
+            s.logLine = "You tame a " + creature.name + ", but your stable has no free slots - it wanders off." + gainNote;
         } else {
             int str = RollInRange(creature.strRange);
             int dex = RollInRange(creature.dexRange);
@@ -5732,13 +5755,13 @@ static void TrainPetSkillGold(GameState& s, int petId, float Pet::* skillField, 
 }
 
 // ---------------------------------------------------------------------
-// Save / load — ported from save()/load()/applyOfflineAutoGather() in the
+// Save / load - ported from save()/load()/applyOfflineAutoGather() in the
 // JS. The JS saves the whole state object as JSON to localStorage on a
 // 2-second timer; this scaffold writes a plain key=value text file to
 // disk on the same cadence (plus on quit), and loads it once at startup.
 //
 // Simplifications from the original (flagged, not silently dropped):
-//   - No JSON — a hand-rolled key=value / pipe-delimited text format
+//   - No JSON - a hand-rolled key=value / pipe-delimited text format
 //     covers every persistent field. It's not meant to be hand-edited,
 //     just readable enough to debug.
 //   - Transient/in-progress state isn't persisted: an active combat
@@ -5751,19 +5774,19 @@ static void TrainPetSkillGold(GameState& s, int petId, float Pet::* skillField, 
 //     than failing the whole load.
 // ---------------------------------------------------------------------
 
-// Web save persistence (2026-09-22) — Mark reported losing progress every time he
+// Web save persistence (2026-09-22) - Mark reported losing progress every time he
 // reopened the browser. Root cause: Emscripten's default filesystem (MEMFS) is
-// entirely in-memory and is wiped the instant the page unloads — SaveGame's plain
+// entirely in-memory and is wiped the instant the page unloads - SaveGame's plain
 // std::ofstream writes were succeeding every autosave, they just never survived a
 // reload, since nothing backed that filesystem with real browser storage. Desktop is
 // unaffected (a real OS filesystem) and needed no changes.
 // Fix: mount IndexedDB-backed storage (IDBFS) at /persist and keep the save file
 // there instead. IDBFS's actual read/write to IndexedDB is asynchronous, so this
 // needs two-sided glue: `syncfs(true, ...)` pulls last session's save down from
-// IndexedDB into the in-memory FS — g_persistReady only flips once that completes,
+// IndexedDB into the in-memory FS - g_persistReady only flips once that completes,
 // and UpdateDrawFrame (see its own comment) holds off calling LoadGame/starting the
 // game until it does, rather than reading an empty directory. `syncfs(false, ...)`
-// pushes the in-memory FS back up to IndexedDB — called from inside SaveGame itself
+// pushes the in-memory FS back up to IndexedDB - called from inside SaveGame itself
 // (below) after every write, so nothing new to remember at future SaveGame call sites.
 #ifdef __EMSCRIPTEN__
 static const char* kSaveFilePath = "/persist/townforge_save.txt";
@@ -5880,7 +5903,7 @@ static int BackpackCap(const GameState& s) {
 
 static void SaveGame(const GameState& s) {
     std::ofstream out(kSaveFilePath, std::ios::trunc);
-    if (!out.is_open()) return; // JS: storage unavailable — keep playing without persistence
+    if (!out.is_open()) return; // JS: storage unavailable - keep playing without persistence
     out << "version=1\n";
     out << "characterName=" << s.characterName << "\n";
     out << "gold=" << s.gold << "\nwood=" << s.wood << "\nore=" << s.ore << "\nleather=" << s.leather << "\n";
@@ -5888,7 +5911,7 @@ static void SaveGame(const GameState& s) {
     out << "bandages=" << s.bandages << "\n";
     out << "houseTierIdx=" << s.houseTierIdx << "\nhouseHue=" << s.houseHue << "\nhouseName=" << s.houseName << "\n";
     out << "houseModuleLevel=" << s.houseModuleLevel[0] << "," << s.houseModuleLevel[1] << "," << s.houseModuleLevel[2] << "," << s.houseModuleLevel[3] << "\n";
-    // Custom wilderness housing (2026-09-25) — new keys; old saves simply lack them.
+    // Custom wilderness housing (2026-09-25) - new keys; old saves simply lack them.
     out << "housePlotIdx=" << s.housePlotIdx << "\n";
     out << "houseLayout=" << s.houseLayout << "\n";
     out << "hearthBound=" << (s.hearthBound ? 1 : 0) << "\n";
@@ -5917,7 +5940,7 @@ static void SaveGame(const GameState& s) {
            "\nrivalKillsOnPlayer=" << s.rivalKillsOnPlayer <<
            "\nrivalCampIdx=" << s.rivalCampIdx << "\nrivalCampTimer=" << s.rivalCampTimer <<
            "\nrefugeKnown=" << (s.refugeKnown ? 1 : 0) << "\n"; // Phase 6
-    // Murder Inc. blades (2026-09-24) — levels and positions persist like the champion's
+    // Murder Inc. blades (2026-09-24) - levels and positions persist like the champion's
     for (int bi = 0; bi < kBladeCount; bi++) {
         out << "blade" << bi << "Level=" << s.blades[bi].level << "\n"
             << "blade" << bi << "PosX=" << s.blades[bi].pos.x << "\n"
@@ -5948,6 +5971,7 @@ static void SaveGame(const GameState& s) {
     out << "combatHotbar=";
     for (size_t i = 0; i < s.combatHotbar.size(); i++) out << s.combatHotbar[i] << (i + 1 < s.combatHotbar.size() ? "," : "\n");
     out << "guideSeen=" << (s.guideSeen ? 1 : 0) << "\n"; // newbie walkthrough already shown (2026-09-25)
+    out << "markedTowns=" << s.markedTowns << "\n"; // UO-style travel: recall destinations bitmask (2026-09-25)
 
     WriteEquipSlot(out, "equipped.leftHand", s.equipped.leftHand);
     WriteEquipSlot(out, "equipped.rightHand", s.equipped.rightHand);
@@ -5988,7 +6012,7 @@ static void SaveGame(const GameState& s) {
         << "," << (int)s.innocentReqCooldown[2] << "," << (int)s.innocentReqCooldown[3] << "\n";
     out.close();
 #ifdef __EMSCRIPTEN__
-    // The write above only lands in the in-memory FS — flush it to IndexedDB so it
+    // The write above only lands in the in-memory FS - flush it to IndexedDB so it
     // actually survives a reload. Covers every SaveGame call site automatically (the
     // periodic autosave and any future one) with nothing to remember at each site.
     JS_FlushPersistence();
@@ -6023,7 +6047,7 @@ static void ApplyOfflineAutoGather(GameState& s, long long elapsedSeconds) {
     if (NextAutoGatherType(s).empty()) s.autoGather = false;
 }
 
-// Returns true if a save file was found and loaded (whether or not it parsed cleanly —
+// Returns true if a save file was found and loaded (whether or not it parsed cleanly -
 // a partially-corrupt file still applies whatever fields it could read, matching the
 // JS's per-field fallback-to-default approach).
 static bool LoadGame(GameState& s) {
@@ -6032,6 +6056,7 @@ static bool LoadGame(GameState& s) {
 
     long long lastActiveEpoch = 0;
     int saveVersion = 1; // missing = pre-ladder seven-slot format
+    bool sawMarkedTowns = false; // UO-style travel (2026-09-25): pre-marking saves lack the key
     std::string line;
     while (std::getline(in, line)) {
         size_t eq = line.find('=');
@@ -6044,7 +6069,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "houseHue") s.houseHue = std::atoi(val.c_str());
         else if (key == "houseName") s.houseName = val;
         else if (key == "houseModuleLevel") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 4; i++) s.houseModuleLevel[i] = std::atoi(p[i].c_str()); }
-        // Custom wilderness housing (2026-09-25) — missing keys = pre-housing save.
+        // Custom wilderness housing (2026-09-25) - missing keys = pre-housing save.
         else if (key == "housePlotIdx") s.housePlotIdx = std::atoi(val.c_str());
         else if (key == "houseLayout") s.houseLayout = val;
         else if (key == "hearthBound") s.hearthBound = std::atoi(val.c_str()) != 0;
@@ -6107,7 +6132,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "rivalCampIdx") s.rivalCampIdx = std::clamp(std::atoi(val.c_str()), 0, (int)kRivalCampSpots.size() - 1); // Phase 6
         else if (key == "rivalCampTimer") s.rivalCampTimer = std::max(0.0f, (float)std::atof(val.c_str())); // Phase 6
         else if (key == "refugeKnown") s.refugeKnown = std::atoi(val.c_str()) != 0; // Phase 6
-        // Murder Inc. blades (2026-09-24) — old saves without these keys keep the defaults
+        // Murder Inc. blades (2026-09-24) - old saves without these keys keep the defaults
         else if (key.compare(0, 5, "blade") == 0 && key.size() > 6 && std::isdigit((unsigned char)key[5])) {
             int bi = key[5] - '0';
             if (bi >= 0 && bi < kBladeCount) {
@@ -6141,6 +6166,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "bloodstainedBossDefeated") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 3; i++) s.bloodstainedBossDefeated[i] = std::atoi(p[i].c_str()) != 0; }
         else if (key == "combatHotbar") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < s.combatHotbar.size(); i++) s.combatHotbar[i] = std::atoi(p[i].c_str()); }
         else if (key == "guideSeen") { s.guideSeen = (val == "1"); }
+        else if (key == "markedTowns") { s.markedTowns = std::atoi(val.c_str()); sawMarkedTowns = true; }
         else if (key == "equipped.leftHand") ReadEquipSlot(val, s.equipped.leftHand);
         else if (key == "equipped.rightHand") ReadEquipSlot(val, s.equipped.rightHand);
         else if (key == "equipped.helmet") ReadEquipSlot(val, s.equipped.helmet);
@@ -6186,7 +6212,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "innocentReqCooldown") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 4; i++) s.innocentReqCooldown[i] = (float)std::max(0, std::atoi(p[i].c_str())); }
     }
 
-    // Escort state doesn't persist — a loaded "active escort" request would have no
+    // Escort state doesn't persist - a loaded "active escort" request would have no
     // follower to complete, so release it back to a cooldown instead of stranding it.
     for (int i = 0; i < 4; i++)
         if (s.innocentReqState[i] == 2 && s.innocentReqKind[i] == 3) {
@@ -6194,13 +6220,19 @@ static bool LoadGame(GameState& s) {
             s.innocentReqCooldown[i] = kInnocentRequestCooldown;
         }
 
+    // UO-style travel migration (2026-09-25): pre-marking saves have no record of
+    // visited towns, and selectedTown isn't persisted either. Every character
+    // starts in Emberhold, so mark just it - the other towns mark themselves the
+    // next time the player walks through their gates.
+    if (!sawMarkedTowns) s.markedTowns = (1 << 0);
+
     // Custom housing migration (2026-09-25): the town house building is retired.
     // Tier, hue, name, and workshop wings carry over untouched (same fields); the
     // player just claims a wilderness plot now. Runs once per save.
     if (!s.wildHouseMigrated) {
         s.wildHouseMigrated = true;
         if (s.houseTierIdx > 0)
-            s.logLine = "Your town house has been retired. Workshop wings and tier carried over — claim a wilderness plot to build your homestead.";
+            s.logLine = "Your town house has been retired. Workshop wings and tier carried over - claim a wilderness plot to build your homestead.";
     }
     // Validate loaded housing state against the static plot table; transient
     // designer/chest UI flags never survive a reload.
@@ -6221,7 +6253,7 @@ static bool LoadGame(GameState& s) {
         if (elapsed > 0) {
             ApplyOfflineAutoGather(s, elapsed);
             // The Rival's own small growth trickle while you were away (2026-09-23,
-            // "Rival hunts you" plan) — "it's been out there hunting/gathering/
+            // "Rival hunts you" plan) - "it's been out there hunting/gathering/
             // training" without literally simulating any of that. Reuses this same
             // elapsed-since-last-save value rather than tracking a second epoch just
             // for the Rival (see GameState::rivalLevel's comment). Capped at 3 days'
@@ -6234,7 +6266,7 @@ static bool LoadGame(GameState& s) {
         }
     }
     // Retroactive fixup for saves written before maxHp switched from "50 + str" to a
-    // literal "maxHp == str" (Mark's call) — recompute from the loaded str rather than
+    // literal "maxHp == str" (Mark's call) - recompute from the loaded str rather than
     // trusting the stale saved maxHp, which would otherwise carry the old +50 forever.
     // Preserves current damage (missing HP) rather than fully healing on the fixup.
     bool wasDeadAtSave = (s.hp <= 0); // autosave runs every 2s, even mid-death/ghost
@@ -6242,7 +6274,7 @@ static bool LoadGame(GameState& s) {
     s.maxHp = s.str;
     s.hp = std::max(1, s.maxHp - missingHp);
     if (wasDeadAtSave) {
-        // Saved mid-death — the ghost fields are transient and don't survive a
+        // Saved mid-death - the ghost fields are transient and don't survive a
         // reload, so complete the resurrection now: full HP at the Town 1 gate,
         // same as the ghost timer finishing. The death penalty was already
         // applied before the save.
@@ -6267,7 +6299,7 @@ static void ResetGame(GameState& s) {
 }
 
 // ---------------------------------------------------------------------
-// Crafting & equipment — ported from craftItem()/equipItem()/sellItem()/
+// Crafting & equipment - ported from craftItem()/equipItem()/sellItem()/
 // applyCraftGainTaper()/gainSkill() in the JS.
 // ---------------------------------------------------------------------
 
@@ -6275,7 +6307,7 @@ static void ResetGame(GameState& s) {
 // Mirrors craftItem(): checks the workshop's skill cap, the resource cost, then
 // rolls a skill gain and a quality tier for the finished item.
 // capOverride (>= 0) is used by home-workshop crafting (see DrawHouseScreen) to cap
-// skill at the wing's level instead of the real town building's — everything else
+// skill at the wing's level instead of the real town building's - everything else
 // (skill value, resource pool, recipe list) is shared with the town building since
 // it's the same underlying craft, just capped lower at home.
 static void TryCraftItem(GameState& s, int buildingIdx, int recipeIdx, int capOverride = -1) {
@@ -6293,7 +6325,7 @@ static void TryCraftItem(GameState& s, int buildingIdx, int recipeIdx, int capOv
     if (effectiveSkill < r.reqSkill) {
         if (buildingCap < r.reqSkill)
             s.logLine = "This workshop tops out at " + std::to_string(buildingCap) +
-                         " — needs " + std::to_string(r.reqSkill) + " to craft a " + r.name + ".";
+                         " - needs " + std::to_string(r.reqSkill) + " to craft a " + r.name + ".";
         else
             s.logLine = "Skill too low for a " + r.name + " (needs " + std::to_string(r.reqSkill) + ").";
         return;
@@ -6318,7 +6350,7 @@ static void TryCraftItem(GameState& s, int buildingIdx, int recipeIdx, int capOv
     s.backpack.push_back(item);
 
     std::string gainNote = gain > 0 ? " (+" + std::to_string(gain).substr(0, 4) + " skill)" : "";
-    // Smith/Carpenter train STR+DEX (heavy work); Tailor trains DEX+INT (fine work) —
+    // Smith/Carpenter train STR+DEX (heavy work); Tailor trains DEX+INT (fine work) -
     // same skill-to-stat pairing as the JS's (unwired, but still the intended) SKILL_STAT_MAP.
     if (buildingIdx == 0 || buildingIdx == 1) {
         if (MaybeGainStat(s, &GameState::str, 0.06f)) gainNote += " (STR +1)";
@@ -6333,7 +6365,7 @@ static void TryCraftItem(GameState& s, int buildingIdx, int recipeIdx, int capOv
 }
 
 // JS craftPotion(): unlike weapons/armor, potions consume reagents (not a resource
-// pool) and their potency is NOT quality-scaled — baseAmount is baseAmount regardless
+// pool) and their potency is NOT quality-scaled - baseAmount is baseAmount regardless
 // of skill, only the *chance to brew it at all* depends on skill.
 static void TryCraftPotion(GameState& s, int recipeIdx, int capOverride = -1) {
     const BuildingDef& alchemy = kCraftBuildings[3];
@@ -6367,7 +6399,7 @@ static void TryCraftPotion(GameState& s, int recipeIdx, int capOverride = -1) {
 }
 
 // ---------------------------------------------------------------------
-// Vendor "Buy" tab, added 2026-09-21 — the 4 craft buildings selling pre-made gear
+// Vendor "Buy" tab, added 2026-09-21 - the 4 craft buildings selling pre-made gear
 // alongside letting you craft your own (Mark's ask: "the blacksmith, tailor and other
 // crafting building [should] sell gear as well"). Deliberately reuses
 // kCraftBuildings[i].recipes directly (confirmed no separate recipe-unlock system
@@ -6376,7 +6408,7 @@ static void TryCraftPotion(GameState& s, int recipeIdx, int capOverride = -1) {
 // no resource cost, no skill-gain/stat-gain roll. Gold is the only cost.
 // ---------------------------------------------------------------------
 
-// Recipe has no gold-price field (see kQualityTiersData's comment) — a vendor price
+// Recipe has no gold-price field (see kQualityTiersData's comment) - a vendor price
 // has to be derived. Tuned to sit above the gold-equivalent of gathering the
 // materials yourself, so crafting stays the cheaper path; a first-pass number, not a
 // locked balance decision (see the plan's "Explicitly deferred" section).
@@ -6385,7 +6417,7 @@ static const float kVendorGoldPerPower = 4.0f;
 static int VendorPriceFor(const Recipe& r) {
     return std::max(5, (int)std::round(r.cost * kVendorGoldPerResourceUnit + r.power * kVendorGoldPerPower));
 }
-// Always the bottom ("Standard") quality tier regardless of the player's skill —
+// Always the bottom ("Standard") quality tier regardless of the player's skill -
 // QualityFor(0) hits kQualityTiersData's first bucket unconditionally.
 static void TryBuyPremadeItem(GameState& s, int buildingIdx, int recipeIdx) {
     const BuildingDef& b = kCraftBuildings[buildingIdx];
@@ -6405,7 +6437,7 @@ static void TryBuyPremadeItem(GameState& s, int buildingIdx, int recipeIdx) {
     s.logLine = "Bought " + item.name + " for " + std::to_string(price) + "g.";
 }
 // Alchemy's Buy tab: potions have no quality scaling at all (see TryCraftPotion's own
-// comment), so this is just the same potion at a flat markup over its reagent cost —
+// comment), so this is just the same potion at a flat markup over its reagent cost -
 // no "Standard" tier question to resolve here.
 static void TryBuyPremadePotion(GameState& s, int recipeIdx) {
     const BuildingDef& alchemy = kCraftBuildings[3];
@@ -6421,17 +6453,17 @@ static void TryBuyPremadePotion(GameState& s, int recipeIdx) {
 }
 
 // JS usePotion(): heal potions restore HP anytime; stamina potions are brewable but
-// have nothing to restore here (no stamina stat in this scaffold — see header note).
+// have nothing to restore here (no stamina stat in this scaffold - see header note).
 static void DrinkPotion(GameState& s, int potionIdx) {
     if (potionIdx < 0 || potionIdx >= (int)s.potions.size()) return;
     PotionStack& p = s.potions[potionIdx];
     if (p.effect == "poison" || p.effect == "damage") {
-        s.logLine = p.name + " isn't meant to be drunk — use Poison Weapon or Throw instead.";
+        s.logLine = p.name + " isn't meant to be drunk - use Poison Weapon or Throw instead.";
         return;
     }
     if (p.effect == "heal") {
         s.hp = std::min(s.maxHp, s.hp + p.potency);
-        s.logLine = "Drank " + p.name + " — healed " + std::to_string(p.potency) + ".";
+        s.logLine = "Drank " + p.name + " - healed " + std::to_string(p.potency) + ".";
     } else { // "stamina"
         s.logLine = "Drank " + p.name + " (no stamina system in this scaffold to restore).";
     }
@@ -6449,12 +6481,12 @@ static void PoisonWeapon(GameState& s, int potionIdx) {
     s.weaponPoisonPotency = p.potency;
     float gain = GainSkillCapped(s.poisoning, RollGatherSkillGain(s.poisoning), 100.0f);
     std::string gainNote = gain > 0 ? " (Poisoning +" + std::to_string(gain).substr(0, 4) + ")" : "";
-    s.logLine = "You coat your weapon in poison — " + std::to_string(p.potency) + " charges." + gainNote;
+    s.logLine = "You coat your weapon in poison - " + std::to_string(p.potency) + " charges." + gainNote;
     p.count -= 1;
     if (p.count <= 0) s.potions.erase(s.potions.begin() + potionIdx);
 }
 
-// JS throwExplosionPotion(): a free action in combat — deals damage but does NOT
+// JS throwExplosionPotion(): a free action in combat - deals damage but does NOT
 // hand the turn to the monster (no MonsterCounterAndMaybeEnd() call here).
 static void ThrowExplosionPotion(GameState& s, int potionIdx) {
     if (!s.combat.has_value() || potionIdx < 0 || potionIdx >= (int)s.potions.size()) return;
@@ -6518,7 +6550,7 @@ static void SkinCorpse(GameState& s, int corpseIdx) {
     s.corpses.erase(s.corpses.begin() + corpseIdx);
 
     float yieldMult = 0.5f + 1.5f * (s.skinning / 100.0f);
-    // Phase 3: Ice Wolves are skinned for furs, not leather — the Fur Trader's premium.
+    // Phase 3: Ice Wolves are skinned for furs, not leather - the Fur Trader's premium.
     bool isIceWolf = (c.monsterName == "Ice Wolf");
     int yieldGained = std::max(1, (int)std::round(c.baseLeather * yieldMult));
     if (isIceWolf) s.furs += yieldGained; else s.leather += yieldGained;
@@ -6532,7 +6564,7 @@ static void SkinCorpse(GameState& s, int corpseIdx) {
 }
 
 // ---------------------------------------------------------------------
-// Banking (the Vaultkeep) — ported from the JS's state.bank. Deposited
+// Banking (the Vaultkeep) - ported from the JS's state.bank. Deposited
 // gold and items are completely safe from every danger system above: a
 // murderer loss, a failed Snoop, or a guard-zone confiscation only ever
 // touches what you're carrying, never the bank.
@@ -6562,7 +6594,7 @@ static void DepositItem(GameState& s, int backpackIdx) {
 static void WithdrawItem(GameState& s, int bankIdx) {
     if (bankIdx < 0 || bankIdx >= (int)s.bankItems.size()) return;
     if ((int)s.backpack.size() >= BackpackCap(s)) {
-        s.logLine = "Your backpack is full — make room before withdrawing.";
+        s.logLine = "Your backpack is full - make room before withdrawing.";
         return;
     }
     Item item = s.bankItems[bankIdx];
@@ -6571,7 +6603,7 @@ static void WithdrawItem(GameState& s, int bankIdx) {
     s.logLine = "Withdrew " + item.name + " from the vault.";
 }
 
-// Player housing — ported from the JS's buyHouseTier()/setHouseHue()/setHouseName()/
+// Player housing - ported from the JS's buyHouseTier()/setHouseHue()/setHouseName()/
 // buildHouseModule()/upgradeHouseModule() (see kHouseTiers/kHouseHues/kHomeModuleDefs).
 static void BuyHouseTier(GameState& s, int targetIdx) {
     if (targetIdx <= s.houseTierIdx || targetIdx >= (int)kHouseTiers.size()) return;
@@ -6629,27 +6661,27 @@ static std::string TileNameFor(const std::string& key) {
     return "Vacant Lot";
 }
 
-// World positions for the Town's 9 buildings — a uniform 3x3 grid (Mark asked for "a
+// World positions for the Town's 9 buildings - a uniform 3x3 grid (Mark asked for "a
 // perfect square... connected by roads" instead of the old loosely hand-placed
-// arrangement) on 300-unit spacing (was 250 — Mark asked for more breathing room
+// arrangement) on 300-unit spacing (was 250 - Mark asked for more breathing room
 // between buildings after the 15% visual-size bump made the grid feel cramped; see
 // kTownVisualScale and kTownWorldSize above), centered on Townhall. Every other
 // building lines up with Townhall on exactly one axis, so DrawRoadToPlaza draws it a
 // plain straight road; only the 4 corner buildings need its L-bend. That's what
 // actually produces the clean tic-tac-toe grid of roads, not anything special in the
-// road-drawing code itself — see DrawRoadToPlaza, unchanged.
+// road-drawing code itself - see DrawRoadToPlaza, unchanged.
 struct TownNodePos { std::string key; Vector2 pos; };
 // House sits 100 units past Stable on the middle row, the same offset the Wilderness
-// Gate uses 100 units past Bank on the middle column — same "just outside the grid"
+// Gate uses 100 units past Bank on the middle column - same "just outside the grid"
 // spacing, different edge, so it doesn't crowd Stable or break the 3x3 layout.
 // (2026-09-25: the town house building was retired in favor of custom wilderness
-// housing — the node is gone, but this comment stays to explain the grid history.)
+// housing - the node is gone, but this comment stays to explain the grid history.)
 static const std::array<TownNodePos, 9> kTownNodePositions = {{
     {"smith", {200, 200}}, {"carpenter", {500, 200}}, {"tailor", {800, 200}},
     {"alchemy", {200, 500}}, {"townhall", {500, 500}}, {"stable", {800, 500}},
     {"healer", {200, 800}}, {"bank", {500, 800}}, {"provisioner", {800, 800}},
 }};
-// Phase 3 — Frostmere's own building set: 5 nodes on the same town grid (plaza at
+// Phase 3 - Frostmere's own building set: 5 nodes on the same town grid (plaza at
 // 420,420 and the Wilderness Gate at 500,900 are shared). Roads, collision, and
 // hit-testing all iterate ActiveTownNodes(), so the smaller set just works.
 static const std::array<TownNodePos, 5> kTown3NodePositions = {{
@@ -6657,13 +6689,13 @@ static const std::array<TownNodePos, 5> kTown3NodePositions = {{
     {"provisioner", {500, 600}},
     {"furtrader", {180, 620}}, {"smith", {820, 620}},
 }};
-// Phase 4 — Cragmoor's own building set: 5 nodes, same grid conventions.
+// Phase 4 - Cragmoor's own building set: 5 nodes, same grid conventions.
 static const std::array<TownNodePos, 5> kTown4NodePositions = {{
     {"bank", {350, 280}}, {"healer", {650, 280}},
     {"provisioner", {500, 600}},
     {"smith", {180, 620}}, {"minersguild", {820, 620}},
 }};
-// Range over the active town's building nodes — the two tables have different
+// Range over the active town's building nodes - the two tables have different
 // sizes, so this (not a reference) is what the town loops iterate.
 struct TownNodeList {
     const TownNodePos* data; size_t n;
@@ -6675,7 +6707,7 @@ static TownNodeList ActiveTownNodes(int townIdx) {
     if (townIdx == 3) return { kTown4NodePositions.data(), kTown4NodePositions.size() }; // Phase 4: Cragmoor
     return { kTownNodePositions.data(), kTownNodePositions.size() };
 }
-// NPC table for the active town — all four tables are the same size, so a plain
+// NPC table for the active town - all four tables are the same size, so a plain
 // reference works here.
 static const std::array<TownNPC, 6>& ActiveTownNPCs(int townIdx) {
     if (townIdx == 2) return kTown3NPCs;
@@ -6687,26 +6719,37 @@ static const char* ActiveTownName(int townIdx) {
     if (townIdx == 3) return kTown4Name; // Phase 4: Cragmoor
     return (townIdx == 0) ? kTown1Name : kTown2Name;
 }
+// UO-style travel (2026-09-25): the first visit to a town marks it as a recall
+// destination for the save. Called from the per-frame hook in main() (which
+// watches selectedTown change while on the Town screen) - one place, so no
+// arrival path (gates, tabs, resurrection, recall) can miss it.
+static void MarkTownVisited(GameState& s, int townIdx) {
+    if (townIdx < 0 || townIdx > 3) return;
+    int bit = 1 << townIdx;
+    if (s.markedTowns & bit) return;
+    s.markedTowns |= bit;
+    Journal(s, std::string("You have marked ") + ActiveTownName(townIdx) + " as a recall destination.");
+}
 // Where the player lands in the Wilderness when leaving a town's gate.
 static Vector2 TownWildernessSpawn(int townIdx) {
     if (townIdx == 2) return { 1400, 740 }; // just south of the Frostmere gate
     if (townIdx == 3) return { 300, 1150 }; // just south of the Cragmoor gate (Phase 4)
     return (townIdx == 0) ? Vector2{ 900, 1650 } : Vector2{ 2900, 1650 };
 }
-// The town's central plaza — sized to hold only Townhall's grid slot, so every other
+// The town's central plaza - sized to hold only Townhall's grid slot, so every other
 // building (all 300 units out on the grid) is clearly outside it and gets a road.
 static const Rectangle kTownPlaza = { 420, 420, 160, 160 };
 
-// The Wilderness Gate — a Town-edge node like a building, but instead of an
+// The Wilderness Gate - a Town-edge node like a building, but instead of an
 // upgrade/craft panel, walking up and pressing E switches to Screen::Wilderness.
 // Placed due south on the grid's own central column (shares Bank's and Townhall's x),
 // so the same straight road that already reaches Bank continues on to the gate (see the
-// dedicated DrawWallBand call for that extension in DrawTownScreen) — the most direct,
+// dedicated DrawWallBand call for that extension in DrawTownScreen) - the most direct,
 // obvious path out of town rather than a walk to a far corner.
 static const Vector2 kWildernessGatePos = { 500, 900 };
 
 // ---------------------------------------------------------------------
-// The Wilderness — an open outdoor space (no interior walls, unlike the dungeons; just
+// The Wilderness - an open outdoor space (no interior walls, unlike the dungeons; just
 // scattered gather/tame nodes on open ground, closer in spirit to Town's layout than a
 // dungeon's) reached via kWildernessGatePos in Town. Shares kDungeonWorldSize (1800)
 // for the same "real room to walk around" reasoning as the dungeons. Gather nodes call
@@ -6715,10 +6758,10 @@ static const Vector2 kWildernessGatePos = { 500, 900 };
 // creature spots call the same TryStartTameAttempt() the Pets screen list already uses.
 // ---------------------------------------------------------------------
 // The extra NE (forest, x>1500/y<600) and W (mountain, x<450) entries below are the
-// wilderness-overhaul density pass — same resources/monsters as everywhere else on the
+// wilderness-overhaul density pass - same resources/monsters as everywhere else on the
 // map, just more of them concentrated into the two zones a real forest and mountain
 // range would have, per the reference concept image Mark shared. An earlier survey
-// wrongly flagged 5 wild creature sprites as unused "free" additions — they turned out
+// wrongly flagged 5 wild creature sprites as unused "free" additions - they turned out
 // to already be wired in (see GameAssets.wildCreatureTex's original 5-of-11 coverage).
 // The real gap (Panther/Bison/Horse/Sabertooth/Drake/Wyvern, difficulty 40-100, defined
 // in kWildCreatures but never exposed) got closed properly: Mark generated all 6 with
@@ -6730,43 +6773,43 @@ static const std::array<WildernessGatherNode, 21> kWildernessGatherNodes = {{
     { {400, 900}, "ore", RegionAt({400, 900}) },   { {1400, 900}, "ore", RegionAt({1400, 900}) },   { {900, 600}, "ore", RegionAt({900, 600}) },
     { {1700, 150}, "wood", RegionAt({1700, 150}) }, { {1650, 450}, "wood", RegionAt({1650, 450}) }, // Dense Forest zone (NE)
     { {250, 300}, "ore", RegionAt({250, 300}) },   { {300, 1300}, "ore", RegionAt({300, 1300}) },   // Dragontooth mountain zone (W)
-    // The new stretch toward Saltmere (2026-09-22, "second town" plan) — a couple of
+    // The new stretch toward Saltmere (2026-09-22, "second town" plan) - a couple of
     // waypoints so the longer walk isn't completely empty, not an exhaustive re-scatter.
     { {2200, 1550}, "wood", RegionAt({2200, 1550}) }, { {2550, 1900}, "ore", RegionAt({2550, 1900}) },
-    // Phase 2 — Salt Coast fishery: tidal pools by the Saltmere Docks landmark.
+    // Phase 2 - Salt Coast fishery: tidal pools by the Saltmere Docks landmark.
     // Walk up and press E like any other node; yields fish + Fishing skill.
     { {2700, 1400}, "fish", RegionAt({2700, 1400}) }, { {2850, 1550}, "fish", RegionAt({2850, 1550}) },
     { {2600, 1400}, "fish", RegionAt({2600, 1400}) },
-    // Phase 3 — Frostwastes ice crystals: walk up and press E like any other node;
+    // Phase 3 - Frostwastes ice crystals: walk up and press E like any other node;
     // yields ice + Mining skill (crystal mining). Positions hand-checked against the
     // Tomb entrance (900,300), northern monster spots, and the Frostmere gate.
     { {800, 450}, "ice", RegionAt({800, 450}) }, { {1500, 200}, "ice", RegionAt({1500, 200}) },
     { {500, 550}, "ice", RegionAt({500, 550}) },
-    // Phase 4 — Stonepeaks rich ore veins: walk up and press E; yields ore at a
+    // Phase 4 - Stonepeaks rich ore veins: walk up and press E; yields ore at a
     // much richer rate than normal veins + Mining skill. Deep in the southern
     // Stonepeaks, clear of the Ember Depths entrance (200,2100) and house plots.
     { {350, 1900}, "richore", RegionAt({350, 1900}) }, { {150, 2400}, "richore", RegionAt({150, 2400}) },
     { {450, 2650}, "richore", RegionAt({450, 2650}) },
 }};
-// Index into kWildCreatures — a spread of difficulties so there's an easy tame near the
+// Index into kWildCreatures - a spread of difficulties so there's an easy tame near the
 // entrance and a real challenge (Forest Dragon) at the far end of the map.
-// Roaming Innocent NPCs (2026-09-23) — Mark asked for "AI innocent players... ones you
+// Roaming Innocent NPCs (2026-09-23) - Mark asked for "AI innocent players... ones you
 // can attack, rob etc" as a proactive alternative to the old passive
 // TryTriggerInnocentEncounter popup (which only ever fired as a random chance after
 // gathering/combat, never something you could seek out). Deliberately reuses the
 // entire existing GameState::InnocentEncounter/DrawInnocentPanel mechanism as-is
 // (Murder/Steal/Snoop/Spare all already exist and already move notoriety/karma/gold
-// correctly) — the only real gap was that nothing in the world could ever populate
+// correctly) - the only real gap was that nothing in the world could ever populate
 // s.innocentEncounter except that random roll. Each spot just wanders in place
 // (MonsterWanderOffset, same as monsters/Town NPCs) and, once resolved one way or
-// another, sits empty for a while before a fresh traveler appears — same "respawns
+// another, sits empty for a while before a fresh traveler appears - same "respawns
 // after a cooldown" shape as a gather node, not a one-time encounter.
 struct WildernessInnocentSpot { Vector2 pos; RegionId region; };
 static const std::array<WildernessInnocentSpot, 4> kWildernessInnocentSpots = {{
     { {450, 1150}, RegionAt({450, 1150}) }, { {1450, 1150}, RegionAt({1450, 1150}) }, { {1150, 450}, RegionAt({1150, 450}) }, { {2100, 1350}, RegionAt({2100, 1350}) }, // last one along the Saltmere stretch
 }};
 // (kInnocentRespawnSeconds is defined just above the innocent deep-dive section.)
-// Called once per frame from DrawWildernessScreen — rolls a fresh traveler into
+// Called once per frame from DrawWildernessScreen - rolls a fresh traveler into
 // any spot that's currently empty once its respawn timer runs out. Spot i always
 // hosts identity i now (fixed people with persistent memory, not random faces).
 // Also ticks Silas's shop restock, request cooldowns, and the escort follow.
@@ -6796,37 +6839,37 @@ static const std::array<WildernessCreatureSpot, 17> kWildernessCreatureSpots = {
     { {300, 500}, 2 },   // Grizzly Bear (difficulty 30)
     { {1500, 300}, 7 },  // Storm Griffin (difficulty 80)
     { {900, 150}, 10 },  // Forest Dragon (difficulty 100)
-    { {1650, 600}, 1 },  // Timber Wolf #2 — Dense Forest zone (NE)
+    { {1650, 600}, 1 },  // Timber Wolf #2 - Dense Forest zone (NE)
     { {700, 900}, 3 },   // Dire Panther (difficulty 40)
     { {1100, 900}, 4 },  // Plains Bison (difficulty 50)
     { {1100, 400}, 5 },  // War Horse (difficulty 60)
     { {700, 500}, 6 },   // Sabertooth Cat (difficulty 70)
     { {1300, 600}, 8 },  // Young Drake (difficulty 90)
     { {500, 200}, 9 },   // Elder Wyvern (difficulty 100)
-    // The Saltmere corridor (2026-09-24) — had zero creatures/monsters at all before
+    // The Saltmere corridor (2026-09-24) - had zero creatures/monsters at all before
     // this (only 2 gather nodes + 1 innocent NPC dotted the whole stretch); Mark asked
     // for monsters/animals "all thru the wilderness", and this was the one real gap.
     // Reuses the same 11 creature types (no new art needed) at a few waypoints along
-    // the walk, roughly easy-to-moderate — the corridor is meant to feel like an
+    // the walk, roughly easy-to-moderate - the corridor is meant to feel like an
     // established trade road, not a second gauntlet on top of the original zone.
     { {2000, 1900}, 0 }, // Stray Dog
     { {2300, 1600}, 4 }, // Plains Bison
-    { {2500, 1800}, 5 }, // War Horse — fits the "road" setting
+    { {2500, 1800}, 5 }, // War Horse - fits the "road" setting
     { {2700, 1950}, 1 }, // Timber Wolf
     { {2400, 1450}, 6 }, // Sabertooth Cat
 }};
-// wildCreatureTex is parallel to kWildCreatures (not kWildernessCreatureSpots) —
+// wildCreatureTex is parallel to kWildCreatures (not kWildernessCreatureSpots) -
 // creatureIdx indexes it directly. Was a 5-of-11-covered array needing a slot-mapping
 // indirection (and, before that fix, an outright out-of-bounds read for Griffin(7)/
-// Dragon(10)) until every creature got real art — see GameAssets.wildCreatureTex.
-// Walk here and press E to head back to Town — placed just past the entrance so it's
+// Dragon(10)) until every creature got real art - see GameAssets.wildCreatureTex.
+// Walk here and press E to head back to Town - placed just past the entrance so it's
 // the first thing you see coming in, same as walking straight back out a real gate.
 static const Vector2 kWildernessReturnGatePos = { 900, 1750 };
 // Saltmere-side gate position (mirrors the wilderness entry point for town 2).
 static const Vector2 kSaltmereGatePos = { 2900, 1650 };
 
 // Phase 0: the towns' wilderness gates, tagged with their regions. (kTown2Name
-// is "Saltmere"; the Town 1 gate uses kTown1Name ("Emberhold") — matches its HUD usage.
+// is "Saltmere"; the Town 1 gate uses kTown1Name ("Emberhold") - matches its HUD usage.
 // Phase 3: Frostmere's gate added.)
 struct TownGate { const char* townName; Vector2 wildernessPos; RegionId region; };
 static const std::array<TownGate, 4> kTownGates = {{
@@ -6842,7 +6885,7 @@ static const std::array<TownGate, 4> kTownGates = {{
 static void UpdateEscort(GameState& s, float dt) {
     if (s.escortInnocent < 0) return;
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
-        CancelEscort(s, "flees as you fall — the escort is broken.");
+        CancelEscort(s, "flees as you fall - the escort is broken.");
         return;
     }
     s.escortTimer -= dt;
@@ -6865,41 +6908,41 @@ static void UpdateEscort(GameState& s, float dt) {
     }
 }
 
-// Fightable Wilderness monsters — walk up and press E to engage, then E again in
-// melee range to swing. Live/real-time (GameState::ActiveMonster/wildEngaged) — the
+// Fightable Wilderness monsters - walk up and press E to engage, then E again in
+// melee range to swing. Live/real-time (GameState::ActiveMonster/wildEngaged) - the
 // first slice of the real-time combat rework, NOT the panel-based state.combat system
 // ambushes/dungeons/Bloodstained still use. Levels/leather/gold are pitched around
 // the Whisper Crypt's easier tiers (see kDungeons) since the Wilderness is reachable
 // well before any dungeon. Art: single frames cropped from OpenGameArt.org animation
-// sheets Mark downloaded (assets/wilderness/wild_*.png) — Bat: bagzie, OGA-BY 3.0.
+// sheets Mark downloaded (assets/wilderness/wild_*.png) - Bat: bagzie, OGA-BY 3.0.
 // Goblin/Imp: Stephen "Redshrike" Challener & William.Thompsonj, CC-BY 4.0
 // ("[LPC] Goblin"/"[LPC] Imp"). Wolf: Redshrike & Thompsonj, CC-BY 4.0 ("[LPC] Wolf
-// Animation" — the howl.png frame, no cropping needed). Bandit: Calciumtrice, CC-BY
+// Animation" - the howl.png frame, no cropping needed). Bandit: Calciumtrice, CC-BY
 // 3.0 ("Animated Rogue").
 // isTacticalOpponent was a trailing field here through 2026-09-22 for the one Rival
 // Adventurer entry; removed 2026-09-23 when the Rival stopped being a static spot at
-// all (see GameState::rivalLevel's comment and the "Rival hunts you" plan) — it's now a
+// all (see GameState::rivalLevel's comment and the "Rival hunts you" plan) - it's now a
 // fully separate roaming entity, so every entry left in this array is an ordinary
 // always-melee monster again, no per-entry AI-variant flag needed.
 struct WildernessMonsterSpot { Vector2 pos; std::string name; int level; int baseLeather; int baseGold; int iconIdx; RegionId region; };
 static const std::array<WildernessMonsterSpot, 20> kWildernessMonsterSpots = {{
     { {1150, 1250}, "Wild Bat", 2, 1, 2, 0, RegionAt({1150, 1250}) },
-    { {600, 1000}, "Timber Wolf", 5, 3, 4, 2, RegionAt({600, 1000}) }, // Phase 1: Whisperwood signature — was Wandering Goblin
+    { {600, 1000}, "Timber Wolf", 5, 3, 4, 2, RegionAt({600, 1000}) }, // Phase 1: Whisperwood signature - was Wandering Goblin
     { {1150, 700}, "Lone Wolf", 9, 5, 7, 2, RegionAt({1150, 700}) },
     { {600, 350}, "Lesser Imp", 14, 7, 10, 3, RegionAt({600, 350}) },
     { {1300, 150}, "Highway Bandit", 20, 10, 15, 4, RegionAt({1300, 150}) },
-    { {300, 1550}, "Mountain Bandit", 20, 10, 15, 4, RegionAt({300, 1550}) }, // same art/stats as Highway Bandit — Dragontooth zone (W)
+    { {300, 1550}, "Mountain Bandit", 20, 10, 15, 4, RegionAt({300, 1550}) }, // same art/stats as Highway Bandit - Dragontooth zone (W)
     // Density pass + Saltmere corridor coverage (2026-09-24, Mark asked for monsters
-    // "all thru the wilderness") — two fill in gaps in the original zone, four cover
+    // "all thru the wilderness") - two fill in gaps in the original zone, four cover
     // the corridor east toward Saltmere (which had zero monster spots at all before
     // this). All reuse the existing 5 monster art types; no new assets needed.
-    { {900, 1400}, "Timber Wolf", 5, 3, 4, 2, RegionAt({900, 1400}) },   // Phase 1: Whisperwood signature — was Wandering Goblin; south-central gap, original zone
+    { {900, 1400}, "Timber Wolf", 5, 3, 4, 2, RegionAt({900, 1400}) },   // Phase 1: Whisperwood signature - was Wandering Goblin; south-central gap, original zone
     { {1500, 900}, "Lesser Imp", 14, 7, 10, 3, RegionAt({1500, 900}) },        // east-central gap, original zone
     { {2000, 1650}, "Wild Bat", 2, 1, 2, 0, RegionAt({2000, 1650}) },           // corridor, near the Town 1 side
     { {2300, 1750}, "Highway Bandit", 20, 10, 15, 4, RegionAt({2300, 1750}) },  // corridor, a real "road danger"
     { {2600, 1650}, "Wandering Goblin", 5, 3, 4, 1, RegionAt({2600, 1650}) },   // corridor
     { {2750, 1850}, "Lone Wolf", 9, 5, 7, 2, RegionAt({2750, 1850}) },          // corridor, near the Saltmere side
-    // Phase 3 — Frostwastes: ice wolves (iconIdx 5) and frostbitten undead
+    // Phase 3 - Frostwastes: ice wolves (iconIdx 5) and frostbitten undead
     // (iconIdx 6). New icon indices reuse existing sheets with an icy tint (see
     // WildMonsterSheetFor/WildMonsterTintFor); 3D looks are new procedural
     // entries in T3CMonsterLook. Positions hand-checked against the Frostmere
@@ -6909,7 +6952,7 @@ static const std::array<WildernessMonsterSpot, 20> kWildernessMonsterSpots = {{
     { {1600, 300}, "Ice Wolf", 32, 17, 25, 5, RegionAt({1600, 300}) },
     { {700, 200}, "Frostbitten Husk", 28, 15, 22, 6, RegionAt({700, 200}) },
     { {1300, 500}, "Frostbitten Husk", 35, 19, 28, 6, RegionAt({1300, 500}) },
-    // Phase 4 — Stonepeaks: rock golems (iconIdx 7, alias the Emberveil
+    // Phase 4 - Stonepeaks: rock golems (iconIdx 7, alias the Emberveil
     // elemental sheets) and mountain cats (iconIdx 8, tawny-tinted wolf sheet).
     // Deep in the southern peaks, clear of the Cragmoor gate (300,1050), the
     // Ember Depths entrance (200,2100), and the house plots.
@@ -6920,9 +6963,9 @@ static const std::array<WildernessMonsterSpot, 20> kWildernessMonsterSpots = {{
 }};
 static const int kWildMonsterIconCount = 9; // iconIdx 0-4 classic, 5 Ice Wolf, 6 Frostbitten Husk, 7 Rock Golem, 8 Mountain Cat
 static_assert(kWildernessMonsterSpots.size() == kWildMonsterSpotCount,
-              "wildSpotRespawn is sized by kWildMonsterSpotCount — keep them in sync");
+              "wildSpotRespawn is sized by kWildMonsterSpotCount - keep them in sync");
 // --- UO player-killer Rival (2026-09-24): epithet ladder, tuning, and helpers ---
-// Display name escalates with rivalKillsOnPlayer — the red earns its reputation.
+// Display name escalates with rivalKillsOnPlayer - the red earns its reputation.
 static std::string RivalEpithetName(const GameState& s) {
     if (s.rivalKillsOnPlayer >= 8) return "Rival Adventurer, Bane of the Wilderness";
     if (s.rivalKillsOnPlayer >= 5) return "Rival Adventurer the Merciless";
@@ -6958,26 +7001,26 @@ static const float kRivalHuntGiveUpTime = 25.0f; // seconds of hunting without c
 // hunt/stalk/intercept code paths but never sprint, never loot, never earn
 // epithets, and never touch rivalKillsOnPlayer. Pair hunts are the signature:
 // 30% of blade hunts become a two-blade jump ("Murder Inc. is hunting you!").
-// Coordination: the champion never pair-hunts (solo predator — his identity);
+// Coordination: the champion never pair-hunts (solo predator - his identity);
 // while the champion is hunting/stalking, blades don't start hunts; blades never
 // freelance while another blade is hunting (pairs form ONLY via the pair roll).
-// Cap: 2 hunters at once, never all 3 + the champion — that's unplayable.
+// Cap: 2 hunters at once, never all 3 + the champion - that's unplayable.
 static const float kBladeHuntBaseChance = 0.25f;  // ~half the champion's appetite
 static const float kBladeHuntGiveUpTime = 12.0f;  // shorter leash than the champion's 25s
-static const float kBladeHuntSpeed = 130.0f;       // flat — no sprint bursts. Scary in pairs, outrunnable solo
+static const float kBladeHuntSpeed = 130.0f;       // flat - no sprint bursts. Scary in pairs, outrunnable solo
 static const float kBladePatrolSpeed = 55.0f;     // same amble as the champion's patrol
 static const float kBladeStalkChance = 0.25f;     // share of blade hunts that begin as a visible stalk
 static const float kBladeStalkRange = 350.0f;     // blades shadow a little closer than the champion
 static const float kBladePairChance = 0.30f;      // share of blade hunt commits that become pair hunts
 static const float kBladeLevelFracMin = 0.45f;    // blades track 45-60% of the champion's
-static const float kBladeLevelFracMax = 0.60f;    // target power — always beatable, never the main event
+static const float kBladeLevelFracMax = 0.60f;    // target power - always beatable, never the main event
 
-// Fixed guild names — no epithet ladder for the crew, just rank numerals.
+// Fixed guild names - no epithet ladder for the crew, just rank numerals.
 static std::string BladeName(int bi) {
     static const char* numerals[3] = { "II", "III", "IV" };
     return std::string("Murder Inc. Blade ") + numerals[bi < 0 || bi > 2 ? 0 : bi];
 }
-// True while the guild has an active threat — used to keep hunts to one at a time.
+// True while the guild has an active threat - used to keep hunts to one at a time.
 static bool GuildThreatActive(const GameState& s, int exceptBlade = -1) {
     if (s.rivalActivity == GameState::RivalActivity::Hunting ||
         s.rivalActivity == GameState::RivalActivity::Stalking) return true;
@@ -7017,7 +7060,7 @@ static void BladeStartStalk(GameState& s, int bi) {
 static void RivalStartHunt(GameState& s) {
     s.rivalActivity = GameState::RivalActivity::Hunting;
     s.rivalActivityTimer = kRivalHuntGiveUpTime;
-    s.rivalSprinting = true; // opens with a sprint — the burst out of the treeline
+    s.rivalSprinting = true; // opens with a sprint - the burst out of the treeline
     s.rivalSprintTimer = kRivalSprintDuration;
     s.rivalSprintStartDist = Dist(s.rivalPos, s.wildernessPlayerPos);
     s.rivalSprintStartVel = s.rivalPlayerVel;
@@ -7036,7 +7079,7 @@ static void RivalStartStalk(GameState& s) {
     PlaySfx(SfxId::Hunt);
 }
 // UO red loots your corpse: 15% of carried gold on every rival kill (bank gold is
-// never touched), plus one random backpack item on the ordinary-loss path — the
+// never touched), plus one random backpack item on the ordinary-loss path - the
 // murderer-loss path already strips the whole backpack, so the empty check skips it
 // there naturally. Called AFTER the loss function so it appends to that log line.
 static void RivalCorpseLoot(GameState& s) {
@@ -7055,7 +7098,7 @@ static void RivalCorpseLoot(GameState& s) {
 }
 // "As if it were a WildernessMonsterSpot" stats for whichever monster is currently
 // engaged. The Rival no longer has a real kWildernessMonsterSpots row (see
-// GameState::rivalLevel's comment) — everything that used to read
+// GameState::rivalLevel's comment) - everything that used to read
 // kWildernessMonsterSpots[am.spotIdx] unconditionally now goes through this instead, so
 // the Rival's stats come from its own persistent GameState::rivalLevel. Gold/leather
 // scale off rivalLevel using roughly the same ratio the static Bandit/Highway entries
@@ -7074,7 +7117,7 @@ static EngagedMonsterStats EngagedWildMonsterStats(const GameState& s, const Gam
     return { spot.name, spot.level, spot.baseGold, spot.baseLeather };
 }
 // Called right before ending a fight against the Rival (win, loss, or a successful
-// flee) — nudges its persistent level partway toward the player's current
+// flee) - nudges its persistent level partway toward the player's current
 // CombatPower() (same "roughly as strong as you" idea RollMurdererLevel already uses
 // for ambushers, ± the same variance) rather than snapping instantly, so it escalates
 // across repeated encounters instead of spiking. Also remembers where the fight ended
@@ -7087,7 +7130,7 @@ static void RivalFightEnded(GameState& s, const GameState::ActiveMonster& am) {
     s.rivalActivity = GameState::RivalActivity::Patrol;
     s.rivalActivityTimer = 0.0f; // pick a fresh patrol target immediately rather than waiting out a stale timer
 }
-// Called when a fight against a blade ends (win, loss, or disengage) — persists
+// Called when a fight against a blade ends (win, loss, or disengage) - persists
 // its position and nudges its level toward 45-60% of the champion's target power,
 // never above the champion's own level. The crew stays beneath the boss.
 static void BladeFightEnded(GameState& s, int bi, const GameState::ActiveMonster& am) {
@@ -7103,7 +7146,7 @@ static void BladeFightEnded(GameState& s, int bi, const GameState::ActiveMonster
 }
 // Tuning for the live engagement above. Melee range (60) sits just past where
 // ResolveCircleCollision already naturally separates two kNodeRadius*0.7 (35) circles
-// plus kPlayerRadius (17) — i.e. collision alone settles a chasing monster at roughly
+// plus kPlayerRadius (17) - i.e. collision alone settles a chasing monster at roughly
 // sword's-reach, this just confirms "in range" once it does. Chase speed (90) is well
 // under kPlayerSpeed (220) so the player can always outrun/kite one; the leash (250)
 // keeps a chasing monster from wandering into a neighboring node's territory, and the
@@ -7113,7 +7156,7 @@ static const float kWildMonsterChaseSpeed = 90.0f;
 static const float kWildMonsterLeashRange = 250.0f;
 static const float kWildDisengageRange = 320.0f;
 
-// The Rival Adventurer's out-of-combat roaming (2026-09-23, "Rival hunts you" plan) —
+// The Rival Adventurer's out-of-combat roaming (2026-09-23, "Rival hunts you" plan) -
 // see GameState::rivalLevel's comment for why it's a fully separate entity rather than
 // a kWildernessMonsterSpots row. Patrol is slower than a chasing monster (it's not
 // actually chasing anything); Hunting is faster than kWildMonsterChaseSpeed so it reads
@@ -7125,11 +7168,11 @@ static const float kRivalHuntCheckMin = 30.0f, kRivalHuntCheckMax = 90.0f; // ho
 // (Hunt speed/chance/give-up now live in the UO player-killer tuning block above:
 // kRivalSprintSpeed/kRivalRecoverSpeed, kRivalHuntBaseChance, kRivalHuntGiveUpTime.)
 // Called once per frame from DrawWildernessScreen, before the nearest-interactable
-// search, so s.rivalPos is current for this frame's distance checks — only while it
+// search, so s.rivalPos is current for this frame's distance checks - only while it
 // isn't already the thing you're fighting (updateTacticalOpponentAI owns movement then).
 static const float kWildPlayerAttackCooldown = 0.8f;
 static const float kWildMonsterAttackCooldown = 1.3f;
-// Per-spell recharge for live spellcasting (2026-09-25, combat feel) — each spell
+// Per-spell recharge for live spellcasting (2026-09-25, combat feel) - each spell
 // runs its own 1.2s clock instead of one global lockout, so different spells chain
 // (Spark Dart then Ember Burst both go off) while each spell keeps its old pacing.
 // A short global cast lock (one cast animation) sits underneath so casts can't
@@ -7144,29 +7187,29 @@ static const float kCastLockTime = 0.35f;
 // frames, so this now just gates ActorAnim::Attack in DrawPlayer instead of driving a
 // fake rotation effect.
 static const float kSwingEffectDuration = 0.18f;
-// Same idea as kSwingEffectDuration but for spellcasting, gating ActorAnim::Cast —
+// Same idea as kSwingEffectDuration but for spellcasting, gating ActorAnim::Cast -
 // longer than the swing window since each cast already has its own per-spell
 // cooldown (kSpellCooldown) to read against, unlike the DEX-scaled swing timer.
 static const float kCastEffectDuration = 0.35f;
-// DEX-based swing speed (Mark's own design, not from the JS prototype — see the
+// DEX-based swing speed (Mark's own design, not from the JS prototype - see the
 // STR/DEX/INT growth entry near MaybeGainStat/kStatCapTotal above; the JS never gave
 // DEX any effect on attack timing at all). Anchored so DEX 10 (the starting default)
-// matches the old flat kWildPlayerAttackCooldown exactly — nobody's swing gets slower
-// than today's baseline — scaling down to 0.4s (2x speed) at DEX 100
+// matches the old flat kWildPlayerAttackCooldown exactly - nobody's swing gets slower
+// than today's baseline - scaling down to 0.4s (2x speed) at DEX 100
 // (kStatCapIndividual, the individual stat cap), linear in between.
 static float PlayerSwingCooldown(const GameState& s) {
     float t = std::clamp((s.dex - 10) / (float)(kStatCapIndividual - 10), 0.0f, 1.0f);
     return kWildPlayerAttackCooldown - t * (kWildPlayerAttackCooldown - 0.4f);
 }
 
-// Purely decorative scatter (no collision) — same role as Town's kFoliagePositions.
+// Purely decorative scatter (no collision) - same role as Town's kFoliagePositions.
 // CraftPix "Rocks & Bushes" (assets/wilderness/PNG/), same license as the tame-spot art.
 // 3=tree (reuses GameAssets.wildTree, the same texture wood-gather nodes use) and
 // 4=rock (reuses GameAssets.wildRock, ore nodes' fallback texture) are purely
-// decorative scatter for the forest/mountain density zones — no new assets, since both
+// decorative scatter for the forest/mountain density zones - no new assets, since both
 // textures are already loaded for their interactive-node role.
 // 5-14 are the "Medieval Animal Set" decorative props (same Gemini batch as the new
-// creatures) — pure flavor scatter, same no-collision role as everything else here.
+// creatures) - pure flavor scatter, same no-collision role as everything else here.
 struct WildernessFoliage { Vector2 pos; int variant; }; // 0=bush1,1=bush2,2=fern1,3=tree,
                                                           // 4=rock,5=water,6=deerskull,
                                                           // 7=chest,8=bush(new),9=rocks(new),
@@ -7183,17 +7226,17 @@ static const std::array<WildernessFoliage, 52> kWildernessFoliage = {{
     { {1000, 1600}, 5 }, { {1450, 1300}, 6 }, { {1200, 250}, 7 }, { {1600, 1300}, 8 },
     { {600, 1400}, 9 },  { {250, 1550}, 10 }, { {1000, 1650}, 11 }, { {800, 1650}, 12 },
     { {1100, 1700}, 13 }, { {1450, 700}, 14 },
-    // The new stretch toward Saltmere — a light scatter, reusing existing variants
+    // The new stretch toward Saltmere - a light scatter, reusing existing variants
     // (2026-09-22, "second town" plan), not an exhaustive re-decoration.
     { {2000, 1650}, 0 }, { {2350, 1850}, 1 }, { {2650, 1600}, 2 }, { {2800, 1850}, 0 },
-    // Phase 1 — Whisperwood densification: a thicker stand north-west of Emberhold's
+    // Phase 1 - Whisperwood densification: a thicker stand north-west of Emberhold's
     // gate and a few trees south of it. Hand-checked clear of the road, gate, monster
     // spots, gather nodes, house plots, and dungeon entrances. 3D parity is automatic
     // (variant 3 maps to the 3D tree in Wild3DDrawFoliageOne).
     { {700, 1180}, 3 }, { {780, 1260}, 3 }, { {660, 1300}, 0 }, { {820, 1150}, 2 },
     { {740, 1100}, 3 }, { {860, 1320}, 1 }, { {620, 1220}, 2 }, { {880, 1200}, 3 },
     { {700, 1900}, 3 }, { {620, 1980}, 0 }, { {1050, 1500}, 3 }, { {1120, 1600}, 2 },
-    // Phase 4 — Stonepeaks cliff/mesa scatter: granite outcrops across the western
+    // Phase 4 - Stonepeaks cliff/mesa scatter: granite outcrops across the western
     // highlands. Hand-checked clear of the Cragmoor gate, King's Road, ore veins,
     // the Ember Depths entrance, monster spots, and house plots.
     { {80, 1900}, 4 }, { {450, 1500}, 4 }, { {100, 2200}, 4 }, { {480, 2450}, 4 },
@@ -7216,35 +7259,35 @@ static const Texture2D* WildFoliageIcon(int variant) {
     }
 }
 
-// Physical entrances to the 6 curated dungeons — walking up and pressing E does exactly
+// Physical entrances to the 6 curated dungeons - walking up and pressing E does exactly
 // what clicking that dungeon's tab on the Hunt screen already does
 // (s.selectedDungeon = idx; s.screen = Screen::Hunt), just from out here on the map
-// instead of a tab click. The Hunt tab's own dungeon picker is untouched — this is a
+// instead of a tab click. The Hunt tab's own dungeon picker is untouched - this is a
 // second way in, not a replacement. One per far corner/edge of the map, clear of every
 // gather/tame/monster/gate node already out here.
 struct WildernessDungeonEntrance { Vector2 pos; int dungeonIdx; Color color; RegionId region; };
 // Six-dungeon ladder order (dungeonIdx): [0] Whisper Crypt, [1] Weavers' Nest,
 // [2] Sunken Vault, [3] Ember Depths, [4] Frostbound Tomb, [5] The Hollow.
-// (Emberveil Hollow's entrance removed 2026-09-25 — not part of the plan.)
+// (Emberveil Hollow's entrance removed 2026-09-25 - not part of the plan.)
 static const std::array<WildernessDungeonEntrance, 6> kWildernessDungeonEntrances = {{
     { {1650, 1650}, 0, Color{ 65, 95, 135, 255 }, RegionAt({1650, 1650}) }, // [0] The Whisper Crypt
     { {1650, 900}, 1, Color{ 95, 65, 95, 255 }, RegionAt({1650, 900}) }, // [1] The Weavers' Nest (Phase 5: was Bloodtusk Hold)
     { {2500, 1100}, 2, Color{ 45, 95, 150, 255 }, RegionAt({2500, 1100}) },   // [2] The Sunken Vault (Phase 2: relocated from the Stonepeaks to the Salt Coast corridor)
-    // Phase 4 — The Ember Depths: deep in the southern Stonepeaks, clear of the
+    // Phase 4 - The Ember Depths: deep in the southern Stonepeaks, clear of the
     // Cragmoor gate (300,1050), the rich ore veins, and the house plots.
     { {200, 2100}, 3, Color{ 200, 90, 40, 255 }, RegionAt({200, 2100}) }, // [3] The Ember Depths
-    // Phase 3 — The Frostbound Tomb: north in the Frostwastes, clear of the
+    // Phase 3 - The Frostbound Tomb: north in the Frostwastes, clear of the
     // Frostmere gate (1400,640), the Lesser Imp spot (600,350), and the wood
     // node at (900,600).
     { {900, 300}, 4, Color{ 140, 180, 220, 255 }, RegionAt({900, 300}) }, // [4] The Frostbound Tomb
-    // Phase 5 — The Hollow: beneath Emberhold (southeast of the town return gate),
+    // Phase 5 - The Hollow: beneath Emberhold (southeast of the town return gate),
     // clear of the road, the Southfen/Far South house plots, and the gate itself.
     { {1050, 1900}, 5, Color{ 110, 100, 90, 255 }, RegionAt({1050, 1900}) }, // [5] The Hollow
 }};
 
 static void UpdateRivalRoaming(GameState& s, float dt) {
     if (s.wildEngaged.has_value() && s.wildEngaged->isRival) return;
-    // Ghosts are beneath the red's notice — break off any hunt/stalk, patrol instead.
+    // Ghosts are beneath the red's notice - break off any hunt/stalk, patrol instead.
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
         if (s.rivalActivity == GameState::RivalActivity::Hunting ||
             s.rivalActivity == GameState::RivalActivity::Stalking) {
@@ -7255,7 +7298,7 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
     }
 
     // Smoothed player velocity for intercept steering. Movement runs after this in
-    // DrawWildernessScreen, so this is one frame stale — fine for prediction.
+    // DrawWildernessScreen, so this is one frame stale - fine for prediction.
     // Teleport guard: gate travel zeroes it instead of whipping the intercept.
     if (dt > 0.0001f) {
         Vector2 d = { s.wildernessPlayerPos.x - s.rivalPrevPlayerPos.x,
@@ -7273,7 +7316,7 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
     s.rivalPrevPlayerPos = s.wildernessPlayerPos;
 
     // --- Stalking: visibly shadow the player at range, then commit or break off ---
-    // Pure dread — no damage during the stalk, just the label and the banner.
+    // Pure dread - no damage during the stalk, just the label and the banner.
     if (s.rivalActivity == GameState::RivalActivity::Stalking) {
         s.rivalStalkTimer -= dt;
         Vector2 away = { s.rivalPos.x - s.wildernessPlayerPos.x, s.rivalPos.y - s.wildernessPlayerPos.y };
@@ -7289,7 +7332,7 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
             }
         }
         if (s.rivalStalkTimer <= 0.0f) {
-            if (RandUnit() < 0.5f) RivalStartHunt(s); // commits — the banner fires
+            if (RandUnit() < 0.5f) RivalStartHunt(s); // commits - the banner fires
             else { s.rivalActivity = GameState::RivalActivity::Patrol; s.rivalActivityTimer = 0.0f; }
         }
         return;
@@ -7325,7 +7368,7 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
             }
             if (stuck || juked) { s.rivalSprinting = false; s.rivalSprintTimer = kRivalRecoverDuration; }
         }
-        // Intercept: steer toward where the player WILL be, not where they are —
+        // Intercept: steer toward where the player WILL be, not where they are -
         // juking matters, bee-lining doesn't.
         float tti = distNow / std::max(1.0f, speed);
         Vector2 predicted = { s.wildernessPlayerPos.x + s.rivalPlayerVel.x * tti,
@@ -7337,7 +7380,7 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
             s.rivalPos.x += dir.x / len * speed * dt;
             s.rivalPos.y += dir.y / len * speed * dt;
         }
-        // Caught you — the red doesn't ask for a duel. DrawWildernessScreen
+        // Caught you - the red doesn't ask for a duel. DrawWildernessScreen
         // converts the flag into a real fight if you're still in range.
         if (Dist(s.rivalPos, s.wildernessPlayerPos) < kRivalCatchRange) {
             s.rivalAutoEngage = true;
@@ -7347,11 +7390,11 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
         if (s.rivalActivityTimer <= 0.0f) s.rivalActivity = GameState::RivalActivity::Patrol;
         return;
     }
-    // Patrolling: walk toward rivalPatrolTarget — the timer only counts down once
+    // Patrolling: walk toward rivalPatrolTarget - the timer only counts down once
     // actually AT the target (not during travel, or a long walk would eat the whole
     // pause before it even arrives), then either pick a new patrol target or commit to
     // a hunt. Doubles as "time until next decision" in both the paused and hunting
-    // cases — simplest thing that reads as intentional rather than literally
+    // cases - simplest thing that reads as intentional rather than literally
     // simulating gathering/fighting.
     Vector2 toTarget = { s.rivalPatrolTarget.x - s.rivalPos.x, s.rivalPatrolTarget.y - s.rivalPos.y };
     float distToTarget = std::sqrt(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
@@ -7362,7 +7405,7 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
     }
     s.rivalActivityTimer -= dt;
     if (s.rivalActivityTimer > 0.0f) return; // arrived, still pausing ("gathering/fighting") here
-    // Opportunistic hunt roll — the red strikes when you're vulnerable, not on a
+    // Opportunistic hunt roll - the red strikes when you're vulnerable, not on a
     // schedule: gathering, mid-fight, or hurt raises the odds; lingering near the
     // return gate, dungeon entrances, or the Town2 gate lowers them.
     float huntChance = kRivalHuntBaseChance;
@@ -7381,7 +7424,7 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
     }
     if (nearSafety) huntChance -= kRivalHuntSafetyPenalty;
     huntChance = std::clamp(huntChance, 0.05f, 0.95f);
-    // Murder Inc. coordination (2026-09-24): one threat at a time — the champion is a
+    // Murder Inc. coordination (2026-09-24): one threat at a time - the champion is a
     // solo predator and won't pile onto a blade's hunt. His own speeds, chances,
     // and loot below are untouched.
     if (!GuildThreatActive(s) && RandUnit() < huntChance) {
@@ -7390,7 +7433,7 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
         return;
     }
     // Pick a new patrol waypoint among the gather nodes and the other real monsters'
-    // spots — the same set of "places" that sell the it's-out-there-doing-things
+    // spots - the same set of "places" that sell the it's-out-there-doing-things
     // fiction without actually running the gather/combat systems against them.
     int totalSpots = (int)kWildernessGatherNodes.size() + (int)kWildernessMonsterSpots.size();
     int pick = std::rand() % totalSpots;
@@ -7400,7 +7443,7 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
     s.rivalActivityTimer = kRivalPauseDuration;
 }
 
-// Murder Inc. guild blade roaming (2026-09-24) — the champion's crew. Same
+// Murder Inc. guild blade roaming (2026-09-24) - the champion's crew. Same
 // patrol/hunt/stalk shape as UpdateRivalRoaming (same waypoint fiction, same
 // intercept steering off the shared smoothed player velocity) but simpler:
 // flat hunt speed (no sprint bursts), shorter leash, half the appetite, and the
@@ -7410,7 +7453,7 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
 static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
     auto& b = s.blades[bi];
     if (s.wildEngaged.has_value() && s.wildEngaged->bladeIdx == bi) return;
-    // Same ghost rule as the champion — the crew doesn't hunt the dead either.
+    // Same ghost rule as the champion - the crew doesn't hunt the dead either.
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
         if (b.activity == GameState::RivalActivity::Hunting ||
             b.activity == GameState::RivalActivity::Stalking) {
@@ -7436,7 +7479,7 @@ static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
             }
         }
         if (b.stalkTimer <= 0.0f) {
-            if (RandUnit() < 0.5f) BladeStartHunt(s, bi, -1); // commits solo — pairs only form on fresh patrol commits
+            if (RandUnit() < 0.5f) BladeStartHunt(s, bi, -1); // commits solo - pairs only form on fresh patrol commits
             else { b.activity = GameState::RivalActivity::Patrol; b.activityTimer = 0.0f; }
         }
         return;
@@ -7474,10 +7517,10 @@ static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
     }
     b.activityTimer -= dt;
     if (b.activityTimer > 0.0f) return; // arrived, still pausing here
-    // Hunt roll — same vulnerability/safety instincts as the champion, at half the
+    // Hunt roll - same vulnerability/safety instincts as the champion, at half the
     // base appetite. Any fight (even the champion's) smells like blood to the crew.
     // One threat at a time: never while the champion is on the prowl, never while
-    // another blade is hunting — pairs form ONLY via the pair roll below.
+    // another blade is hunting - pairs form ONLY via the pair roll below.
     float huntChance = kBladeHuntBaseChance;
     bool vulnerable = s.gatheringResource.has_value() ||
                       s.wildEngaged.has_value() ||
@@ -7496,7 +7539,7 @@ static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
     huntChance = std::clamp(huntChance, 0.05f, 0.95f);
     if (!GuildThreatActive(s, bi) && RandUnit() < huntChance) {
         if (RandUnit() < kBladeStalkChance) { BladeStartStalk(s, bi); return; }
-        // Pair hunt — the signature Murder Inc. jump: 30% chance a second blade
+        // Pair hunt - the signature Murder Inc. jump: 30% chance a second blade
         // joins the same hunt. Only a patrolling/stalking, non-engaged blade can
         // be pulled in; the champion never pair-hunts.
         int partner = -1;
@@ -7513,7 +7556,7 @@ static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
         BladeStartHunt(s, bi, partner);
         return;
     }
-    // New patrol waypoint — the same gather-node/monster-spot set the champion walks.
+    // New patrol waypoint - the same gather-node/monster-spot set the champion walks.
     int totalSpots = (int)kWildernessGatherNodes.size() + (int)kWildernessMonsterSpots.size();
     int pick = std::rand() % totalSpots;
     b.patrolTarget = pick < (int)kWildernessGatherNodes.size()
@@ -7523,7 +7566,7 @@ static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
 }
 
 // ---------------------------------------------------------------------
-// Dungeon room layouts — real rooms and corridors, one distinct shape per dungeon
+// Dungeon room layouts - real rooms and corridors, one distinct shape per dungeon
 // (piloted on the Sunken Crypt alone as a single hub-and-spoke shape; once that held
 // up, each other dungeon got its own shape instead of reusing it everywhere). All
 // axis-aligned, like every other world layout in this file; anything not inside one of
@@ -7531,20 +7574,20 @@ static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
 // axis-slide fallback in DrawHuntScreen. Same order as kDungeons (0=Whisper Crypt,
 // 1=The Weavers' Nest, 2=Sunken Vault, 3=Ember Depths, 4=Frostbound Tomb, 5=The Hollow).
 //
-//   The Weavers' Nest (Phase 5): a web-choked nest — big central chamber with 4 chambers opening directly onto it
-//     (no corridor for those — the rectangles just share a wall) plus 2 further
-//     chambers — an open raider stronghold rather than a maze.
+//   The Weavers' Nest (Phase 5): a web-choked nest - big central chamber with 4 chambers opening directly onto it
+//     (no corridor for those - the rectangles just share a wall) plus 2 further
+//     chambers - an open raider stronghold rather than a maze.
 //   The Sunken Crypt: the original hub-and-spoke pilot layout, unchanged.
 //   The Sunken Vault: an asymmetric branching tree (not a star or a chain) with varied
-//     room sizes — a more organic cave-system feel than the other three's uniform rooms.
+//     room sizes - a more organic cave-system feel than the other three's uniform rooms.
 // ---------------------------------------------------------------------
 // Every rectangle below is exactly 2x the original (pre-2026-09-19) coordinates, to
-// match kDungeonWorldSize going from 900 to 1800 — doubling every room/corridor
+// match kDungeonWorldSize going from 900 to 1800 - doubling every room/corridor
 // preserves all the touching-boundary adjacency between them exactly (linear scaling
 // can't introduce a gap or overlap that wasn't already there), while giving 4x the
 // floor area and much longer walks between rooms to actually explore.
 static const std::vector<Rectangle> kDungeonRoomLayouts[6] = {
-    // [0] The Whisper Crypt — hub and spoke (the original pilot layout)
+    // [0] The Whisper Crypt - hub and spoke (the original pilot layout)
     {
         {760,760,280,280},    // hub
         {720,240,360,360},    // N room (monster 0)
@@ -7560,7 +7603,7 @@ static const std::vector<Rectangle> kDungeonRoomLayouts[6] = {
         {1260,1260,340,340},  // SE room (boss)
         {1080,1320,180,180},  // SE corridor (S room <-> SE room)
     },
-    // [1] The Weavers' Nest (Phase 5) — web-choked nest chambers (fortress courtyard layout kept)
+    // [1] The Weavers' Nest (Phase 5) - web-choked nest chambers (fortress courtyard layout kept)
     {
         {600,600,600,600},    // courtyard (hub, no monster)
         {700,1200,400,300},   // South chamber (monster 0, spawn)
@@ -7570,7 +7613,7 @@ static const std::vector<Rectangle> kDungeonRoomLayouts[6] = {
         {1200,300,400,400},   // NE chamber (monster 4)
         {1200,1100,440,440},  // SE chamber (boss)
     },
-    // [2] The Sunken Vault — asymmetric branching cave
+    // [2] The Sunken Vault - asymmetric branching cave
     {
         {740,1160,360,320},   // entrance (monster 0, spawn)
         {260,1180,360,280},   // room (monster 1)
@@ -7584,39 +7627,39 @@ static const std::vector<Rectangle> kDungeonRoomLayouts[6] = {
         {1200,1120,400,360},  // boss room
         {1300,1000,160,120},  // corridor
     },
-    // [3] The Ember Depths (Phase 4) — a volcanic forge: entry shaft, twin
+    // [3] The Ember Depths (Phase 4) - a volcanic forge: entry shaft, twin
     // forge halls, slag pit and magma channel, the Emberlord's Crucible below.
     {
-        {780,1240,240,240},  // entry shaft (monster 0, spawn) — contains {900,1360}
-        {780,960,240,280},   // forge hall 1 (monster 1) — touches entry's top edge
-        {400,960,380,280},   // west slag pit (monster 2) — touches forge hall 1's west edge
-        {1020,960,380,280},  // east magma channel (monster 3) — touches forge hall 1's east edge
-        {780,680,240,280},   // forge hall 2 (monster 4) — touches forge hall 1's top edge
-        {700,300,400,380},   // the Crucible (boss) — touches forge hall 2's top edge
+        {780,1240,240,240},  // entry shaft (monster 0, spawn) - contains {900,1360}
+        {780,960,240,280},   // forge hall 1 (monster 1) - touches entry's top edge
+        {400,960,380,280},   // west slag pit (monster 2) - touches forge hall 1's west edge
+        {1020,960,380,280},  // east magma channel (monster 3) - touches forge hall 1's east edge
+        {780,680,240,280},   // forge hall 2 (monster 4) - touches forge hall 1's top edge
+        {700,300,400,380},   // the Crucible (boss) - touches forge hall 2's top edge
     },
-    // [4] The Frostbound Tomb (Phase 3) — a long frozen nave with side chapels,
+    // [4] The Frostbound Tomb (Phase 3) - a long frozen nave with side chapels,
     // the Frostbound King's throne at the far end. Rooms touch at clean
     // boundaries (nest-style: big chamber, no separate corridor rects).
     {
-        {780,1240,240,240},  // entrance (monster 0, spawn) — contains {900,1360}
-        {780,960,240,280},   // nave 1 (monster 1) — touches entrance's top edge
-        {400,960,380,280},   // west chapel (monster 2) — touches nave 1's west edge
-        {1020,960,380,280},  // east chapel (monster 3) — touches nave 1's east edge
-        {780,680,240,280},   // nave 2 (monster 4) — touches nave 1's top edge
-        {700,300,400,380},   // throne room (boss) — touches nave 2's top edge
+        {780,1240,240,240},  // entrance (monster 0, spawn) - contains {900,1360}
+        {780,960,240,280},   // nave 1 (monster 1) - touches entrance's top edge
+        {400,960,380,280},   // west chapel (monster 2) - touches nave 1's west edge
+        {1020,960,380,280},  // east chapel (monster 3) - touches nave 1's east edge
+        {780,680,240,280},   // nave 2 (monster 4) - touches nave 1's top edge
+        {700,300,400,380},   // throne room (boss) - touches nave 2's top edge
     },
-    // [5] The Hollow (Phase 5) — a lightless abyss shaft with two side tunnels, boss at the
+    // [5] The Hollow (Phase 5) - a lightless abyss shaft with two side tunnels, boss at the
     // very top (deepest point). Rooms are directly adjacent/overlapping by a clean 30px
     // (nest-style: big chamber, no separate corridor rects) rather than connected by corridors
-    // like the other dungeons — a different construction technique for a genuinely
+    // like the other dungeons - a different construction technique for a genuinely
     // different shape. Every adjacency below was hand-verified to overlap, not just touch.
     {
-        {750,1150,300,300},  // entrance (monster 0, spawn) — contains {900,1300}
-        {750,880,300,300},   // shaft room 2 (monster 1) — overlaps entrance's top edge by 30
-        {360,890,420,280},   // west tunnel (monster 2) — overlaps shaft room 2's west edge by 30
-        {1020,890,420,280},  // east tunnel (monster 3) — overlaps shaft room 2's east edge by 30
-        {750,610,300,300},   // shaft room 3 (monster 4) — overlaps shaft room 2's top edge by 30
-        {680,240,440,400},   // boss room — overlaps shaft room 3's top edge by 30
+        {750,1150,300,300},  // entrance (monster 0, spawn) - contains {900,1300}
+        {750,880,300,300},   // shaft room 2 (monster 1) - overlaps entrance's top edge by 30
+        {360,890,420,280},   // west tunnel (monster 2) - overlaps shaft room 2's west edge by 30
+        {1020,890,420,280},  // east tunnel (monster 3) - overlaps shaft room 2's east edge by 30
+        {750,610,300,300},   // shaft room 3 (monster 4) - overlaps shaft room 2's top edge by 30
+        {680,240,440,400},   // boss room - overlaps shaft room 3's top edge by 30
     }
 };
 static bool DungeonIsFloor(int dungeonIdx, Vector2 p) {
@@ -7626,9 +7669,9 @@ static bool DungeonIsFloor(int dungeonIdx, Vector2 p) {
 }
 // Draws `tex` tiled within `worldRect` (converted to screen space via `camera`), phase-
 // aligned to the world grid (not the rect's own corner) so adjacent rects tile
-// seamlessly. Deliberately doesn't scissor to its own bounds — every caller already
+// seamlessly. Deliberately doesn't scissor to its own bounds - every caller already
 // has an outer scissor active, and nesting scissor calls breaks it (raylib's
-// EndScissorMode() disables scissoring entirely rather than restoring the outer one) —
+// EndScissorMode() disables scissoring entirely rather than restoring the outer one) -
 // so tiles may overhang a rect's edge by a fraction of a tile into neighboring wall.
 static void DrawTiledRect(const Texture2D* tex, Rectangle worldRect, Vector2 camera, float worldTileSize, Color fillColor, Color tint = WHITE) {
     Vector2 topLeft = WorldToScreen({ worldRect.x, worldRect.y }, camera);
@@ -7642,7 +7685,7 @@ static void DrawTiledRect(const Texture2D* tex, Rectangle worldRect, Vector2 cam
             DrawTextureEx(*tex, { x, y }, 0.0f, scale, tint);
 }
 
-// World positions for a dungeon's monster nodes — the center of that dungeon's own
+// World positions for a dungeon's monster nodes - the center of that dungeon's own
 // rooms in kDungeonRoomLayouts above (indices 0-4 = monsters 0-4, index 5 = boss).
 static Vector2 DungeonMonsterNodePos(int dungeonIdx, int idx) {
     // Doubled to match kDungeonRoomLayouts (see that array's comment).
@@ -7661,7 +7704,7 @@ static Vector2 DungeonMonsterNodePos(int dungeonIdx, int idx) {
     return kCenters[dungeonIdx][std::clamp(idx, 0, kDungeonBossSlot)];
 }
 
-// Monsters wander in a small loop around their home spot rather than standing frozen —
+// Monsters wander in a small loop around their home spot rather than standing frozen -
 // a stateless, time-driven offset (no per-monster position to save/track) so it works
 // identically for rendering, interaction range, and collision with zero extra bookkeeping.
 // Each slot gets its own phase/speed/radius so they don't all move in lockstep. The
@@ -7670,15 +7713,15 @@ static Vector2 DungeonMonsterNodePos(int dungeonIdx, int idx) {
 static Vector2 MonsterWanderOffset(int slotIdx, float worldTime) {
     float phase = (float)slotIdx * 2.4f; // arbitrary per-slot offset so motion isn't synchronized
     float speed = 0.5f + 0.15f * (slotIdx % 3);   // slight per-slot speed variety
-    float radius = 22.0f + 6.0f * (slotIdx % 2);   // small wander radius — stays near its spawn
+    float radius = 22.0f + 6.0f * (slotIdx % 2);   // small wander radius - stays near its spawn
     return { std::cos(worldTime * speed + phase) * radius, std::sin(worldTime * speed * 0.8f + phase) * radius };
 }
 // The analytical derivative of MonsterWanderOffset (same phase/speed constants), giving
-// a real facing direction for anything drawn wandering by it — used for Town NPCs
+// a real facing direction for anything drawn wandering by it - used for Town NPCs
 // (2026-09-23) so they visibly turn to face their own wander motion instead of always
 // facing Down, without needing a stored previous-position field to compute velocity
 // from. Not used for dungeon-monster/creature wander (those stay a simpler static Idle,
-// see the Carl-art integration phase 4 notes) — Town is the one place players actually
+// see the Carl-art integration phase 4 notes) - Town is the one place players actually
 // stand around watching NPCs long enough for it to be worth the extra polish.
 static Vector2 WanderFacing(int slotIdx, float worldTime) {
     float phase = (float)slotIdx * 2.4f;
@@ -7693,14 +7736,14 @@ static Vector2 DungeonMonsterLivePos(int dungeonIdx, int idx, float worldTime) {
     return { home.x + off.x, home.y + off.y };
 }
 // Same wander treatment for Wilderness monster spots (added 2026-09-22 for live
-// combat's bump-to-engage — see kWildernessMonsterSpots) — these previously stood
+// combat's bump-to-engage - see kWildernessMonsterSpots) - these previously stood
 // completely still at kWildernessMonsterSpots[idx].pos until engaged.
 static Vector2 WildernessMonsterLivePos(int idx, float worldTime) {
     Vector2 home = kWildernessMonsterSpots[idx].pos;
     Vector2 off = MonsterWanderOffset(idx, worldTime);
     return { home.x + off.x, home.y + off.y };
 }
-// Same idea for the roaming Innocent NPCs (kWildernessInnocentSpots) — a small wander
+// Same idea for the roaming Innocent NPCs (kWildernessInnocentSpots) - a small wander
 // in place, not a real patrol like the Rival, since these are meant to read as ordinary
 // travelers rather than a threat with somewhere to be.
 static Vector2 WildernessInnocentLivePos(int idx, float worldTime) {
@@ -7708,14 +7751,14 @@ static Vector2 WildernessInnocentLivePos(int idx, float worldTime) {
     Vector2 off = MonsterWanderOffset(idx, worldTime);
     return { home.x + off.x, home.y + off.y };
 }
-// Same idea for Town's wandering NPCs (kTownNPCs) — Town's first-ever ambient motion.
+// Same idea for Town's wandering NPCs (kTownNPCs) - Town's first-ever ambient motion.
 static Vector2 TownNPCLivePos(int idx, float worldTime, int townIdx = 0) {
     Vector2 home = ActiveTownNPCs(townIdx)[idx].homePos;
     Vector2 off = MonsterWanderOffset(idx, worldTime);
     return { home.x + off.x, home.y + off.y };
 }
 
-// World positions for the Bloodstained Road's three ladders — one node per path (each
+// World positions for the Bloodstained Road's three ladders - one node per path (each
 // node's target updates live as you climb, rather than one node per tier).
 static Vector2 BloodstainedPathNodePos(int pathIdx) {
     static const Vector2 kPos[3] = { {220, 300}, {450, 550}, {680, 300} }; // blue, gray, red
@@ -7730,14 +7773,14 @@ static void DrawWorldNode(Vector2 screenPos, float radius, Color color, const st
                      screenPos.y > kViewport.y - radius && screenPos.y < kViewport.y + kViewport.height + radius;
     if (!onScreen) return;
     if (icon) {
-        // Real art loaded (every dungeon monster) — show it directly with no colored
+        // Real art loaded (every dungeon monster) - show it directly with no colored
         // circle backdrop (a flat color disc behind the art was both visual clutter and
         // the actual source of the original red-on-red problem on the Ember Depths'
         // fire-red floor, since that disc used the monster's own color). A thin gold
         // ring still signals "in range", the same role it plays on buildings.
         if (nearPlayer) DrawCircleLines((int)screenPos.x, (int)screenPos.y, radius + 4, Fade(kColorSlate, 0.9f));
         // The neutral backing plate that used to sit here was removed 2026-09-23 at
-        // Mark's request ("remove the circle behind all of the images") — it existed to
+        // Mark's request ("remove the circle behind all of the images") - it existed to
         // guarantee icon contrast against busy/similarly-colored floors (originally
         // fixed the Ember Depths' red fire-elemental icons blending into its red/near-
         // black lava floor). Now that most icons here are real art with their own
@@ -7745,7 +7788,7 @@ static void DrawWorldNode(Vector2 screenPos, float radius, Color color, const st
         // if a specific icon becomes hard to read against a specific floor again, this
         // is the spot to revisit rather than a new bug to chase elsewhere.
         // `iconSrcRect` (2026-09-23, animated monsters/creatures) crops one frame out of
-        // a DirSpriteSheet via ActorSrcRect instead of showing the whole texture — same
+        // a DirSpriteSheet via ActorSrcRect instead of showing the whole texture - same
         // ring/plate/label chrome either way.
         if (iconSrcRect) DrawIconCenteredRect(*icon, *iconSrcRect, screenPos, radius * 1.5f, iconTint);
         else DrawIconCentered(*icon, screenPos, radius * 1.5f, iconTint);
@@ -7757,7 +7800,7 @@ static void DrawWorldNode(Vector2 screenPos, float radius, Color color, const st
         }
     } else {
         // No art loaded for this one (e.g. the Bloodstained Road's path markers, which
-        // never pass an icon) — the colored circle is the only visual, so it still needs
+        // never pass an icon) - the colored circle is the only visual, so it still needs
         // the always-visible outline for contrast against similarly-colored ground.
         DrawCircleV(screenPos, radius, Fade(color, 0.85f));
         DrawCircleV(screenPos, radius, Fade(BLACK, nearPlayer ? 0.0f : 0.15f)); // subtle dim when out of range
@@ -7777,7 +7820,7 @@ static void DrawWorldNode(Vector2 screenPos, float radius, Color color, const st
 }
 
 // Death-system variant of DrawWorldNode (2026-09-24): draws an art icon fading out
-// and growing slightly as the death animation runs — used for monsters mid-death
+// and growing slightly as the death animation runs - used for monsters mid-death
 // in the 2D wilderness/dungeon views. Everything else (backing circle, labels)
 // would look wrong half-faded, so this only draws the fading sprite.
 static void DrawDyingWorldNode(Vector2 screenPos, float radius, const Texture2D* icon,
@@ -7791,7 +7834,7 @@ static void DrawDyingWorldNode(Vector2 screenPos, float radius, const Texture2D*
 
 // Simple clickable button helper.
 static bool Button(Rectangle r, const std::string& label, bool enabled) {
-    // A small (1.5px/side) outset on both the visual rect and the click/tap hit-test —
+    // A small (1.5px/side) outset on both the visual rect and the click/tap hit-test -
     // enough to feel a bit more generous without crowding neighboring buttons the way
     // a bigger outset plus a drop shadow did (both have been tried and back out).
     const float kOutset = 1.5f;
@@ -7805,28 +7848,28 @@ static bool Button(Rectangle r, const std::string& label, bool enabled) {
     DrawUIText(label.c_str(), (int)(big.x + (big.width - tw) / 2.0f), (int)(big.y + (big.height - 14) / 2.0f),
               14, kColorText);
     bool clicked = enabled && hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-    if (clicked) PlaySfx(SfxId::Click); // central UI click — one place covers all buttons
+    if (clicked) PlaySfx(SfxId::Click); // central UI click - one place covers all buttons
     return clicked;
 }
 
-// Tap-to-interact button — the touch equivalent of the [E] key, shown only while in
+// Tap-to-interact button - the touch equivalent of the [E] key, shown only while in
 // range of something interactable (mirrors the virtual joystick's bottom-left corner
 // on the opposite side of the screen). Called after the world/scissor for the same
-// reason as DrawVirtualJoystick — so it isn't painted over and isn't affected by the
+// reason as DrawVirtualJoystick - so it isn't painted over and isn't affected by the
 // scissor region.
 static bool DrawInteractButton(const std::string& label) {
     Rectangle r = { kViewport.x + kViewport.width - 150.0f, kViewport.y + kViewport.height - 90.0f, 130.0f, 60.0f };
     return Button(r, label, true);
 }
 
-// Touch-drag scrolling (2026-09-22) — every scrollable list in the game (Craft/
+// Touch-drag scrolling (2026-09-22) - every scrollable list in the game (Craft/
 // Provisioner recipe & backpack lists, Magic's spell list, Pets, Bank, House, Skills,
 // the Character screen's backpack) only ever responded to a desktop mouse wheel; mobile
 // has no wheel at all, so on a touch device none of them could be scrolled past the
 // first screenful. raylib's Emscripten GLFW3 layer already maps a single touch to the
 // left mouse button (the same convention the virtual joystick and tap-to-interact
 // button already rely on elsewhere in this file), so drag-to-scroll uses the same
-// IsMouseButtonDown/GetMousePosition APIs — no separate touch API needed. One shared
+// IsMouseButtonDown/GetMousePosition APIs - no separate touch API needed. One shared
 // pair of drag-tracking statics is enough since only one list can be actively dragged
 // at a time (one input device, one screen visible at once) regardless of which list.
 // Drop-in replacement for the old `GetMouseWheelMove() * 24.0f` expression at every
@@ -7856,7 +7899,7 @@ static float ScrollDelta(Rectangle area) {
 }
 
 // ---------------------------------------------------------------------
-// Live-combat spell hotbar (2026-09-22) — shared by DrawWildernessScreen and
+// Live-combat spell hotbar (2026-09-22) - shared by DrawWildernessScreen and
 // DrawHuntScreen (dungeons), the two live-combat screens. Assignment only touches
 // s.combatHotbar/s.hotbarPickerSlot, no screen-specific monster state, so it's a real
 // shared abstraction rather than the deliberate per-screen duplication used for the
@@ -7866,11 +7909,11 @@ static float ScrollDelta(Rectangle area) {
 // Draws the 5 hotbar slots at the fixed spot the old "first 3 known offensive spells"
 // strip used to occupy (between the joystick and the interact button) and returns
 // which slot was just tapped, or -1. The caller decides what a tap means: outside
-// combat it opens the assignment picker, in combat it casts — see the call sites in
+// combat it opens the assignment picker, in combat it casts - see the call sites in
 // DrawWildernessScreen/DrawHuntScreen.
 //
 // Denied taps (2026-09-25): in combat, taps on slots that can't currently fire
-// (cooldown/cast-lock, unaffordable) are ALSO reported — Button with enabled=false
+// (cooldown/cast-lock, unaffordable) are ALSO reported - Button with enabled=false
 // would swallow them silently, which felt like "I can only cast once". The caller
 // flashes the slot (hotbarDenyT) and explains via floater, so every tap answers.
 // Empty slots stay silent: "+" already says there's nothing there.
@@ -7892,7 +7935,7 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
             if (inCombat) {
                 bool affordable = s.mana >= sp.manaCost && s.reagents >= kLiveCombatReagentCost;
                 // Per-spell recharge (2026-09-25): only THIS spell's clock and the
-                // brief global cast lock gate the button — other spells stay live.
+                // brief global cast lock gate the button - other spells stay live.
                 bool ready = spellCds != nullptr && castLockT <= 0.0f && spellCds[spellIdx] <= 0.0f;
                 enabled = affordable && ready;
             }
@@ -7910,7 +7953,7 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
 }
 
 // Full-width overlay listing every known spell (offense + heal/cure) to assign to the
-// open slot, plus a Clear/Cancel option — opened by tapping any hotbar slot while not
+// open slot, plus a Clear/Cancel option - opened by tapping any hotbar slot while not
 // engaged in a fight (see the DrawCombatHotbarRow call sites).
 static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppressPress) {
     if (!s.hotbarPickerSlot.has_value()) return;
@@ -7920,7 +7963,7 @@ static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppre
     DrawRectangleRoundedLines(overlay, 0.05f, 6, Fade(BLACK, 0.5f));
     DrawUIText("Assign a spell to this slot:", (int)overlay.x + 12, (int)overlay.y + 10, 14, kColorHeading);
     float y = overlay.y + 36;
-    // suppressPress: the tap that opened the picker is still "pressed" this frame —
+    // suppressPress: the tap that opened the picker is still "pressed" this frame -
     // ignore it here so it can't instantly fire a picker button under the finger.
     if (!suppressPress && Button({ overlay.x + 12, y, overlay.width - 24, 26 }, "Clear slot", true)) {
         s.combatHotbar[slot] = -1;
@@ -7935,11 +7978,12 @@ static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppre
             known.push_back((int)i);
     }
     float listBottom = overlay.y + overlay.height - 40;
-    if (known.empty()) DrawUIText("No spells known yet — practice on the Magic tab.", (int)overlay.x + 12, (int)y, 13, DARKGRAY);
+    if (known.empty()) DrawUIText("No spells known yet - practice on the Magic tab.", (int)overlay.x + 12, (int)y, 13, DARKGRAY);
     for (int idx : known) {
-        if (y + 26 > listBottom) break; // no scrolling for now — a long known-spell list just truncates
+        if (y + 26 > listBottom) break; // no scrolling for now - a long known-spell list just truncates
         const Spell& sp = kSpells[idx];
-        std::string tag = sp.type == SpellType::Offensive ? "[Attack] " : "[Heal] ";
+        std::string tag = sp.type == SpellType::Offensive ? "[Attack] "
+                        : (idx == kRecallSpellIdx ? "[Travel] " : "[Heal] ");
         if (!suppressPress && Button({ overlay.x + 12, y, overlay.width - 24, 24 }, tag + sp.name, true)) {
             s.combatHotbar[slot] = idx;
             s.hotbarPickerSlot.reset();
@@ -7951,10 +7995,10 @@ static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppre
         s.hotbarPickerSlot.reset();
 }
 
-// Persistent HP/Mana readout for live combat (2026-09-22) — Wilderness has no player
+// Persistent HP/Mana readout for live combat (2026-09-22) - Wilderness has no player
 // stat display at all otherwise; the Hunt screen already shows HP unconditionally (see
 // its own header) so it only needs a Mana bar added at its call site, not this whole
-// pair. No Stamina bar — no such stat exists in this game (DrinkPotion's stamina-potion
+// pair. No Stamina bar - no such stat exists in this game (DrinkPotion's stamina-potion
 // branch literally logs "no stamina system in this scaffold"), confirmed and explicitly
 // deferred rather than guessed at.
 static void DrawLiveCombatHud(const GameState& s, float x, float y) {
@@ -7971,7 +8015,7 @@ static void DrawLiveCombatHud(const GameState& s, float x, float y) {
     DrawRectangleRec({ manaBg.x, manaBg.y, manaBg.width * manaPct, manaBg.height }, Color{ 63, 82, 122, 255 });
 }
 
-// Bandage + heal-potion quick-use row for live combat (2026-09-22) — shared by both
+// Bandage + heal-potion quick-use row for live combat (2026-09-22) - shared by both
 // screens, sits just above the spell hotbar row. Reuses UseBandageOutOfCombat and
 // DrinkPotion directly with zero changes: both already operate purely on GameState (hp/
 // bandages/potions), with no CombatState coupling at all, so no new "live" variant was
@@ -7998,12 +8042,12 @@ static void DrawLiveCombatQuickItems(GameState& s) {
 // ---------------------------------------------------------------------
 // Town screen: a walkable town square. Gather/Auto-Gather stay as a small
 // HUD strip (they're timed actions, not places to walk to), but every
-// building is now a node in the world — walk up and press E to open its
+// building is now a node in the world - walk up and press E to open its
 // upgrade panel, which pauses movement until closed.
 // ---------------------------------------------------------------------
 
 // ---------------------------------------------------------------------
-// 3D town view (2026-09-24, first 3D milestone) — a 3D rendering of the Town
+// 3D town view (2026-09-24, first 3D milestone) - a 3D rendering of the Town
 // screen built from raylib primitives plus real CC0 building models (Quaternius
 // Medieval Village MegaKit, assembled per-building in Town3DDrawBuilding),
 // toggled with the "3D [V]" HUD button or the V key (see DrawTownScreen). The 2D
@@ -8016,14 +8060,14 @@ static void DrawLiveCombatQuickItems(GameState& s) {
 //  - Desktop draws into a 540x900 render texture (see kZoom), so raylib's
 //    GetScreenToWorldRay/GetWorldToScreen (which use the *window* size)
 //    would mis-map. The ray and the label projection below are computed by
-//    hand against the virtual canvas instead — consistent with what
+//    hand against the virtual canvas instead - consistent with what
 //    BeginMode3D actually renders into the texture.
 //  - All game logic is shared: movement/E-interact/panels run in
 //    DrawTownScreen before this is called, and clicking a building box in
 //    3D sets s.selectedTile exactly like walking up + E does in 2D.
-//  - Minimal vector helpers below instead of raymath.h — main.cpp only
+//  - Minimal vector helpers below instead of raymath.h - main.cpp only
 //    includes raylib.h today, and this keeps the 3D section dependency-free
-//    (rlgl.h is pulled in below for the shadowmap pattern only — it ships
+//    (rlgl.h is pulled in below for the shadowmap pattern only - it ships
 //    with raylib's headers on every platform, including the emscripten build).
 // ---------------------------------------------------------------------
 #include "rlgl.h"
@@ -8066,7 +8110,7 @@ static Matrix T3DMatMul(Matrix a, Matrix b) {
 
 // ==== T3C-KIT-BEGIN ====
 // ---------------------------------------------------------------------
-// Phase 3 — Procedural Creature Kit (2026-09-24).
+// Phase 3 - Procedural Creature Kit (2026-09-24).
 //
 // Mark's directive: no placeholder stand-ins. The CC0 hunt could not cover
 // the roster (the KayKit-Adventurers repo 404s and kaykit.com is unreachable
@@ -8116,7 +8160,7 @@ static void T3CPushTri(T3CMeshBuilder& b, const float p0[3], const float p1[3],
     float vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
     float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
     float l = sqrtf(nx * nx + ny * ny + nz * nz);
-    if (l < 1e-9f) return; // degenerate (sphere pole fans) — skip instead of
+    if (l < 1e-9f) return; // degenerate (sphere pole fans) - skip instead of
                            // emitting a zero-area tri with a bogus normal
     nx /= l; ny /= l; nz /= l;
     const float* ps[3] = { p0, p1, p2 };
@@ -8247,7 +8291,7 @@ static Model T3CFinish(T3CMeshBuilder& b) {
     for (int i = 0; i < n * 2; i++) mesh.texcoords[i] = b.uv[(size_t)i];
     for (int i = 0; i < n * 4; i++) mesh.colors[i] = b.col[(size_t)i];
     UploadMesh(&mesh, false);
-    // NOTE: the CPU-side arrays are intentionally never freed — the part
+    // NOTE: the CPU-side arrays are intentionally never freed - the part
     // meshes are built once and live for the whole session.
     return LoadModelFromMesh(mesh);
 }
@@ -8360,12 +8404,12 @@ static T3CQuadParts T3CBuildQuad(const T3CQuadSpec& s) {
     float fx = s.bodyLen * 0.30f;
     float lz = s.bodyW * 0.42f;
 
-    { // Torso — baked at rest.
+    { // Torso - baked at rest.
         T3CMeshBuilder b;
         T3CSphere(b, 0.0f, torsoY, 0.0f, s.bodyLen * 0.5f, s.bodyH * 0.5f, s.bodyW * 0.5f, 7, 10, WHITE);
         P.torso = T3CFinish(b);
     }
-    // Head group — pivot at the neck base so yaw/pitch read as head turns.
+    // Head group - pivot at the neck base so yaw/pitch read as head turns.
     float neckX = s.bodyLen * 0.5f + 1.0f;
     float neckY = torsoY + s.neckUp;
     P.neckP = { neckX, neckY, 0.0f };
@@ -8407,7 +8451,7 @@ static T3CQuadParts T3CBuildQuad(const T3CQuadSpec& s) {
             T3CBox(b, -2.0f, s.headR * 0.9f, 0.0f, s.headR * 1.6f, s.headR * 0.7f, s.headR * 0.35f, WHITE);
         P.head = T3CFinish(b);
     }
-    { // Leg — one mesh shared by all four legs (pivot at the hip, extends -Y).
+    { // Leg - one mesh shared by all four legs (pivot at the hip, extends -Y).
         T3CMeshBuilder b;
         T3CCylinder(b, 0.0f, 0.0f, 0.0f, -s.legLen, s.legR, s.legR * 0.7f, 6, WHITE);
         T3CBox(b, 0.0f, -s.legLen + 1.5f, 0.0f, s.legR * 1.8f, 3.0f, s.legR * 1.8f, WHITE);
@@ -8415,7 +8459,7 @@ static T3CQuadParts T3CBuildQuad(const T3CQuadSpec& s) {
     }
     P.legFLP = { fx, hipY, lz }; P.legFRP = { fx, hipY, -lz };
     P.legBLP = { -fx, hipY, lz }; P.legBRP = { -fx, hipY, -lz };
-    // Tail — pivot at the rear; cone angled up-back.
+    // Tail - pivot at the rear; cone angled up-back.
     P.tailP = { -s.bodyLen * 0.5f + 2.0f, torsoY + s.bodyH * 0.22f, 0.0f };
     {
         T3CMeshBuilder b;
@@ -8424,7 +8468,7 @@ static T3CQuadParts T3CBuildQuad(const T3CQuadSpec& s) {
         T3CConeDir(b, base, dir, s.tailLen, s.tailR, 6, WHITE);
         P.tail = T3CFinish(b);
     }
-    // Wings — pivot at the shoulder; two double-sided triangles each.
+    // Wings - pivot at the shoulder; two double-sided triangles each.
     if (P.hasWings) {
         float wx = s.bodyLen * 0.08f, wy = torsoY + s.bodyH * 0.38f, wz = s.bodyW * 0.32f;
         float span = s.wingSpan, chord = s.wingChord;
@@ -8505,13 +8549,13 @@ struct T3CHumanParts {
 static T3CHumanParts T3CBuildHuman(const T3CHumanSpec& s) {
     T3CHumanParts P{};
     P.gear = s.gear;
-    { // Torso — baked at rest, with a belt band.
+    { // Torso - baked at rest, with a belt band.
         T3CMeshBuilder b;
         T3CBox(b, 0.0f, s.hipY + s.torsoH * 0.5f, 0.0f, s.torsoD, s.torsoH, s.torsoW, WHITE);
         T3CBox(b, 0.0f, s.hipY + 2.0f, 0.0f, s.torsoD + 1.5f, 3.0f, s.torsoW + 1.5f, WHITE);
         P.torso = T3CFinish(b);
     }
-    { // Chestplate — baked steel, drawn WHITE so it color-blocks the shirt tint.
+    { // Chestplate - baked steel, drawn WHITE so it color-blocks the shirt tint.
         T3CMeshBuilder b;
         Color steel = { 138, 143, 152, 255 }, steelD = { 104, 109, 119, 255 };
         float fx = s.torsoD * 0.5f;
@@ -8522,7 +8566,7 @@ static T3CHumanParts T3CBuildHuman(const T3CHumanSpec& s) {
         P.armor = T3CFinish(b);
     }
     P.neckP = { 0.0f, s.neckY, 0.0f };
-    { // Head — face forward (+X): baked dark eyes so the face reads at range.
+    { // Head - face forward (+X): baked dark eyes so the face reads at range.
         T3CMeshBuilder b;
         T3CSphere(b, 1.5f, s.headR * 0.85f, 0.0f, s.headR, s.headR, s.headR, 6, 8, WHITE);
         Color eye = { 26, 20, 18, 255 };
@@ -8531,7 +8575,7 @@ static T3CHumanParts T3CBuildHuman(const T3CHumanSpec& s) {
         T3CBox(b, ex, ey, -ez, 1.6f, 2.6f, 2.0f, eye);
         P.head = T3CFinish(b);
     }
-    if (s.gear & kGearHair) { // hair cap — crown plus back-of-head mass
+    if (s.gear & kGearHair) { // hair cap - crown plus back-of-head mass
         T3CMeshBuilder b;
         T3CSphere(b, 0.0f, s.headR * 1.47f, 0.0f, s.headR * 1.15f, s.headR * 0.8f,
                   s.headR * 1.15f, 5, 8, Color{ 96, 66, 40, 255 });
@@ -8548,7 +8592,7 @@ static T3CHumanParts T3CBuildHuman(const T3CHumanSpec& s) {
         T3CBox(b, 1.5f + s.headR * 0.95f, s.headR * 0.45f, 0.0f, 1.5f, s.headR * 0.9f, 2.2f, steelD);
         P.helm = T3CFinish(b);
     }
-    { // Arm — pivot at the shoulder, extends -Y; elbow cuff for joint read.
+    { // Arm - pivot at the shoulder, extends -Y; elbow cuff for joint read.
         T3CMeshBuilder b;
         T3CCylinder(b, 0.0f, 0.0f, 0.0f, -s.armLen, s.armR, s.armR * 0.75f, 6, WHITE);
         T3CSphere(b, 0.0f, -s.armLen * 0.55f, 0.0f, s.armR * 1.25f, s.armR * 1.25f,
@@ -8558,7 +8602,7 @@ static T3CHumanParts T3CBuildHuman(const T3CHumanSpec& s) {
     }
     P.armLP = { 0.0f, s.shoulderY, s.shoulderHW };
     P.armRP = { 0.0f, s.shoulderY, -s.shoulderHW };
-    if (s.gear & kGearSword) { // sword — arm-local coords, grip at the hand
+    if (s.gear & kGearSword) { // sword - arm-local coords, grip at the hand
         T3CMeshBuilder b;
         float hy = -s.armLen;
         Color steel = { 188, 193, 203, 255 }, steelD = { 120, 126, 138, 255 };
@@ -8568,7 +8612,7 @@ static T3CHumanParts T3CBuildHuman(const T3CHumanSpec& s) {
         T3CBox(b, 0.0f, hy - 27.5f, 0.0f, 2.4f, 3.5f, 1.1f, steel); // tip
         P.weapon = T3CFinish(b);
     }
-    { // Leg — pivot at the hip, extends -Y, with knee joint and boot.
+    { // Leg - pivot at the hip, extends -Y, with knee joint and boot.
         T3CMeshBuilder b;
         T3CCylinder(b, 0.0f, 0.0f, 0.0f, -s.legLen, s.legR, s.legR * 0.8f, 6, WHITE);
         T3CSphere(b, 0.0f, -s.legLen * 0.5f, 0.0f, s.legR * 1.15f, s.legR * 1.15f,
@@ -8767,7 +8811,7 @@ static void T3CDrawQuad(const T3CQuadParts& P, float x, float z, float yawRad, f
     rlRotatef((headPitch - 0.5f * qAtk) * kT3CDeg, 0.0f, 0.0f, 1.0f); // dips into the bite on attack
     DrawModel(P.head, { 0.0f, 0.0f, 0.0f }, 1.0f, coatV);
     rlPopMatrix();
-    // Legs — diagonal pairs (FL+BR phase 0, FR+BL phase PI), the trot cycle.
+    // Legs - diagonal pairs (FL+BR phase 0, FR+BL phase PI), the trot cycle.
     const Vector3 piv[4] = { P.legFLP, P.legFRP, P.legBLP, P.legBRP };
     const float phs[4] = { 0.0f, 3.14159265f, 3.14159265f, 0.0f };
     for (int i = 0; i < 4; i++) {
@@ -8835,7 +8879,7 @@ static void T3CDrawSerpent(const T3CQuadParts& P, float x, float z, float yawRad
         DrawModel(P.segBody, { 0.0f, 0.0f, 0.0f }, 1.0f, coatV);
         rlPopMatrix();
     }
-    { // head — leads the wave, raised, yawing with it
+    { // head - leads the wave, raised, yawing with it
         float ph = t * freq + a.seed;
         rlPushMatrix();
         rlTranslatef(P.segSpacing * 0.5f + 4.0f + sAtk * 26.0f, 10.0f + sinf(ph * 0.5f) * 1.5f + sAtk * 8.0f,
@@ -8939,7 +8983,7 @@ static T3CQuadLook T3CCreatureLook(int creatureIdx) {
     }
 }
 
-// Phase 3/4 — new wilderness monster icons reuse existing sheets with a tint
+// Phase 3/4 - new wilderness monster icons reuse existing sheets with a tint
 // (no new art files): 5 Ice Wolf -> wolf sheet, 6 Frostbitten Husk -> imp sheet,
 // 7 Rock Golem -> imp (humanoid) sheet, 8 Mountain Cat -> wolf sheet.
 static const DirSpriteSheet& WildMonsterSheetFor(int iconIdx) {
@@ -8963,23 +9007,23 @@ struct T3CMonLook {
 };
 static T3CMonLook T3CMonsterLook(int iconIdx) {
     switch (iconIdx) {
-        case 0: // Wild Bat — winged, flaps constantly
+        case 0: // Wild Bat - winged, flaps constantly
             return { false, 9, { 90, 80, 110, 255 }, {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, 1.0f };
-        case 1: // Wandering Goblin — small humanoid, green skin
+        case 1: // Wandering Goblin - small humanoid, green skin
             return { true, 0, {0,0,0,0}, { 110, 90, 60, 255 }, { 70, 60, 50, 255 }, { 90, 160, 80, 255 }, 0.62f };
         case 2: // Lone Wolf
             return { false, 0, { 120, 120, 130, 255 }, {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, 1.0f };
-        case 3: // Lesser Imp — small humanoid, red skin
+        case 3: // Lesser Imp - small humanoid, red skin
             return { true, 0, {0,0,0,0}, { 80, 50, 50, 255 }, { 50, 40, 40, 255 }, { 180, 80, 60, 255 }, 0.55f };
-        case 4: // Highway/Mountain Bandit — humanoid, dark garb
+        case 4: // Highway/Mountain Bandit - humanoid, dark garb
             return { true, 0, {0,0,0,0}, { 60, 55, 60, 255 }, { 45, 40, 45, 255 }, { 225, 200, 165, 255 }, 1.0f };
-        case 5: // Ice Wolf (Phase 3) — pale-furred quadruped, larger than a lone wolf
+        case 5: // Ice Wolf (Phase 3) - pale-furred quadruped, larger than a lone wolf
             return { false, 0, { 205, 225, 240, 255 }, {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, 1.25f };
-        case 6: // Frostbitten Husk (Phase 3) — gaunt humanoid, ice-pale skin, tattered garb
+        case 6: // Frostbitten Husk (Phase 3) - gaunt humanoid, ice-pale skin, tattered garb
             return { true, 0, {0,0,0,0}, { 110, 125, 140, 255 }, { 80, 95, 110, 255 }, { 190, 215, 230, 255 }, 1.05f };
-        case 7: // Rock Golem (Phase 4) — bulky stone humanoid, granite gray
+        case 7: // Rock Golem (Phase 4) - bulky stone humanoid, granite gray
             return { true, 1, {0,0,0,0}, { 120, 112, 100, 255 }, { 95, 88, 78, 255 }, { 150, 140, 125, 255 }, 1.50f };
-        case 8: // Mountain Cat (Phase 4) — tawny feline quadruped
+        case 8: // Mountain Cat (Phase 4) - tawny feline quadruped
         default:
             return { false, 1, { 195, 158, 105, 255 }, {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, 1.10f };
     }
@@ -8995,7 +9039,7 @@ static T3CDunLook T3CDungeonMonsterLook(int dungeonIdx, int monsterIdx) {
     float bs = boss ? 1.35f : 1.0f;
     if (!boss) monsterIdx = monsterIdx % 5; // extra slots 5-7 borrow looks from 0-2
     switch (dungeonIdx % 6) {
-        case 3: // The Ember Depths — living elements: brutes + critters (volcanic theme kept)
+        case 3: // The Ember Depths - living elements: brutes + critters (volcanic theme kept)
             switch (monsterIdx) {
                 case 0:  return { true, false, 0, 0, 0.95f };       // Cinder Imp
                 case 1:  return { true, false, 0, 1, 1.10f };       // Magma Hound
@@ -9004,11 +9048,11 @@ static T3CDunLook T3CDungeonMonsterLook(int dungeonIdx, int monsterIdx) {
                 case 4:  return { true, false, 0, 1, 1.25f };       // Pyroclast Titan
                 default: return { true, false, 0, 1, 1.35f * bs }; // The Emberlord
             }
-        case 1: // The Weavers' Nest (Phase 5) — spiders: dark chitin quadrupeds (panther rig), growing by rank
+        case 1: // The Weavers' Nest (Phase 5) - spiders: dark chitin quadrupeds (panther rig), growing by rank
             return { false, false, 1, 0, (0.80f + 0.10f * (float)monsterIdx) * bs };
-        case 0: // The Whisper Crypt — undead humanoids, growing by rank
+        case 0: // The Whisper Crypt - undead humanoids, growing by rank
             return { true, false, 0, 0, (0.90f + 0.08f * (float)monsterIdx) * bs };
-        case 2: // The Sunken Vault — coastal wyrm-kin (Phase 2 re-theme; body plans unchanged)
+        case 2: // The Sunken Vault - coastal wyrm-kin (Phase 2 re-theme; body plans unchanged)
             switch (monsterIdx) {
                 case 0:  return { false, true, 10, 0, 1.00f };      // Fen Serpent (serpentine)
                 case 1:  return { true, false, 0, 1, 1.00f };       // Scalekin Raider
@@ -9017,7 +9061,7 @@ static T3CDunLook T3CDungeonMonsterLook(int dungeonIdx, int monsterIdx) {
                 case 4:  return { false, false, 8, 0, 1.25f };      // Abyssal Wyrm (wyvern)
                 default: return { false, false, 6, 0, 1.60f * bs }; // The Sunken King (dragon)
             }
-        case 5: // The Hollow (Phase 5) — abyss skulkers
+        case 5: // The Hollow (Phase 5) - abyss skulkers
             switch (monsterIdx) {
                 case 0:  return { false, false, 0, 0, 0.55f };      // Warren Rat (small canine)
                 case 1:  return { false, false, 1, 0, 0.90f };      // Tunnel Skulker (feline)
@@ -9026,7 +9070,7 @@ static T3CDunLook T3CDungeonMonsterLook(int dungeonIdx, int monsterIdx) {
                 case 4:  return { true, false, 0, 1, 1.20f };       // Deep Marauder
                 default: return { true, false, 0, 1, 1.40f * bs };  // The Hollow King (Phase 5)
             }
-        case 4: // Phase 3 — The Frostbound Tomb: frostbitten undead humanoids, growing by rank
+        case 4: // Phase 3 - The Frostbound Tomb: frostbitten undead humanoids, growing by rank
             switch (monsterIdx) {
                 case 0:  return { true, false, 0, 0, 0.95f };       // Frostbite Husk
                 case 1:  return { true, false, 0, 0, 1.05f };       // Glacier Wight
@@ -9063,7 +9107,7 @@ static const int kT3CTrackPlayerWild = 20;
 static const int kT3CTrackCreatureWild = 30; // + creature spot idx
 static const int kT3CTrackMonsterWild = 60;  // + monster spot idx
 static const int kT3CTrackRival = 90;
-static const int kT3CTrackBladeWild = 91; // + blade idx (0..2) — one track per blade so they don't animate in lockstep
+static const int kT3CTrackBladeWild = 91; // + blade idx (0..2) - one track per blade so they don't animate in lockstep
 static const int kT3CTrackInnocentWild = 100; // + innocent idx
 static const int kT3CTrackCompanion = 120;
 static const int kT3CTrackPlayerDungeon = 130;
@@ -9071,7 +9115,7 @@ static const int kT3CTrackMonsterDungeon = 140; // + monster idx (0..8), engaged
 // ==== T3C-KIT-END ====
 
 // Orbit-camera state for the 3D town view. File-statics (like g_scrollDragging),
-// not GameState — purely transient view state, never saved.
+// not GameState - purely transient view state, never saved.
 // g_t3dYaw/Pitch/Dist are the *targets* written by input; the smoothed copies
 // below are what the camera actually uses, eased each frame (2026-09-24 feel
 // pass), so drags and wheel zooms glide instead of snapping.
@@ -9082,7 +9126,7 @@ static float g_t3dYawSm = 0.7f, g_t3dPitchSm = 0.85f, g_t3dDistSm = 650.0f; // s
 static Vector3 g_t3dTargetSm = { 0.0f, 0.0f, 0.0f }; // smoothed orbit target
 static bool g_t3dCamInit = false;
 static int g_t3dCamScreen = -1; // which screen the smoothed camera last served (0=town, 1=wilderness)
-// Feel-pass tuning constants (2026-09-24) — tweak these on the PC build:
+// Feel-pass tuning constants (2026-09-24) - tweak these on the PC build:
 static const float kT3DPitchMin = 0.22f; // polar clamp: camera can never dip below the ground
 static const float kT3DPitchMax = 1.35f; // ~77 deg: near-top-down is as far as it goes
 static const float kT3DDistMin = 260.0f; // closest zoom: building fills the view
@@ -9237,7 +9281,7 @@ static float Town3DBuildingHeight(const std::string& key) {
 // one directional light, 3x3 PCF) with the glsl100 shaders in
 // assets/shaders/shadowmap.vs/.fs. If the shaders or the depth FBO can't be
 // created, Town3DEnsureShadow leaves g_t3dShadow.ready false and the 3D view
-// falls back to the previous flat lighting — never a crash, never 2D impact.
+// falls back to the previous flat lighting - never a crash, never 2D impact.
 #define T3D_SHADOWMAP_RES 1024
 struct Town3DShadow {
     bool ready = false;
@@ -9286,7 +9330,7 @@ static RenderTexture2D Town3DLoadShadowmapRT(int width, int height) {
 }
 
 // 2026-09-24: real shadow-mapping caused a WebGL/mobile-only "shadow acne"
-// flashing bug — this shader's `precision mediump float` is honored far more
+// flashing bug - this shader's `precision mediump float` is honored far more
 // literally on mobile GPUs than desktop drivers, and the PCF depth comparison
 // below is precision-sensitive in a way desktop testing can't reproduce. It
 // flashed while moving on a real phone but never reproduced on desktop.
@@ -9340,16 +9384,16 @@ static void Town3DApplyShadowShader(Model& m) {
 
 // ---- 3D town lighting take 2: diffuse+specular+fog, no shadow map (2026-09-24) ----
 // The shadow-map SAMPLING above is what triggered the mobile "shadow acne"
-// flashing bug, not the plain per-vertex lighting math — those are
+// flashing bug, not the plain per-vertex lighting math - those are
 // independent, and the old shadow shader/pass above stay completely
 // untouched and permanently disabled (kT3DShadowsEnabled) rather than
 // risk re-entangling this with that unresolved issue. This is
-// assets/shaders/lit.vs/.fs — shadowmap.fs with the shadow-map sampling
-// section removed, nothing else — so every model gets real directional
+// assets/shaders/lit.vs/.fs - shadowmap.fs with the shadow-map sampling
+// section removed, nothing else - so every model gets real directional
 // shading instead of the flat, unlit fallback that shipped while shadows
 // were off. Deliberately NOT used for Dungeon (torchlight.vs/.fs handles
 // indoor lighting on its own) or building Interiors (kept dark/moody like
-// the dungeons, by design — see DrawInterior3DWorld's own comment).
+// the dungeons, by design - see DrawInterior3DWorld's own comment).
 struct Town3DLit {
     bool ready = false, tried = false;
     Shader shader{};
@@ -9409,7 +9453,7 @@ static Town3DGround g_t3dGround;
 // building row, right past every doorstep, joined by the main north-south
 // street (plaza -> bank -> Wilderness Gate). Baked into the ground texture, so
 // zero z-fighting by construction. Gameplay positions (kTownNodePositions /
-// kTownPlaza / kWildernessGatePos) are untouched — only the paint changes.
+// kTownPlaza / kWildernessGatePos) are untouched - only the paint changes.
 static const float kT3DRoadW = 26.0f;
 
 static void Town3DGroundDisc(Image* img, float x, float z, float r, Color col) {
@@ -9467,8 +9511,8 @@ static void Town3DEnsureGround(const GameState& s) {
     }
     Town3DEnsureShadow(); // ground model wants the shadow shader when available
     bool town2 = (s.selectedTown != 0);
-    bool town3 = (s.selectedTown == 2); // Phase 3: Frostmere — snow-covered ground
-    bool town4 = (s.selectedTown == 3); // Phase 4: Cragmoor — granite mountain ground
+    bool town3 = (s.selectedTown == 2); // Phase 3: Frostmere - snow-covered ground
+    bool town4 = (s.selectedTown == 3); // Phase 4: Cragmoor - granite mountain ground
     Color grassDark  = town4 ? Color{ 118, 114, 106, 255 } : town3 ? Color{ 218, 230, 242, 255 } : (town2 ? Color{ 96, 132, 88, 255 }   : Color{ 104, 148, 82, 255 });
     Color grassLight = town4 ? Color{ 158, 154, 144, 255 } : town3 ? Color{ 240, 248, 252, 255 } : (town2 ? Color{ 132, 168, 118, 255 }  : Color{ 148, 190, 112, 255 });
     Color plazaCol   = town4 ? Color{ 140, 136, 126, 255 } : town3 ? Color{ 180, 196, 212, 255 } : (town2 ? Color{ 160, 162, 168, 255 }  : Color{ 196, 168, 108, 255 });
@@ -9574,14 +9618,14 @@ static void Town3DEnsureGround(const GameState& s) {
 // ---- 3D town sky: gradient dome that follows the camera (2026-09-24) ----
 // Stacked open-topped cylinder bands, horizon (warm haze) -> zenith (blue).
 // Centered on the camera's x/z so the viewer is always inside it (the far
-// plane is 1000; the wall sits at 950). Drawn with the default shader —
-// unlit, unfogged — before the shadow shader is enabled for the scene.
+// plane is 1000; the wall sits at 950). Drawn with the default shader -
+// unlit, unfogged - before the shadow shader is enabled for the scene.
 // 2026-09-24 bugfix (re-applied on this drop, built on the pre-fix
 // baseline): DrawCylinder always fills a full disc cap at both ends, even
 // for a straight tube. Stacking 16 of those for the sky gave ~17 solid
 // 950-radius discs at every band boundary, and the camera (sitting between
 // two of them) had its view of the ground/buildings completely blocked by
-// the nearest one — an empty flat-colored screen. DrawCylinderEx has the
+// the nearest one - an empty flat-colored screen. DrawCylinderEx has the
 // identical cap behavior, so the real fix is this hand-rolled side-wall-
 // only quad function, shared by the town, wilderness, and interior skies.
 static void Town3DSkyBand(Vector3 base, Vector3 top, float radius, int sides, Color color) {
@@ -9611,7 +9655,7 @@ static void Town3DDrawSky(Vector3 camPos) {
         float y0 = -30.0f + i * bandH, y1 = y0 + bandH;
         Town3DSkyBand({ camPos.x, y0, camPos.z }, { camPos.x, y1, camPos.z }, R, 24, col);
     }
-    // Zenith cap overhead — the one real cap, sealing the top of the dome.
+    // Zenith cap overhead - the one real cap, sealing the top of the dome.
     DrawCylinder({ camPos.x, 931.0f, camPos.z }, R, R, 2.0f, 24, kT3DSkyZenith);
     rlEnableBackfaceCulling();
 }
@@ -9704,7 +9748,7 @@ static void Town3DDrawPiece(Model m, Vector3 pos, float rotYDeg,
     DrawModelEx(m, pos, { 0, 1, 0 }, rotYDeg, { s, s, s }, tint);
 }
 
-// Deterministic 0..1 hash from a world position — stable across frames, so
+// Deterministic 0..1 hash from a world position - stable across frames, so
 // per-instance variation never jitters.
 static float Town3DHash01(float x, float z) {
     float h = sinf(x * 12.9898f + z * 78.233f) * 43758.5453f;
@@ -9780,7 +9824,7 @@ static void Town3DDrawBuilding(const std::string& key, float cx, float cz) {
     Color roofTint = Town3DTintFor(key, true);
     const float S = kT3DModScale;
     if (key == "townhall") {
-        // Two-story, 3x2 modules — the town's landmark. Roof46's long axis runs
+        // Two-story, 3x2 modules - the town's landmark. Roof46's long axis runs
         // along z, so it is turned 90 degrees to cover the 6m x-axis span.
         Town3DDrawHouse(cx, cz, w, wd, ww, M.roof46, 90.0f, 3, 2, 2, true, wallTint, roofTint);
     } else if (key == "bank" || key == "stable") {
@@ -9810,7 +9854,7 @@ static const float kTown3DBuildingHalf = 55.0f; // 110-unit footprint, ~kNodeRad
 
 // True when the point hits a HUD control that must win over orbit/pick input.
 // Rects mirror the ones drawn later in DrawTownScreen's HUD section.
-static bool g_touchSeen = false; // latched on first touch input — desktop never sees the TARGET button
+static bool g_touchSeen = false; // latched on first touch input - desktop never sees the TARGET button
 static Rectangle TargetFrameRect() { return { 20.0f, 208.0f, 230.0f, 58.0f }; }
 static Rectangle TargetButtonRect() {
     return { kViewport.x + kViewport.width - 150.0f, kViewport.y + kViewport.height - 160.0f, 130.0f, 60.0f };
@@ -9821,7 +9865,7 @@ static Rectangle TargetButtonRect() {
 // DrawWildernessScreen, which covers both). Toggle with M or the MAP button;
 // tap/click the map itself to close it. Every marker comes from the same tables
 // the world uses (kTownGates, kWildernessDungeonEntrances, kHousePlots,
-// kWildernessMonsterSpots, kKingsRoadWaypoints) — no duplicated coordinates.
+// kWildernessMonsterSpots, kKingsRoadWaypoints) - no duplicated coordinates.
 static Rectangle MinimapRect() {
     return { kViewport.x + kViewport.width - 164.0f, 140.0f, 154.0f, 154.0f };
 }
@@ -9839,7 +9883,7 @@ static void DrawMinimap(GameState& s) {
         return;
     }
     Rectangle mm = MinimapRect();
-    // Tap/click the map to close it (display-only v1 — no click-to-travel).
+    // Tap/click the map to close it (display-only v1 - no click-to-travel).
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), mm)) {
         s.minimapOpen = false;
         return;
@@ -9847,7 +9891,7 @@ static void DrawMinimap(GameState& s) {
     const float sc = mm.width / kWildernessWorldSize; // world units -> minimap px
     auto toMap = [&](Vector2 w) -> Vector2 { return { mm.x + w.x * sc, mm.y + w.y * sc }; };
     DrawRectangleRec(mm, Fade(BLACK, 0.62f));
-    // Region washes — match the Phase 0 2D ground washes, slightly stronger so
+    // Region washes - match the Phase 0 2D ground washes, slightly stronger so
     // the regions read at minimap scale.
     DrawRectangle((int)mm.x, (int)mm.y, (int)mm.width, (int)(700.0f * sc), Color{ 228, 238, 248, 110 }); // Frostwastes snow (Phase 3)
     DrawRectangle((int)(mm.x + 1950.0f * sc), (int)(mm.y + 700.0f * sc),
@@ -9871,7 +9915,7 @@ static void DrawMinimap(GameState& s) {
         DrawCircleV(p, 4.0f, e.color);
         DrawCircleLines((int)p.x, (int)p.y, 4.0f, Fade(BLACK, 0.6f));
     }
-    // Phase 6 — connective tissue landmarks.
+    // Phase 6 - connective tissue landmarks.
     for (const auto& shrine : kShrines) // virtue shrines: pale gold dots
         DrawCircleV(toMap(shrine.pos), 3.0f, Color{ 240, 230, 180, 220 });
     { // the Fields of Sorrow: gray ring
@@ -10011,7 +10055,7 @@ static const TownFoliage kT3DExtraTrees[] = {
 };
 struct T3DPropFix { int kind; float ox, oz, nx, nz; };
 static const T3DPropFix kT3DPropFixes[] = {
-    // kind, old x, old z, new x, new z — 2D-placed props nudged off the 3D lanes
+    // kind, old x, old z, new x, new z - 2D-placed props nudged off the 3D lanes
     { 8, 430, 270, 430, 238 },  // carpenter's crate off the north lane
     { 7, 880, 270, 880, 236 },  // tailor's barrel off the north lane
     { 8, 740, 270, 740, 236 },  // tailor's crate off the north lane
@@ -10060,7 +10104,7 @@ static void Town3DDrawFoliageOne(const TownFoliage& f, float x, float z) {
         case 1: // pine
             Town3DDrawPiece(M.treePine, { x, 0, z }, rot, 2.0f * vs);
             break;
-        case 5: // autumn bush — bush model scaled up to read at tree spacing
+        case 5: // autumn bush - bush model scaled up to read at tree spacing
             Town3DDrawPiece(M.bush, { x, 0, z }, rot, 4.4f * vs);
             break;
         case 2:
@@ -10072,14 +10116,14 @@ static void Town3DDrawFoliageOne(const TownFoliage& f, float x, float z) {
         case 4:
             Town3DDrawPiece(M.treeFat, { x, 0, z }, rot, 2.0f * vs);
             break;
-        default: // 0 — oak
+        default: // 0 - oak
             Town3DDrawPiece(M.treeOak, { x, 0, z }, rot, 2.0f * vs);
             break;
     }
 }
 
 // The 3D town's drawable contents, shared by the shadow pass (depth from the
-// sun's POV) and the main pass (lit + shadowed). The sky is NOT included — it
+// sun's POV) and the main pass (lit + shadowed). The sky is NOT included - it
 // is drawn only in the main pass, unlit, before the shadow shader is enabled.
 static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     (void)shadowPass;
@@ -10090,14 +10134,14 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     // large flat outer field so the horizon never shows a hard edge.
     DrawModel(g_t3dGround.model, { 500, 0, 500 }, 1.0f, WHITE);
     Color outerCol = (s.selectedTown == 0) ? Color{ 96, 138, 76, 255 } : Color{ 90, 124, 82, 255 };
-    // 2026-09-24: was -1.5 — z-fights with the ground model at long view
+    // 2026-09-24: was -1.5 - z-fights with the ground model at long view
     // distances once the far clip plane is extended (see rlSetClipPlanes in
     // main(), fixing a web-only clipping bug); depth precision gets coarser
     // the farther the far plane sits. -15 is still visually nothing (flat-
     // color horizon filler, never seen edge-on) but leaves enough margin.
     DrawPlane({ 500, -15.0f, 500 }, { 4000, 4000 }, outerCol);
 
-    // Buildings — Quaternius MegaKit assemblies (see Town3DDrawBuilding), one per
+    // Buildings - Quaternius MegaKit assemblies (see Town3DDrawBuilding), one per
     // grid node on the same footprints the old programmer-art boxes used.
     // Foundation slab kept, widened for the 3x2-module buildings (townhall,
     // bank, stable) so the slab never peeks out from under the walls; the
@@ -10110,7 +10154,7 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
         DrawCube({ node.pos.x, 1, node.pos.y }, fw, 2, fd, ColorBrightness(col, -0.4f)); // foundation
         Town3DDrawBuilding(node.key, node.pos.x, node.pos.y);
     }
-    if (s.selectedTown == 2) { // Phase 3 — Frostmere 3D winter dressing: snow drifts + frost pines
+    if (s.selectedTown == 2) { // Phase 3 - Frostmere 3D winter dressing: snow drifts + frost pines
         static const std::array<Vector2, 6> kFrostDrifts3D = {{
             {120, 150}, {880, 120}, {950, 700}, {60, 750}, {750, 920}, {200, 920}
         }};
@@ -10125,14 +10169,14 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
             DrawCylinder({ p3.x, 105, p3.y }, 1, 22, 45, 8, Color{ 225, 238, 248, 255 });
         }
     }
-    if (s.selectedTown == 3) { // Phase 4 — Cragmoor mountain dressing: granite outcrops + hardy pines
+    if (s.selectedTown == 3) { // Phase 4 - Cragmoor mountain dressing: granite outcrops + hardy pines
         static const std::array<Vector2, 6> kCragRocks3D = {{
             {120, 150}, {880, 120}, {950, 700}, {60, 750}, {750, 920}, {200, 920}
         }};
         static const std::array<Vector2, 3> kCragPines3D = {{
             {100, 400}, {900, 350}, {520, 120}
         }};
-        for (auto& rk : kCragRocks3D) { // granite outcrops — primitive clusters, no new models
+        for (auto& rk : kCragRocks3D) { // granite outcrops - primitive clusters, no new models
             DrawSphere({ rk.x, 8, rk.y }, 26.0f, Color{ 135, 130, 120, 255 });
             DrawSphere({ rk.x + 20, 5, rk.y - 14 }, 16.0f, Color{ 120, 115, 105, 255 });
             DrawSphere({ rk.x - 16, 4, rk.y + 14 }, 12.0f, Color{ 148, 143, 132, 255 });
@@ -10143,17 +10187,17 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
             DrawCylinder({ p3.x, 88, p3.y }, 1, 18, 40, 8, Color{ 95, 120, 88, 255 });
         }
     }
-    // Wilderness Gate — sage box, same role as in 2D.
+    // Wilderness Gate - sage box, same role as in 2D.
     DrawCube({ kWildernessGatePos.x, 35, kWildernessGatePos.y }, 90, 70, 90, Color{ 140, 165, 140, 255 });
     DrawCube({ kWildernessGatePos.x, 79, kWildernessGatePos.y }, 102, 18, 102, Color{ 110, 135, 110, 255 });
 
-    // Foliage — real CC0 models (Kenney Nature Kit) per variant, see
+    // Foliage - real CC0 models (Kenney Nature Kit) per variant, see
     // kFoliagePositions. Per-instance rotation + scale jitter from a
     // deterministic position hash (stable across frames). Kenney trees are
     // authored small (~1.2-1.7m), so they draw at 2x the modular scale.
     // 3D-side position fixes applied (see kT3DTreeFixes), plus 3D-only edge
     // and gate-approach greenery (kT3DExtraTrees).
-    // Phase 3: skipped for Frostmere — the 5-building town has its own
+    // Phase 3: skipped for Frostmere - the 5-building town has its own
     // positions and winter dressing (see Frostmere's 3D props below).
     if (s.selectedTown != 2)
     for (const TownFoliage& f : kFoliagePositions) {
@@ -10164,7 +10208,7 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     for (const TownFoliage& f : kT3DExtraTrees)
         Town3DDrawFoliageOne(f, f.pos.x, f.pos.y);
 
-    // Props — small primitive clusters per kind (see kTownProps' kind index),
+    // Props - small primitive clusters per kind (see kTownProps' kind index),
     // with 3D-side nudges off the 3D lanes (see kT3DPropFixes). Street lamps
     // are placed for the 3D lane network instead (kT3DLamps).
     for (const TownProp& p : kTownProps) {
@@ -10195,11 +10239,11 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
                 for (int i = 0; i < 3; i++)
                     DrawCube({ x, 6.0f + i * 11.0f, z }, sz, 10, 12, Color{ 130, 90, 55, 255 });
                 break;
-            case 7: // barrel — KayKit Dungeon barrel (CC0), ~1m at modular scale
+            case 7: // barrel - KayKit Dungeon barrel (CC0), ~1m at modular scale
                 Town3DDrawPiece(g_t3dModels.barrel, { x, 0, z },
                                 Town3DHash01(x, z) * 360.0f, 1.0f);
                 break;
-            case 8: // crate — Quaternius Prop_Crate (already in the kit)
+            case 8: // crate - Quaternius Prop_Crate (already in the kit)
                 Town3DDrawPiece(g_t3dModels.crate, { x, 0, z },
                                 Town3DHash01(x, z) * 360.0f, 1.0f);
                 break;
@@ -10224,7 +10268,7 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
             case 15: // red potion
                 DrawCylinder({ x, 8, z }, 7, 8, 16, 8, Color{ 200, 70, 70, 255 });
                 break;
-            case 16: // chest — KayKit Dungeon chest (CC0), 0.7x to fit the old footprint
+            case 16: // chest - KayKit Dungeon chest (CC0), 0.7x to fit the old footprint
                 Town3DDrawPiece(g_t3dModels.chest, { x, 0, z },
                                 Town3DHash01(x, z) * 360.0f, 0.7f);
                 break;
@@ -10235,26 +10279,26 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
         }
     }
 
-    // Phase 1 — Emberhold capital dressing (town 1 only).
+    // Phase 1 - Emberhold capital dressing (town 1 only).
     if (s.selectedTown == 0) {
         for (const CapitalProp& p : kCapitalProps)
             DrawCapitalProp3D(p.kind, p.pos.x, p.pos.y, p.size, s.worldTime);
     }
 
-    // Phase 2 — Saltmere coastal dressing (town 2 only).
+    // Phase 2 - Saltmere coastal dressing (town 2 only).
     if (s.selectedTown == 1) {
         for (const CoastProp& p : kCoastProps)
             DrawCoastProp3D(p.kind, p.pos.x, p.pos.y, p.size, s.worldTime);
     }
 
-    // Street lamps along the 3D lane network (kT3DLamps) — the 2D lamps flank
+    // Street lamps along the 3D lane network (kT3DLamps) - the 2D lamps flank
     // the old spoke layout, so the 3D view places its own here instead.
     for (const Vector2& lp : kT3DLamps) {
         DrawCylinder({ lp.x, 22, lp.y }, 3, 4, 44, 6, Color{ 60, 60, 65, 255 });
         DrawSphere({ lp.x, 48, lp.y }, 7, Color{ 255, 220, 130, 255 });
     }
 
-    // Plaza fence — Quaternius wooden fence rails (CC0, same kit as the
+    // Plaza fence - Quaternius wooden fence rails (CC0, same kit as the
     // buildings) marking the plaza edges, with gaps where the streets
     // enter/exit. The 2D view draws fence posts here; the 3D view previously
     // had nothing. kTownPlaza = {420,420,160,160}; one rail spans ~45 world
@@ -10276,7 +10320,7 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     }
 
     // Player + wandering townsfolk (Phase 3: procedural humanoids from the
-    // creature kit — walk swing tied to movement speed, idle bob + head turns).
+    // creature kit - walk swing tied to movement speed, idle bob + head turns).
     T3CKitUseSunShader();
     {
         float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
@@ -10327,7 +10371,7 @@ static void Town3DShadowPass(GameState& s) {
 
 // ---- 3D town ambience: chimney smoke + circling birds (2026-09-24 feel pass) ----
 // Cheap, high-payoff life. Smoke and birds draw in ONE batched rlgl triangle
-// batch (a single draw call), unlit, in the main 3D pass only — never in the
+// batch (a single draw call), unlit, in the main 3D pass only - never in the
 // shadow pass, so they neither cast nor receive shadows.
 static const int kT3DSmokePuffsPer = 7;
 static const float kT3DSmokeRise = 26.0f;  // world units per second
@@ -10372,7 +10416,7 @@ static void Town3DDrawAmbience(const Town3DCam& c, int townIdx) {
     float t = (float)GetTime();
     rlDisableBackfaceCulling();
     rlBegin(RL_TRIANGLES);
-    // Smoke — one recycled puff pool per chimney (townhall, bank, smith, alchemy).
+    // Smoke - one recycled puff pool per chimney (townhall, bank, smith, alchemy).
     const int puffN = (int)(sizeof(g_t3dSmoke) / sizeof(g_t3dSmoke[0]));
     int pi = 0;
     for (auto& node : ActiveTownNodes(townIdx)) {
@@ -10398,7 +10442,7 @@ static void Town3DDrawAmbience(const Town3DCam& c, int townIdx) {
             rlVertex3f(v0.x, v0.y, v0.z); rlVertex3f(v2.x, v2.y, v2.z); rlVertex3f(v3.x, v3.y, v3.z);
         }
     }
-    // Birds — dark silhouettes circling high above the town, wings flapping.
+    // Birds - dark silhouettes circling high above the town, wings flapping.
     for (int i = 0; i < kT3DBirdCount; i++) {
         float ang = t * 0.22f + (float)i * 1.5708f;
         float rad = 720.0f + (float)i * 110.0f;
@@ -10500,7 +10544,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     BeginMode3D(cam3d);
     Town3DDrawSky(c.pos); // gradient sky, default shader (unlit, unfogged)
     // Per-frame shader state: just the camera position, for the specular
-    // highlight and distance fog (see Town3DEnsureLit — no shadow map to
+    // highlight and distance fog (see Town3DEnsureLit - no shadow map to
     // bind, so no texture-slot dance or shader restore needed afterward).
     Town3DEnsureLit();
     if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
@@ -10678,11 +10722,11 @@ static void Wild3DEnsureGround() {
         float fz = Wild3DSmooth(1350.0f, 1550.0f, wx) * (1.0f - Wild3DSmooth(1950.0f, 2150.0f, wx)) *
                    (1.0f - Wild3DSmooth(550.0f, 750.0f, wz));
         r += (62.0f - r) * fz * 0.55f; g += (104.0f - g) * fz * 0.55f; b += (58.0f - b) * fz * 0.55f;
-        // Phase 4 — Stonepeaks: full granite mountain palette west of x=500, fading in
+        // Phase 4 - Stonepeaks: full granite mountain palette west of x=500, fading in
         // across the foothills (x 300-650). The Frostwastes snow below overrides it.
         float mz = 1.0f - Wild3DSmooth(300.0f, 650.0f, wx);
         r += (133.0f - r) * mz * 0.85f; g += (129.0f - g) * mz * 0.85f; b += (121.0f - b) * mz * 0.85f;
-        // Phase 3: full Frostwastes snow biome — bright snow, fading in north of y=700
+        // Phase 3: full Frostwastes snow biome - bright snow, fading in north of y=700
         float sz = Wild3DSmooth(700.0f, 560.0f, wz);
         r += (232.0f - r) * sz; g += (240.0f - g) * sz; b += (248.0f - b) * sz;
         // Salt Coast sand tint along the Saltmere corridor
@@ -10728,7 +10772,7 @@ static void Wild3DEnsureGround() {
 // Shared Kenney trees/bush/chest/fence come from Town3DLoadModels (loaded once
 // for both views); the wilderness adds only what the town didn't need: rocks
 // (ore clusters + mountain scatter) and a stump marking wood-gather spots.
-// All CC0 — see assets/models/README.md for provenance.
+// All CC0 - see assets/models/README.md for provenance.
 struct Wild3DModels {
     bool loaded = false;
     Model rockLargeA{}, rockLargeB{}, rockLargeC{};
@@ -10781,7 +10825,7 @@ static bool Wild3DInView(const Town3DCam& c, float x, float z, float radius) {
 // ---- Swaying 3D grass tufts (2026-09-24) ----
 // Sparse crossed-quad tufts with a GPU wind wobble (assets/shaders/grass.vs,
 // paired with the existing shadowmap.fs so tufts get the same sun, shadow
-// receive, and fog as every other model). Perf: one merged mesh per area —
+// receive, and fog as every other model). Perf: one merged mesh per area -
 // the town is a single draw call, the wilderness is 4 quadrant chunks culled
 // by the camera. Skipped in the shadow pass (like the ambience batch): tufts
 // neither cast shadows nor pay the depth-pass cost. No dungeon grass.
@@ -11052,7 +11096,7 @@ static void Wild3DDrawGatherNode(const WildernessGatherNode& node, int idx, floa
         float sa = h1 * 6.2832f;
         Town3DDrawPiece(W.stump, { node.pos.x + cosf(sa) * 44.0f, 0, node.pos.y + sinf(sa) * 44.0f },
                         rot + 40.0f, 3.0f);
-    } else if (node.resource == "fish") { // Phase 2: tidal pool — blue disc + sand rim, animated ripple
+    } else if (node.resource == "fish") { // Phase 2: tidal pool - blue disc + sand rim, animated ripple
         Vector3 c = { node.pos.x, 0, node.pos.y };
         DrawCylinder(c, 46.0f, 46.0f, 3.0f, 24, Color{ 150, 128, 95, 255 });          // sand rim
         DrawCylinder({ c.x, 3.5f, c.z }, 40.0f, 40.0f, 3.0f, 24, Color{ 45, 110, 150, 255 }); // pool
@@ -11064,7 +11108,7 @@ static void Wild3DDrawGatherNode(const WildernessGatherNode& node, int idx, floa
             DrawCube({ c.x + cosf(fa) * fr, 6.0f, c.z + sinf(fa) * fr },
                      8.0f, 2.5f, 3.5f, Color{ 200, 225, 240, 255 });
         }
-    } else if (node.resource == "ice") { // Phase 3: ice crystal — pale blue prism cluster
+    } else if (node.resource == "ice") { // Phase 3: ice crystal - pale blue prism cluster
         float tw = 0.75f + 0.25f * sinf(t * 3.0f + h1 * 6.2832f);
         DrawCylinder({ node.pos.x, 1.0f, node.pos.y }, 30.0f, 30.0f, 2.0f, 20, Color{ 200, 220, 240, 255 }); // frost bed
         for (int ci = 0; ci < 5; ci++) {
@@ -11077,7 +11121,7 @@ static void Wild3DDrawGatherNode(const WildernessGatherNode& node, int idx, floa
             DrawCylinder({ node.pos.x + cosf(ca) * cr, ch * 1.25f, node.pos.y + sinf(ca) * cr },
                          7.0f, 0.5f, ch * 0.5f, 4, Color{ 200, 228, 250, glow });
         }
-    } else if (node.resource == "richore") { // Phase 4: rich ore vein — bigger rocks, gold flecks, ember glow
+    } else if (node.resource == "richore") { // Phase 4: rich ore vein - bigger rocks, gold flecks, ember glow
         const Model& rock = (idx % 3 == 0) ? W.rockLargeA : (idx % 3 == 1) ? W.rockLargeB : W.rockLargeC;
         Town3DDrawPiece(rock, { node.pos.x, 0, node.pos.y }, rot, 4.4f, Color{ 185, 170, 150, 255 });
         Town3DDrawPiece(W.rockSmallA, { node.pos.x + 40.0f, 0, node.pos.y + 24.0f }, rot + 70.0f, 3.0f,
@@ -11116,7 +11160,7 @@ static void Wild3DDrawFoliageOne(const WildernessFoliage& f, bool shadowPass) {
     float x = f.pos.x, z = f.pos.y;
     float rot = Town3DHash01(x, z) * 360.0f;
     float vs = 0.85f + 0.35f * Town3DHash01(z, x + 17.0f);
-    // Phase 3 — Frostwastes: foliage north of y=700 gets a frosty tint.
+    // Phase 3 - Frostwastes: foliage north of y=700 gets a frosty tint.
     Color frost = (z < 700.0f) ? Color{ 200, 220, 240, 255 } : WHITE;
     switch (f.variant) {
         case 0: case 1: case 2: case 8: case 14: // bushes/ferns/plant
@@ -11147,7 +11191,7 @@ static void Wild3DDrawFoliageOne(const WildernessFoliage& f, bool shadowPass) {
 }
 
 // 3D-only scatter filling the big empty stretches of the 3200-unit world (the
-// 2D content is sparse out here). Deterministic hash grid, built once —
+// 2D content is sparse out here). Deterministic hash grid, built once -
 // positions derive from world coordinates, never from gameplay data, and every
 // gameplay position gets a keep-clear radius so nothing overlaps a node.
 struct Wild3DScatterItem { float x, z; int kind; int variant; float rot, scale; }; // kind: 0=tree 1=rock 2=mixed
@@ -11173,10 +11217,10 @@ static void Wild3DBuildScatter() {
     };
     struct Zone { float x0, x1, z0, z1, step, density; int kind; };
     static const Zone zones[] = {
-        { 1500, 2050, 0, 700, 80, 0.62f, 0 },     // Dense Forest (NE) — trees
-        { 0, 450, 0, 1800, 95, 0.45f, 1 },        // Dragontooth mountains (W) — rocks
-        { 1800, 2950, 1500, 2000, 110, 0.40f, 2 },// Saltmere corridor verges — mixed
-        { 0, 1500, 0, 1800, 150, 0.16f, 2 },      // original zone — light filler
+        { 1500, 2050, 0, 700, 80, 0.62f, 0 },     // Dense Forest (NE) - trees
+        { 0, 450, 0, 1800, 95, 0.45f, 1 },        // Dragontooth mountains (W) - rocks
+        { 1800, 2950, 1500, 2000, 110, 0.40f, 2 },// Saltmere corridor verges - mixed
+        { 0, 1500, 0, 1800, 150, 0.16f, 2 },      // original zone - light filler
     };
     for (const Zone& zn : zones) {
         for (float gx = zn.x0; gx <= zn.x1; gx += zn.step) {
@@ -11232,8 +11276,8 @@ static void Wild3DDrawGate(float x, float z, Color post, Color beam) {
     DrawCube({ x, 70, z }, 108, 16, 24, beam);
 }
 
-// (Phase 3 removed the old primitive stand-ins — Wild3DDrawAnimal,
-// Wild3DDrawMonster, Wild3DCreatureColor/Size — in favor of the procedural
+// (Phase 3 removed the old primitive stand-ins - Wild3DDrawAnimal,
+// Wild3DDrawMonster, Wild3DCreatureColor/Size - in favor of the procedural
 // creature kit above; the call sites below draw kit archetypes instead.)
 // Facing from the wander loop's local velocity (matches the 2D screen deriving
 // real facing from movement); falls back to a hashed direction when still.
@@ -11246,7 +11290,7 @@ static float Wild3DWanderFacing(int idx, float x, float z, float worldTime) {
 }
 
 // Forward declarations for the combat FX / flagging helpers defined later in
-// the world-space combat section (2026-09-24) — the 3D scene draws above call
+// the world-space combat section (2026-09-24) - the 3D scene draws above call
 // them before their definitions appear in the file.
 static void PlayerCombatPhases3D(const GameState& s, float* atk, float* cast);
 static float MonsterCombatPhase3D(float monsterAttackT);
@@ -11260,12 +11304,12 @@ static void DrawFlagMarker3D(const GameState& s, int zone);
 static void DrawSpellFX3D(GameState& s, int zone);
 static Color CombatHitTint(float hurtT, Color base, Color tail);
 static void DrawFloatTexts3D(GameState& s, const Town3DCam& c, int zone, int screenW, int screenH);
-// Target switching (2026-09-25) — defined with the flag helpers, called from the
+// Target switching (2026-09-25) - defined with the flag helpers, called from the
 // click/tap handlers above their definitions.
 static void CycleFlagTarget(GameState& s);
 static void TransferWildPrimary(GameState& s, int newSpotIdx);
 static void TransferDungeonPrimary(GameState& s, int dungeonIdx, int newMonsterIdx, bool newIsBoss);
-// Pack/death lookups (2026-09-25) — defined with the death system, used by the
+// Pack/death lookups (2026-09-25) - defined with the death system, used by the
 // 3D draw functions above their definitions.
 static const GameState::ActiveMonster* FindWildExtra(const GameState& s, int spotIdx);
 static const GameState::ActiveDungeonMonster* FindDungeonExtra(const GameState& s, int monsterIdx, bool isBoss);
@@ -11291,7 +11335,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         if (!vis(it.x, it.z, 80.0f)) continue;
         Wild3DDrawScatterOne(it, shadowPass);
     }
-    // Swaying grass tufts along the paths (main pass only — never shadows).
+    // Swaying grass tufts along the paths (main pass only - never shadows).
     if (!shadowPass) T3DGrassDrawWild(cull);
     // Decorative foliage from the 2D data.
     for (const WildernessFoliage& f : kWildernessFoliage) {
@@ -11304,7 +11348,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         if (!vis(n.pos.x, n.pos.y, 80.0f)) continue;
         Wild3DDrawGatherNode(n, (int)i, s.worldTime);
     }
-    // Phase 2 — Saltmere Docks: wilderness landmark on the Salt Coast (decorative).
+    // Phase 2 - Saltmere Docks: wilderness landmark on the Salt Coast (decorative).
     for (const CoastProp& d : kSaltDocks) {
         if (!vis(d.pos.x, d.pos.y, 120.0f)) continue;
         DrawCoastProp3D(d.kind, d.pos.x, d.pos.y, d.size, s.worldTime);
@@ -11314,7 +11358,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         if (!vis(e.pos.x, e.pos.y, 90.0f)) continue;
         Wild3DDrawEntrance(e);
     }
-    // Phase 6 — connective tissue landmarks, 3D.
+    // Phase 6 - connective tissue landmarks, 3D.
     for (size_t si = 0; si < kShrines.size(); si++) { // virtue shrines: stone dais + light beam
         const ShrineDef& shrine = kShrines[si];
         if (!vis(shrine.pos.x, shrine.pos.y, 90.0f)) continue;
@@ -11357,18 +11401,18 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     if (vis(kWildernessTown2GatePos.x, kWildernessTown2GatePos.y, 90.0f))
         Wild3DDrawGate(kWildernessTown2GatePos.x, kWildernessTown2GatePos.y,
                        Color{ 150, 148, 142, 255 }, Color{ 118, 116, 110, 255 });
-    // Phase 3 — Frostmere gate: icy pale-blue gate.
+    // Phase 3 - Frostmere gate: icy pale-blue gate.
     if (vis(kWildernessTown3GatePos.x, kWildernessTown3GatePos.y, 90.0f))
         Wild3DDrawGate(kWildernessTown3GatePos.x, kWildernessTown3GatePos.y,
                        Color{ 190, 210, 228, 255 }, Color{ 150, 175, 200, 255 });
-    // Phase 4 — Cragmoor gate: granite gray gate.
+    // Phase 4 - Cragmoor gate: granite gray gate.
     if (vis(kWildernessTown4GatePos.x, kWildernessTown4GatePos.y, 90.0f))
         Wild3DDrawGate(kWildernessTown4GatePos.x, kWildernessTown4GatePos.y,
                        Color{ 150, 142, 128, 255 }, Color{ 115, 108, 96, 255 });
 
-    // Custom housing (2026-09-25) — for-sale signs on unowned plots; floor slab +
+    // Custom housing (2026-09-25) - for-sale signs on unowned plots; floor slab +
     // wall/door boxes on owned ones. DrawCube rides the active sun/shadow shader
-    // like the gate/prop boxes above. No roof — open dollhouse view, same as 2D.
+    // like the gate/prop boxes above. No roof - open dollhouse view, same as 2D.
     for (size_t pi = 0; pi < kHousePlots.size(); pi++) {
         const HousePlot& hp = kHousePlots[pi];
         float pr = hp.cells * kHouseCellSize * 0.6f;
@@ -11420,7 +11464,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     for (const auto& d : s.dyingMonsters) if (d.zone == 0) { wildDying = true; break; }
     for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
         bool eng = wasEngaged && s.wildEngaged->spotIdx == (int)i;
-        // Empty slots (waiting to respawn) draw nothing — except a slot mid-death-
+        // Empty slots (waiting to respawn) draw nothing - except a slot mid-death-
         // animation, which draws the shrinking body instead.
         const GameState::DyingMonster* dying = wildDying ? FindDyingWildSpot(s, (int)i) : nullptr;
         bool isDying = dying != nullptr;
@@ -11452,7 +11496,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                         mAtk);
         }
     }
-    // The Rival Adventurer — while their death animation plays, the fading body at
+    // The Rival Adventurer - while their death animation plays, the fading body at
     // the kill site is drawn instead of the patrolling rival (no double-draw);
     // they "retreat" (RivalFightEnded already put them back on patrol) rather
     // than leaving a corpse.
@@ -11473,12 +11517,12 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                             Color{ 235, 200, 170, 255 }, ra, shadowPass, rAtk, -1.0f);
         }
     }
-    // Murder Inc. blades — the same humanoid kit as the champion, but in dark
+    // Murder Inc. blades - the same humanoid kit as the champion, but in dark
     // dried-blood guild colors and slightly smaller, so the crew reads as the
     // crew and the champion stays the champion.
     for (int bi = 0; bi < kBladeCount; bi++) {
         // While a blade's death animation plays, the fading body at the kill site
-        // is drawn instead of the patrolling blade (no double-draw) — same
+        // is drawn instead of the patrolling blade (no double-draw) - same
         // retreat-not-death treatment as the champion above.
         const GameState::DyingMonster* bladeDying3D = FindDyingBlade(s, bi);
         Vector2 bp = bladeDying3D ? bladeDying3D->pos
@@ -11496,7 +11540,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                             Color{ 220, 190, 165, 255 }, ba, shadowPass, bAtk, -1.0f);
         }
     }
-    // Roaming innocents (only the ones currently present) — fixed per-identity
+    // Roaming innocents (only the ones currently present) - fixed per-identity
     // tints from kInnocentDefs so Tam/Liora/Silas/Garran read as distinct people.
     for (size_t i = 0; i < kWildernessInnocentSpots.size(); i++) {
         if (!s.innocentSpots[i].present) continue;
@@ -11522,7 +11566,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                             edef.shirt, edef.pants, edef.skin, ea, shadowPass);
         }
     }
-    // Fallen monsters linger where they died — dark flattened mounds that fade
+    // Fallen monsters linger where they died - dark flattened mounds that fade
     // with the corpse timer. Purely visual; the lootable corpse list is separate.
     for (const GameState::WorldCorpse& c : s.worldCorpses) {
         if (c.zone != 0) continue;
@@ -11544,7 +11588,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                         kitDist(s.companionPos.x, s.companionPos.y), shadowPass);
         }
     }
-    // Player, same humanoid kit as the town 3D view — shrinks during the death
+    // Player, same humanoid kit as the town 3D view - shrinks during the death
     // animation, ghostly-translucent while a ghost.
     {
         float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
@@ -11611,7 +11655,7 @@ static void Wild3DShadowPass(GameState& s, const Town3DCam* cull) {
     EndTextureMode();
 }
 
-// Gradient sky dome for the wilderness — same banded-cylinder tech as the
+// Gradient sky dome for the wilderness - same banded-cylinder tech as the
 // town, widened so the horizon sits past the fog range.
 static void Wild3DDrawSky(Vector3 camPos) {
     const float R = 4200.0f, bandH = 120.0f;
@@ -11627,7 +11671,7 @@ static void Wild3DDrawSky(Vector3 camPos) {
     rlEnableBackfaceCulling();
 }
 
-// Circling birds over the wilderness — the town's batched rlgl bird tech
+// Circling birds over the wilderness - the town's batched rlgl bird tech
 // (one draw call), main pass only.
 static void Wild3DDrawAmbience(const Town3DCam& c) {
     (void)c;
@@ -11678,7 +11722,7 @@ static Wild3DNearest Wild3DNearestInfo(const GameState& s) {
         consider(sp.pos, "Tame " + kWildCreatures[sp.creatureIdx].name);
     bool wasEngaged = s.wildEngaged.has_value();
     for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
-        if (s.wildSpotRespawn[i] > 0.0f) continue; // empty — waiting to respawn
+        if (s.wildSpotRespawn[i] > 0.0f) continue; // empty - waiting to respawn
         Vector2 mp = (wasEngaged && (int)i == s.wildEngaged->spotIdx) ? s.wildEngaged->pos
                      : WildernessMonsterLivePos((int)i, s.worldTime);
         consider(mp, "Fight " + kWildernessMonsterSpots[i].name);
@@ -11721,6 +11765,7 @@ static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
     if (CheckCollisionPointRec(m, kJoystickZone)) return true;
     if (CheckCollisionPointRec(m, JournalWildButtonRect())) return true; // LOG button
     if (s.journalOpen && CheckCollisionPointRec(m, JournalPanelRect())) return true; // journal panel
+    if (s.recallPickerOpen && CheckCollisionPointRec(m, RecallPickerRect())) return true; // recall modal
     if (s.wildEngaged.has_value()) {
         if (CheckCollisionPointRec(m, { 20, 110, 330, 60 })) return true; // HP/mana strip
         if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return true; // quick items
@@ -11738,7 +11783,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     if (IsKeyPressed(KEY_C)) g_t3dFollowMode = !g_t3dFollowMode;
     Town3DPinchZoom(kWild3DDistMin, kWild3DDistMax);
     // --- Orbit / zoom input (same feel as the town 3D view; the orbit state is
-    // shared). No click-picking in Phase 1 — interaction stays walk-up + E / tap,
+    // shared). No click-picking in Phase 1 - interaction stays walk-up + E / tap,
     // exactly like the 2D wilderness.
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
         CheckCollisionPointRec(mouse, kViewport) && !Wild3DPointInUI(mouse, s)) {
@@ -11757,7 +11802,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     }
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) {
         // Tap-to-flag (2026-09-24): a tap that wasn't a drag picks a monster the
-        // same way the 2D click does — flagging it for auto-approach.
+        // same way the 2D click does - flagging it for auto-approach.
         bool wasClick = g_t3dDragDist < 8.0f;
         g_t3dOrbiting = false;
         if (wasClick && CheckCollisionPointRec(mouse, kViewport) && !Wild3DPointInUI(mouse, s)) {
@@ -11780,14 +11825,14 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     BeginMode3D(cam3d);
     Wild3DDrawSky(c.pos); // gradient sky, default shader (unlit, unfogged)
     // Per-frame shader state, same as the town pass: just the camera position
-    // for specular/fog (see Town3DEnsureLit — no shadow map in this system).
+    // for specular/fog (see Town3DEnsureLit - no shadow map in this system).
     Town3DEnsureLit();
     if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
     T3DGrassFrameUpdate(c.pos); // sway clock for the grass shader
     Wild3DDrawSceneContents(s, false, &c);
     Wild3DDrawAmbience(c); // birds, unlit, one batched draw call, main pass only
     // Combat FX (2026-09-24): flag marker, spell projectiles/impacts, heal +
-    // vigor auras, summoned fiend — world-space, so they sit in the scene.
+    // vigor auras, summoned fiend - world-space, so they sit in the scene.
     DrawFlagMarker3D(s, 0);
     DrawSpellFX3D(s, 0);
     // Nearest-interactable ring (warm) + red ring on the engaged monster.
@@ -11832,7 +11877,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
                 std::string hn = s.houseName.empty() ? "Homestead" : s.houseName;
                 label3D(hp.pos.x, 130, hp.pos.y, hn);
             } else {
-                label3D(hp.pos.x, 110, hp.pos.y, "Plot for Sale — " + std::to_string(hp.price) + "g");
+                label3D(hp.pos.x, 110, hp.pos.y, "Plot for Sale - " + std::to_string(hp.price) + "g");
             }
         }
         if (inRange && !nearest.engaged)
@@ -11849,7 +11894,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     DrawFloatTexts3D(s, c, 0, screenW, screenH); // combat feel: damage numbers / MISS
     DrawUIText("3D view: drag to orbit, wheel to zoom. [V] toggles 2D.", 20, 196, 12,
                Color{ 90, 74, 52, 255 });
-    // Phase 0: HUD region label (3D view) — same top-center pill as the 2D view,
+    // Phase 0: HUD region label (3D view) - same top-center pill as the 2D view,
     // computed live from the player position so it flips at boundaries.
     {
         const char* regionName = RegionName(RegionAt(s.wildernessPlayerPos));
@@ -11862,13 +11907,13 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
 
 
 // ---------------------------------------------------------------------
-// 3D dungeon view (2026-09-24, Phase 2 — dungeons 3D). One 3D view per
+// 3D dungeon view (2026-09-24, Phase 2 - dungeons 3D). One 3D view per
 // dungeon, built from the same 2D data the classic view uses: wall geometry
 // is extruded from the kDungeonRoomLayouts rectangles (anything not floor is
 // wall, exactly like DungeonIsFloor), floors are baked per-dungeon from the
 // themed 2D tiles, and torches sit in the big rooms. Lighting is a custom
 // torchlight shader (assets/shaders/torchlight.*): dark ambient + up to 8
-// warm flickering point lights — no sun, no shadowmaps indoors. Pure view
+// warm flickering point lights - no sun, no shadowmaps indoors. Pure view
 // layer: positions, transitions, and combat all stay in DrawHuntScreen.
 // ---------------------------------------------------------------------
 static const float kDung3DDistMin = 150.0f;  // closest zoom: one room fills the view
@@ -11900,7 +11945,7 @@ static void Dungeon3DEnsureTorch() {
     T.torchCountLoc = GetShaderLocation(T.shader, "torchCount");
     T.timeLoc = GetShaderLocation(T.shader, "time");
     T.ambientLoc = GetShaderLocation(T.shader, "ambient");
-    float amb[4] = { 0.30f, 0.27f, 0.30f, 1.0f }; // cool dark ambient — the torches do the work
+    float amb[4] = { 0.30f, 0.27f, 0.30f, 1.0f }; // cool dark ambient - the torches do the work
     SetShaderValue(T.shader, T.ambientLoc, amb, SHADER_UNIFORM_VEC4);
     // Procedural flame sprite (no new assets): white-yellow core fading to
     // transparent orange, teardrop-narrowed toward the top. Drawn as a
@@ -11925,7 +11970,7 @@ static void Dungeon3DEnsureTorch() {
     T.ready = true;
 }
 
-// Assign the torch shader to a model's materials — required, not optional:
+// Assign the torch shader to a model's materials - required, not optional:
 // DrawModel enables the MATERIAL's shader, so a bare rlEnableShader before
 // DrawModel would be overridden (same reason Town3DApplyLitShader exists).
 static void Dungeon3DApplyTorchShader(Model& m) {
@@ -11949,7 +11994,7 @@ static void Dungeon3DTorchSpots(int dungeonIdx, Vector3* out, int* outCount) {
 }
 
 // Baked dungeon floor: one 1024px texture over the 1800-unit world, stamped
-// one tile per 45-unit cell — wall texture everywhere, themed floor texture
+// one tile per 45-unit cell - wall texture everywhere, themed floor texture
 // where DungeonIsFloor, plus the same per-dungeon specials the 2D view draws
 // (Sunken Crypt water pool, Hollow Warrens boss-room rug). One draw call.
 struct Dungeon3DGround {
@@ -11983,7 +12028,7 @@ static void Dungeon3DEnsureGround(int dungeonIdx) {
                 ImageDraw(&ground, floorImg, { 0, 0, (float)floorImg.width, (float)floorImg.height }, dest, WHITE);
             } else if (!isFloor && wallOk) {
                 // Emberveil's lava wall/floor art reads as nearly identical (see the
-                // 2D view's obsidian multiply tint) — same treatment here.
+                // 2D view's obsidian multiply tint) - same treatment here.
                 // Phase 3: the Frostbound Tomb gets an icy tint on its crypt tiles.
                 Color tint = (dungeonIdx == 3) ? Color{ 110, 85, 75, 255 } : // Ember Depths: cooled obsidian walls
                              (dungeonIdx == 4) ? Color{ 190, 215, 240, 255 } : WHITE; // Frostbound Tomb: icy
@@ -11994,7 +12039,7 @@ static void Dungeon3DEnsureGround(int dungeonIdx) {
             }
         }
     }
-    // Sunken Crypt's flooded boss room — same rect the 2D view tiles water over.
+    // Sunken Crypt's flooded boss room - same rect the 2D view tiles water over.
     if (dungeonIdx == 0 && g_assets.sunkenCryptWaterOk) { // Whisper Crypt's flooded boss room
         Image wimg = LoadImageFromTexture(g_assets.sunkenCryptWater);
         for (float wy = 1260; wy < 1600; wy += 32)
@@ -12002,7 +12047,7 @@ static void Dungeon3DEnsureGround(int dungeonIdx) {
                 ImageDraw(&ground, wimg, { 0, 0, 32, 14 }, { wx * k, wy * k, 32 * k, 32 * k }, WHITE);
         UnloadImage(wimg);
     }
-    // Hollow Warrens' medallion rug in its boss room — same rect as the 2D view.
+    // Hollow Warrens' medallion rug in its boss room - same rect as the 2D view.
     if (dungeonIdx == 5 && g_assets.hollowWarrensRugOk) { // The Hollow's boss-room rug
         Image rimg = LoadImageFromTexture(g_assets.hollowWarrensRug);
         ImageDraw(&ground, rimg, { 0, 0, (float)rimg.width, (float)rimg.height },
@@ -12024,7 +12069,7 @@ static void Dungeon3DEnsureGround(int dungeonIdx) {
 
 // Dungeon walls: one merged mesh extruded from the 2D floor test. The 1800-unit
 // world is scanned on a 45-unit grid; a cell is wall when DungeonIsFloor is
-// false there but true in a neighbor — so room openings/corridors come out
+// false there but true in a neighbor - so room openings/corridors come out
 // exactly where the 2D collision says floor is. Top faces for every wall cell,
 // side faces only toward floor neighbors: one model, one draw call.
 struct Dungeon3DWalls {
@@ -12062,7 +12107,7 @@ static void Dungeon3DBuildWalls(int dungeonIdx) {
     for (int gz = 0; gz < N; gz++) {
         for (int gx = 0; gx < N; gx++) {
             if (at(gx, gz)) continue;
-            // Only cells touching floor get geometry — deeper rock is invisible.
+            // Only cells touching floor get geometry - deeper rock is invisible.
             bool touches = at(gx - 1, gz - 1) || at(gx, gz - 1) || at(gx + 1, gz - 1) ||
                            at(gx - 1, gz) || at(gx + 1, gz) ||
                            at(gx - 1, gz + 1) || at(gx, gz + 1) || at(gx + 1, gz + 1);
@@ -12106,7 +12151,7 @@ static void Dungeon3DBuildWalls(int dungeonIdx) {
     mesh.colors = (unsigned char*)malloc(verts.size() * 4);
     mesh.indices = (unsigned short*)malloc(idx.size() * sizeof(unsigned short));
     // Emberveil's lava wall art reads as nearly identical to its floor (see the 2D
-    // view's obsidian multiply tint) — same treatment here, via vertex colors.
+    // view's obsidian multiply tint) - same treatment here, via vertex colors.
     unsigned char tr = 255, tg = 255, tb = 255;
     if (dungeonIdx == 3) { tr = 150; tg = 120; tb = 105; } // Ember Depths: obsidian vertex tint
     for (size_t i = 0; i < verts.size(); i++) {
@@ -12133,7 +12178,7 @@ static void Dungeon3DBuildWalls(int dungeonIdx) {
 
 // Interior camera: the shared damped orbit/follow rig with tighter zoom
 // limits, clamped inside the dungeon so it can't leave through the outer rock.
-// (Room walls can still occlude at very low zoom — the tight limits keep that
+// (Room walls can still occlude at very low zoom - the tight limits keep that
 // rare; the player marker, torchlight, and labels stay readable regardless.)
 static Town3DCam Dungeon3DGetCam(const GameState& s, int screenW, int screenH) {
     Town3DCam c = Town3DGetCamFor(s.dungeonPlayerPos, screenW, screenH, 2, kDung3DDistMin, kDung3DDistMax,
@@ -12150,12 +12195,12 @@ static Town3DCam Dungeon3DGetCam(const GameState& s, int screenW, int screenH) {
 
 static Color Dungeon3DMonsterColor(int dungeonIdx, bool boss) {
     static const Color cols[6] = {
-        { 110, 125, 145, 255 }, // [0] The Whisper Crypt — drowned pale blue
-        { 88, 62, 88, 255 },    // [1] The Weavers' Nest — spider chitin purple-brown (Phase 5)
-        { 45, 110, 120, 255 },  // [2] The Sunken Vault — drowned sea-teal (Phase 2)
-        { 190, 85, 35, 255 },   // [3] The Ember Depths — molten orange (Phase 4)
+        { 110, 125, 145, 255 }, // [0] The Whisper Crypt - drowned pale blue
+        { 88, 62, 88, 255 },    // [1] The Weavers' Nest - spider chitin purple-brown (Phase 5)
+        { 45, 110, 120, 255 },  // [2] The Sunken Vault - drowned sea-teal (Phase 2)
+        { 190, 85, 35, 255 },   // [3] The Ember Depths - molten orange (Phase 4)
         { 165, 200, 235, 255 }, // [4] The Frostbound Tomb - glacier ice (Phase 3)
-        { 85, 70, 115, 255 },   // [5] The Hollow — lightless violet (Phase 5)
+        { 85, 70, 115, 255 },   // [5] The Hollow - lightless violet (Phase 5)
     };
     Color c = cols[dungeonIdx % 6];
     return boss ? ColorBrightness(c, 0.3f) : c;
@@ -12227,15 +12272,15 @@ static Rectangle JournalHuntButtonRect(); // defined with the journal UI below
 static bool Dung3DPointInUI(Vector2 m, const GameState& s) {
     if (CheckCollisionPointRec(m, { 20, 56, 104, 40 })) return true; // in-dungeon MENU toggle
     if (s.dungeonMenuOpen && s.selectedDungeon.has_value() &&
-        CheckCollisionPointRec(m, { 12, 104, 336, 240 })) return true; // MENU dropdown panel
+        CheckCollisionPointRec(m, { 12, 104, 336, 328 })) return true; // MENU dropdown panel
+    if (s.recallPickerOpen && CheckCollisionPointRec(m, RecallPickerRect())) return true; // recall modal
     if (CheckCollisionPointRec(m, { 452, 116, 68, 30 })) return true; // the 2D/3D toggle button
     if (CheckCollisionPointRec(m, { 528, 116, 96, 30 })) return true; // the camera mode button
     if (CheckCollisionPointRec(m, { 20, 110, 330, 60 })) return true; // HP strip
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return true; // TARGET button
     if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return true; // quick items
     if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return true; // spell hotbar
-    if ((!s.selectedDungeon.has_value() || s.dungeonMenuOpen) &&
-        CheckCollisionPointRec(m, JournalHuntButtonRect())) return true; // LOG button
+    if (CheckCollisionPointRec(m, JournalHuntButtonRect())) return true; // LOG button (always visible, incl. dungeons)
     if (s.journalOpen && CheckCollisionPointRec(m, JournalPanelRect())) return true; // journal panel
     return false;
 }
@@ -12252,7 +12297,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
     if (IsKeyPressed(KEY_C)) g_t3dFollowMode = !g_t3dFollowMode;
     Town3DPinchZoom(kDung3DDistMin, kDung3DDistMax);
     // --- Orbit / zoom input (the shared orbit state; tighter dungeon limits).
-    // No click-picking — interaction stays walk-up + E / tap, like the 2D view.
+    // No click-picking - interaction stays walk-up + E / tap, like the 2D view.
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
         CheckCollisionPointRec(mouse, kViewport) && !Dung3DPointInUI(mouse, s)) {
         g_t3dOrbiting = true;
@@ -12270,7 +12315,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
     }
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) {
         // Tap-to-flag (2026-09-24): a tap that wasn't a drag picks a monster the
-        // same way the 2D click does — flagging it for auto-approach.
+        // same way the 2D click does - flagging it for auto-approach.
         bool wasClick = g_t3dDragDist < 8.0f;
         g_t3dOrbiting = false;
         if (wasClick && CheckCollisionPointRec(mouse, kViewport) && !Dung3DPointInUI(mouse, s)) {
@@ -12321,10 +12366,10 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         for (const auto& d : s.dyingMonsters)
             if (d.zone == 1 && d.dungeonIdx == di) { dyingHere = true; break; }
         for (int i = 0; i < kDungeonRegularSlots; i++) {
-            // The engaged slot is drawn separately below at its live position —
+            // The engaged slot is drawn separately below at its live position -
             // same convention as the 2D view.
             if (engaged && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
-            // Empty slots (waiting to respawn) show nothing — except the slot whose
+            // Empty slots (waiting to respawn) show nothing - except the slot whose
             // monster is mid-death-animation, which draws the fall below. Pack
             // attackers draw at their chase positions.
             const GameState::DyingMonster* dying = dyingHere ? FindDyingDungeonSlot(s, di, i, false) : nullptr;
@@ -12340,7 +12385,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         if (!(engaged && s.dungeonEngaged->isBoss)) {
             const GameState::DyingMonster* bossDying = dyingHere ? FindDyingDungeonSlot(s, di, kDungeonBossSlot, true) : nullptr;
             if (!bossDying && s.dungeonSpawnRespawn[di][kDungeonBossSlot] > 0.0f) {
-                // boss slot empty — nothing to draw
+                // boss slot empty - nothing to draw
             } else {
                 Vector2 bp = bossDying ? bossDying->pos : DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime);
                 Vector2 f = WanderFacing(kDungeonBossSlot, s.worldTime);
@@ -12363,7 +12408,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         }
     }
     Dungeon3DDrawPlayer(s);
-    // Fallen monsters linger where they died — dark flattened mounds that fade
+    // Fallen monsters linger where they died - dark flattened mounds that fade
     // with the corpse timer. Purely visual; the lootable corpse list is separate.
     for (const GameState::WorldCorpse& c : s.worldCorpses) {
         if (c.zone != 1) continue;
@@ -12407,7 +12452,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
                                  Fade(Color{ 255, 196, 110, 255 }, pulse));
     }
     // Combat FX (2026-09-24): flag marker, spell projectiles/impacts, heal +
-    // vigor auras, summoned fiend — world-space, so they sit in the scene.
+    // vigor auras, summoned fiend - world-space, so they sit in the scene.
     DrawFlagMarker3D(s, 1);
     DrawSpellFX3D(s, 1);
     EndMode3D();
@@ -12452,14 +12497,14 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         DrawUIText(prompt.c_str(), sx, sy, 14, WHITE);
     }
     DrawFloatTexts3D(s, c, 1, screenW, screenH); // combat feel: damage numbers / MISS
-    DrawUIText(TextFormat("%s — 3D view: drag to orbit, wheel to zoom. [V] toggles 2D.",
+    DrawUIText(TextFormat("%s - 3D view: drag to orbit, wheel to zoom. [V] toggles 2D.",
                           kDungeons[di].name.c_str()),
                20, 196, 12, Color{ 200, 180, 150, 255 });
 }
 
 
 // ---------------------------------------------------------------------
-// Building detail / upgrade panel — extracted 2026-09-24 from DrawTownScreen
+// Building detail / upgrade panel - extracted 2026-09-24 from DrawTownScreen
 // so building interiors can open the identical panel from their signature
 // furniture (anvil, teller counter, ...). Content unchanged: craft buildings
 // show upgrade info + "Craft here", amenities show their screen links.
@@ -12504,14 +12549,14 @@ static void DrawBuildingDetailPanel(GameState& s, int screenW) {
                 DrawUIText("Max level reached.", 36, panelY + 48, 13, DARKGRAY);
             }
             // Step inside and actually use the place, instead of tabbing away to Craft
-            // by hand — jumps straight to this building's own recipe tab.
+            // by hand - jumps straight to this building's own recipe tab.
             if (Button({ 220, (float)(panelY + 72), 160, 34 }, "Craft here", true)) {
                 s.craftBuildingTab = idx;
                 s.screen = Screen::Craft;
                 s.selectedTile.reset();
             }
         } else {
-            DrawUIText("(No upgrades — amenity building.)", 36, panelY + 28, 13, DARKGRAY);
+            DrawUIText("(No upgrades - amenity building.)", 36, panelY + 28, 13, DARKGRAY);
             // Same "step inside and use it" idea as the craft buildings above, for the
             // amenities that have an actual screen of their own.
             struct AmenityLink { const char* label; Screen target; };
@@ -12534,13 +12579,13 @@ static void DrawBuildingDetailPanel(GameState& s, int screenW) {
 }
 
 // =====================================================================
-// Building interiors (2026-09-24) — walkable rooms inside each of the ten
+// Building interiors (2026-09-24) - walkable rooms inside each of the ten
 // town buildings. One Screen::Interior reuses the town's movement,
 // interaction, 2D/3D rendering, and camera machinery: 2D is a top-down
 // room that fills the viewport; 3D reuses Town3DGetCamFor with tighter
 // zoom limits. Enter with E at a building's door in town; exit with E at
-// the room's door. Signature furniture opens DrawBuildingDetailPanel —
-// the same panel the old exterior E-press opened — so every existing
+// the room's door. Signature furniture opens DrawBuildingDetailPanel -
+// the same panel the old exterior E-press opened - so every existing
 // link (Craft/Bank/Pets/Character/House/Provisioner) keeps working.
 // =====================================================================
 
@@ -12549,7 +12594,7 @@ static const float kInteriorRoomH = 760.0f;
 static const float kInteriorWallMargin = 34.0f; // player clamp from the walls
 // 2026-09-25 bugfix, re-derived (the 2026-09-24 fix of 300-900 quietly
 // regressed back to the pre-fix 150-520 at some point across drops, and
-// re-testing found 300-900 itself no longer clears the problem either —
+// re-testing found 300-900 itself no longer clears the problem either -
 // interiors now force a steeper follow pitch, kT3DFollowPitch=0.96 rad,
 // than whatever this range was originally tuned against): interiors use the
 // same elevated-orbit camera math as Town/Wilderness, where most of the
@@ -12717,7 +12762,7 @@ struct InteriorRoomDef {
     Color wall;
 };
 
-// Phase 3 — the Fur Trader's interior: pelt frames and fur bolts using the
+// Phase 3 - the Fur Trader's interior: pelt frames and fur bolts using the
 // tailor's existing legitimate models with a fur-shop identity (no new art).
 static const InteriorPropDef kInteriorPropsFurTrader[] = {
     { "tailor", "Mannequin.gltf", "Pelt Frame", 280, 330, 0, 1, 0, 32, 32, "panel", Color{200,190,180,255}, 32, 32 },
@@ -12727,7 +12772,7 @@ static const InteriorPropDef kInteriorPropsFurTrader[] = {
     { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
 };
 
-// Phase 4 — the Miners' Guild assay office: assay table, guild anvil, ore
+// Phase 4 - the Miners' Guild assay office: assay table, guild anvil, ore
 // barrels, and a pick rack, using the smith's existing legitimate models.
 static const InteriorPropDef kInteriorPropsMinersGuild[] = {
     { "smith", "Workbench.gltf", "Assay Table", 280, 200, 0, 1, 0, 64, 36, "panel", Color{139,110,75,255}, 64, 36 },
@@ -12764,10 +12809,10 @@ static const InteriorRoomDef* InteriorRoomFor(const std::string& key) {
 // interior, same greet-popup treatment as town townsfolk.
 struct InteriorNPCDef { const char* name; const char* greeting; float x, y; };
 static bool InteriorNPCFor(const std::string& key, InteriorNPCDef& out) {
-    if (key == "stable") { out = { "Cobb the Stableboy", "Mind the horses — they spook easy.", 280, 260 }; return true; }
-    if (key == "provisioner") { out = { "Mira the Provisioner", "Fine wares, fair prices — have a look.", 280, 225 }; return true; }
-    if (key == "furtrader") { out = { "Halla Furwife", "Pelts and winter gear, hunter — dress for the deep cold.", 280, 225 }; return true; }
-    if (key == "minersguild") { out = { "Guildmaster Harl", "The Guild pays top coin for ore — bulk, no questions, no haggling.", 280, 225 }; return true; } // Phase 4
+    if (key == "stable") { out = { "Cobb the Stableboy", "Mind the horses - they spook easy.", 280, 260 }; return true; }
+    if (key == "provisioner") { out = { "Mira the Provisioner", "Fine wares, fair prices - have a look.", 280, 225 }; return true; }
+    if (key == "furtrader") { out = { "Halla Furwife", "Pelts and winter gear, hunter - dress for the deep cold.", 280, 225 }; return true; }
+    if (key == "minersguild") { out = { "Guildmaster Harl", "The Guild pays top coin for ore - bulk, no questions, no haggling.", 280, 225 }; return true; } // Phase 4
     return false;
 }
 
@@ -12797,7 +12842,7 @@ static std::vector<InteriorPropDef> InteriorPropsFor(GameState& s, const std::st
                             mp.bw, mp.bh, "", mp.c2d, mp.sw, mp.sh });
         }
     }
-    // Phase 2 — Saltmere coastal dressing (town 2 only): primitive-drawn props
+    // Phase 2 - Saltmere coastal dressing (town 2 only): primitive-drawn props
     // appended to Saltmere interiors. Model-less ("" dir/model): 2D draws the
     // labeled shape, Interior3DDrawProp draws the matching primitive.
     if (s.selectedTown == 1) {
@@ -12821,7 +12866,7 @@ static std::vector<InteriorPropDef> InteriorPropsFor(GameState& s, const std::st
             coast("Salt Barrel", 450, 640, 0, Color{ 140, 120, 95, 255 }, 40, 44);
         }
     }
-    // Phase 3 — Frostmere cold dressing (town 3 only): an ice lantern and a frost
+    // Phase 3 - Frostmere cold dressing (town 3 only): an ice lantern and a frost
     // crystal in every interior. Model-less (""): 2D draws the labeled shape,
     // Interior3DDrawFrost draws the matching primitive.
     if (s.selectedTown == 2) {
@@ -12889,7 +12934,7 @@ static void ExitInterior(GameState& s) {
     PlaySfx(SfxId::Door);
 }
 
-// Cached interior models — plain LoadModel, no town shadow shader: interiors
+// Cached interior models - plain LoadModel, no town shadow shader: interiors
 // render in a fixed indoor light like the dungeons' procedural props.
 static std::map<std::string, Model> g_interiorModels;
 static Model Interior3DModel(const std::string& dir, const std::string& model) {
@@ -13000,7 +13045,7 @@ static bool Interior3DPointInUI(int screenW, int screenH) {
     return false;
 }
 
-// Phase 2 — Saltmere coastal interior props: primitive-drawn 3D stand-ins for the
+// Phase 2 - Saltmere coastal interior props: primitive-drawn 3D stand-ins for the
 // model-less props InteriorPropsFor appends in town 2. "Exit" is skipped (the
 // door is drawn by DrawInterior3DWorld). Room-coord center: x3 = p.x - 280,
 // z3 = p.y - 380, base height p.yOff.
@@ -13055,10 +13100,10 @@ static void Interior3DDrawCoastal(const InteriorPropDef& p) {
         DrawCylinder({ x3, y0 + 14, z3 }, 14.5f, 14.5f, 2.5f, 12, Color{ 70, 72, 78, 255 }); // iron band
         DrawCylinder({ x3, y0 + 29, z3 }, 10, 10, 2, 12, Color{ 235, 235, 240, 255 }); // salt top
     }
-    // else: unknown model-less prop — 2D shape only, nothing to draw in 3D.
+    // else: unknown model-less prop - 2D shape only, nothing to draw in 3D.
 }
 
-// Phase 3 — model-less frost props InteriorPropsFor appends in town 3.
+// Phase 3 - model-less frost props InteriorPropsFor appends in town 3.
 static void Interior3DDrawFrost(const InteriorPropDef& p) {
     if (!p.label || std::string(p.label) == "Exit") return;
     float x3 = p.x - kInteriorRoomW * 0.5f, z3 = p.y - kInteriorRoomH * 0.5f, y0 = p.yOff;
@@ -13072,7 +13117,7 @@ static void Interior3DDrawFrost(const InteriorPropDef& p) {
         DrawCylinder({ x3, y0 + 34, z3 }, 9, 0.5f, 14, 4, Color{ 215, 238, 255, 255 });
         DrawCylinder({ x3 + 16, y0 + 9, z3 + 6 }, 0.5f, 8, 18, 4, Color{ 180, 212, 245, 255 });
     }
-    // else: unknown model-less prop — 2D shape only, nothing to draw in 3D.
+    // else: unknown model-less prop - 2D shape only, nothing to draw in 3D.
 }
 
 static void Interior3DDrawProp(const InteriorPropDef& p) {
@@ -13116,7 +13161,7 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
 
     float hw = kInteriorRoomW * 0.5f, hh = kInteriorRoomH * 0.5f;
     // Room geometry is drawn centered on the origin (x3 = p.x - hw), so the
-    // camera must target the centered player position — raw room coords put
+    // camera must target the centered player position - raw room coords put
     // the camera far outside the room (dark void). Clamp inside the room.
     Vector2 intCamPos = { s.interiorPlayerPos.x - hw, s.interiorPlayerPos.y - hh };
     intCamPos.x = std::clamp(intCamPos.x, -hw + 80.0f, hw - 80.0f);
@@ -13169,7 +13214,7 @@ static bool InteriorDoInteract(GameState& s, const InteriorPropDef* nearest, boo
     return false;
 }
 
-// Storage chest panel — opens from the Chest prop inside the wilderness homestead.
+// Storage chest panel - opens from the Chest prop inside the wilderness homestead.
 // Two columns: backpack items with Store buttons, chest items with Take buttons.
 static void DrawHouseChestPanel(GameState& s, int screenW, int screenH) {
     DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, 0.5f));
@@ -13304,13 +13349,13 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
 static void DrawSnowfall(int screenW, int screenH, float worldTime); // Phase 3 (defined above DrawWildernessScreen)
 static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     bool canGather = !s.gatheringResource.has_value();
-    // Second town (2026-09-22) — reuses Town 1's exact building positions/plaza/roads/
+    // Second town (2026-09-22) - reuses Town 1's exact building positions/plaza/roads/
     // collision/foliage/props unchanged (see GameState::selectedTown's comment); only
     // the NPC flavor, ground texture, and building tint differ per town, selected here.
     const auto& activeNPCs = ActiveTownNPCs(s.selectedTown);
 
     // Find the nearest building within interact range (used for both the prompt and
-    // the actual E-press action) — movement is paused while a panel is open. The
+    // the actual E-press action) - movement is paused while a panel is open. The
     // Wilderness Gate competes in the same nearest-node search as every building, but
     // pressing E on it switches screens instead of opening a detail panel.
     std::string nearestKey;
@@ -13323,7 +13368,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     bool gateIsNearest = gateDist < nearestDist;
     if (gateIsNearest) nearestDist = gateDist;
     // Wandering townsfolk compete in the same nearest-interactable search, same pattern
-    // as the Wilderness Gate above — see kTownNPCs.
+    // as the Wilderness Gate above - see kTownNPCs.
     int nearestNPCIdx = -1;
     for (int i = 0; i < (int)activeNPCs.size(); i++) {
         float d = Dist(s.townPlayerPos, TownNPCLivePos(i, s.worldTime, s.selectedTown));
@@ -13339,7 +13384,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         for (auto& node : ActiveTownNodes(s.selectedTown))
             ResolveCircleCollision(s.townPlayerPos, kPlayerRadius, node.pos, kNodeRadius);
         ResolveCircleCollision(s.townPlayerPos, kPlayerRadius, kWildernessGatePos, kNodeRadius);
-        // Townsfolk have no collision — they're ambient dressing, not obstacles; walking
+        // Townsfolk have no collision - they're ambient dressing, not obstacles; walking
         // through one is fine (see kTownNPCs' own comment).
         s.townPlayerPos = ClampToWorld(s.townPlayerPos, kPlayerEdgeMargin, kTownWorldSize);
         if (inRange && IsKeyPressed(KEY_E)) {
@@ -13384,11 +13429,11 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     BeginScissorMode((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height);
     Vector2 camera = CameraTopLeft(s.townPlayerPos, kTownWorldSize);
     // Town 2 uses the dirt/road texture as its primary ground (already loaded, no new
-    // asset needed) instead of grass, for an immediately different first impression —
+    // asset needed) instead of grass, for an immediately different first impression -
     // a "packed earth trading post" feel vs. Town 1's tended grass.
-    // Frostmere (Town 3) reuses the grass texture under a snow wash — the cold
+    // Frostmere (Town 3) reuses the grass texture under a snow wash - the cold
     // fallback color shows through the semi-transparent tint below.
-    bool town4 = (s.selectedTown == 3); // Phase 4: Cragmoor — granite mountain town
+    bool town4 = (s.selectedTown == 3); // Phase 4: Cragmoor - granite mountain town
     const Texture2D* activeGroundTex = (s.selectedTown == 0)
         ? (g_assets.groundGrassOk ? &g_assets.groundGrass : nullptr)
         : (s.selectedTown == 2)
@@ -13407,23 +13452,23 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
                       Color{ 150, 148, 140, 70 });
     }
 
-    // Farmland patches — CraftPix "village" ground dressing (assets/village/farmland.png),
+    // Farmland patches - CraftPix "village" ground dressing (assets/village/farmland.png),
     // hand-placed clear of every building/road/plaza, same spirit as kFoliagePositions
     // below (just a rectangle of tiled ground instead of a scattered icon). Re-placed
     // for the 3x3 grid layout, tucked along the open west edge near Alchemy/Healer
-    // (both now in the grid's west column) same as before — offsets kept the same
+    // (both now in the grid's west column) same as before - offsets kept the same
     // distance from Alchemy/Healer's own (now 300-unit-spaced) positions.
     static const std::array<Rectangle, 2> kFarmlandPatches = {{
         {20, 356, 100, 100},  // near the Alchemy garden
         {20, 632, 100, 100},  // near the Healer's kitchen garden
     }};
-    // Skipped for Town 2 — farmland doesn't fit its coastal trade-port identity; no
+    // Skipped for Town 2 - farmland doesn't fit its coastal trade-port identity; no
     // equivalent dressing added this pass (see the plan's deferred list).
     if (s.selectedTown == 0 && g_assets.farmlandOk)
         for (const Rectangle& patch : kFarmlandPatches)
             DrawTiledRect(&g_assets.farmland, patch, camera, 48.0f * kTownVisualScale, Color{ 200, 150, 90, 255 });
 
-    // Fence posts marking the town plaza — purely decorative (no collision), evenly
+    // Fence posts marking the town plaza - purely decorative (no collision), evenly
     // spaced along its 4 edges from the same "village" pack as the farmland above.
     if (g_assets.fencePostOk) {
         std::vector<Vector2> posts;
@@ -13443,12 +13488,12 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         }
     }
 
-    // Decorative foliage first, so buildings/roads/plaza always render on top of it —
+    // Decorative foliage first, so buildings/roads/plaza always render on top of it -
     // purely visual, no collision, hand-placed clear of every building/road/plaza. Six
     // variants (see kFoliagePositions) reusing the Wilderness screen's tree/bush/fern
     // textures for variety instead of one repeated bush icon, plus one autumn-colored
     // bush from a different pack for a splash of warm color.
-    // Phase 3: skipped for Frostmere — winter-dressed separately below.
+    // Phase 3: skipped for Frostmere - winter-dressed separately below.
     if (s.selectedTown != 2)
     for (const TownFoliage& f : kFoliagePositions) {
         const Texture2D* icon = f.variant == 0 ? (g_assets.foliageOk ? &g_assets.foliage : nullptr)
@@ -13464,7 +13509,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         DrawIconCentered(*icon, screenPos, 34.0f * kTownVisualScale, WHITE);
     }
 
-    // Phase 3 — Frostmere winter dressing: snow drifts and frost-dusted pines,
+    // Phase 3 - Frostmere winter dressing: snow drifts and frost-dusted pines,
     // hand-placed clear of the 5 buildings/plaza/gate road (decorative only).
     if (s.selectedTown == 2) {
         static const std::array<Vector2, 6> kFrostDrifts = {{
@@ -13489,7 +13534,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         }
     }
 
-    // A dirt plaza around the Town Hall / Provisioner cluster — the outer 6 buildings
+    // A dirt plaza around the Town Hall / Provisioner cluster - the outer 6 buildings
     // sit on open grass, connected back to it by roads, rather than a uniform flat
     // ground. Town 2 tints its roads/plaza a cooler gray-blue (worn dock stone) instead
     // of Town 1's warm tan, on top of the same already-loaded dirt texture.
@@ -13499,13 +13544,13 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     DrawWallBand(kTownPlaza, camera, dirtTex, 48.0f * kTownVisualScale, roadTint);
     for (auto& node : ActiveTownNodes(s.selectedTown)) DrawRoadToPlaza(node.pos, kTownPlaza, camera, dirtTex);
     // Extends Bank's own straight road (same central column, x=450) on past it to the
-    // Wilderness Gate — one continuous main street from the plaza straight out of town,
+    // Wilderness Gate - one continuous main street from the plaza straight out of town,
     // instead of the gate sitting unconnected off in a corner.
     DrawWallBand({ kWildernessGatePos.x - 14, kTownPlaza.y + kTownPlaza.height, 28,
                     kWildernessGatePos.y - (kTownPlaza.y + kTownPlaza.height) },
                   camera, dirtTex, 48.0f * kTownVisualScale, roadTint);
 
-    // Town-flavor props (well/lamps/signage/stalls/clutter) — see kTownProps.
+    // Town-flavor props (well/lamps/signage/stalls/clutter) - see kTownProps.
     for (const TownProp& p : kTownProps) {
         const Texture2D* icon = nullptr;
         switch (p.kind) {
@@ -13533,9 +13578,9 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         if (screenPos.x < kViewport.x - 30 || screenPos.x > kViewport.x + kViewport.width + 30 ||
             screenPos.y < kViewport.y - 30 || screenPos.y > kViewport.y + kViewport.height + 30) continue;
         // Soft warm ground-glow under each streetlamp (Gemini's "sell the illusion they're
-        // actively lighting the paths" suggestion) — layered fading circles (not
+        // actively lighting the paths" suggestion) - layered fading circles (not
         // DrawCircleGradient: its signature differs between the desktop raylib 6.0 build
-        // and the web build's raylib 5.5 source, int-x/y vs Vector2 — this avoids the
+        // and the web build's raylib 5.5 source, int-x/y vs Vector2 - this avoids the
         // mismatch entirely) drawn before the lamp sprite so the sprite sits on top of
         // its own light pool rather than the glow overlapping the post.
         if (p.kind == 1) {
@@ -13548,7 +13593,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         DrawIconCentered(*icon, screenPos, p.size * kTownVisualScale, WHITE);
     }
 
-    // Phase 1 — Emberhold capital dressing (town 1 only).
+    // Phase 1 - Emberhold capital dressing (town 1 only).
     if (s.selectedTown == 0) {
         for (const CapitalProp& p : kCapitalProps) {
             Vector2 csp = WorldToScreen(p.pos, camera);
@@ -13558,7 +13603,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         }
     }
 
-    // Phase 2 — Saltmere coastal dressing (town 2 only).
+    // Phase 2 - Saltmere coastal dressing (town 2 only).
     if (s.selectedTown == 1) {
         for (const CoastProp& p : kCoastProps) {
             Vector2 csp = WorldToScreen(p.pos, camera);
@@ -13568,9 +13613,9 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         }
     }
 
-    // Phase 3 — Frostmere cold dressing (town 3 only): ice lanterns, snow-capped
+    // Phase 3 - Frostmere cold dressing (town 3 only): ice lanterns, snow-capped
     // wood piles, and frost banners. Primitive-drawn, hand-placed clear of the
-    // 5 buildings/plaza/gate road — no new art files needed.
+    // 5 buildings/plaza/gate road - no new art files needed.
     if (s.selectedTown == 2) {
         struct FrostProp { int kind; Vector2 pos; float size; };
         static const std::array<FrostProp, 7> kFrostProps = {{
@@ -13610,7 +13655,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         bool near = (node.key == nearestKey) && inRange;
         std::string sub;
         // Saltmere got its own real building art 2026-09-23 (Mark's "Carl" art drop,
-        // assets/saltmere_buildings/) — before that, Town 2 had no dedicated art at all
+        // assets/saltmere_buildings/) - before that, Town 2 had no dedicated art at all
         // and fell back to the generic wall+roof+door composite tinted slate-blue. Real
         // art always renders at its own true colors (bodyTint WHITE); the slate tint is
         // now only a defensive fallback for the rare case a given key's file is missing.
@@ -13627,15 +13672,15 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
                            realTex, bodyTint, kTownVisualScale);
     }
     {
-        // The Wilderness Gate — drawn with the generic wall+roof fallback (no CraftPix
+        // The Wilderness Gate - drawn with the generic wall+roof fallback (no CraftPix
         // building art fits "gate to the wilds"), colored sage to read as an outdoor
         // threshold rather than a shop.
         Vector2 gateScreenPos = WorldToScreen(kWildernessGatePos, camera);
         DrawBuildingNode(gateScreenPos, kColorPanelBg, "Wilderness Gate", gateIsNearest && inRange, "",
                            nullptr, nullptr, nullptr, WHITE, kTownVisualScale);
     }
-    // Wandering townsfolk (2026-09-23: real animated art, Mark's "Carl" drop — used to
-    // be a plain colored circle, see kTownNPCs' comment history) — faces its own wander
+    // Wandering townsfolk (2026-09-23: real animated art, Mark's "Carl" drop - used to
+    // be a plain colored circle, see kTownNPCs' comment history) - faces its own wander
     // motion via WanderFacing rather than always Down, since Town is the one screen
     // players linger on long enough for that polish to actually read.
     const auto& activeNPCSheets = (s.selectedTown == 0) ? g_assets.townNPCSheets : g_assets.saltmereNPCSheets;
@@ -13668,7 +13713,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         else EnterInterior(s, nearestKey);
     }
 
-    // Greet popup — small heading+text panel modeled on DrawInnocentPanel's shape, minus
+    // Greet popup - small heading+text panel modeled on DrawInnocentPanel's shape, minus
     // its action buttons (nothing to choose, just dismiss). Toggled by E, same as
     // selectedTile's building panels.
     if (s.greetedNPC.has_value()) {
@@ -13682,7 +13727,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
             s.greetedNPC.reset();
     }
 
-    // Gather HUD strip — drawn AFTER (not before) the world render, so the tiled ground
+    // Gather HUD strip - drawn AFTER (not before) the world render, so the tiled ground
     // fill doesn't paint over it. kViewport starts at y=110, overlapping this strip's
     // y=120-156, so draw order here matters: whichever is drawn last wins the pixels.
     if (Button({ 20, 120, 130, 30 }, "Gather Wood [1]", canGather)) TryStartGather(s, "wood");
@@ -13696,7 +13741,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     if (s.town3DView && Button({ 528, 120, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
         g_t3dFollowMode = !g_t3dFollowMode;
     // Solid-backed (DrawInfoLine, not bare DrawUIText) and split across two short lines
-    // instead of one concatenated one — 2026-09-22 fix: this text sits directly on the
+    // instead of one concatenated one - 2026-09-22 fix: this text sits directly on the
     // tiled ground with nothing else guaranteeing contrast (same class of bug already
     // fixed on the vendor screens' backdrops), and the combined skills+gathering string
     // could run long enough to overflow the safe margin on some viewports.
@@ -13705,26 +13750,26 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         DrawInfoLine(TextFormat("Gathering %s... %.1fs", s.gatheringResource->c_str(), s.gatherSecondsRemaining),
                        20, 176, 12);
 
-    // --- Detail / upgrade panel — opened by walking up + E, closed with [X]/[ESC] ---
+    // --- Detail / upgrade panel - opened by walking up + E, closed with [X]/[ESC] ---
     DrawBuildingDetailPanel(s, screenW);
     if (!s.selectedTile.has_value()) {
         DrawUIText("WASD/arrows (or drag bottom-left) to move. Walk up to a building and press [E].", 20, screenH - 66, 13, Fade(DARKGRAY, 0.8f));
     }
-    // Phase 3 — snowfall over Frostmere (both 2D and 3D town views).
+    // Phase 3 - snowfall over Frostmere (both 2D and 3D town views).
     if (s.selectedTown == 2) DrawSnowfall(screenW, screenH, s.worldTime);
 }
 
 // ---------------------------------------------------------------------
-// The Wilderness — reached via the gate in Town (see kWildernessGatePos in
+// The Wilderness - reached via the gate in Town (see kWildernessGatePos in
 // DrawTownScreen). An open outdoor arena like Town, not a walled dungeon: gather
 // nodes reuse TryStartGather (so auto-gather and the gather-completion ambush check
 // just work unmodified), creature spots reuse TryStartTameAttempt/ResolveTameAttempt
 // (with a "tame" pendingEncounterCheck added alongside "gather" for the same ambush
-// roll — see UpdateTameAttempt), and a Town Gate node walks you back out.
+// roll - see UpdateTameAttempt), and a Town Gate node walks you back out.
 // ---------------------------------------------------------------------
 
 // ---------------------------------------------------------------------
-// Death / ghost / corpse / respawn — full definitions (forward-declared above
+// Death / ghost / corpse / respawn - full definitions (forward-declared above
 // the loss functions; defined here, after the wilderness tables they use).
 // ---------------------------------------------------------------------
 static float RollWildRespawn() { return kWildRespawnMin + RandUnit() * (kWildRespawnMax - kWildRespawnMin); }
@@ -13737,7 +13782,7 @@ static const DungeonMonster& DungeonSlotMonster(const DungeonDef& dungeon, int s
     return dungeon.monsters[slotIdx % 5];
 }
 
-// Which town the ghost returns to — the closest gate to where death happened.
+// Which town the ghost returns to - the closest gate to where death happened.
 // For dungeon deaths the dungeon's wilderness entrance is the reference point.
 static int GhostResurrectTown(const GameState& s) {
     Vector2 ref = s.wildernessPlayerPos;
@@ -13761,7 +13806,7 @@ static void DrawPlayerLifeState(const GameState& s, Vector2 screenPos, Vector2 f
     float kPlayerRadius = ::kPlayerRadius * visualScale;
     if (s.playerDeathAnimT > 0.0f) {
         // Body collapsing: draw the normal player, then sink it under a growing
-        // dark fade — reads as falling even without a dedicated prone sprite.
+        // dark fade - reads as falling even without a dedicated prone sprite.
         float fade = 1.0f - std::max(0.0f, s.playerDeathAnimT / kPlayerDeathAnimTime);
         DrawPlayer(s, screenPos, facing, "", visualScale, ActorAnim::Idle);
         DrawCircleV(screenPos, kPlayerRadius * 1.4f, Fade(BLACK, 0.75f * fade));
@@ -13823,12 +13868,12 @@ static void DrawWorldCorpses2D(const GameState& s, int zone, Vector2 camera) {
 
 static void BeginPlayerDeath(GameState& s) {
     // Called at the END of every player-loss path, AFTER that path's gold/item/
-    // Shaken/Rival-loot logic has resolved — this only handles the death itself:
+    // Shaken/Rival-loot logic has resolved - this only handles the death itself:
     // HP to 0, everything hostile cleared, ghost placed. The loss functions no
     // longer restore 20% HP; resurrection (full HP, closest town) happens when
     // the ghost timer expires.
     s.hp = 0;
-    // Stop anything in progress — a ghost can't be mid-gather or mid-tame.
+    // Stop anything in progress - a ghost can't be mid-gather or mid-tame.
     s.autoGather = false;
     s.gatheringResource.reset();
     s.tamingAttempt.reset();
@@ -13841,7 +13886,7 @@ static void BeginPlayerDeath(GameState& s) {
     s.wildExtraAttackers.clear();   // the pack scatters when you fall
     s.dungeonExtraAttackers.clear();
     s.dyingMonsters.clear();
-    CancelEscort(s, "flees as you fall — the escort is broken."); // a ghost can't be escorting anyone
+    CancelEscort(s, "flees as you fall - the escort is broken."); // a ghost can't be escorting anyone
     // Combat FX state dies with the player (2026-09-24): the flag, in-flight
     // spells, the vigor aura, and the fiend don't survive death.
     s.flagTarget.reset();
@@ -13854,7 +13899,7 @@ static void BeginPlayerDeath(GameState& s) {
     s.fiendTickT = 0.0f;
     // The ghost walks where it died. Panel-combat deaths (ambush panel over town,
     // the Hunt picker, etc.) manifest in the wilderness at the last wilderness
-    // position — never stranded on a picker screen.
+    // position - never stranded on a picker screen.
     if (s.screen == Screen::Hunt && s.selectedDungeon.has_value()) {
         s.ghostZone = 1;
         s.ghostDungeonIdx = *s.selectedDungeon;
@@ -13872,9 +13917,9 @@ static void BeginPlayerDeath(GameState& s) {
 static void FinishPlayerDeathAnim(GameState& s) {
     s.playerDeathAnimT = 0.0f;
     s.playerIsGhost = true;
-    PlaySfx(SfxId::Ghost); // death anim ends — the ghost transition
+    PlaySfx(SfxId::Ghost); // death anim ends - the ghost transition
     s.ghostTimer = kGhostDuration;
-    s.logLine += " You are a ghost. Walk where you will — nothing can touch you, and you can touch nothing, for a little while.";
+    s.logLine += " You are a ghost. Walk where you will - nothing can touch you, and you can touch nothing, for a little while.";
 }
 
 static void ResurrectPlayer(GameState& s) {
@@ -13891,7 +13936,7 @@ static void ResurrectPlayer(GameState& s) {
     s.ghostDungeonIdx = -1;
     s.logLine = std::string("You wake in ") + ActiveTownName(townIdx) + ", whole once more.";
 }
-// Phase 6 — shrine resurrection: a high-karma ghost who reaches a shrine rises
+// Phase 6 - shrine resurrection: a high-karma ghost who reaches a shrine rises
 // on the spot, no trip to a town healer. The shrine's reward for the virtuous.
 static void ShrineResurrect(GameState& s, const ShrineDef& shrine) {
     s.hp = s.maxHp;
@@ -13905,7 +13950,7 @@ static void ShrineResurrect(GameState& s, const ShrineDef& shrine) {
 }
 
 // Multi-enemy combat tuning (2026-09-25).
-static const float kPackAggroRadius = 280.0f; // ~6 tiles at 48u — damaging a
+static const float kPackAggroRadius = 280.0f; // ~6 tiles at 48u - damaging a
     // monster angers live same-faction monsters within this radius of the victim
 static const int kMaxMeleeAttackers = 4;      // concurrent melee attackers max (primary + extras)
 static const float kClickAssistBasePx = 40.0f; // tap-assist radius at 1080p height, scaled linearly
@@ -13932,7 +13977,7 @@ static const GameState::ActiveDungeonMonster* FindDungeonExtra(const GameState& 
     return nullptr;
 }
 
-// Death-animation lookup for the draw loops — one entry per simultaneous death.
+// Death-animation lookup for the draw loops - one entry per simultaneous death.
 static const GameState::DyingMonster* FindDyingWildSpot(const GameState& s, int spotIdx) {
     for (const auto& d : s.dyingMonsters)
         if (d.zone == 0 && !d.isRival && d.spotIdx == spotIdx) return &d;
@@ -13984,7 +14029,7 @@ static void PromoteWildExtraOrAutoFlag(GameState& s) {
     if (best >= 0) {
         GameState::FlagTarget f; f.zone = 0; f.spotIdx = best;
         s.flagTarget = f;
-        s.logLine = "Target: " + kWildernessMonsterSpots[best].name + " — closing in!";
+        s.logLine = "Target: " + kWildernessMonsterSpots[best].name + " - closing in!";
     } else {
         s.flagTarget.reset();
     }
@@ -14025,7 +14070,7 @@ static void PromoteDungeonExtraOrAutoFlag(GameState& s, int dungeonIdx) {
         GameState::FlagTarget f; f.zone = 1; f.monsterIdx = best; f.isBoss = bestBoss;
         s.flagTarget = f;
         const DungeonMonster& m = bestBoss ? dungeon.boss : DungeonSlotMonster(dungeon, best);
-        s.logLine = "Target: " + m.name + " — closing in!";
+        s.logLine = "Target: " + m.name + " - closing in!";
     } else {
         s.flagTarget.reset();
     }
@@ -14039,14 +14084,14 @@ static bool InSwingArc(Vector2 playerPos, Vector2 playerFacing, Vector2 enemyPos
     float len = std::sqrt(to.x * to.x + to.y * to.y);
     if (len < 0.0001f) return true;
     float flen = std::sqrt(playerFacing.x * playerFacing.x + playerFacing.y * playerFacing.y);
-    if (flen < 0.0001f) return true; // never moved — generous
+    if (flen < 0.0001f) return true; // never moved - generous
     return (to.x * playerFacing.x + to.y * playerFacing.y) / (len * flen) >= 0.0f;
 }
 
 // Pack aggro (2026-09-25): when the player damages a normal monster, live
 // same-faction monsters within kPackAggroRadius of the victim join the fight as
 // extra attackers. Rival/blade duels never trigger this (1v1 stays 1v1), and the
-// dungeon boss never joins as a pack member — it only fights when engaged.
+// dungeon boss never joins as a pack member - it only fights when engaged.
 static void WildPackAggro(GameState& s, int damagedSpotIdx, Vector2 center) {
     if (damagedSpotIdx < 0 || damagedSpotIdx >= (int)kWildernessMonsterSpots.size()) return;
     if (!s.wildEngaged.has_value() || s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0) return;
@@ -14076,7 +14121,7 @@ static void WildPackAggro(GameState& s, int damagedSpotIdx, Vector2 center) {
 static void DungeonPackAggro(GameState& s, int dungeonIdx, int damagedMonsterIdx, bool damagedIsBoss,
                             Vector2 center) {
     if (!s.dungeonEngaged.has_value()) return;
-    if (damagedIsBoss) return; // the boss has no pack — it fights alone
+    if (damagedIsBoss) return; // the boss has no pack - it fights alone
     const DungeonDef& dungeon = kDungeons[dungeonIdx];
     const std::string& faction = DungeonSlotMonster(dungeon, damagedMonsterIdx).name;
     int joined = 0;
@@ -14105,13 +14150,13 @@ static void DungeonPackAggro(GameState& s, int dungeonIdx, int damagedMonsterIdx
 // ambush chaining) runs in FinishMonsterDeath when the animation completes.
 // clearEngagement=true (the default) is for the PRIMARY's death: the engagement
 // is dropped and the pack promotes/auto-flags per above. Pack-member deaths pass
-// false — the fight goes on. NOTE: am may alias *s.wildEngaged — callers must not
+// false - the fight goes on. NOTE: am may alias *s.wildEngaged - callers must not
 // touch their am reference after this call when clearEngagement is true.
 static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& am,
                                   const std::string& name, int baseGold, int baseLeather,
                                   bool clearEngagement) {
     PlaySfx(SfxId::MonsterDie);
-    // Capture identity BEFORE s.wildEngaged.reset() below — callers pass *s.wildEngaged
+    // Capture identity BEFORE s.wildEngaged.reset() below - callers pass *s.wildEngaged
     // by reference, so `am` dangles the moment the optional resets (2026-09-25).
     bool wasDuel = am.isRival || am.bladeIdx >= 0;
     GameState::DyingMonster dm;
@@ -14129,7 +14174,7 @@ static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& 
     if (clearEngagement) {
         s.wildEngaged.reset();
         if (wasDuel) {
-            // Duels stay 1v1 — the old behavior: flag clears, no pack, no auto-flag.
+            // Duels stay 1v1 - the old behavior: flag clears, no pack, no auto-flag.
             s.wildExtraAttackers.clear();
             s.flagTarget.reset();
         } else {
@@ -14167,7 +14212,7 @@ static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeo
 
 // Pack-member death (2026-09-25, multi-enemy combat): queues a death animation,
 // respawn cooldown, and per-victim rewards for an extra attacker WITHOUT
-// touching the primary engagement — the fight continues with whoever's left.
+// touching the primary engagement - the fight continues with whoever's left.
 // The primary's in-flight spell bolts stay live for the same reason.
 static void BeginWildExtraDeath(GameState& s, const GameState::ActiveMonster& ex) {
     PlaySfx(SfxId::MonsterDie);
@@ -14201,10 +14246,10 @@ static void BeginDungeonExtraDeath(GameState& s, int dungeonIdx, const GameState
     s.dyingMonsters.push_back(dm);
 }
 
-// The deferred half of the old EndWildMonsterWin/EndDungeonMonsterWin bodies —
+// The deferred half of the old EndWildMonsterWin/EndDungeonMonsterWin bodies -
 // runs when the death animation completes: corpse (visual + lootable), rewards,
 // Shaken relief, ambush/innocent chaining. Economy behavior is unchanged, only
-// delayed by the animation. One call per kill — simultaneous kills each resolve.
+// delayed by the animation. One call per kill - simultaneous kills each resolve.
 static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
     float corpseDur = (dm.isRival || dm.bladeIdx >= 0) ? kRivalCorpseFadeTime : kCorpseFadeTime;
     s.worldCorpses.push_back({ dm.pos, corpseDur, corpseDur, dm.zone, dm.iconIdx, dm.name });
@@ -14213,7 +14258,7 @@ static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
     std::string msg = "Defeated the " + dm.name + "! Corpse left behind with leather and " +
                       std::to_string(goldFound) + " gold to loot.";
     if (dm.zone == 1 && !dm.isBoss && dm.dungeonIdx >= 0) {
-        // Dungeon XP / boss ladder — the old EndDungeonMonsterWin block.
+        // Dungeon XP / boss ladder - the old EndDungeonMonsterWin block.
         s.dungeonXP[dm.dungeonIdx] += dm.level;
         const DungeonDef& dungeon = kDungeons[dm.dungeonIdx];
         if (s.dungeonXP[dm.dungeonIdx] >= dungeon.bossUnlockXp &&
@@ -14222,7 +14267,7 @@ static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
     }
     LiveMaybeGainMagicResist(s);
     Journal(s, msg); // kills resolve into the event journal
-    PlaySfx(SfxId::Victory); // the deferred win resolves here — fight won
+    PlaySfx(SfxId::Victory); // the deferred win resolves here - fight won
     DecrementShaken(s); // JS: every win eases Shaken by one fight
     AddWeeklyProgress(s, kGoalDefeat, 1);
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) return; // can't happen, but never chain an encounter onto a ghost
@@ -14230,7 +14275,7 @@ static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
     else { if (!TryTriggerAmbush(s, "wilderness")) TryTriggerInnocentEncounter(s, "wilderness"); }
 }
 
-// Per-frame tick for the whole system — called from UpdateDrawFrame's global
+// Per-frame tick for the whole system - called from UpdateDrawFrame's global
 // update block so it runs on every screen, in 2D and 3D alike.
 static void UpdateDeathAndRespawn(GameState& s, float dt) {
     if (s.playerDeathAnimT > 0.0f) {
@@ -14242,10 +14287,10 @@ static void UpdateDeathAndRespawn(GameState& s, float dt) {
     }
     if (!s.dyingMonsters.empty()) {
         for (auto& d : s.dyingMonsters) d.timer -= dt;
-        // Resolve each finished death independently — cleaves and AoE can stack kills.
+        // Resolve each finished death independently - cleaves and AoE can stack kills.
         for (size_t i = 0; i < s.dyingMonsters.size(); ) {
             if (s.dyingMonsters[i].timer <= 0.0f) {
-                GameState::DyingMonster dm = s.dyingMonsters[i]; // copy — finish touches state
+                GameState::DyingMonster dm = s.dyingMonsters[i]; // copy - finish touches state
                 s.dyingMonsters.erase(s.dyingMonsters.begin() + i);
                 FinishMonsterDeath(s, dm);
             } else {
@@ -14260,7 +14305,7 @@ static void UpdateDeathAndRespawn(GameState& s, float dt) {
         [](const GameState::WorldCorpse& c) { return c.timer <= 0.0f; }), s.worldCorpses.end());
 }
 
-// Spawns just the visible corpse for a panel-combat win (ambush/bloodstained) —
+// Spawns just the visible corpse for a panel-combat win (ambush/bloodstained) -
 // there's no world sprite to play a fall animation on, so the corpse appears at
 // the player's position. The lootable corpse list + rewards are handled by the
 // existing panel win logic, unchanged.
@@ -14285,7 +14330,7 @@ static void DrawGhostStatus(const GameState& s) {
     } else if (s.ghostTimer <= kGhostReturnNotice) {
         text = std::string("Returning to ") + ActiveTownName(GhostResurrectTown(s)) + "...";
     } else {
-        text = "GHOST — " + std::to_string((int)std::ceil(s.ghostTimer)) +
+        text = "GHOST - " + std::to_string((int)std::ceil(s.ghostTimer)) +
                "s until resurrection. You can walk, but touch nothing.";
     }
     int fsz = 14;
@@ -14295,7 +14340,7 @@ static void DrawGhostStatus(const GameState& s) {
     DrawUIText(text.c_str(), sx, sy, fsz, Color{ 190, 215, 255, 255 });
 }
 
-// Innocent world sprite (2D wilderness, 2026-09-24) — dedicated pixel-art portrait
+// Innocent world sprite (2D wilderness, 2026-09-24) - dedicated pixel-art portrait
 // per identity, drawn at a readable world size; falls back to the old neutral
 // circle if the texture didn't load.
 static void DrawInnocentSprite2D(Vector2 screenPos, int id, const std::string& label, bool near) {
@@ -14409,7 +14454,7 @@ static void SpawnSpellImpact(GameState& s, int zone, Vector2 pos, int spellIdx, 
 }
 
 // Floating damage number / MISS floater (2026-09-25, combat feel). Steals the
-// oldest slot when all 16 are live — combat never has that many concurrent hits.
+// oldest slot when all 16 are live - combat never has that many concurrent hits.
 static void SpawnFloatText(GameState& s, int zone, Vector2 pos, const std::string& text, Color color) {
     GameState::FloatText* slot = nullptr;
     for (auto& ft : s.floatTexts) if (!ft.active) { slot = &ft; break; }
@@ -14438,6 +14483,179 @@ static void Journal(GameState& s, const std::string& text) {
     s.logLine = text;
 }
 
+// ---------------------------------------------------------------------
+// UO-style travel (2026-09-25): town marking + Recall + leave-dungeon.
+// ---------------------------------------------------------------------
+static Rectangle RecallPickerRect() { return { 70, 190, 400, 340 }; }
+
+// The actual town arrival - mirrors walking through a town gate (same spawn,
+// same 3D-view carry, escort cancelled). Engagement state never crosses zones.
+static void TeleportToTown(GameState& s, int townIdx, const std::string& why) {
+    CancelEscort(s, "parts ways as the world folds - the escort is broken.");
+    s.flagTarget.reset();
+    s.wildEngaged.reset();
+    s.wildExtraAttackers.clear();
+    s.dungeonEngaged.reset();
+    s.dungeonExtraAttackers.clear();
+    s.dungeonMenuOpen = false;
+    for (auto& p : s.spellProjectiles) p.active = false;
+    for (auto& im : s.spellImpacts) im.active = false;
+    s.fiendT = 0.0f;
+    s.vigorT = 0.0f;
+    s.leaveDungT = -1.0f; // a recall out cancels a leave-dungeon cast
+    s.recallPickerOpen = false;
+    s.selectedTown = townIdx;
+    s.screen = Screen::Town;
+    s.townPlayerPos = { 450, 830 }; // same relative spawn every town uses, just south of its own gate
+    if (s.wild3DView || s.hunt3DView) s.town3DView = true; // stay in 3D across the jump (view state only)
+    Journal(s, why + ActiveTownName(townIdx) + ".");
+    PlaySfx(SfxId::Cast);
+}
+
+// Recall's preconditions. `why` is the short deny reason shown at the button.
+static bool CanCastRecall(const GameState& s, std::string& why) {
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { why = "The dead cannot recall."; return false; }
+    const Spell& sp = kSpells[kRecallSpellIdx];
+    if (EffectiveSkill(s, &GameState::magery) < (float)sp.minSkill) { why = "Need 40 Magery"; return false; }
+    if (s.mana < (float)sp.manaCost) { why = "No mana!"; return false; }
+    if (s.reagents < sp.reagentCost) { why = "No reagents!"; return false; }
+    return true;
+}
+
+static void TryRecallToTown(GameState& s, int townIdx) {
+    if (townIdx < 0 || townIdx > 3) return;
+    if (!(s.markedTowns & (1 << townIdx))) { s.logLine = "You have never marked that town."; return; }
+    std::string why;
+    if (!CanCastRecall(s, why)) {
+        s.logLine = why + " - cannot recall.";
+        Journal(s, why + " (Recall)");
+        // Deny floater only where floaters render (world zones, not tab screens).
+        if (s.screen == Screen::Wilderness) SpawnFloatText(s, 0, s.wildernessPlayerPos, why, kFloatDenyColor);
+        else if (s.screen == Screen::Hunt && s.selectedDungeon.has_value())
+            SpawnFloatText(s, 1, s.dungeonPlayerPos, why, kFloatDenyColor);
+        return;
+    }
+    const Spell& sp = kSpells[kRecallSpellIdx];
+    s.mana -= (float)sp.manaCost;
+    s.reagents -= sp.reagentCost;
+    std::string note;
+    ApplySpellTraining(s, sp, note);
+    PlaySfx(SfxId::Cast);
+    if (RandUnit() * 100.0f < SpellSuccessChance(s, sp)) {
+        TeleportToTown(s, townIdx, "The world folds - you arrive in ");
+    } else {
+        Journal(s, "Your Recall fizzles!" + note);
+    }
+}
+
+// Recall destination modal - shared by the Magic tab, the hotbar (mid-fight),
+// and the R key. Lists marked towns; unmarked ones show locked.
+static void DrawRecallPicker(GameState& s, int screenW, int screenH) {
+    if (!s.recallPickerOpen) return;
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.recallPickerOpen = false; return; }
+    DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, 0.45f)); // dim: modal
+    Rectangle panel = RecallPickerRect();
+    DrawRectangleRounded(panel, 0.06f, 8, Fade(kColorPageBg, 0.98f));
+    DrawRectangleRoundedLines(panel, 0.06f, 8, Fade(BLACK, 0.5f));
+    DrawUIText("Recall to a marked town", (int)panel.x + 16, (int)panel.y + 12, 16, kColorHeading);
+    const Spell& sp = kSpells[kRecallSpellIdx];
+    DrawUIText(TextFormat("Needs %d Magery, %d mana, %d reagents", sp.minSkill, sp.manaCost, sp.reagentCost),
+               (int)panel.x + 16, (int)panel.y + 36, 12, DARKGRAY);
+    float by = panel.y + 64;
+    for (int i = 0; i < 4; i++) {
+        bool marked = (s.markedTowns & (1 << i)) != 0;
+        std::string label = std::string(ActiveTownName(i)) + (marked ? "" : "  (visit to mark)");
+        if (Button({ panel.x + 16, by, panel.width - 32, 40 }, label, marked)) {
+            TryRecallToTown(s, i);
+        }
+        by += 48;
+    }
+    if (Button({ panel.x + 16, panel.y + panel.height - 52, panel.width - 32, 36 }, "Cancel", true))
+        s.recallPickerOpen = false;
+}
+
+// Leave-dungeon (2026-09-25): the shared exit sequence - the same state the
+// physical [E]-exit runs, factored so the MENU's magery escape reuses it.
+static void ExitDungeonToWilderness(GameState& s) {
+    s.screen = Screen::Wilderness;
+    s.wild3DView = s.hunt3DView; // leaving in 3D returns to the 3D wilderness (view state only)
+    s.dungeonMenuOpen = false;
+    s.flagTarget.reset();
+    s.dungeonEngaged.reset();        // the fight doesn't follow you out
+    s.dungeonExtraAttackers.clear(); // the pack melts back to ambient (2026-09-25)
+    for (auto& p : s.spellProjectiles) p.active = false;
+    for (auto& im : s.spellImpacts) im.active = false;
+    s.fiendT = 0.0f;
+    s.vigorT = 0.0f;
+    s.leaveDungT = -1.0f;
+}
+
+static void TryStartLeaveDungeon(GameState& s) {
+    if (!s.selectedDungeon.has_value()) return;
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    if (s.leaveDungT >= 0.0f) return; // already casting
+    if (EffectiveSkill(s, &GameState::magery) < kLeaveDungeonMinMagery) {
+        s.logLine = "Need 25 Magery to weave a way out.";
+        Journal(s, "Need 25 Magery (Leave Dungeon)");
+        return;
+    }
+    if (s.mana < (float)kLeaveDungeonMana) {
+        s.logLine = "Not enough mana to leave the dungeon.";
+        Journal(s, "No mana! (Leave Dungeon)");
+        SpawnFloatText(s, 1, s.dungeonPlayerPos, "No mana!", kFloatDenyColor);
+        return;
+    }
+    s.mana -= (float)kLeaveDungeonMana; // the risk: mana is spent even if interrupted
+    s.leaveDungT = kLeaveDungeonCastTime;
+    s.leaveDungHurtSnap = s.playerHurtT;
+    s.dungeonMenuOpen = false; // close the MENU so the cast bar reads clearly
+    Journal(s, "You begin weaving a path out of the dungeon... (3s - don't get hit)");
+    PlaySfx(SfxId::Cast);
+}
+
+// Ticks the leave-dungeon cast every frame while inside a dungeon. Damage
+// interrupts (playerHurtT resets to 0 on every hit); completion exits.
+static void TickLeaveDungeon(GameState& s, float dt) {
+    if (s.leaveDungT < 0.0f) return;
+    if (!s.selectedDungeon.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
+        s.leaveDungT = -1.0f; // left or died by other means - drop the cast silently
+        return;
+    }
+    // A hit landed after the cast started: playerHurtT was reset to 0, which is
+    // <= the snapshot (it only ever counts up otherwise). -1 snapshot = was unhit.
+    bool hit = (s.playerHurtT >= 0.0f) &&
+               (s.leaveDungHurtSnap < 0.0f || s.playerHurtT <= s.leaveDungHurtSnap + 0.0001f);
+    if (hit) {
+        s.leaveDungT = -1.0f;
+        Journal(s, "Your concentration breaks - the way out collapses.");
+        SpawnFloatText(s, 1, s.dungeonPlayerPos, "Interrupted!", kFloatDenyColor);
+        return;
+    }
+    s.leaveDungT -= dt;
+    if (s.leaveDungT <= 0.0f) {
+        s.leaveDungT = -1.0f;
+        const std::string dname = kDungeons[*s.selectedDungeon].name;
+        ExitDungeonToWilderness(s);
+        // Never trap the player: if the exit somehow didn't take, force it.
+        if (s.screen != Screen::Wilderness) {
+            s.screen = Screen::Wilderness;
+            Journal(s, "The spell stutters, but the dungeon spits you out anyway.");
+        }
+        Journal(s, "You slip out of " + dname + " and back into the wilderness.");
+    }
+}
+
+// Cast bar for the leave-dungeon channel - drawn in the shared dungeon HUD so
+// it shows in 2D and 3D alike.
+static void DrawLeaveDungeonCastbar(const GameState& s) {
+    if (s.leaveDungT < 0.0f || !s.selectedDungeon.has_value()) return;
+    float pct = 1.0f - std::clamp(s.leaveDungT / kLeaveDungeonCastTime, 0.0f, 1.0f);
+    DrawUIText("Leaving dungeon - don't get hit!", 187, 112, 13, kColorText);
+    Rectangle bg = { 187, 130, 166, 10 };
+    DrawRectangleRec(bg, Fade(BLACK, 0.35f));
+    DrawRectangleRec({ bg.x, bg.y, bg.width * pct, bg.height }, Color{ 63, 82, 122, 255 });
+}
+
 // Hit-flash staging (2026-09-25, combat feel): white-hot for the first ~150ms so
 // the moment of contact reads instantly, then the site's usual red tint for the
 // tail of the existing 0.30s flash. hurtT < 0 means "not flashing" -> base color.
@@ -14447,7 +14665,7 @@ static Color CombatHitTint(float hurtT, Color base, Color tail) {
 }
 
 // --- Mechanical resolution on projectile arrival ---
-// These are the bodies that used to run instantly inside the cast lambdas —
+// These are the bodies that used to run instantly inside the cast lambdas -
 // moved here verbatim so the only change is the visible flight time.
 static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::string& trainNote, int zone) {
     const Spell& spell = kSpells[spellIdx];
@@ -14471,7 +14689,7 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
             int impactSpot = am.spotIdx;
             // Radius spells (2026-09-25, multi-enemy combat): the blast goes off
             // BEFORE the primary's death is processed, so even a lethal direct
-            // hit still catches every valid enemy inside the radius — the pack
+            // hit still catches every valid enemy inside the radius - the pack
             // is pulled from the impact first, then each victim inside takes its
             // own damage roll from the same formulas, and deaths queue
             // independently. The cast's single success roll already passed; the
@@ -14493,12 +14711,12 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
                     if (ex.hp <= 0) {
                         BeginWildExtraDeath(s, ex);
                         s.wildExtraAttackers.erase(s.wildExtraAttackers.begin() + ei);
-                        continue; // erased — don't advance ei
+                        continue; // erased - don't advance ei
                     }
                     ei++;
                 }
                 if (blastCount > 0)
-                    s.logLine = spell.name + " erupts — " + std::to_string(blastCount) +
+                    s.logLine = spell.name + " erupts - " + std::to_string(blastCount) +
                                 (blastCount == 1 ? " foe" : " foes") + " caught in the blast!" + trainNote;
             }
             if (am.hp > 0 && !impactWasDuel && !packPulled)
@@ -14547,10 +14765,10 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
             int impactSlot = am.monsterIdx;
             // Radius spells (2026-09-25, multi-enemy combat): the blast goes off
             // BEFORE the primary's death is processed, so even a lethal direct
-            // hit still catches every valid enemy inside the radius — the pack
+            // hit still catches every valid enemy inside the radius - the pack
             // is pulled from the impact first, then each victim inside takes its
             // own damage roll from the same formulas, and deaths queue
-            // independently. The boss has no pack — it fights alone.
+            // independently. The boss has no pack - it fights alone.
             float aoeR = SpellAoeRadius(spell);
             bool packPulled = false;
             if (aoeR > 0.0f && !impactWasBoss) {
@@ -14568,12 +14786,12 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
                     if (ex.hp <= 0) {
                         BeginDungeonExtraDeath(s, *s.selectedDungeon, ex);
                         s.dungeonExtraAttackers.erase(s.dungeonExtraAttackers.begin() + ei);
-                        continue; // erased — don't advance ei
+                        continue; // erased - don't advance ei
                     }
                     ei++;
                 }
                 if (blastCount > 0)
-                    s.logLine = spell.name + " erupts — " + std::to_string(blastCount) +
+                    s.logLine = spell.name + " erupts - " + std::to_string(blastCount) +
                                 (blastCount == 1 ? " foe" : " foes") + " caught in the blast!" + trainNote;
             }
             if (am.hp > 0 && !impactWasBoss && !packPulled)
@@ -14592,10 +14810,10 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
 }
 
 // Debuffs (Sap Strength / Cloud Mind / Fumbling Curse) had data but no live
-// mechanics — the comments said they were dropped. They are now castable in
+// mechanics - the comments said they were dropped. They are now castable in
 // live combat: a wisp flies to the enemy and the debuff applies for 20s.
 // Sap Strength: monster deals 30% less damage. Cloud Mind: -15% monster hit
-// chance. Fumbling Curse: monster attacks 50% slower. (New mechanics —
+// chance. Fumbling Curse: monster attacks 50% slower. (New mechanics -
 // disclosed per the task brief.)
 static void ResolvePlayerDebuffImpact(GameState& s, int spellIdx, const std::string& trainNote, int zone) {
     const Spell& spell = kSpells[spellIdx];
@@ -14626,7 +14844,7 @@ static void ResolvePlayerDebuffImpact(GameState& s, int spellIdx, const std::str
 static void ResolveEnemyRangedImpact(GameState& s, bool castByRival, int castByBladeIdx) {
     if (!s.wildEngaged.has_value()) return;
     auto& am = *s.wildEngaged;
-    // The bolt belongs to its caster — if the fight changed hands mid-flight
+    // The bolt belongs to its caster - if the fight changed hands mid-flight
     // (disengage + re-engage on someone else), it fizzles instead of hitting
     // the wrong opponent.
     if (am.isRival != castByRival || am.bladeIdx != castByBladeIdx) return;
@@ -14818,7 +15036,7 @@ static bool FlagTargetLivePos(const GameState& s, Vector2* out) {
             return true;
         }
         if (f.spotIdx < 0 || f.spotIdx >= (int)kWildernessMonsterSpots.size()) return false;
-        if (s.wildSpotRespawn[f.spotIdx] > 0.0f) return false; // died — flag goes stale
+        if (s.wildSpotRespawn[f.spotIdx] > 0.0f) return false; // died - flag goes stale
         *out = WildernessMonsterLivePos(f.spotIdx, s.worldTime);
         return true;
     }
@@ -14865,11 +15083,11 @@ static void ClearFlagTarget(GameState& s) { s.flagTarget.reset(); }
 static const float kDisengageGraceSeconds = 1.5f; // bump-engage suppression after a manual disengage
 
 // Full disengage (2026-09-25): clicking/tapping empty ground while fighting
-// normal monsters ends the WHOLE fight — engagement, pack, and flag. The old
+// normal monsters ends the WHOLE fight - engagement, pack, and flag. The old
 // flag-only stand-down was a no-op: the per-frame flag/engagement sync above
 // resurrected the marker from the still-live engagement within one frame, so
 // the player could never actually stand down. Rival/blade duels and boss
-// fights stay locked 1v1 by design — callers check those first and never call
+// fights stay locked 1v1 by design - callers check those first and never call
 // this for them. The grace timer stops contact auto-engage from instantly
 // re-engaging while the monsters are still standing on the player.
 static void DisengageFromNormals(GameState& s, int zone) {
@@ -14901,7 +15119,7 @@ static void SteerTowardFlag(GameState& s, Vector2& playerPos, Vector2& playerFac
     Vector2 tgt;
     if (!FlagTargetLivePos(s, &tgt)) { s.flagTarget.reset(); return; }
     float d = Dist(playerPos, tgt);
-    if (d <= kWildMeleeRange * 0.9f) return; // close enough — contact engagement fires on its own
+    if (d <= kWildMeleeRange * 0.9f) return; // close enough - contact engagement fires on its own
     float step = kPlayerSpeed * dt; // same pace as manual walking
     if (step >= d) return;
     Vector2 dir = { (tgt.x - playerPos.x) / d, (tgt.y - playerPos.y) / d };
@@ -14926,7 +15144,7 @@ static bool Wild2DFlagCandidate(const GameState& s, Vector2 camera, Vector2 m,
     for (int i = 0; i < n; i++) {
         if (s.wildSpotRespawn[i] > 0.0f) continue;
         if (s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0 &&
-            s.wildEngaged->spotIdx == i) continue; // already fighting it — nothing to flag
+            s.wildEngaged->spotIdx == i) continue; // already fighting it - nothing to flag
         const GameState::ActiveMonster* ex = FindWildExtra(s, i);
         GameState::FlagTarget f; f.zone = 0; f.spotIdx = i;
         consider(ex ? ex->pos : WildernessMonsterLivePos(i, s.worldTime), f);
@@ -14950,6 +15168,7 @@ static void Wild2DClickFlag(GameState& s, Vector2 camera, int screenW, int scree
     if (m.x > screenW - 170 && m.y > screenH - 170) return; // interact button
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return; // TARGET button (shared HUD handles it)
     if (s.minimapOpen && CheckCollisionPointRec(m, MinimapRect())) return; // minimap (tap closes it)
+    if (s.recallPickerOpen && CheckCollisionPointRec(m, RecallPickerRect())) return; // recall modal
     if (!s.minimapOpen && CheckCollisionPointRec(m, MinimapToggleRect())) return; // MAP button
     if (s.wildEngaged.has_value()) {
         if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return; // quick items
@@ -14972,15 +15191,15 @@ static void Wild2DClickFlag(GameState& s, Vector2 camera, int screenW, int scree
             // Mid-fight tap on another pack member: switch the primary to it.
             TransferWildPrimary(s, f.spotIdx);
         } else if (fightingNormal && (f.isRival || f.bladeIdx >= 0)) {
-            s.logLine = "You're already in a fight — finish it first!";
+            s.logLine = "You're already in a fight - finish it first!";
         } else {
             s.flagTarget = f;
-            s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+            s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " - closing in!";
         }
     } else if (duelLocked) {
-        s.logLine = "You're locked in — finish the duel first!";
+        s.logLine = "You're locked in - finish the duel first!";
     } else {
-        // Clicked empty ground: FULL disengage (2026-09-25), not just the flag —
+        // Clicked empty ground: FULL disengage (2026-09-25), not just the flag -
         // the per-frame flag/engagement sync would otherwise resurrect the marker
         // from the still-live fight within one frame.
         DisengageFromNormals(s, 0);
@@ -15030,6 +15249,7 @@ static void Dungeon2DClickFlag(GameState& s, Vector2 camera, int screenW, int sc
     if (CheckCollisionPointRec(m, kJoystickZone)) return;
     if (m.x > screenW - 170 && m.y > screenH - 170) return; // interact button
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return; // TARGET button (shared HUD handles it)
+    if (s.recallPickerOpen && CheckCollisionPointRec(m, RecallPickerRect())) return; // recall modal
     if (s.dungeonEngaged.has_value()) {
         if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return; // quick items
         if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return; // spell hotbar
@@ -15049,10 +15269,10 @@ static void Dungeon2DClickFlag(GameState& s, Vector2 camera, int screenW, int sc
             TransferDungeonPrimary(s, *s.selectedDungeon, f.monsterIdx, f.isBoss);
         } else {
             s.flagTarget = f;
-            s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+            s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " - closing in!";
         }
     } else if (s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss) {
-        s.logLine = "You're locked in — finish the boss first!";
+        s.logLine = "You're locked in - finish the boss first!";
     } else {
         // Clicked empty ground: FULL disengage (2026-09-25), not just the flag.
         DisengageFromNormals(s, 1);
@@ -15105,9 +15325,9 @@ static void TransferDungeonPrimary(GameState& s, int dungeonIdx, int newMonsterI
     const GameState::ActiveDungeonMonster& cur = *s.dungeonEngaged;
     if (!cur.isBoss && !newIsBoss && cur.monsterIdx == newMonsterIdx) return;
     if (cur.isBoss && newIsBoss) return;
-    // Safety net: the boss never demotes to a pack extra — boss fights stay 1v1 (2026-09-25).
+    // Safety net: the boss never demotes to a pack extra - boss fights stay 1v1 (2026-09-25).
     if (cur.isBoss && !newIsBoss) {
-        s.logLine = "You're locked in — finish the boss first!";
+        s.logLine = "You're locked in - finish the boss first!";
         return;
     }
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
@@ -15148,7 +15368,7 @@ static void CycleFlagTarget(GameState& s) {
     if (s.screen != Screen::Wilderness && s.screen != Screen::Hunt) return;
     if (s.screen == Screen::Wilderness) {
         if (s.wildEngaged.has_value() && (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0)) {
-            s.logLine = "You're locked in — finish this duel first!";
+            s.logLine = "You're locked in - finish this duel first!";
             return;
         }
         struct Cand { int spotIdx; float d; };
@@ -15188,18 +15408,18 @@ static void CycleFlagTarget(GameState& s) {
         if (pick == -2) {
             GameState::FlagTarget f; f.zone = 0; f.isRival = true;
             s.flagTarget = f;
-            s.logLine = "You fix your eyes on " + RivalEpithetName(s) + count + " — closing in!";
+            s.logLine = "You fix your eyes on " + RivalEpithetName(s) + count + " - closing in!";
         } else if (pick <= -3) {
             int bi = -3 - pick;
             GameState::FlagTarget f; f.zone = 0; f.bladeIdx = bi;
             s.flagTarget = f;
-            s.logLine = "You fix your eyes on Murder Inc. " + BladeName(bi) + count + " — closing in!";
+            s.logLine = "You fix your eyes on Murder Inc. " + BladeName(bi) + count + " - closing in!";
         } else if (engagedNormal) {
             TransferWildPrimary(s, pick);
         } else {
             GameState::FlagTarget f; f.zone = 0; f.spotIdx = pick;
             s.flagTarget = f;
-            s.logLine = "Target: " + kWildernessMonsterSpots[pick].name + count + " — closing in!";
+            s.logLine = "Target: " + kWildernessMonsterSpots[pick].name + count + " - closing in!";
         }
         return;
     }
@@ -15209,7 +15429,7 @@ static void CycleFlagTarget(GameState& s) {
     const DungeonDef& dungeon = kDungeons[di];
     bool engaged = s.dungeonEngaged.has_value();
     if (engaged && s.dungeonEngaged->isBoss) {
-        s.logLine = "You're locked in — finish the boss first!"; // boss duels stay 1v1 (2026-09-25)
+        s.logLine = "You're locked in - finish the boss first!"; // boss duels stay 1v1 (2026-09-25)
         return;
     }
     struct DCand { int monsterIdx; bool isBoss; float d; };
@@ -15248,7 +15468,7 @@ static void CycleFlagTarget(GameState& s) {
         GameState::FlagTarget f; f.zone = 1; f.monsterIdx = cs[next].monsterIdx; f.isBoss = cs[next].isBoss;
         s.flagTarget = f;
         const DungeonMonster& m = cs[next].isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, cs[next].monsterIdx);
-        s.logLine = "Target: " + m.name + count + " — closing in!";
+        s.logLine = "Target: " + m.name + count + " - closing in!";
     }
 }
 
@@ -15285,7 +15505,7 @@ static bool Wild3DConsiderFlag(GameState& s, const Town3DCam& c, Vector2 m, floa
 
 // Screen-space tap assist for the 3D wilderness view (2026-09-25): projects
 // each candidate to screen and snaps a missed tap to the nearest fightable
-// enemy within a resolution-scaled pixel radius — the 3D counterpart of the
+// enemy within a resolution-scaled pixel radius - the 3D counterpart of the
 // 2D click assist. Runs after the ray-sphere passes miss.
 static bool Wild3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
                                float assistPx, GameState::FlagTarget* out) {
@@ -15340,13 +15560,13 @@ static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
         if (fightingNormal && !f.isRival && f.bladeIdx < 0 && f.spotIdx != s.wildEngaged->spotIdx) {
             TransferWildPrimary(s, f.spotIdx);
         } else if (fightingNormal && (f.isRival || f.bladeIdx >= 0)) {
-            s.logLine = "You're already in a fight — finish it first!";
+            s.logLine = "You're already in a fight - finish it first!";
         } else {
             s.flagTarget = f;
-            s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+            s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " - closing in!";
         }
     } else if (duelLocked) {
-        s.logLine = "You're locked in — finish the duel first!";
+        s.logLine = "You're locked in - finish the duel first!";
     } else {
         // Clicked empty ground: FULL disengage (2026-09-25), not just the flag.
         DisengageFromNormals(s, 0);
@@ -15442,10 +15662,10 @@ static void Dungeon3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
             TransferDungeonPrimary(s, di, f.monsterIdx, f.isBoss);
         } else {
             s.flagTarget = f;
-            s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+            s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " - closing in!";
         }
     } else if (s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss) {
-        s.logLine = "You're locked in — finish the boss first!";
+        s.logLine = "You're locked in - finish the boss first!";
     } else {
         // Clicked empty ground: FULL disengage (2026-09-25), not just the flag.
         DisengageFromNormals(s, 1);
@@ -15507,7 +15727,7 @@ static FlagTargetInfo GetFlagTargetInfo(const GameState& s, int zone) {
         if (s.flagTarget.has_value() && s.flagTarget->zone == 1) {
             const auto& f = *s.flagTarget;
             if (!f.isBoss && (f.monsterIdx < 0 || f.monsterIdx >= kDungeonRegularSlots))
-                return { "—", 1.0f, 1.0f, false };
+                return { "-", 1.0f, 1.0f, false };
             const DungeonMonster& m = f.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, f.monsterIdx);
             if (const auto* ex = FindDungeonExtra(s, f.monsterIdx, f.isBoss))
                 return { m.name, ex->hp, ex->maxHp, true };
@@ -15515,7 +15735,7 @@ static FlagTargetInfo GetFlagTargetInfo(const GameState& s, int zone) {
             return { m.name, full, full, true };
         }
     }
-    return { "—", 1.0f, 1.0f, false };
+    return { "-", 1.0f, 1.0f, false };
 }
 
 static void DrawTargetFrame(const GameState& s, int zone) {
@@ -15548,7 +15768,7 @@ static bool DrawTargetButton() {
 // --- Spell FX drawing ---
 static void DrawFiend2D(GameState& s, Vector2 camera) {
     // A genuinely distinct little demon (2026-09-24): drawn entirely from
-    // shapes — horned head, flapping wings, barbed tail, ember glow — so it
+    // shapes - horned head, flapping wings, barbed tail, ember glow - so it
     // never reads as a recolored adventurer.
     Vector2 sp = WorldToScreen(s.fiendPos, camera);
     float flick = 0.7f + 0.3f * sinf(s.worldTime * 13.0f);
@@ -15670,7 +15890,7 @@ static void DrawSpellFX3D(GameState& s, int zone) {
     }
     if (s.fiendT > 0.0f && s.fiendZone == zone) {
         // A distinct little demon built from primitives (2026-09-24): squat
-        // body, horn cones, flapping wing planes, barbed tail — no humanoid
+        // body, horn cones, flapping wing planes, barbed tail - no humanoid
         // kit reuse.
         float fx0 = s.fiendPos.x, fz0 = s.fiendPos.y;
         float yaw = atan2f(s.playerFacing.y, s.playerFacing.x);
@@ -15731,7 +15951,7 @@ static void DrawSpellFX3D(GameState& s, int zone) {
     }
 }
 
-// Floating damage numbers / MISS for the 3D views (2026-09-25, combat feel) —
+// Floating damage numbers / MISS for the 3D views (2026-09-25, combat feel) -
 // drawn in the 2D overlay pass after EndMode3D via the hand-rolled projection
 // (same approach as the 3D labels), rising in world units as they fade.
 static void DrawFloatTexts3D(GameState& s, const Town3DCam& c, int zone, int screenW, int screenH) {
@@ -15797,20 +16017,23 @@ static void CastLiveDebuffSpell(GameState& s, int spellIdx, int zone) {
 
 // Live-cast router for every non-Offensive spell type (2026-09-24), called from
 // the engaged hotbar. The old version only handled the two Mending heals, never
-// set a cooldown or cast timer, and charged resources without checking them —
+// set a cooldown or cast timer, and charged resources without checking them -
 // Debuff/Buff/Summon data would have fallen through into the heal path. Now
 // every type routes somewhere real:
 //   Utility (Mending Word, Greater Mending): heal, as before, plus a cast pose,
 //     per-spell cooldowns, and a visible green-gold burst.
 //   Debuff (Sap Strength, Cloud Mind, Fumbling Curse): a wisp flies to the
-//     enemy and applies the debuff for 20s — see ResolvePlayerDebuffImpact.
+//     enemy and applies the debuff for 20s - see ResolvePlayerDebuffImpact.
 //   Buff (Blessing of Vigor): +25% melee/spell damage for 30s, gold aura.
 //   Summon (Summon Fiend): a small demon follows the player for 25s, lashing
-//     the engaged enemy every 2s — see FiendStrikeLive.
+//     the engaged enemy every 2s - see FiendStrikeLive.
 static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
     if (spellIdx < 0 || spellIdx >= (int)kSpells.size()) return;
     const Spell& spell = kSpells[spellIdx];
-    // Per-spell cooldown + cast lock, same as the offensive live casts — without
+    // UO-style travel: Recall never casts directly - the hotbar/Magic/R-key paths
+    // open the town picker instead (costs are paid on destination select).
+    if (spellIdx == kRecallSpellIdx) { s.recallPickerOpen = true; return; }
+    // Per-spell cooldown + cast lock, same as the offensive live casts - without
     // this a tap during another spell's lock would eat mana for a queued cast.
     if (zone == 0 && s.wildEngaged.has_value()) {
         const auto& am = *s.wildEngaged;
@@ -15991,7 +16214,7 @@ static void DrawJournalUI(GameState& s, Rectangle buttonRect, bool visible) {
             s.journalScroll = 0.0f; // open at the newest line
             // 2026-09-25 art-pass fix: JournalPanelRect (x180-520, y160-450)
             // and MinimapRect (top-right, ~x326-480 y140-294) overlap in the
-            // wilderness — the journal drew directly over the minimap,
+            // wilderness - the journal drew directly over the minimap,
             // fully hiding it while open. The two aren't needed at once, so
             // opening one closes the other rather than letting them stack.
             s.minimapOpen = false;
@@ -16016,9 +16239,9 @@ static const char* kGuideTitles[5] = {
 static const char* kGuideBodies[5] = {
     "Drag the left stick to walk.\nOn desktop, WASD or arrow keys\nwork too.\n\nWalk up to glowing trees, rocks,\nand water to gather. Walk into\na dungeon entrance to go inside.",
     "Tap the sword button (or SPACE)\nto swing at your target.\n\nSwitch targets with the G key,\nthe TARGET button, or by\ntapping another monster.",
-    "Open the Magic tab, tap a hotbar\nslot, then pick a spell for it.\n\nCasting costs mana + 1 reagent.\nBuy reagents at the Provisioner.\n\nIn a fight, tap a slot — or\npress 1-5 — to cast.",
+    "Open the Magic tab, tap a hotbar\nslot, then pick a spell for it.\n\nCasting costs mana + 1 reagent.\nBuy reagents at the Provisioner.\n\nIn a fight, tap a slot - or\npress 1-5 - to cast.\n\nVisiting a town marks it.\nRecall needs 40 Magery and\na marked town.",
     "The LOG button (L key) opens\nyour journal.\n\nEvery hit, spell, kill, and\nloot is written there with\nthe time. Open it anytime\nto see what happened.",
-    "Chop, mine, and fish to train\nskills — every skill caps\nat 100.\n\nThe bank keeps your gold and\nitems safe. Buy a house plot\nfor storage and a hearth\nyou can recall to.",
+    "Chop, mine, and fish to train\nskills - every skill caps\nat 100.\n\nThe bank keeps your gold and\nitems safe. Buy a house plot\nfor storage and a hearth\nyou can recall to.\n\nLeave a dungeon anytime from\nits MENU - needs 25 Magery,\na 3-second cast, no hits.",
 };
 
 // Shared page chrome: title, page dots, body lines.
@@ -16103,7 +16326,7 @@ static float MonsterCombatPhase3D(float monsterAttackT) {
 }
 
 // ---------------------------------------------------------------------------
-// Custom wilderness housing — interactions, designer, and rendering (2026-09-25).
+// Custom wilderness housing - interactions, designer, and rendering (2026-09-25).
 // ---------------------------------------------------------------------------
 // GameState overload (forward declaration was next to the plot table).
 static Vector2 HousePlotInteractPos(const GameState& s, int plotIdx) {
@@ -16113,7 +16336,7 @@ static Vector2 HousePlotInteractPos(const GameState& s, int plotIdx) {
 static void TryBuyHousePlot(GameState& s, int plotIdx) {
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
     if (s.housePlotIdx >= 0) {
-        s.logLine = "You already own a plot — one homestead per adventurer.";
+        s.logLine = "You already own a plot - one homestead per adventurer.";
         return;
     }
     if (plotIdx < 0 || plotIdx >= (int)kHousePlots.size()) return;
@@ -16164,13 +16387,13 @@ static void DrawHouseDesigner(GameState& s, int screenW, int screenH) {
         if (IsKeyPressed(KEY_ONE + t)) { s.houseDesignerTool = t; PlaySfx(SfxId::Click); }
 
     DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, 0.65f));
-    DrawUIText(("House Designer — " + std::string(p.name)).c_str(), 20, 116, 16, kColorHeading);
+    DrawUIText(("House Designer - " + std::string(p.name)).c_str(), 20, 116, 16, kColorHeading);
     DrawUIText(("Gold: " + std::to_string(s.gold) + "g").c_str(), 20, 140, 14, kColorText);
     DrawUIText("Tap a tile to place it. Keys 1-4 pick a tool.", 20, 162, 12, kColorText);
-    DrawUIText("Place a Door so you can walk in. One door per house —", 20, 178, 12, kColorText);
+    DrawUIText("Place a Door so you can walk in. One door per house -", 20, 178, 12, kColorText);
     DrawUIText("placing a new one moves it. Erasing gives no refund.", 20, 194, 12, kColorText);
 
-    // Tool palette — horizontal row above the grid (540x900 portrait screen).
+    // Tool palette - horizontal row above the grid (540x900 portrait screen).
     float bw = 118.0f, bh = 34.0f;
     float bx = (screenW - (4 * bw + 3 * 8.0f)) / 2.0f;
     for (int t = 0; t < 4; t++) {
@@ -16205,9 +16428,9 @@ static void DrawHouseDesigner(GameState& s, int screenW, int screenH) {
                 DrawRectangleLinesEx(r, 2.0f, GOLD);
                 if (clicked) {
                     int tool = s.houseDesignerTool;
-                    if (tool == 3) { // erase — no refund (noted in the House tab)
+                    if (tool == 3) { // erase - no refund (noted in the House tab)
                         if (c != '.') { HouseSetCell(s.houseLayout, cells, cx, cy, '.'); PlaySfx(SfxId::Click); }
-                    } else if (tool == 2) { // door — exactly one; the old one becomes wall
+                    } else if (tool == 2) { // door - exactly one; the old one becomes wall
                         if (c != 'D') {
                             if (s.gold < kHouseDoorCost) s.logLine = "A door costs 50g.";
                             else {
@@ -16318,7 +16541,7 @@ static void DrawWildernessHousePlots2D(const GameState& s, Vector2 camera, bool 
     }
 }
 
-// Phase 3 — screen-space snowfall for the Frostwastes. Deterministic flakes from
+// Phase 3 - screen-space snowfall for the Frostwastes. Deterministic flakes from
 // worldTime (no game state): hashed seeds drift down with a sideways breeze and
 // wrap in screen space. Drawn over the world, under the HUD.
 static void DrawSnowfall(int screenW, int screenH, float worldTime) {
@@ -16340,7 +16563,7 @@ static void DrawSnowfall(int screenW, int screenH, float worldTime) {
 
 // Duel softlock guard (2026-09-25): a locked duel (Rival Adventurer, Murder Inc.
 // blade, dungeon boss) whose foe reaches 0 HP MUST release the lock, no matter which
-// damage path got it there — every normal kill path already clears via
+// damage path got it there - every normal kill path already clears via
 // BeginWildMonsterDeath/BeginDungeonMonsterDeath, but if any path ever leaves the
 // engagement holding a dead foe (the reported "stuck in a fight, can't act"
 // softlock), this runs the standard duel-end flow exactly once so loot, corpse,
@@ -16368,7 +16591,7 @@ static void EnforceDuelInvariants(GameState& s) {
                     s.wildEngaged.reset();
                     s.wildExtraAttackers.clear();
                     ClearFlagTarget(s);
-                    s.logLine = "The duel fizzles — your foe is gone.";
+                    s.logLine = "The duel fizzles - your foe is gone.";
                     s.duelStuckT = 0.0f;
                 }
             } else {
@@ -16396,8 +16619,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // House designer overlay takes over the whole screen while open.
     if (s.houseDesignerOpen) { DrawHouseDesigner(s, screenW, screenH); return; }
     if (GetTouchPointCount() > 0) g_touchSeen = true; // latch: TARGET button appears on touch devices
-    DrawUIText("The Wilderness — gather wood/ore or tame a creature. Watch for trouble.", 20, 112, 13, kColorAccent);
-    // Phase 0: HUD region label — always visible, flips live as the player crosses
+    DrawUIText("The Wilderness - gather wood/ore or tame a creature. Watch for trouble.", 20, 112, 13, kColorAccent);
+    // Phase 0: HUD region label - always visible, flips live as the player crosses
     // a boundary. Top-center pill, clear of the target frame (left) and HUD buttons.
     {
         const char* regionName = RegionName(RegionAt(s.wildernessPlayerPos));
@@ -16405,9 +16628,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         int sx = (int)(kViewport.x + (kViewport.width - w) / 2);
         DrawRectangle(sx - 10, 106, w + 20, 26, Fade(BLACK, 0.45f));
         DrawUIText(regionName, sx, 110, 16, Color{ 232, 200, 120, 255 });
-        // Phase 6 — road ward indicator: patrols watch the King's Road.
+        // Phase 6 - road ward indicator: patrols watch the King's Road.
         if (PlayerRoadWarded(s.wildernessPlayerPos)) {
-            const char* ward = "Patrolled road — monsters keep their distance";
+            const char* ward = "Patrolled road - monsters keep their distance";
             int ww = MeasureUIText(ward, 11);
             DrawUIText(ward, (int)(kViewport.x + (kViewport.width - ww) / 2), 134, 11, Color{ 150, 200, 150, 255 });
         }
@@ -16417,10 +16640,10 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     for (int bi = 0; bi < kBladeCount; bi++) UpdateBladeRoaming(s, bi, GetFrameTime()); // the Murder Inc. crew roams too
     UpdateInnocentSpots(s, GetFrameTime());
 
-    // Phase 6 — connective tissue updates.
+    // Phase 6 - connective tissue updates.
     {
         float dt = GetFrameTime();
-        // Murder Inc.'s camp relocates every so often — the rumor mill tracks it.
+        // Murder Inc.'s camp relocates every so often - the rumor mill tracks it.
         s.rivalCampTimer -= dt;
         if (s.rivalCampTimer <= 0.0f) {
             s.rivalCampIdx = std::rand() % (int)kRivalCampSpots.size();
@@ -16436,14 +16659,14 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             int level = RollMurdererLevel(s);
             s.ambush = GameState::AmbushEncounter{ "Sorrow Wraith", level };
             s.sorrowCooldown = 90.0f;
-            s.logLine = "The mist thickens — a Sorrow Wraith rises from the broken field!";
+            s.logLine = "The mist thickens - a Sorrow Wraith rises from the broken field!";
             PlaySfx(SfxId::Hunt);
         }
-        // Stumbling into Murder Inc.'s camp starts a hunt — the hard way to find it.
+        // Stumbling into Murder Inc.'s camp starts a hunt - the hard way to find it.
         if (quiet && !GuildThreatActive(s) &&
             Dist(s.wildernessPlayerPos, kRivalCampSpots[s.rivalCampIdx]) < 130.0f) {
             BladeStartHunt(s, std::rand() % kBladeCount, -1);
-            Journal(s, "You stumble into Murder Inc.'s camp — they've seen you!");
+            Journal(s, "You stumble into Murder Inc.'s camp - they've seen you!");
         }
     }
 
@@ -16465,15 +16688,15 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     bool wasEngaged = s.wildEngaged.has_value(); // captured before any of this frame's updates
     for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
         // The engaged slot's live (moving) position takes over from its wander loop
-        // once you're fighting it — everything else still searches by its own wander
+        // once you're fighting it - everything else still searches by its own wander
         // position (WildernessMonsterLivePos), not a fixed spawn point.
-        if (s.wildSpotRespawn[i] > 0.0f) continue; // empty — waiting to respawn
+        if (s.wildSpotRespawn[i] > 0.0f) continue; // empty - waiting to respawn
         Vector2 pos = (wasEngaged && s.wildEngaged->spotIdx == (int)i) ? s.wildEngaged->pos : WildernessMonsterLivePos((int)i, s.worldTime);
         float d = Dist(s.wildernessPlayerPos, pos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Monster; nearestIdx = (int)i; }
     }
     {
-        // The Rival Adventurer (2026-09-23) — no longer a kWildernessMonsterSpots row
+        // The Rival Adventurer (2026-09-23) - no longer a kWildernessMonsterSpots row
         // (see GameState::rivalLevel's comment), so it gets its own dedicated distance
         // check here, same pattern as Town2Gate's addition alongside ReturnGate.
         Vector2 pos = (wasEngaged && s.wildEngaged->isRival) ? s.wildEngaged->pos : s.rivalPos;
@@ -16481,13 +16704,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Rival; nearestIdx = -1; }
     }
     for (int bi = 0; bi < kBladeCount; bi++) {
-        // Murder Inc. blades — same dedicated distance check as the champion.
+        // Murder Inc. blades - same dedicated distance check as the champion.
         Vector2 pos = (wasEngaged && s.wildEngaged->bladeIdx == bi) ? s.wildEngaged->pos : s.blades[bi].pos;
         float d = Dist(s.wildernessPlayerPos, pos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Blade; nearestIdx = bi; }
     }
     for (size_t i = 0; i < kWildernessInnocentSpots.size(); i++) {
-        if (!s.innocentSpots[i].present) continue; // empty/respawning — not interactable
+        if (!s.innocentSpots[i].present) continue; // empty/respawning - not interactable
         float d = Dist(s.wildernessPlayerPos, WildernessInnocentLivePos((int)i, s.worldTime));
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Innocent; nearestIdx = (int)i; }
     }
@@ -16500,28 +16723,28 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::ReturnGate; nearestIdx = -1; }
     }
     {
-        // Gate to Town 2 (2026-09-22, "second town" plan) — a genuine walk out from
+        // Gate to Town 2 (2026-09-22, "second town" plan) - a genuine walk out from
         // the Town 1 area, same pattern as kWildernessDungeonEntrances.
         float d = Dist(s.wildernessPlayerPos, kWildernessTown2GatePos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Town2Gate; nearestIdx = -1; }
     }
     {
-        // Gate to Town 3 / Frostmere (Phase 3) — same pattern as the Town 2 gate.
+        // Gate to Town 3 / Frostmere (Phase 3) - same pattern as the Town 2 gate.
         float d = Dist(s.wildernessPlayerPos, kWildernessTown3GatePos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Town3Gate; nearestIdx = -1; }
     }
     {
-        // Gate to Town 4 / Cragmoor (Phase 4) — same pattern as the Town 3 gate.
+        // Gate to Town 4 / Cragmoor (Phase 4) - same pattern as the Town 3 gate.
         float d = Dist(s.wildernessPlayerPos, kWildernessTown4GatePos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Town4Gate; nearestIdx = -1; }
     }
     for (size_t pi = 0; pi < kHousePlots.size(); pi++) {
-        // Housing plots (2026-09-25) — the owned plot's interact point is its door
+        // Housing plots (2026-09-25) - the owned plot's interact point is its door
         // once one is placed, so E walks you to the entrance, not the plot middle.
         float d = Dist(s.wildernessPlayerPos, HousePlotInteractPos(s, (int)pi));
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::HousePlot; nearestIdx = (int)pi; }
     }
-    // Phase 6 — virtue shrines (all seven) and the outlaw refuge. The refuge stays
+    // Phase 6 - virtue shrines (all seven) and the outlaw refuge. The refuge stays
     // hidden from the upstanding: it only competes for E when you're red.
     for (size_t si = 0; si < kShrines.size(); si++) {
         float d = Dist(s.wildernessPlayerPos, kShrines[si].pos);
@@ -16534,12 +16757,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     bool inRange = nearestDist < kNodeRadius + kInteractRange;
 
     // Engaging a monster now starts a *live* fight (GameState::ActiveMonster) instead
-    // of the panel-based state.combat ambushes/dungeons still use — see the big comment
+    // of the panel-based state.combat ambushes/dungeons still use - see the big comment
     // above kWildernessMonsterSpots. Same monsterMaxHP() formula StartCombat uses
     // (level*3) for starting HP.
     auto tryEngageWildMonster = [&](int idx) {
         if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
-        if (s.wildSpotRespawn[idx] > 0.0f) return; // empty — waiting to respawn
+        if (s.wildSpotRespawn[idx] > 0.0f) return; // empty - waiting to respawn
         const WildernessMonsterSpot& spot = kWildernessMonsterSpots[idx];
         GameState::ActiveMonster am;
         am.spotIdx = idx;
@@ -16576,7 +16799,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         s.logLine = "The " + BladeName(bi) + " turns to face you!";
     };
     // Walking up to a roaming Innocent NPC and pressing E opens the exact same
-    // DrawInnocentPanel (Murder/Steal/Snoop/Spare) the old random popup already used —
+    // DrawInnocentPanel (Murder/Steal/Snoop/Spare) the old random popup already used -
     // only the trigger is new, see kWildernessInnocentSpots' comment. The spot goes
     // empty and starts its respawn countdown immediately; which choice the player makes
     // in the panel doesn't change that (all four already call innocentEncounter.reset()
@@ -16596,7 +16819,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         spot.present = false;
         spot.respawnTimer = kInnocentRespawnSeconds;
     };
-    // A hunt that closed to catch range converts into a real fight — but only if
+    // A hunt that closed to catch range converts into a real fight - but only if
     // you're still right there, not already fighting something else, and not
     // mid-panel with an ambush or innocent encounter. (If the moment passes, it passes.)
     if (s.rivalAutoEngage) {
@@ -16605,7 +16828,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             Dist(s.rivalPos, s.wildernessPlayerPos) < kRivalCatchRange * 1.5f)
             tryEngageRival();
     }
-    // Murder Inc. blades convert a closed hunt into a real fight the same way —
+    // Murder Inc. blades convert a closed hunt into a real fight the same way -
     // never mid-panel, never while you're already fighting something else.
     for (int bi = 0; bi < kBladeCount; bi++) {
         if (!s.blades[bi].autoEngage) continue;
@@ -16618,11 +16841,11 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // --- Live combat with whichever monster is already engaged (if any) ---
     // AI: chase toward the player (leashed to spawn so it can't wander into a
     // neighboring node's territory), disengage if the player breaks far enough away,
-    // and the monster's own attack lands on its own cooldown — all independent of
+    // and the monster's own attack lands on its own cooldown - all independent of
     // input, same as monster wander motion elsewhere. Uses the exact
     // MonsterCounterAndMaybeEnd hit-chance/damage formula (see EndWildMonsterLoss's
     // comment) even though it isn't calling that function directly (no CombatState to
-    // hand it — see the big comment above LiveMaybeGainMagicResist).
+    // hand it - see the big comment above LiveMaybeGainMagicResist).
     auto updateEngagedMonsterAI = [&]() {
         if (!s.wildEngaged.has_value()) return;
         GameState::ActiveMonster& am = *s.wildEngaged;
@@ -16632,7 +16855,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // Stop advancing at kWildMeleeRange (60), not kWildMeleeRange*0.6 (36) as this
         // used to say: the player-vs-monster collision floor a few lines below
         // (kPlayerRadius + kNodeRadius*0.6 = 17+30 = 47) is *larger* than 36, so the
-        // monster could never actually reach that old target distance — every frame it
+        // monster could never actually reach that old target distance - every frame it
         // computed "not close enough yet," stepped toward the player, and collision
         // immediately shoved the player back out to 47 to compensate. That fight-with-
         // itself was the reported "monster pushing the player back" bug. 60 sits safely
@@ -16660,7 +16883,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             s.logLine = "The " + spot.name + " loses interest.";
             s.wildEngaged.reset();
             s.wildExtraAttackers.clear(); // the pack gives up too
-            ClearFlagTarget(s); // the fight's over — drop the marker too
+            ClearFlagTarget(s); // the fight's over - drop the marker too
             return;
         }
 
@@ -16695,7 +16918,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             if (s.hp <= 0) { EndWildMonsterLoss(s, mname); return; }
         }
 
-        // AI companion's turn — autonomous, cooldown-driven (2026-09-22, "AI players"
+        // AI companion's turn - autonomous, cooldown-driven (2026-09-22, "AI players"
         // plan Part 2), rather than reactive to the player's own action like the old
         // panel's pet turn was. Uses the exact same ResolvePetTurnLive formulas the
         // Hunt-screen dungeon fights also use.
@@ -16711,12 +16934,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             else if (am.hp < hpBefore) WildPackAggro(s, am.spotIdx, am.pos); // the pet's damage pulls the pack in too (2026-09-25)
         }
     };
-    // The tactical opponent's own AI (2026-09-22, "AI players" plan Part 3) — confirmed
+    // The tactical opponent's own AI (2026-09-22, "AI players" plan Part 3) - confirmed
     // via research to be the first monster in the whole game with any real decision-
     // making at all (every other monster, in every combat system, always melees with one
     // fixed hit roll and never retreats). Called INSTEAD of updateEngagedMonsterAI (see
     // the call site below) when the engaged monster is flagged
-    // GameState::ActiveMonster::isRival — a separate function rather than a branch
+    // GameState::ActiveMonster::isRival - a separate function rather than a branch
     // inside the normal one, since the decision logic is genuinely different, not a
     // tweak to it.
     auto updateTacticalOpponentAI = [&]() {
@@ -16731,7 +16954,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (am.castEffectTimer > 0) am.castEffectTimer -= dtF;
 
         // Below ~25% HP: flee directly away from the player for a few seconds instead of
-        // fighting on — no existing monster has ever done this (Flee/FleeCombat are
+        // fighting on - no existing monster has ever done this (Flee/FleeCombat are
         // player-only actions everywhere else in the game).
         if (am.isFleeing) {
             am.fleeTimer -= dtF;
@@ -16747,9 +16970,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         }
         if (am.hp / am.maxHp < 0.25f) { am.isFleeing = true; am.fleeTimer = 3.0f; return; }
 
-        // Not fleeing — chase into range exactly like a normal monster (same chase-then-
+        // Not fleeing - chase into range exactly like a normal monster (same chase-then-
         // leash math as updateEngagedMonsterAI), except leashed to its *current* pos
-        // rather than a spawn point — it has no fixed spawn anymore (see
+        // rather than a spawn point - it has no fixed spawn anymore (see
         // GameState::rivalLevel's comment), so this just prevents runaway movement
         // within a single frame rather than enforcing a real territory.
         float distNow = Dist(am.pos, s.wildernessPlayerPos);
@@ -16764,7 +16987,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         }
         if (Dist(am.pos, s.wildernessPlayerPos) > kWildDisengageRange) {
             if (am.isRival) {
-                // UO red doesn't give up because you ran — it RUNS YOU DOWN. Instead of
+                // UO red doesn't give up because you ran - it RUNS YOU DOWN. Instead of
                 // resuming patrol, it keeps hunting in the overworld for kRivalPursuitTime.
                 RivalFightEnded(s, am); // persists its position + growth nudge
                 s.wildEngaged.reset();
@@ -16778,7 +17001,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 return;
             }
             if (am.bladeIdx >= 0) {
-                // Blades don't pursue — longer leash. Back to patrol, no drama.
+                // Blades don't pursue - longer leash. Back to patrol, no drama.
                 BladeFightEnded(s, am.bladeIdx, am);
                 s.wildEngaged.reset();
                 ClearFlagTarget(s);
@@ -16786,14 +17009,14 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 return;
             }
             s.logLine = "The " + spot.name + " loses interest.";
-            RivalFightEnded(s, am); // persists its position/resumes roaming from here — no win/loss, so no growth nudge beyond that
+            RivalFightEnded(s, am); // persists its position/resumes roaming from here - no win/loss, so no growth nudge beyond that
             s.wildEngaged.reset();
             ClearFlagTarget(s);
             return;
         }
 
         // Tactical decision: prefer a ranged strike over melee whenever it's off
-        // cooldown, rather than always closing to melee like every other monster — a
+        // cooldown, rather than always closing to melee like every other monster - a
         // simple priority rule (not a full utility-AI), matching this project's existing
         // "small, honest simplifications" convention.
         bool inMelee = Dist(am.pos, s.wildernessPlayerPos) < kWildMeleeRange;
@@ -16803,7 +17026,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             std::string mname = spot.name;
             // The strike is now a visible shadow bolt: it flies first and the
             // hit roll + damage run in ResolveEnemyRangedImpact on arrival.
-            // Same cooldown, same formulas — the only change is the travel time.
+            // Same cooldown, same formulas - the only change is the travel time.
             if (auto* bp = SpawnSpellProjectile(s, 0, am.pos, s.wildernessPlayerPos, -2, false)) {
                 bp->castByRival = am.isRival;
                 bp->castByBladeIdx = am.bladeIdx;
@@ -16827,7 +17050,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             }
             if (s.hp <= 0) {
                 if (am.bladeIdx >= 0) {
-                    // Blades beat you up and move on — only the champion loots corpses,
+                    // Blades beat you up and move on - only the champion loots corpses,
                     // tracks kills, or escalates to murderer-tier losses. Ordinary loss.
                     BladeFightEnded(s, am.bladeIdx, am);
                     EndWildMonsterLoss(s, mname);
@@ -16837,13 +17060,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 RivalFightEnded(s, am);
                 s.rivalHasBeatenPlayer = true;
                 if (wasAlreadyBeaten) EndWildMonsterMurdererLoss(s, mname); else EndWildMonsterLoss(s, mname);
-                RivalCorpseLoot(s); // the red loots your corpse — 15% of carried gold + one item
+                RivalCorpseLoot(s); // the red loots your corpse - 15% of carried gold + one item
                 return;
             }
         }
 
         // The AI companion still helps against this opponent too, same as any other
-        // fight — no special-casing needed here.
+        // fight - no special-casing needed here.
         if (s.companionAttackCooldown > 0) s.companionAttackCooldown -= dtF;
         if (ActivePet(s) && s.companionAttackCooldown <= 0) {
             s.companionAttackCooldown = kCompanionAttackCooldown;
@@ -16867,12 +17090,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     };
     // Pack attackers (2026-09-25, multi-enemy combat): extra monsters chase and
     // melee the player alongside the primary, with the same chase/leash rules.
-    // At most kMaxMeleeAttackers (primary + extras) swing at once — extras beyond
+    // At most kMaxMeleeAttackers (primary + extras) swing at once - extras beyond
     // the cap crowd around and wait for an opening.
     auto updateWildExtraAttackers = [&]() {
         if (s.wildExtraAttackers.empty()) return;
         if (!s.wildEngaged.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
-            s.wildExtraAttackers.clear(); // no fight (or death) — the pack melts back to ambient
+            s.wildExtraAttackers.clear(); // no fight (or death) - the pack melts back to ambient
             return;
         }
         if (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0) return; // duels stay 1v1
@@ -16911,7 +17134,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 // Nearest-rank selection: the primary plus the closest extras fill
                 // the kMaxMeleeAttackers slots; extras beyond the cap crowd and
                 // wait for an opening. (Counting "everyone else in melee" would
-                // park ALL extras once 5+ crowd in — 2026-09-25 fix.)
+                // park ALL extras once 5+ crowd in - 2026-09-25 fix.)
                 float myD = Dist(ex.pos, s.wildernessPlayerPos);
                 int rank = 0;
                 if (s.wildEngaged.has_value() &&
@@ -16935,13 +17158,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                     }
                     if (s.hp <= 0) { EndWildMonsterLoss(s, spot.name); return; }
                 }
-                // else: crowded out — waits for an opening
+                // else: crowded out - waits for an opening
             }
             ResolveCircleCollision(ex.pos, kNodeRadius * 0.6f, s.wildernessPlayerPos, kPlayerRadius);
             i++;
         }
     };
-    // Action (not automatic AI) — the player's own swing, rate-limited by its own
+    // Action (not automatic AI) - the player's own swing, rate-limited by its own
     // cooldown. Called from both the keyboard (KEY_E) and touch (DrawInteractButton)
     // paths below, same dual-input pattern tryInteract() uses elsewhere on this screen.
     // Uses the exact ResolveCombatRound hit-chance/damage formula (see EndWildMonsterWin's
@@ -16953,7 +17176,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (Dist(am.pos, s.wildernessPlayerPos) >= kWildMeleeRange || am.playerAttackCooldown > 0) return;
         am.playerAttackCooldown = PlayerSwingCooldown(s);
         am.swingEffectTimer = kSwingEffectDuration;
-        PlaySfx(SfxId::Swing); // melee swing starts — world combat only
+        PlaySfx(SfxId::Swing); // melee swing starts - world combat only
         int power = CombatPower(s);
         float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
         float hitChance = std::clamp(50.0f + (power - spot.level) * 4.0f + weaponSkillBonus, 5.0f, 95.0f);
@@ -16985,7 +17208,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 }
             }
             // Cleave (2026-09-25, multi-enemy combat): a landed swing also strikes
-            // every pack attacker inside the same melee range + swing arc — each
+            // every pack attacker inside the same melee range + swing arc - each
             // victim keeps its own hit-chance and damage roll, and deaths queue
             // independently. Rival/blade duels never cleave (1v1 stays 1v1).
             if (!swingWasDuel && !s.wildExtraAttackers.empty()) {
@@ -17009,13 +17232,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                         if (ex.hp <= 0) {
                             BeginWildExtraDeath(s, ex);
                             s.wildExtraAttackers.erase(s.wildExtraAttackers.begin() + ei);
-                            continue; // erased — don't advance ei
+                            continue; // erased - don't advance ei
                         }
                     }
                     ei++;
                 }
                 if (cleaveCount > 0)
-                    s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage — your swing cleaves " +
+                    s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage - your swing cleaves " +
                                 std::to_string(cleaveCount) + (cleaveCount == 1 ? " foe!" : " foes!");
             }
             Journal(s, s.logLine); // hits dealt go to the event journal
@@ -17025,14 +17248,14 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             Journal(s, s.logLine);
         }
     };
-    // Magery in live Wilderness combat — ranged (no kWildMeleeRange check, unlike the
+    // Magery in live Wilderness combat - ranged (no kWildMeleeRange check, unlike the
     // sword swing above), on its own per-spell cooldown (kSpellCooldown) so casting
     // doesn't share a clock with melee. Reuses the exact same success/damage/training
     // formulas as the panel-based CastOffensiveSpell (SpellSuccessChance/SpellPowerFor/
-    // ApplySpellTraining) since it's the same underlying magic system — just applied to
+    // ApplySpellTraining) since it's the same underlying magic system - just applied to
     // s.wildEngaged's hp instead of s.combat's. Simplified vs. the panel version: no
     // RollSpellDisrupted check, since that reads s.combat->playerWasHit, which has no
-    // equivalent in live combat — an intentional simplification, not an oversight.
+    // equivalent in live combat - an intentional simplification, not an oversight.
     auto tryCastSpellAtEngagedMonster = [&](int spellIdx) {
         if (!s.wildEngaged.has_value()) return;
         if (spellIdx < 0 || spellIdx >= (int)kSpells.size()) return;
@@ -17053,12 +17276,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         std::string note;
         ApplySpellTraining(s, spell, note);
         // The bolt flies now; the success roll, damage, and kill handling run in
-        // ResolvePlayerSpellImpact on arrival — same formulas, visible travel.
+        // ResolvePlayerSpellImpact on arrival - same formulas, visible travel.
         SpawnSpellProjectile(s, 0, s.wildernessPlayerPos, am.pos, spellIdx, true, note);
         PlaySfx(SfxId::Cast);
         if (SfxIsFireSpell(spellIdx)) PlaySfx(SfxId::Fireball);
     };
-    // Walking into a dungeon entrance does exactly what its Hunt-tab does today —
+    // Walking into a dungeon entrance does exactly what its Hunt-tab does today -
     // s.selectedDungeon is left as-is if you're re-entering the one you were already in
     // (mirrors the tab-click behavior: only a fresh spawn point on switching dungeons).
     auto tryEnterDungeon = [&](int idx) {
@@ -17066,10 +17289,10 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         s.selectedDungeon = idx;
         s.huntSubView = 0;
         s.dungeonMenuOpen = false; // entering a dungeon starts with the full view (2026-09-25)
-        CancelEscort(s, "won't follow you into the dark — the escort is broken.");
+        CancelEscort(s, "won't follow you into the dark - the escort is broken.");
         s.screen = Screen::Hunt;
         s.hunt3DView = s.wild3DView; // entering from the 3D wilderness stays 3D (view state only)
-        // Zone change — the flag and in-flight spells don't cross over.
+        // Zone change - the flag and in-flight spells don't cross over.
         s.flagTarget.reset();
         s.wildEngaged.reset();           // the wilderness fight doesn't follow you in
         s.wildExtraAttackers.clear();    // the pack melts back to ambient (2026-09-25)
@@ -17080,7 +17303,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         s.vigorT = 0.0f;
     };
     auto tryInteract = [&]() {
-        // Phase 6 — shrines are the one thing a ghost CAN touch: the virtuous dead
+        // Phase 6 - shrines are the one thing a ghost CAN touch: the virtuous dead
         // may pray for resurrection. Everything else stays hands-off for ghosts.
         bool shrineForGhost = s.playerIsGhost && nearestKind == WildNodeKind::Shrine;
         if ((s.playerIsGhost && !shrineForGhost) || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
@@ -17092,21 +17315,21 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         else if (nearestKind == WildNodeKind::Innocent) tryEngageInnocentSpot(nearestIdx);
         else if (nearestKind == WildNodeKind::DungeonEntrance) tryEnterDungeon(kWildernessDungeonEntrances[nearestIdx].dungeonIdx);
         else if (nearestKind == WildNodeKind::Town2Gate) {
-            CancelEscort(s, "parts ways at the gate — the escort is broken.");
+            CancelEscort(s, "parts ways at the gate - the escort is broken.");
             s.selectedTown = 1;
             s.screen = Screen::Town;
             s.townPlayerPos = { 450, 830 }; // same relative spawn every town uses, just south of its own gate
             if (s.wild3DView) s.town3DView = true; // stay in 3D across the gate (view state only)
         }
         else if (nearestKind == WildNodeKind::Town3Gate) {
-            CancelEscort(s, "parts ways at the gate — the escort is broken.");
+            CancelEscort(s, "parts ways at the gate - the escort is broken.");
             s.selectedTown = 2;
             s.screen = Screen::Town;
             s.townPlayerPos = { 450, 830 }; // same relative spawn every town uses, just south of its own gate
             if (s.wild3DView) s.town3DView = true; // stay in 3D across the gate (view state only)
         }
         else if (nearestKind == WildNodeKind::Town4Gate) { // Phase 4: Cragmoor
-            CancelEscort(s, "parts ways at the gate — the escort is broken.");
+            CancelEscort(s, "parts ways at the gate - the escort is broken.");
             s.selectedTown = 3;
             s.screen = Screen::Town;
             s.townPlayerPos = { 450, 830 }; // same relative spawn every town uses, just south of its own gate
@@ -17119,7 +17342,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 else { s.houseDesignerOpen = true; s.houseDemolishArmed = false; PlaySfx(SfxId::Click); }
             } else TryBuyHousePlot(s, pi);
         }
-        // Phase 6 — virtue shrines: the virtuous find healing. Karma 10+ to be heard.
+        // Phase 6 - virtue shrines: the virtuous find healing. Karma 10+ to be heard.
         // Ghosts with high karma rise on the spot; the rest find only silence.
         else if (nearestKind == WildNodeKind::Shrine) {
             const ShrineDef& shrine = kShrines[nearestIdx];
@@ -17135,7 +17358,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 s.logLine = std::string("The Shrine of ") + shrine.name + " is silent. Your heart must be lighter for it to hear you. (Needs 10 karma.)";
             }
         }
-        // Phase 6 — the outlaw refuge: only reds get the black market.
+        // Phase 6 - the outlaw refuge: only reds get the black market.
         else if (nearestKind == WildNodeKind::Refuge) {
             if (s.notoriety > 1.0f) {
                 s.refugeKnown = true;
@@ -17146,20 +17369,20 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             }
         }
         else {
-            CancelEscort(s, "parts ways at the gate — the escort is broken.");
+            CancelEscort(s, "parts ways at the gate - the escort is broken.");
             s.selectedTown = 0; s.screen = Screen::Town; s.townPlayerPos = { 450, 830 };
             if (s.wild3DView) s.town3DView = true; // walking back through the gate returns to 3D town
         } // just south of kWildernessGatePos
     };
-    // Being engaged in a live fight takes over the prompt/E-press entirely — same
+    // Being engaged in a live fight takes over the prompt/E-press entirely - same
     // "combat blocks other actions" convention the old panel-based system already had
     // (see tabsEnabled in main()), just enforced here instead since this fight never
     // leaves the Wilderness screen.
     std::string prompt;
     if (s.wildEngaged.has_value()) { // re-checked: the duel guard above may have ended the fight this frame
-        // Melee is automatic now (see trySwingAtEngagedMonster's call site below) — no
+        // Melee is automatic now (see trySwingAtEngagedMonster's call site below) - no
         // button/prompt needed for it, just naming who you're fighting.
-        // (The Rival has no kWildernessMonsterSpots row — spotIdx is -1 for it, so it
+        // (The Rival has no kWildernessMonsterSpots row - spotIdx is -1 for it, so it
         // gets its epithet name here instead of an out-of-bounds read.)
         prompt = "Fighting " + (s.wildEngaged->isRival ? RivalEpithetName(s)
                                : s.wildEngaged->bladeIdx >= 0 ? BladeName(s.wildEngaged->bladeIdx)
@@ -17188,16 +17411,16 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             prompt = "[E] Slip into the outlaw refuge";
         else prompt = "[E] Return to Emberhold";
     }
-    // Ghosts and the dying get no prompts — they can't touch anything. (Phase 6:
+    // Ghosts and the dying get no prompts - they can't touch anything. (Phase 6:
     // the one exception is a ghost at a shrine, which can pray for resurrection.)
     if ((s.playerIsGhost && nearestKind != WildNodeKind::Shrine) || s.playerDeathAnimT > 0.0f) prompt.clear();
 
-    // No movement during the death animation — the body isn't going anywhere.
+    // No movement during the death animation - the body isn't going anywhere.
     if (s.playerDeathAnimT <= 0.0f) {
         bool moved = UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GetFrameTime(), kWildernessWorldSize);
         // UO-style attack flagging (2026-09-24): when the player isn't driving,
         // steer toward the flagged target until contact auto-engages. Manual
-        // input always wins — steering only fills the idle gap.
+        // input always wins - steering only fills the idle gap.
         if (!moved) SteerTowardFlag(s, s.wildernessPlayerPos, s.playerFacing, GetFrameTime(), kWildernessWorldSize, 0);
         if (ActivePet(s)) UpdateCompanionFollow(s, s.wildernessPlayerPos, s.playerFacing, GetFrameTime());
     }
@@ -17209,9 +17432,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
         // The engaged one collides against its live position (below); the others
         // wander in a small loop (WildernessMonsterLivePos) and auto-engage the player
-        // on contact — bumping into one starts the fight, no E press required (walking
+        // on contact - bumping into one starts the fight, no E press required (walking
         // up and pressing E while in range still works too, via tryInteract).
-        if (s.wildSpotRespawn[i] > 0.0f) continue; // empty — waiting to respawn
+        if (s.wildSpotRespawn[i] > 0.0f) continue; // empty - waiting to respawn
         // Live check, not wasEngaged: a projectile/fiend kill inside
         // UpdateLiveSpellFX above can reset or promote the engagement mid-frame (2026-09-25).
         if (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == (int)i) continue;
@@ -17223,12 +17446,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             tryEngageWildMonster((int)i);
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, livePos, kNodeRadius * 0.7f);
     }
-    // Live check, not wasEngaged — see the comment in the monster loop above (2026-09-25).
+    // Live check, not wasEngaged - see the comment in the monster loop above (2026-09-25).
     if (s.wildEngaged.has_value())
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, s.wildEngaged->pos, kNodeRadius * 0.6f);
     for (auto& entrance : kWildernessDungeonEntrances)
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, entrance.pos, kNodeRadius * 0.8f);
-    // Custom house walls block movement (2026-09-25) — floors and the door are walkable.
+    // Custom house walls block movement (2026-09-25) - floors and the door are walkable.
     if (s.housePlotIdx >= 0 && s.housePlotIdx < (int)kHousePlots.size()) {
         const HousePlot& hp = kHousePlots[s.housePlotIdx];
         if (HouseLayoutValid(s.houseLayout, hp.cells)) {
@@ -17246,7 +17469,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 
     // AI reacts to this frame's final (post-collision) player position; the player's
     // own swing is a separate action so it can also be triggered by touch, below. The
-    // Rival Adventurer (ActiveMonster::isRival) gets its own AI function instead — see
+    // Rival Adventurer (ActiveMonster::isRival) gets its own AI function instead - see
     // updateTacticalOpponentAI's comment.
     if (s.wildEngaged.has_value() && (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0))
         updateTacticalOpponentAI();
@@ -17254,7 +17477,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         updateEngagedMonsterAI();
     updateWildExtraAttackers(); // pack members chase/crowd/attack alongside the primary
     // Auto-continuous melee: fires on its own cooldown every frame once engaged and in
-    // range, no button press needed — mirrors updateEngagedMonsterAI's unconditional
+    // range, no button press needed - mirrors updateEngagedMonsterAI's unconditional
     // per-frame check for the monster's own attack. trySwingAtEngagedMonster already
     // self-gates on range/cooldown/wildEngaged internally, so calling it unconditionally
     // here is safe.
@@ -17310,7 +17533,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         DrawUIText("King's Road", (int)lbl.x - 38, (int)lbl.y, 12, Color{ 96, 74, 50, 255 });
     }
 
-    // Dirt paths from the Return Gate to each dungeon entrance — same DrawWallBand/
+    // Dirt paths from the Return Gate to each dungeon entrance - same DrawWallBand/
     // outline treatment as Town's roads, so the map reads as a connected place instead
     // of open grass with icons scattered on it.
     {
@@ -17319,7 +17542,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             DrawWildPath(kWildernessReturnGatePos, entrance.pos, camera, wildDirtTex);
     }
 
-    // Decorative bush/fern scatter — drawn first (no collision) so nodes layer on top of
+    // Decorative bush/fern scatter - drawn first (no collision) so nodes layer on top of
     // any incidental overlap. CraftPix "Rocks & Bushes", same license as the tame-spot art.
     for (const WildernessFoliage& f : kWildernessFoliage) {
         const Texture2D* icon = WildFoliageIcon(f.variant);
@@ -17330,7 +17553,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         DrawIconCentered(*icon, screenPos, 34.0f, WHITE);
     }
 
-    // Housing plots (2026-09-25) — for-sale signs on unowned plots, custom houses
+    // Housing plots (2026-09-25) - for-sale signs on unowned plots, custom houses
     // on owned ones. Drawn after foliage so houses layer on top of it.
     DrawWildernessHousePlots2D(s, camera,
         inRange && nearestKind == WildNodeKind::HousePlot, nearestIdx);
@@ -17371,7 +17594,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             DrawCircleLines((int)screenPos.x, (int)screenPos.y, kNodeRadius * 0.6f * rip, Color{ 150, 210, 240, 200 });
         }
     }
-    // Phase 2 — Saltmere Docks: wilderness landmark on the Salt Coast (decorative;
+    // Phase 2 - Saltmere Docks: wilderness landmark on the Salt Coast (decorative;
     // the tidal-pool nodes nearby are the interactables).
     for (const CoastProp& d : kSaltDocks) {
         Vector2 dsp = WorldToScreen(d.pos, camera);
@@ -17387,7 +17610,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         std::string sub = TextFormat("diff %d - %.0f%%", creature.difficulty, TameChance(s, creature));
         Vector2 screenPos = WorldToScreen(spot.pos, camera);
         // Tamable creatures don't wander (spot.pos is a fixed point, unlike Wilderness
-        // monsters/dungeon monsters), so there's no motion to derive a facing from — but
+        // monsters/dungeon monsters), so there's no motion to derive a facing from - but
         // they can still face the player, the same "notices you approaching" read the
         // Rival/engaged-monster blocks already use elsewhere (2026-09-23 wire-up).
         if (sheet.ok) {
@@ -17406,10 +17629,10 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // The engaged slot is drawn separately below, at its live position with an HP
         // bar, instead of here at its idle spawn spot. Checks s.wildEngaged fresh
         // (not the frame-start wasEngaged) since updateEngagedMonsterAI() above may
-        // have just ended the fight this same frame — wasEngaged would still be true
+        // have just ended the fight this same frame - wasEngaged would still be true
         // then, and dereferencing an emptied optional is undefined behavior.
         if (s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->spotIdx == (int)i) continue;
-        // Empty slots (waiting to respawn) draw nothing — except a slot mid-death-
+        // Empty slots (waiting to respawn) draw nothing - except a slot mid-death-
         // animation, which draws the fading body instead. Pack attackers draw at
         // their chase positions with a red flash while hurt.
         const GameState::DyingMonster* dying = wildDying2D ? FindDyingWildSpot(s, (int)i) : nullptr;
@@ -17437,7 +17660,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         }
     }
     if (s.wildEngaged.has_value()) {
-        // Live, moving monster — "near" (the highlight ring) now means "close enough to
+        // Live, moving monster - "near" (the highlight ring) now means "close enough to
         // swing" instead of "close enough to engage", reusing DrawWorldNode's existing
         // ring rather than adding a second visual for the same idea.
         EngagedMonsterStats spot = EngagedWildMonsterStats(s, *s.wildEngaged);
@@ -17447,7 +17670,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         Color engagedBaseTint = (engagedIcon < 0) ? WHITE : WildMonsterTintFor(engagedIcon);
         Vector2 screenPos = WorldToScreen(s.wildEngaged->pos, camera);
         // Combat FX (2026-09-24): the monster lunges toward the player on its
-        // attack tick and flashes red when hurt — synced to the damage numbers.
+        // attack tick and flashes red when hurt - synced to the damage numbers.
         const auto& amFX = *s.wildEngaged;
         {
             Vector2 toP = { s.wildernessPlayerPos.x - amFX.pos.x, s.wildernessPlayerPos.y - amFX.pos.y };
@@ -17461,7 +17684,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         Color fxTint = CombatHitTint(amFX.monsterHurtT, engagedBaseTint, Color{ 255, 130, 130, 255 });
         bool inMelee = Dist(s.wildEngaged->pos, s.wildernessPlayerPos) < kWildMeleeRange;
         if (sheet.ok) {
-            // Faces the player directly rather than tracking real per-frame velocity —
+            // Faces the player directly rather than tracking real per-frame velocity -
             // chasing monsters always move straight at the player anyway, so this reads
             // identically without needing a stored previous-position/facing field.
             Vector2 toPlayer = { s.wildernessPlayerPos.x - s.wildEngaged->pos.x, s.wildernessPlayerPos.y - s.wildEngaged->pos.y };
@@ -17478,11 +17701,11 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         DrawRectangleRec({ hpBg.x, hpBg.y, hpBg.width * hpPct, hpBg.height }, Color{ 122, 46, 46, 255 });
         DrawRectangleLinesEx(hpBg, 1.0f, Fade(RAYWHITE, 0.8f));
     } else {
-        // Roaming, not currently fought — patrolling or actively hunting the player
+        // Roaming, not currently fought - patrolling or actively hunting the player
         // (2026-09-23, "Rival hunts you" plan). Sub-label surfaces which, both for
         // legibility and because "Hunting..." is a genuinely useful warning.
         // While their death animation plays, the fading body at the kill site is
-        // drawn instead of the patrolling rival (no double-draw) — they retreat
+        // drawn instead of the patrolling rival (no double-draw) - they retreat
         // rather than die, see RivalFightEnded.
         const GameState::DyingMonster* rivalDying2D = FindDyingRival(s);
         {
@@ -17516,14 +17739,14 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             }
         }
     }
-    // Murder Inc. blades — drawn like the champion's node but a darker dried-blood
+    // Murder Inc. blades - drawn like the champion's node but a darker dried-blood
     // red, with numbered guild names and the same activity sub-labels. Unlike the
     // champion's node they stay visible while you're fighting something else, so a
     // pair-hunt partner closing in never surprises you unfairly.
     for (int bi = 0; bi < kBladeCount; bi++) {
         if (s.wildEngaged.has_value() && s.wildEngaged->bladeIdx == bi) continue; // drawn above with its HP bar
         // While a blade's death animation plays, the fading body at the kill site
-        // is drawn instead of the patrolling blade (no double-draw) — same
+        // is drawn instead of the patrolling blade (no double-draw) - same
         // retreat-not-death treatment as the champion.
         const GameState::DyingMonster* bladeDying2D = FindDyingBlade(s, bi);
         const auto& b = s.blades[bi];
@@ -17570,7 +17793,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         const Texture2D* icon = g_assets.wildEntranceTexOk[entrance.dungeonIdx] ? &g_assets.wildEntranceTex[entrance.dungeonIdx] : nullptr;
         DrawWorldNode(screenPos, kNodeRadius * 0.9f, entrance.color, dungeon.name, near, dungeon.theme, icon);
     }
-    // Phase 6 — connective tissue landmarks, 2D.
+    // Phase 6 - connective tissue landmarks, 2D.
     for (size_t si = 0; si < kShrines.size(); si++) { // virtue shrines: gold-ringed white stones
         bool near = nearestKind == WildNodeKind::Shrine && nearestIdx == (int)si && inRange;
         Vector2 screenPos = WorldToScreen(kShrines[si].pos, camera);
@@ -17604,26 +17827,26 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         DrawWorldNode(screenPos, kNodeRadius * 0.8f, kColorPanelBg, "Emberhold Gate", near);
     }
     {
-        // Gate to Town 2 (2026-09-22) — same treatment as the Town 1 gate just above,
+        // Gate to Town 2 (2026-09-22) - same treatment as the Town 1 gate just above,
         // out in the newly added Wilderness space (kWildernessTown2GatePos).
         bool near = nearestKind == WildNodeKind::Town2Gate && inRange;
         Vector2 screenPos = WorldToScreen(kWildernessTown2GatePos, camera);
         DrawWorldNode(screenPos, kNodeRadius * 0.9f, Color{ 140, 148, 156, 255 }, kTown2Name, near, "Coastal trade port");
     }
     {
-        // Gate to Town 3 / Frostmere (Phase 3) — same treatment as the Town 2 gate.
+        // Gate to Town 3 / Frostmere (Phase 3) - same treatment as the Town 2 gate.
         bool near = nearestKind == WildNodeKind::Town3Gate && inRange;
         Vector2 screenPos = WorldToScreen(kWildernessTown3GatePos, camera);
         DrawWorldNode(screenPos, kNodeRadius * 0.9f, Color{ 200, 218, 232, 255 }, kTown3Name, near, "Frozen northern town");
     }
     {
-        // Gate to Town 4 / Cragmoor (Phase 4) — same treatment as the Town 3 gate.
+        // Gate to Town 4 / Cragmoor (Phase 4) - same treatment as the Town 3 gate.
         bool near = nearestKind == WildNodeKind::Town4Gate && inRange;
         Vector2 screenPos = WorldToScreen(kWildernessTown4GatePos, camera);
         DrawWorldNode(screenPos, kNodeRadius * 0.9f, Color{ 150, 142, 128, 255 }, kTown4Name, near, "Mountain mining town");
     }
     // AI companion (2026-09-23): now renders as a real animated creature instead of a
-    // colored circle, via WildCreatureSheetForRole — see that function's comment for
+    // colored circle, via WildCreatureSheetForRole - see that function's comment for
     // why it's "a creature representative of this Pet's role", not its exact tamed
     // species (Pet doesn't record which of the 11 kWildCreatures it came from, only
     // its role/stats/name; adding that would mean touching the taming system, out of
@@ -17646,7 +17869,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // Attack and Cast frames (see LoadGameAssets' heroSheet column-range comments), so
     // this picks the animation state instead of driving the old rotation-arc hack.
     // Attack takes priority if somehow both timers are live at once (shouldn't overlap
-    // in practice — melee and magic are on separate cooldowns but not literally
+    // in practice - melee and magic are on separate cooldowns but not literally
     // exclusive). Reads `s.wildEngaged` fresh rather than the frame-start `wasEngaged`,
     // since updateEngagedMonsterAI() above can end the fight (and reset it) earlier in
     // this same frame (same stale-optional pitfall documented elsewhere in this function).
@@ -17658,7 +17881,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     DrawWorldCorpses2D(s, 0, camera); // fallen monsters linger where they died
     DrawPlayerLifeState(s, WorldToScreen(s.wildernessPlayerPos, camera), s.playerFacing, prompt, 1.0f, wildCombatAnim);
     // Combat FX overlays (2026-09-24): flag marker, projectiles, impacts, heal
-    // aura, vigor aura, summoned fiend — drawn in world space inside the scissor.
+    // aura, vigor aura, summoned fiend - drawn in world space inside the scissor.
     Wild2DClickFlag(s, camera, screenW, screenH); // tap a monster to flag it
     DrawFlagMarker2D(s, camera, 0);
     DrawSpellFX2D(s, camera, 0);
@@ -17670,9 +17893,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // Live check, not wasEngaged: the fight may have ended mid-frame (2026-09-25).
     if (s.wildEngaged.has_value()) {
         // Melee is fully automatic now (see the trySwingAtEngagedMonster call site
-        // above) — no interact button needed here anymore for it.
+        // above) - no interact button needed here anymore for it.
         // Drawn after EndScissorMode (not before), same reason Town's gather HUD strip
-        // is — kViewport starts at y=110 and the tiled ground fill would paint over
+        // is - kViewport starts at y=110 and the tiled ground fill would paint over
         // anything drawn here earlier in the frame.
         DrawLiveCombatHud(s, 20, 116);
         DrawLiveCombatQuickItems(s);
@@ -17681,18 +17904,18 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     }
     DrawGhostStatus(s); // death animation / ghost walk banner
     DrawMinimap(s); // wilderness minimap (shared by the 2D and 3D views)
-    // Phase 3 — snowfall while in the Frostwastes (both 2D and 3D views).
+    // Phase 3 - snowfall while in the Frostwastes (both 2D and 3D views).
     if (RegionAt(s.wildernessPlayerPos) == RegionId::Frostwastes) DrawSnowfall(screenW, screenH, s.worldTime);
 
-    // Spell hotbar — only while actually engaged (2026-09-22 fix: it used to also show
+    // Spell hotbar - only while actually engaged (2026-09-22 fix: it used to also show
     // while just exploring "so it could be configured between fights," but that spot
     // (x:175-509) directly overlaps the interact button (x:390-520, same y) used for
     // "[E] Gather/Tame/Fight/Enter" prompts, silently covering it whenever nothing was
-    // engaged — Mark caught this by trying to gather. Configuration now lives on the
+    // engaged - Mark caught this by trying to gather. Configuration now lives on the
     // Magic screen instead, which has real free space (see DrawMagicScreen).
     // Live check, not wasEngaged: the fight may have ended mid-frame (2026-09-25).
     if (s.wildEngaged.has_value()) {
-        s.hotbarPickerSlot.reset(); // picker is Magic-screen UI — never carry it into a fight
+        s.hotbarPickerSlot.reset(); // picker is Magic-screen UI - never carry it into a fight
         const auto& wam = *s.wildEngaged;
         int tapped = DrawCombatHotbarRow(s, true, wam.spellCooldowns, wam.castLockT);
         // Keyboard hotbar (2026-09-25, combat feel): 1-5 mirror the touch slots,
@@ -17706,18 +17929,23 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             if (spellIdx >= 0 && spellIdx < (int)kSpells.size()) {
                 const Spell& sp = kSpells[spellIdx];
                 // Deny feedback (2026-09-25): a tap/key on a slot that can't fire
-                // must answer AT the button — silent swallows felt like "I can
+                // must answer AT the button - silent swallows felt like "I can
                 // only cast one spell". Red flash on the slot + floater by the
                 // player saying why, instead of nothing happening.
                 std::string deny;
+                // UO-style travel: Recall pays its own spell costs (2 reagents),
+                // not the flat live-combat 1, and needs 40 Magery to attempt.
+                int needReag = (spellIdx == kRecallSpellIdx) ? sp.reagentCost : kLiveCombatReagentCost;
                 if (wam.castLockT > 0 || wam.spellCooldowns[spellIdx] > 0) deny = "Not ready";
+                else if (spellIdx == kRecallSpellIdx && EffectiveSkill(s, &GameState::magery) < (float)sp.minSkill) deny = "Need 40 Magery";
                 else if (s.mana < sp.manaCost) deny = "No mana!";
-                else if (s.reagents < kLiveCombatReagentCost) deny = "No reagents!";
+                else if (s.reagents < needReag) deny = "No reagents!";
                 if (!deny.empty()) {
                     if (tapped < 5) s.hotbarDenyT[tapped] = kHotbarDenyTime;
                     SpawnFloatText(s, 0, s.wildernessPlayerPos, deny, kFloatDenyColor);
                     Journal(s, deny + " (" + sp.name + ")");
-                } else if (sp.type == SpellType::Offensive) tryCastSpellAtEngagedMonster(spellIdx);
+                } else if (spellIdx == kRecallSpellIdx) s.recallPickerOpen = true; // town picker; costs on select
+                else if (sp.type == SpellType::Offensive) tryCastSpellAtEngagedMonster(spellIdx);
                 else CastLiveUtilitySpell(s, spellIdx, 0);
             }
         }
@@ -17735,7 +17963,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         g_t3dFollowMode = !g_t3dFollowMode;
 
     // UO-red banner (2026-09-24): unmissable center-screen hunt/stalk warning. Drawn
-    // here — past the 2D/3D view branch — so it shows in both wilderness views.
+    // here - past the 2D/3D view branch - so it shows in both wilderness views.
     if (s.rivalBannerTimer > 0.0f && !s.rivalBanner.empty()) {
         s.rivalBannerTimer -= GetFrameTime();
         const char* btxt = s.rivalBanner.c_str();
@@ -17747,7 +17975,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         DrawUIText(btxt, (screenW - btw) / 2, bby, bfs, Color{ 255, 130, 115, 255 });
     }
 
-    // Status strip, mirrors Town's gather HUD — solid-backed and split across separate
+    // Status strip, mirrors Town's gather HUD - solid-backed and split across separate
     // short lines rather than one long concatenated string (2026-09-22 fix, same reason
     // as Town's: no contrast guarantee against the tiled ground, and the combined
     // skills+gathering+taming text could run past a safe margin on some viewports).
@@ -17764,6 +17992,10 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                                    kWildCreatures[s.tamingAttempt->creatureIdx].name.c_str(), s.tamingAttempt->secondsRemaining),
                        20, statusY, 12);
     }
+    // UO-style travel (2026-09-25): recall destination modal, drawn last so it
+    // floats above the world. R opens it on desktop.
+    if (IsKeyPressed(KEY_R) && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f) s.recallPickerOpen = true;
+    DrawRecallPicker(s, screenW, screenH);
 }
 
 // ---------------------------------------------------------------------
@@ -17788,7 +18020,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     DrawRectangleRec({ hpBg.x, hpBg.y, hpBg.width * hpPct, hpBg.height },
                        hpPct > 0.3f ? Color{ 63, 94, 63, 255 } : Color{ 122, 46, 46, 255 });
 
-    // Equipped gear summary — now driven by real crafted items (equip from the Craft
+    // Equipped gear summary - now driven by real crafted items (equip from the Craft
     // screen). Power/defense computed the same way as CombatPower()/TotalDefense().
     std::string weaponLine = s.equipped.rightHand ? s.equipped.rightHand->name : "None (unarmed)";
     DrawUIText(("Weapon: " + weaponLine).c_str(), 240, 116, 13, DARKGRAY);
@@ -17797,7 +18029,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         DrawUIText("Craft or equip gear on the Craft tab.", 240, 152, 13, Fade(DARKGRAY, 0.8f));
     } // end if (!menuCollapsed): HP/gear header
 
-    // --- Corpses waiting to be skinned (leather/gold sit here until skinned — see
+    // --- Corpses waiting to be skinned (leather/gold sit here until skinned - see
     // SkinCorpse()). Shown above the combat/dungeon panel, on both branches. ---
     int corpseBandHeight = 0;
     if (!s.corpses.empty() && !menuCollapsed) {
@@ -17834,10 +18066,10 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         DrawRectangleRec({ mhpBg.x, mhpBg.y, mhpBg.width * mhpPct, mhpBg.height }, Color{ 122, 46, 46, 255 });
         y += 36;
 
-        // Combat arena — the animated knight (see "Combat sprite animations" above)
+        // Combat arena - the animated knight (see "Combat sprite animations" above)
         // vs. the monster, replacing what used to be blank space here with actual
         // visual feedback for every action taken. Only the Sunken Crypt (dungeonIdx 2)
-        // has a matching animated monster (Skeleton Warrior) so far — everywhere else
+        // has a matching animated monster (Skeleton Warrior) so far - everywhere else
         // still shows the monster's existing static icon.
         float arenaCenterY = (float)y + 42.0f;
         DrawSpriteFrame(KnightSheetFor(c.anim), c.animTime, { 90, arenaCenterY }, 84.0f);
@@ -17848,7 +18080,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             if (monsterTex) DrawIconCentered(*monsterTex, { 390, arenaCenterY }, 84.0f, DungeonMonsterTint(c.dungeonIdx));
             else DrawCircleV({ 390, arenaCenterY }, 40.0f, Fade(Color{ 122, 46, 46, 255 }, 0.5f));
         } else if (const DirSpriteSheet* sheet = MonsterFamilySheet(c.dungeonIdx); sheet && sheet->ok) {
-            // Static Idle frame, facing Down — this turn-based panel has no movement/
+            // Static Idle frame, facing Down - this turn-based panel has no movement/
             // facing concept of its own, unlike the live Wilderness/dungeon fights.
             Rectangle src = ActorSrcRect(*sheet, { 0, 1 }, ActorAnim::Idle, s.worldTime);
             DrawIconCenteredRect(sheet->tex, src, { 390, arenaCenterY }, 84.0f, DungeonMonsterTint(c.dungeonIdx));
@@ -17873,7 +18105,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                    20, y, 12, DARKGRAY);
         y += 16;
 
-        // Scrollable list of known Offensive/Utility(heal) spells — mirrors the JS's
+        // Scrollable list of known Offensive/Utility(heal) spells - mirrors the JS's
         // knownOffensiveSpells/knownHealSpells filters (magery >= spell.minSkill).
         int spellListTop = y;
         int spellListHeight = 90;
@@ -17891,7 +18123,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
 
         BeginScissorMode(0, spellListTop, screenW, spellListHeight);
         if (knownIdx.empty()) {
-            DrawUIText("No spells known yet — practice on the Magic tab.", 20, spellListTop + 4, 13, DARKGRAY);
+            DrawUIText("No spells known yet - practice on the Magic tab.", 20, spellListTop + 4, 13, DARKGRAY);
         }
         for (size_t row = 0; row < knownIdx.size(); row++) {
             int idx = knownIdx[row];
@@ -17912,7 +18144,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         EndScissorMode();
         y = spellListTop + spellListHeight + 6;
 
-        // Throw damage potions — a free action (see ThrowExplosionPotion(): no
+        // Throw damage potions - a free action (see ThrowExplosionPotion(): no
         // monster counter-attack follows), so just one compact row is enough.
         for (size_t i = 0; i < s.potions.size(); i++) {
             if (s.potions[i].effect != "damage") continue;
@@ -17957,7 +18189,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
 
     // --- Dungeons / Bloodstained Road sub-tabs ---
     // Bloodstained Road hidden 2026-09-23 at Mark's request ("hide the bloodstained
-    // road menu for now") — a single flip-back switch, not a deletion, same pattern as
+    // road menu for now") - a single flip-back switch, not a deletion, same pattern as
     // kAmbushSystemEnabled. Forces huntSubView back to Dungeons and skips drawing the
     // tab bar entirely (rather than just disabling the second tab) since with only one
     // real destination left, a tab bar with one tab would be more confusing than none.
@@ -17979,7 +18211,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     if (s.huntSubView == 1) {
         // --- Bloodstained Road: one walkable node per path, target updates live ---
         int y = subY + 36;
-        DrawUIText("Always-open ladders — walk up and press [E] to fight your way up.", 20, y, 13, Fade(DARKGRAY, 0.8f));
+        DrawUIText("Always-open ladders - walk up and press [E] to fight your way up.", 20, y, 13, Fade(DARKGRAY, 0.8f));
         y += 16;
 
         std::string nearestKey;
@@ -18059,8 +18291,9 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     }
 
     const DungeonDef& dungeon = kDungeons[*s.selectedDungeon];
+    TickLeaveDungeon(s, GetFrameTime()); // UO-style travel: the 3s magery escape ticks here
     if (menuCollapsed) {
-        // Collapsed header stack (2026-09-25) — the arena below takes nearly the
+        // Collapsed header stack (2026-09-25) - the arena below takes nearly the
         // full screen. The MENU toggle (drawn last, above the world) re-opens
         // everything.
         y = 104;
@@ -18068,7 +18301,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     DrawUIText(dungeon.theme.c_str(), 20, y, 12, DARKGRAY);
     y += 8;
 
-    // 3D dungeon view toggle (2026-09-24, Phase 2) — same V-key/button switch as
+    // 3D dungeon view toggle (2026-09-24, Phase 2) - same V-key/button switch as
     // the Town/Wilderness views. Only the explorable arena below goes 3D; the
     // picker tabs, combat panel, and HUD stay 2D.
     if (Button({ 452, 116, 68, 30 }, s.hunt3DView ? "2D [V]" : "3D [V]", true)) s.hunt3DView = !s.hunt3DView;
@@ -18077,7 +18310,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     if (s.hunt3DView && Button({ 528, 116, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
         g_t3dFollowMode = !g_t3dFollowMode;
 
-    // Mana bar — only while actually engaged in a live fight; HP is already always
+    // Mana bar - only while actually engaged in a live fight; HP is already always
     // shown at the top of this screen (see the header above), so only Mana is missing.
     // Safe to draw here (unlike Wilderness's equivalent) since this whole header
     // region sits above where the world/ground actually renders on this screen.
@@ -18097,7 +18330,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     bool bossUnlocked = xp >= dungeon.bossUnlockXp;
 
     // The engaged monster (if any) is drawn/handled separately below at its live
-    // position with an HP bar, same as Wilderness — exclude it from this search.
+    // position with an HP bar, same as Wilderness - exclude it from this search.
     bool wasDungeonEngaged = s.dungeonEngaged.has_value();
     std::string nearestKey; // "0".."7" for regular monsters, "boss"
     float nearestDist = 1e9f;
@@ -18105,7 +18338,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     bool nearestIsExit = false;
     for (int i = 0; i < kDungeonRegularSlots; i++) {
         if (wasDungeonEngaged && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
-        if (s.dungeonSpawnRespawn[*s.selectedDungeon][i] > 0.0f) continue; // empty — waiting to respawn
+        if (s.dungeonSpawnRespawn[*s.selectedDungeon][i] > 0.0f) continue; // empty - waiting to respawn
         float d = Dist(s.dungeonPlayerPos, DungeonMonsterLivePos(*s.selectedDungeon, i, s.worldTime));
         if (d < nearestDist) { nearestDist = d; nearestKey = std::to_string(i); nearestIsBoss = false; nearestIsExit = false; }
     }
@@ -18115,7 +18348,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (d < nearestDist) { nearestDist = d; nearestIsBoss = true; nearestIsExit = false; }
     }
     // Same spot every dungeon spawns you at ({900,1300}, set on entry above and on the
-    // Wilderness's physical entrances) — guaranteed floor in every kDungeonRoomLayouts
+    // Wilderness's physical entrances) - guaranteed floor in every kDungeonRoomLayouts
     // hub room since that's already where you're standing the moment you walk in.
     static const Vector2 kDungeonExitPos = { 900, 1300 };
     {
@@ -18124,20 +18357,20 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     }
     bool inRange = nearestDist < kNodeRadius + kInteractRange;
 
-    // --- Live dungeon combat (2026-09-22) — exact port of Wilderness's live-combat
+    // --- Live dungeon combat (2026-09-22) - exact port of Wilderness's live-combat
     // pattern (see DrawWildernessScreen's tryEngageWildMonster/updateEngagedMonsterAI/
     // trySwingAtEngagedMonster/tryCastSpellAtEngagedMonster) onto dungeon monsters.
     // Reuses the same screen-agnostic math (MonsterHitChance/SpellSuccessChance/
     // SpellPowerFor/ApplySpellTraining/LiveApplyWeaponTraining/PlayerSwingCooldown) and
-    // the same tuning constants (kWildMeleeRange etc. — not Wilderness-specific despite
+    // the same tuning constants (kWildMeleeRange etc. - not Wilderness-specific despite
     // the name). Simplification accepted deliberately, matching the plan: the chase AI
-    // moves in a straight line toward the player with no room-wall awareness — dungeon
+    // moves in a straight line toward the player with no room-wall awareness - dungeon
     // rooms are generous (160+ units) relative to the leash range, so this reads fine
     // without needing real pathfinding.
     auto tryEngageDungeonMonster = [&](int monsterIdx, bool isBoss) {
         if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
         int slot = isBoss ? kDungeonBossSlot : monsterIdx;
-        if (s.dungeonSpawnRespawn[*s.selectedDungeon][slot] > 0.0f) return; // empty — waiting to respawn
+        if (s.dungeonSpawnRespawn[*s.selectedDungeon][slot] > 0.0f) return; // empty - waiting to respawn
         const DungeonMonster& m = isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, monsterIdx);
         GameState::ActiveDungeonMonster am;
         am.monsterIdx = monsterIdx;
@@ -18155,7 +18388,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (nearestIsExit) {
             s.screen = Screen::Wilderness;
             s.wild3DView = s.hunt3DView; // leaving in 3D returns to the 3D wilderness (view state only)
-            // Zone change — the flag and in-flight spells don't cross over.
+            // Zone change - the flag and in-flight spells don't cross over.
             s.flagTarget.reset();
             s.dungeonEngaged.reset();      // the fight doesn't follow you out
             s.dungeonExtraAttackers.clear(); // the pack melts back to ambient (2026-09-25)
@@ -18196,7 +18429,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             s.logLine = m.name + " loses interest.";
             s.dungeonEngaged.reset();
             s.dungeonExtraAttackers.clear(); // the pack gives up too
-            ClearFlagTarget(s); // the fight's over — drop the marker too
+            ClearFlagTarget(s); // the fight's over - drop the marker too
             return;
         }
 
@@ -18231,7 +18464,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             if (s.hp <= 0) { EndDungeonMonsterLoss(s, mname); return; }
         }
 
-        // AI companion's turn — same autonomous cooldown-driven action as Wilderness
+        // AI companion's turn - same autonomous cooldown-driven action as Wilderness
         // (2026-09-22, "AI players" plan Part 2).
         if (s.companionAttackCooldown > 0) s.companionAttackCooldown -= dtF;
         if (ActivePet(s) && s.companionAttackCooldown <= 0) {
@@ -18249,11 +18482,11 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
 
     // Pack attackers, dungeon version (2026-09-25, multi-enemy combat): same
     // chase/leash/crowd rules as the wilderness pack. The boss never fights as
-    // a pack member — extras only exist alongside a normal-monster primary.
+    // a pack member - extras only exist alongside a normal-monster primary.
     auto updateDungeonExtraAttackers = [&]() {
         if (s.dungeonExtraAttackers.empty()) return;
         if (!s.dungeonEngaged.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
-            s.dungeonExtraAttackers.clear(); // no fight (or death) — the pack melts back to ambient
+            s.dungeonExtraAttackers.clear(); // no fight (or death) - the pack melts back to ambient
             return;
         }
         float dtF = GetFrameTime();
@@ -18312,7 +18545,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                     }
                     if (s.hp <= 0) { EndDungeonMonsterLoss(s, exM.name); return; }
                 }
-                // else: crowded out — waits for an opening
+                // else: crowded out - waits for an opening
             }
             ResolveCircleCollision(ex.pos, kNodeRadius * 0.7f, s.dungeonPlayerPos, kPlayerRadius);
             i++;
@@ -18326,7 +18559,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (Dist(am.pos, s.dungeonPlayerPos) >= kWildMeleeRange || am.playerAttackCooldown > 0) return;
         am.playerAttackCooldown = PlayerSwingCooldown(s);
         am.swingEffectTimer = kSwingEffectDuration;
-        PlaySfx(SfxId::Swing); // melee swing starts — world combat only
+        PlaySfx(SfxId::Swing); // melee swing starts - world combat only
         int power = CombatPower(s);
         float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
         float hitChance = std::clamp(50.0f + (power - m.level) * 4.0f + weaponSkillBonus, 5.0f, 95.0f);
@@ -18346,7 +18579,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                 DungeonPackAggro(s, dungeonIdx, am.monsterIdx, false, am.pos); // damaging a normal monster pulls its pack in (2026-09-25)
             if (am.hp <= 0) BeginDungeonMonsterDeath(s, am, dungeonIdx, wasBoss, mname, level, mgold, mleather);
             // Cleave (2026-09-25, multi-enemy combat): a landed swing also strikes
-            // every pack attacker inside the same melee range + swing arc — each
+            // every pack attacker inside the same melee range + swing arc - each
             // victim keeps its own hit-chance and damage roll, and deaths queue
             // independently. The boss fights alone, so it never cleaves.
             if (!wasBoss && !s.dungeonExtraAttackers.empty()) {
@@ -18370,13 +18603,13 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                         if (ex.hp <= 0) {
                             BeginDungeonExtraDeath(s, dungeonIdx, ex);
                             s.dungeonExtraAttackers.erase(s.dungeonExtraAttackers.begin() + ei);
-                            continue; // erased — don't advance ei
+                            continue; // erased - don't advance ei
                         }
                     }
                     ei++;
                 }
                 if (cleaveCount > 0)
-                    s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage — your swing cleaves " +
+                    s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage - your swing cleaves " +
                                 std::to_string(cleaveCount) + (cleaveCount == 1 ? " foe!" : " foes!");
             }
             Journal(s, s.logLine); // hits dealt go to the event journal
@@ -18406,27 +18639,27 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         Journal(s, "You cast " + spell.name + ".");
         std::string note;
         ApplySpellTraining(s, spell, note);
-        // Same projectile treatment as Wilderness — resolution on arrival.
+        // Same projectile treatment as Wilderness - resolution on arrival.
         SpawnSpellProjectile(s, 1, s.dungeonPlayerPos, am.pos, spellIdx, true, note);
         PlaySfx(SfxId::Cast);
         if (SfxIsFireSpell(spellIdx)) PlaySfx(SfxId::Fireball);
     };
 
     Vector2 prevDungeonPos = s.dungeonPlayerPos; // wall-slide against this if the move ends in a wall
-    // No movement during the death animation — the body isn't going anywhere.
+    // No movement during the death animation - the body isn't going anywhere.
     if (s.playerDeathAnimT <= 0.0f) {
         bool moved = UpdatePlayerMovement(s.dungeonPlayerPos, s.playerFacing, GetFrameTime(), kDungeonWorldSize);
-        // Flag steering, same as Wilderness — the wall-slide below still applies.
+        // Flag steering, same as Wilderness - the wall-slide below still applies.
         if (!moved) SteerTowardFlag(s, s.dungeonPlayerPos, s.playerFacing, GetFrameTime(), kDungeonWorldSize, 1);
         if (ActivePet(s)) UpdateCompanionFollow(s, s.dungeonPlayerPos, s.playerFacing, GetFrameTime());
     }
     UpdateLiveSpellFX(s, GetFrameTime()); // combat anim timers, projectiles, debuffs, fiend
     for (int i = 0; i < kDungeonRegularSlots; i++) {
         // The engaged one collides against its live position (below); the rest
-        // wander (DungeonMonsterLivePos) and auto-engage the player on contact — same
+        // wander (DungeonMonsterLivePos) and auto-engage the player on contact - same
         // bump-to-engage treatment as Wilderness. Walking up and pressing E still works
         // too, via tryDungeonInteract.
-        if (s.dungeonSpawnRespawn[*s.selectedDungeon][i] > 0.0f) continue; // empty — waiting to respawn
+        if (s.dungeonSpawnRespawn[*s.selectedDungeon][i] > 0.0f) continue; // empty - waiting to respawn
         // Live check, not wasDungeonEngaged: a projectile/fiend kill inside
         // UpdateLiveSpellFX above can reset or promote the engagement mid-frame (2026-09-25).
         if (s.dungeonEngaged.has_value() && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
@@ -18446,7 +18679,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             tryEngageDungeonMonster(kDungeonBossSlot, true);
         ResolveCircleCollision(s.dungeonPlayerPos, kPlayerRadius, bossLivePos, kNodeRadius); // boss, locked or not
     }
-    // Live check, not wasDungeonEngaged — see the comment in the monster loop above (2026-09-25).
+    // Live check, not wasDungeonEngaged - see the comment in the monster loop above (2026-09-25).
     if (s.dungeonEngaged.has_value())
         ResolveCircleCollision(s.dungeonPlayerPos, kPlayerRadius, s.dungeonEngaged->pos, kNodeRadius * 0.7f);
     ResolveCircleCollision(s.dungeonPlayerPos, kPlayerRadius, kDungeonExitPos, kNodeRadius * 0.6f);
@@ -18464,7 +18697,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     }
 
     // AI reacts to this frame's final (post-collision) player position, same ordering
-    // as Wilderness. Melee is auto-continuous once engaged — no button needed.
+    // as Wilderness. Melee is auto-continuous once engaged - no button needed.
     updateEngagedDungeonMonsterAI();
     updateDungeonExtraAttackers(); // pack members chase/crowd/attack alongside the primary (2026-09-25)
     if (wasDungeonEngaged) {
@@ -18482,7 +18715,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // here and the old prompt site mutated dungeonEngaged).
     std::string prompt;
     if (s.dungeonEngaged.has_value()) {
-        // Melee is automatic now — just naming who you're fighting, no button needed.
+        // Melee is automatic now - just naming who you're fighting, no button needed.
         const DungeonMonster& m = s.dungeonEngaged->isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, s.dungeonEngaged->monsterIdx);
         prompt = "Fighting " + m.name;
     } else if (inRange) {
@@ -18490,7 +18723,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         else prompt = nearestIsBoss ? "[E] Fight " + dungeon.boss.name
                                       : "[E] Fight " + DungeonSlotMonster(dungeon, std::stoi(nearestKey)).name;
     }
-    // Ghosts and the dying get no prompts — they can't touch anything.
+    // Ghosts and the dying get no prompts - they can't touch anything.
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) prompt.clear();
     Vector2 nearest3DPos = s.dungeonPlayerPos;
     std::string nearest3DLabel;
@@ -18517,14 +18750,14 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     Vector2 camera = CameraTopLeft(s.dungeonPlayerPos, kDungeonWorldSize);
 
     const Texture2D* wallTex = ThemedDungeonWall(*s.selectedDungeon);
-    // Real rooms, not an open arena — see kDungeonRoomLayouts. Wall texture fills the
+    // Real rooms, not an open arena - see kDungeonRoomLayouts. Wall texture fills the
     // whole viewport as solid rock, then each room/corridor rectangle punches a
     // floor-textured hole in it, in one pass with no depth-buffer or masking trickery
     // (floor is simply drawn on top). Each dungeon keeps its own themed floor/wall art
     // (lava/volcanic for Emberveil, web-choked for the Nest (Phase 5), tomb for the Crypt, rock for
     // Wyrmscar), falling back to a generic dungeon look if a themed texture is missing.
     // Emberveil's wall and floor art are both mottled red/black lava-rock crops that read
-    // as nearly identical — Mark could tell monsters apart fine after the plate fix, but
+    // as nearly identical - Mark could tell monsters apart fine after the plate fix, but
     // not walls from floor. Rather than source new art, darken just the wall tile via a
     // multiply tint so it reads as cooled obsidian rock against the floor's bright lava,
     // without touching the other 3 dungeons' walls.
@@ -18535,13 +18768,13 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     Color floorTint = (*s.selectedDungeon == 4) ? Color{ 200, 222, 245, 255 } : WHITE; // Phase 3: icy tomb
     for (const Rectangle& r : kDungeonRoomLayouts[*s.selectedDungeon])
         DrawTiledRect(floorTex, r, camera, 48.0f, Color{ 60, 50, 46, 255 }, floorTint);
-    // The Sunken Crypt gets a water pool in its boss room — it's the one dungeon that's
+    // The Sunken Crypt gets a water pool in its boss room - it's the one dungeon that's
     // actually a *flooded* tomb; see assets/dungeon_themed/sunkencrypt_water.png
     // (cropped from the same "Top down dungeon" pack's water-coast animation).
     if (*s.selectedDungeon == 0 && g_assets.sunkenCryptWaterOk) { // Whisper Crypt's flooded boss room
         DrawTiledRect(&g_assets.sunkenCryptWater, { 1260, 1260, 340, 340 }, camera, 32.0f, Color{ 55, 88, 143, 255 });
     }
-    // The Ember Depths gets a few scattered braziers instead — a volcanic forge-deep
+    // The Ember Depths gets a few scattered braziers instead - a volcanic forge-deep
     // calls for fire, not a tiled floor overlay (this pack's fire art is a
     // standalone prop icon, not a floor texture like the water was); see
     // assets/dungeon_themed/emberveil_brazier.png.
@@ -18554,8 +18787,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     }
     // The Hollow Warrens gets its boss room floored with the fancy medallion-pattern
     // rug from the same "Dungeon Tileset" sheet the walls/floor came from (CC0, Buch on
-    // OpenGameArt — see assets/dungeon/dungeon_tiles.png), plus a couple of scattered
-    // lit torches along the shaft — same "tiled rect for a themed room, icons for scattered
+    // OpenGameArt - see assets/dungeon/dungeon_tiles.png), plus a couple of scattered
+    // lit torches along the shaft - same "tiled rect for a themed room, icons for scattered
     // props" split as the Sunken Crypt/Emberveil cases above.
     if (*s.selectedDungeon == 5 && g_assets.hollowWarrensRugOk) { // The Hollow's boss-room rug
         DrawTiledRect(&g_assets.hollowWarrensRug, { 680, 240, 440, 400 }, camera, 48.0f, Color{ 40, 45, 60, 255 });
@@ -18567,7 +18800,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     }
 
     // Dungeon monsters DO wander in place (DungeonMonsterLivePos already applies
-    // MonsterWanderOffset, same as Town NPCs) — they just never had a facing to match
+    // MonsterWanderOffset, same as Town NPCs) - they just never had a facing to match
     // that motion until now (2026-09-23, "cheap wire-up" following the Carl-art
     // integration). WanderFacing is that motion's own analytical derivative, so this
     // costs nothing beyond what Town NPCs already do with it.
@@ -18577,11 +18810,11 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (d.zone == 1 && d.dungeonIdx == *s.selectedDungeon) { dyingHere2D = true; break; }
     for (int i = 0; i < kDungeonRegularSlots; i++) {
         // The engaged slot is drawn separately below, at its live position with an HP
-        // bar — same convention as Wilderness. Checks s.dungeonEngaged fresh (not
+        // bar - same convention as Wilderness. Checks s.dungeonEngaged fresh (not
         // wasDungeonEngaged) since updateEngagedDungeonMonsterAI() above may have just
         // ended the fight this same frame.
         if (s.dungeonEngaged.has_value() && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
-        // Empty slots show nothing while their respawn timer runs — except a slot
+        // Empty slots show nothing while their respawn timer runs - except a slot
         // mid-death-animation, which draws the sinking body below instead. Pack
         // attackers draw at their chase positions with a red flash while hurt.
         const GameState::DyingMonster* dying2D = dyingHere2D ? FindDyingDungeonSlot(s, *s.selectedDungeon, i, false) : nullptr;
@@ -18612,7 +18845,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     bool engagedIsBossNow = s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss;
     const GameState::DyingMonster* bossDying2D = dyingHere2D ? FindDyingDungeonSlot(s, *s.selectedDungeon, kDungeonBossSlot, true) : nullptr;
     if (!engagedIsBossNow && !bossDying2D && s.dungeonSpawnRespawn[*s.selectedDungeon][kDungeonBossSlot] > 0.0f) {
-        // boss slot empty — nothing to draw
+        // boss slot empty - nothing to draw
     } else if (!engagedIsBossNow) {
         Vector2 bossScreenPos = WorldToScreen(bossDying2D ? bossDying2D->pos :
                                               DungeonMonsterLivePos(*s.selectedDungeon, kDungeonBossSlot, s.worldTime), camera);
@@ -18644,14 +18877,14 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         Vector2 screenPos = WorldToScreen(kDungeonExitPos, camera);
         DrawWorldNode(screenPos, kNodeRadius * 0.7f, kColorPanelBg, "Exit", near);
     }
-    // Live, moving engaged monster + its own HP bar — same treatment as Wilderness's
+    // Live, moving engaged monster + its own HP bar - same treatment as Wilderness's
     // s.wildEngaged draw block.
     if (s.dungeonEngaged.has_value()) {
         const GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
         const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
         const Texture2D* bossTex = am.isBoss ? BossFamilyTexture(*s.selectedDungeon) : nullptr;
         const Texture2D* tex = bossTex ? bossTex : (monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr);
-        // Faces the player during the actual fight — same "face the player directly"
+        // Faces the player during the actual fight - same "face the player directly"
         // trick Wilderness's engaged-monster block already uses, rather than the
         // wander-derived facing the not-yet-engaged loop above uses.
         Rectangle engagedSrc{};
@@ -18663,7 +18896,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         }
         const Rectangle* srcRect = bossTex ? nullptr : (monsterSheet && monsterSheet->ok ? &engagedSrc : nullptr);
         Vector2 screenPos = WorldToScreen(am.pos, camera);
-        // Combat FX (2026-09-24): lunge on attack, red flash on hurt — same as Wilderness.
+        // Combat FX (2026-09-24): lunge on attack, red flash on hurt - same as Wilderness.
         {
             Vector2 toP = { s.dungeonPlayerPos.x - am.pos.x, s.dungeonPlayerPos.y - am.pos.y };
             float tpl = std::sqrt(toP.x * toP.x + toP.y * toP.y);
@@ -18695,7 +18928,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             DrawWorldNode(companionScreenPos, kNodeRadius * 0.5f, Color{ 63, 94, 63, 255 }, companion->name, false);
         }
     }
-    // Weapon swing / spell cast — same real Attack/Cast animation states as Wilderness
+    // Weapon swing / spell cast - same real Attack/Cast animation states as Wilderness
     // (see its call site's comment).
     ActorAnim dungeonCombatAnim = ActorAnim::Idle;
     if (s.dungeonEngaged.has_value()) {
@@ -18705,12 +18938,12 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     DrawWorldCorpses2D(s, 1, camera); // fallen monsters linger where they died
     DrawPlayerLifeState(s, WorldToScreen(s.dungeonPlayerPos, camera), s.playerFacing, prompt, 1.0f, dungeonCombatAnim);
     // Combat FX overlays (2026-09-24): flag marker, projectiles, impacts, heal
-    // aura, vigor aura, summoned fiend — drawn in world space inside the scissor.
+    // aura, vigor aura, summoned fiend - drawn in world space inside the scissor.
     Dungeon2DClickFlag(s, camera, screenW, screenH); // tap a monster to flag it
     DrawFlagMarker2D(s, camera, 1);
     DrawSpellFX2D(s, camera, 1);
     EndScissorMode();
-    } // end 2D arena branch — the touch/combat HUD below is shared with the 3D view
+    } // end 2D arena branch - the touch/combat HUD below is shared with the 3D view
 
     // --- Shared touch/combat HUD (view-independent): virtual joystick, quick
     // items / interact button, engaged spell hotbar, hotbar picker. Runs for
@@ -18720,21 +18953,21 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     if (DrawTargetButton()) CycleFlagTarget(s); // thumb-friendly G for touch
     // Live check, not wasDungeonEngaged: the fight may have ended mid-frame (2026-09-25).
     if (s.dungeonEngaged.has_value()) {
-        // Melee is fully automatic now — no interact button needed here anymore for it.
+        // Melee is fully automatic now - no interact button needed here anymore for it.
         DrawLiveCombatQuickItems(s);
     } else if (inRange && !prompt.empty() && DrawInteractButton(prompt)) {
         tryDungeonInteract();
     }
     DrawGhostStatus(s); // death animation / ghost walk banner
 
-    // Spell hotbar — only while actually engaged (2026-09-22 fix, same reason as
+    // Spell hotbar - only while actually engaged (2026-09-22 fix, same reason as
     // Wilderness: this spot overlaps the interact button used for "[E] Fight/Leave"
     // prompts when not engaged). Configuration lives on the Magic screen instead.
     // s.combatHotbar is shared across both screens either way, so a slot assigned
     // there works here too.
     // Live check, not wasDungeonEngaged: the fight may have ended mid-frame (2026-09-25).
     if (s.dungeonEngaged.has_value()) {
-        s.hotbarPickerSlot.reset(); // picker is Magic-screen UI — never carry it into a fight
+        s.hotbarPickerSlot.reset(); // picker is Magic-screen UI - never carry it into a fight
         const auto& dam = *s.dungeonEngaged;
         int tapped = DrawCombatHotbarRow(s, true, dam.spellCooldowns, dam.castLockT);
         // Keyboard hotbar (2026-09-25, combat feel): 1-5 mirror the touch slots,
@@ -18748,18 +18981,23 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             if (spellIdx >= 0 && spellIdx < (int)kSpells.size()) {
                 const Spell& sp = kSpells[spellIdx];
                 // Deny feedback (2026-09-25): a tap/key on a slot that can't fire
-                // must answer AT the button — silent swallows felt like "I can
+                // must answer AT the button - silent swallows felt like "I can
                 // only cast one spell". Red flash on the slot + floater by the
                 // player saying why, instead of nothing happening.
                 std::string deny;
+                // UO-style travel: Recall pays its own spell costs (2 reagents),
+                // not the flat live-combat 1, and needs 40 Magery to attempt.
+                int needReag = (spellIdx == kRecallSpellIdx) ? sp.reagentCost : kLiveCombatReagentCost;
                 if (dam.castLockT > 0 || dam.spellCooldowns[spellIdx] > 0) deny = "Not ready";
+                else if (spellIdx == kRecallSpellIdx && EffectiveSkill(s, &GameState::magery) < (float)sp.minSkill) deny = "Need 40 Magery";
                 else if (s.mana < sp.manaCost) deny = "No mana!";
-                else if (s.reagents < kLiveCombatReagentCost) deny = "No reagents!";
+                else if (s.reagents < needReag) deny = "No reagents!";
                 if (!deny.empty()) {
                     if (tapped < 5) s.hotbarDenyT[tapped] = kHotbarDenyTime;
                     SpawnFloatText(s, 1, s.dungeonPlayerPos, deny, kFloatDenyColor);
                     Journal(s, deny + " (" + sp.name + ")");
-                } else if (sp.type == SpellType::Offensive) tryCastSpellAtEngagedDungeonMonster(spellIdx);
+                } else if (spellIdx == kRecallSpellIdx) s.recallPickerOpen = true; // town picker; costs on select
+                else if (sp.type == SpellType::Offensive) tryCastSpellAtEngagedDungeonMonster(spellIdx);
                 else CastLiveUtilitySpell(s, spellIdx, 1);
             }
         }
@@ -18773,8 +19011,18 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     if (s.selectedDungeon.has_value()) {
         bool menuOpen = s.dungeonMenuOpen;
         Rectangle menuBtn = { 20, 56, 104, 40 };
+        // Persistent slim HUD (2026-09-25): a dungeon should never feel HUD-less -
+        // compact HP bar always visible next to MENU/LOG in the free top strip.
+        DrawUIText(TextFormat("HP: %d/%d", s.hp, s.maxHp), 236, 60, 14, kColorText);
+        {
+            Rectangle dhpBg = { 236, 80, 130, 10 };
+            DrawRectangleRec(dhpBg, Fade(BLACK, 0.3f));
+            float dhpPct = std::clamp((float)s.hp / (float)std::max(1, s.maxHp), 0.0f, 1.0f);
+            DrawRectangleRec({ dhpBg.x, dhpBg.y, dhpBg.width * dhpPct, dhpBg.height },
+                             dhpPct > 0.3f ? Color{ 63, 94, 63, 255 } : Color{ 122, 46, 46, 255 });
+        }
         if (menuOpen) {
-            Rectangle panel = { 12, 104, 336, 240 };
+            Rectangle panel = { 12, 104, 336, 328 };
             DrawRectangleRounded(panel, 0.08f, 8, Fade(kColorPageBg, 0.97f));
             DrawRectangleRoundedLines(panel, 0.08f, 8, Fade(BLACK, 0.45f));
             DrawUIText(TextFormat("HP: %d / %d   Gold: %d", s.hp, s.maxHp, s.gold),
@@ -18801,12 +19049,23 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             if (Button({ bx1, by, 152, 40 }, "Skills", tabsEnabled)) { s.screen = Screen::Skills; s.dungeonMenuOpen = false; }
             by += 48;
             if (Button({ bx0, by, 152, 40 }, "Guide", tabsEnabled)) { s.screen = Screen::Guide; s.guidePage = 0; s.dungeonMenuOpen = false; }
+            // UO-style travel (2026-09-25): magery escape. Allowed mid-fight -
+            // the 3s cast breaks on damage, so it can't blank a boss mid-swing.
+            by += 48;
+            bool canLeave = !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && s.leaveDungT < 0.0f;
+            if (Button({ 24, by, 312, 40 }, "Leave Dungeon (Magery)", canLeave)) TryStartLeaveDungeon(s);
         }
         if (Button(menuBtn, menuOpen ? "HIDE" : "MENU", true)) s.dungeonMenuOpen = !menuOpen;
+        DrawLeaveDungeonCastbar(s);
     }
-    // Event journal (2026-09-25): LOG button + L key. Collapses behind the same
-    // in-dungeon MENU behavior — no journal chrome while the HUD is collapsed.
-    DrawJournalUI(s, JournalHuntButtonRect(), !s.selectedDungeon.has_value() || s.dungeonMenuOpen);
+    // Event journal (2026-09-25): LOG button + L key. Always visible in dungeons
+    // now - hiding every HUD affordance behind the collapsed MENU read as
+    // "no hud" on the phone (Mark, 2026-09-25).
+    DrawJournalUI(s, JournalHuntButtonRect(), true);
+    // UO-style travel (2026-09-25): recall destination modal, drawn last so it
+    // floats above the world. R opens it on desktop.
+    if (IsKeyPressed(KEY_R) && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f) s.recallPickerOpen = true;
+    DrawRecallPicker(s, screenW, screenH);
 }
 
 // ---------------------------------------------------------------------
@@ -18818,7 +19077,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
 // ---------------------------------------------------------------------
 
 // Small pill-button tab strip shared by the Craft/Buy toggle below and the new
-// Provisioner screen's Buy/Sell toggle — same visual/hit-test pattern as the workshop
+// Provisioner screen's Buy/Sell toggle - same visual/hit-test pattern as the workshop
 // tabs just below (filled kColorSlate when selected, faded gray otherwise), pulled out
 // since both call sites need it now instead of just one.
 static void DrawPillTabs(const std::vector<std::string>& labels, int* selected, float x, float y, float height) {
@@ -18837,12 +19096,12 @@ static void DrawPillTabs(const std::vector<std::string>& labels, int* selected, 
 }
 
 static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
-    // Themed backdrop, keyed by which workshop is open — see DrawInteriorBackdrop.
+    // Themed backdrop, keyed by which workshop is open - see DrawInteriorBackdrop.
     DrawInteriorBackdrop(g_assets.craftWallThemedOk[s.craftBuildingTab] ? &g_assets.craftWallThemed[s.craftBuildingTab] : nullptr,
                            g_assets.craftFloorThemedOk[s.craftBuildingTab] ? &g_assets.craftFloorThemed[s.craftBuildingTab] : nullptr,
                            screenW, screenH, 110);
 
-    // Workshop tabs — all 4 craftable buildings now that Alchemy has recipes too.
+    // Workshop tabs - all 4 craftable buildings now that Alchemy has recipes too.
     int y = 116;
     float tabX = 20;
     for (int i = 0; i < 4; i++) {
@@ -18865,7 +19124,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
     const BuildingDef& b = kCraftBuildings[s.craftBuildingTab];
     bool isAlchemy = s.craftBuildingTab == 3;
 
-    // Craft/Buy toggle, added 2026-09-21 — Buy sells the same recipes pre-made (always
+    // Craft/Buy toggle, added 2026-09-21 - Buy sells the same recipes pre-made (always
     // Standard quality, gold only) instead of letting you craft your own; see
     // TryBuyPremadeItem/TryBuyPremadePotion. Reuses `b`/`isAlchemy` just resolved above.
     {
@@ -18950,7 +19209,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
     DrawInfoLine("Scroll to see more recipes.", 20, y, 13, Fade(DARKGRAY, 0.8f));
     y += 20;
 
-    if (s.craftBuildingTab == 2) { // Tailor also crafts Bandages — consumable, no skill required
+    if (s.craftBuildingTab == 2) { // Tailor also crafts Bandages - consumable, no skill required
         DrawInfoLine(TextFormat("Bandages: %d", s.bandages), 20, y, 13, kColorAccent);
         if (Button({ (float)(screenW - 160), (float)y - 4, 140, 24 }, "Craft 5 (2 leather)", s.leather >= 2))
             CraftBandages(s);
@@ -19024,9 +19283,9 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
 }
 
 // ---------------------------------------------------------------------
-// Provisioner screen (added 2026-09-21) — Buy (reagents/bandages/heal potions,
+// Provisioner screen (added 2026-09-21) - Buy (reagents/bandages/heal potions,
 // a small fixed catalog, not derived from Alchemy's recipe list) and Sell
-// (backpack items, reusing SellFromBackpack — this is also Alchemy's only
+// (backpack items, reusing SellFromBackpack - this is also Alchemy's only
 // sell path, since DrawCraftScreen's Alchemy branch returns early before
 // reaching its own backpack list). See DrawPillTabs/DrawInteriorBackdrop.
 // ---------------------------------------------------------------------
@@ -19048,7 +19307,7 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
                            screenW, screenH, 110);
 
     int y = 116;
-    DrawInfoLine("The Provisioner — everyday supplies, bought and sold.", 20, y, 13, kColorAccent);
+    DrawInfoLine("The Provisioner - everyday supplies, bought and sold.", 20, y, 13, kColorAccent);
     y += 30;
 
     {
@@ -19107,9 +19366,9 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
     EndScissorMode();
 }
 
-// Phase 3 — the Frostmere Fur Trader: fur-lined armor (Buy) and the player's
+// Phase 3 - the Frostmere Fur Trader: fur-lined armor (Buy) and the player's
 // furs at a premium, plus the standard backpack Sell tab. Reached only by
-// walking to the Fur Trader in Frostmere — no tab-bar button (same treatment
+// walking to the Fur Trader in Frostmere - no tab-bar button (same treatment
 // as the Provisioner).
 static void DrawFurTraderScreen(GameState& s, int screenW, int screenH) {
     DrawInteriorBackdrop(g_assets.provisionerWallOk ? &g_assets.provisionerWall : nullptr,
@@ -19117,7 +19376,7 @@ static void DrawFurTraderScreen(GameState& s, int screenW, int screenH) {
                            screenW, screenH, 110);
 
     int y = 116;
-    DrawInfoLine("The Fur Trader — furs bought, cold-weather gear sold.", 20, y, 13, kColorAccent);
+    DrawInfoLine("The Fur Trader - furs bought, cold-weather gear sold.", 20, y, 13, kColorAccent);
     y += 30;
 
     {
@@ -19170,7 +19429,7 @@ static void DrawFurTraderScreen(GameState& s, int screenW, int screenH) {
 }
 
 // ---------------------------------------------------------------------
-// Miners' Guild (Phase 4) — Cragmoor's guild hall. Buys the player's ore in bulk
+// Miners' Guild (Phase 4) - Cragmoor's guild hall. Buys the player's ore in bulk
 // at a premium, sells ore to crafters who don't mine, and offers supervised
 // Mining training (a gold sink on the same capped skill curve as gathering).
 // No economy rules change: ore/gold move at fixed rates, skill stays capped.
@@ -19182,19 +19441,19 @@ static void TrySellOreToGuild(GameState& s) { // Guild bulk rate: 8g per ore
     s.ore = 0;
     PlaySfx(SfxId::Coin);
 }
-static void TryBuyOreFromGuild(GameState& s) { // 12g per ore — for crafters who don't mine
+static void TryBuyOreFromGuild(GameState& s) { // 12g per ore - for crafters who don't mine
     if (s.gold < 12) { s.logLine = "Not enough gold for Guild ore (12g)."; return; }
     s.gold -= 12;
     s.ore += 1;
     s.logLine = "Bought 1 ore from the Guild for 12 gold.";
     PlaySfx(SfxId::Coin);
 }
-static void TryGuildMiningTraining(GameState& s) { // 100g — supervised Mining practice
+static void TryGuildMiningTraining(GameState& s) { // 100g - supervised Mining practice
     if (s.gold < 100) { s.logLine = "Not enough gold for Guild training (100g)."; return; }
     float gain = GainSkillCapped(s.mining, RollGatherSkillGain(s.mining), 100.0f);
     s.gold -= 100;
     s.logLine = gain > 0 ? "Guild training complete. (Mining +" + std::to_string(gain).substr(0, 4) + ")"
-                         : "Guild training complete — no further progress to make.";
+                         : "Guild training complete - no further progress to make.";
     PlaySfx(SfxId::Click);
 }
 static void DrawMinersGuildScreen(GameState& s, int screenW, int screenH) {
@@ -19203,7 +19462,7 @@ static void DrawMinersGuildScreen(GameState& s, int screenW, int screenH) {
                            screenW, screenH, 110);
 
     int y = 116;
-    DrawInfoLine("The Miners' Guild — ore bought in bulk, ore sold, miners trained.", 20, y, 13, kColorAccent);
+    DrawInfoLine("The Miners' Guild - ore bought in bulk, ore sold, miners trained.", 20, y, 13, kColorAccent);
     y += 30;
 
     {
@@ -19216,10 +19475,10 @@ static void DrawMinersGuildScreen(GameState& s, int screenW, int screenH) {
     if (s.minersGuildTab == 0) {
         DrawInfoLine(TextFormat("Gold: %d   Ore: %d", s.gold, s.ore), 20, y, 13, kColorAccent);
         y += 26;
-        DrawInfoLine("Guild ore (12g each) — for crafters who don't mine", 20, y + 6, 12, kColorText);
+        DrawInfoLine("Guild ore (12g each) - for crafters who don't mine", 20, y + 6, 12, kColorText);
         if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Buy 1 (12g)", s.gold >= 12)) TryBuyOreFromGuild(s);
         y += 36;
-        DrawInfoLine("Supervised training (100g) — Mining practice, Guild masters watching", 20, y + 6, 12, kColorText);
+        DrawInfoLine("Supervised training (100g) - Mining practice, Guild masters watching", 20, y + 6, 12, kColorText);
         if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Train (100g)", s.gold >= 100)) TryGuildMiningTraining(s);
         y += 36;
         DrawInfoLine(TextFormat("Mining: %.1f", s.mining), 20, y + 6, 12, kColorText);
@@ -19229,13 +19488,13 @@ static void DrawMinersGuildScreen(GameState& s, int screenW, int screenH) {
     // --- Sell tab: the Guild's bulk ore contract, 8g per ore, all at once ---
     DrawInfoLine(TextFormat("Ore: %d", s.ore), 20, y, 13, kColorAccent);
     y += 24;
-    DrawInfoLine("The Guild buys ore in bulk — 8g per ore, no haggling, no questions.", 20, y + 6, 12, kColorText);
+    DrawInfoLine("The Guild buys ore in bulk - 8g per ore, no haggling, no questions.", 20, y + 6, 12, kColorText);
     if (Button({ (float)(screenW - 180), (float)y, 160, 26 },
                 TextFormat("Sell all (%dg)", s.ore * 8), s.ore > 0)) TrySellOreToGuild(s);
 }
 
 // ---------------------------------------------------------------------
-// Phase 6 — the outlaw refuge black market. Reached only by walking to the
+// Phase 6 - the outlaw refuge black market. Reached only by walking to the
 // refuge as a red (notoriety > 1); no tab-bar button. Sells a forged pardon
 // (the red's way back) plus everyday supplies at a fugitive's markup.
 // ---------------------------------------------------------------------
@@ -19245,16 +19504,16 @@ static void DrawRefugeScreen(GameState& s, int screenW, int screenH) {
                            screenW, screenH, 110);
 
     int y = 116;
-    DrawInfoLine("The Outlaw Refuge — no questions asked. (Reds only.)", 20, y, 13, kColorAccent);
+    DrawInfoLine("The Outlaw Refuge - no questions asked. (Reds only.)", 20, y, 13, kColorAccent);
     y += 30;
     DrawInfoLine(TextFormat("Gold: %d   Notoriety: %.0f", s.gold, s.notoriety), 20, y, 13, kColorAccent);
     y += 30;
 
-    DrawInfoLine("Forged Pardon (500g) — wipes your notoriety clean, no questions", 20, y + 6, 12, kColorText);
+    DrawInfoLine("Forged Pardon (500g) - wipes your notoriety clean, no questions", 20, y + 6, 12, kColorText);
     if (Button({ (float)(screenW - 150), (float)y, 130, 26 }, "Buy (500g)", s.gold >= 500 && s.notoriety > 0)) {
         s.gold -= 500;
         s.notoriety = 0;
-        s.logLine = "The broker burns your wanted poster. You're nobody again — for now.";
+        s.logLine = "The broker burns your wanted poster. You're nobody again - for now.";
         PlaySfx(SfxId::Coin);
     }
     y += 36;
@@ -19284,8 +19543,8 @@ static void DrawRefugeScreen(GameState& s, int screenW, int screenH) {
 }
 
 // ---------------------------------------------------------------------
-// Magic screen: mana/reagent HUD, and a scrollable Spellcraft practice list —
-// every spell (including Debuff/Buff/Summon, shown but not castable — see
+// Magic screen: mana/reagent HUD, and a scrollable Spellcraft practice list -
+// every spell (including Debuff/Buff/Summon, shown but not castable - see
 // the "Magic / spellcasting" header note) can be practiced here risk-free,
 // spending only mana to train Magery/Eval Int/Meditation.
 // ---------------------------------------------------------------------
@@ -19308,22 +19567,41 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
     DrawUIText("Restores mana instantly, small chance of +Meditation", 180, y + 7, 13, Fade(DARKGRAY, 0.8f));
     y += 40;
 
-    // Combat hotbar setup (2026-09-22) — configuration moved here from the Wilderness/
+    // UO-style travel (2026-09-25): Recall. Works from anywhere - towns mark
+    // themselves on first visit; unmarked towns stay locked until walked to.
+    {
+        const Spell& rsp = kSpells[kRecallSpellIdx];
+        DrawUIText(TextFormat("Recall - travel to a marked town (%d Magery, %d mana, %d reagents):",
+                              rsp.minSkill, rsp.manaCost, rsp.reagentCost), 20, y, 12, kColorAccent);
+        y += 24;
+        bool recallBlocked = s.playerIsGhost || s.playerDeathAnimT > 0.0f;
+        for (int ti = 0; ti < 4; ti++) {
+            bool marked = (s.markedTowns & (1 << ti)) != 0;
+            std::string label = std::string(ActiveTownName(ti)) + (marked ? "" : " *");
+            if (Button({ 20.0f + ti * 125.0f, (float)y, 120, 30 }, label, marked && !recallBlocked))
+                TryRecallToTown(s, ti);
+        }
+        y += 34;
+        DrawUIText("* = not yet visited - walk through its gate to mark it.", 20, y, 12, Fade(DARKGRAY, 0.8f));
+        y += 22;
+    }
+
+    // Combat hotbar setup (2026-09-22) - configuration moved here from the Wilderness/
     // Hunt screens, where the same on-screen spot overlapped their interact button when
     // not engaged in a fight. This is the only place to assign slots now; casting still
     // happens on whichever live-combat screen you're actually fighting on.
-    DrawUIText("Combat hotbar — tap a slot to assign a spell for live fights:", 20, y, 12, kColorAccent);
+    DrawUIText("Combat hotbar - tap a slot to assign a spell for live fights:", 20, y, 12, kColorAccent);
     y += 26;
     // Fall-through guard (2026-09-25): Button fires on press-down, so the tap that
     // opens the picker is still "pressed" when the picker draws later in this same
-    // frame — without suppression it would instantly trigger whatever picker button
+    // frame - without suppression it would instantly trigger whatever picker button
     // sits under the finger (usually a spell row), assigning the wrong spell. Skip
     // picker press handling for exactly that frame.
     //
     // Modal (2026-09-25, hotbar duplication fix): while the picker is open the
     // hotbar row underneath must not take taps at all. The picker overlay covers
     // the row geometrically, so a tap on a spell row ALSO lands inside the hotbar
-    // slot rect beneath it — the old code re-targeted hotbarPickerSlot to that
+    // slot rect beneath it - the old code re-targeted hotbarPickerSlot to that
     // slot before assigning, spraying one spell across many slots (the "Ember
     // Burst x4" report). With the row untappable while open, a tap can only ever
     // assign to the slot the picker was opened for: one tap = one slot.
@@ -19337,7 +19615,7 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
     y += 68;
     DrawHotbarPicker(s, screenW, screenH, pickerSuppress);
 
-    DrawUIText("Spellcraft — practice trains Magery/Eval Int/Meditation, mana only:", 20, y, 12,
+    DrawUIText("Spellcraft - practice trains Magery/Eval Int/Meditation, mana only:", 20, y, 12,
                kColorAccent);
     y += 20;
 
@@ -19361,10 +19639,18 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
         if (const Texture2D* icon = SpellIcon((int)i))
             DrawIconCentered(*icon, { 32, rowY + 12 }, 26.0f, WHITE);
         DrawUIText(line.c_str(), 50, (int)rowY + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 100), rowY, 80, 24 }, "Practice", s.mana >= sp.manaCost && CanPracticeSpell(s, sp)))
+        if ((int)i == kRecallSpellIdx) {
+            // UO-style travel: Recall isn't practiced - it opens the town picker.
+            if (Button({ (float)(screenW - 100), rowY, 80, 24 }, "Recall", true))
+                s.recallPickerOpen = true;
+        } else if (Button({ (float)(screenW - 100), rowY, 80, 24 }, "Practice", s.mana >= sp.manaCost && CanPracticeSpell(s, sp)))
             TryPracticeSpell(s, (int)i);
     }
     EndScissorMode();
+    // UO-style travel (2026-09-25): recall destination modal, drawn last so it
+    // floats above the screen. R opens it on desktop.
+    if (IsKeyPressed(KEY_R) && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f) s.recallPickerOpen = true;
+    DrawRecallPicker(s, screenW, screenH);
 }
 
 // ---------------------------------------------------------------------
@@ -19392,7 +19678,7 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
         return; // wait for the attempt to resolve before showing the creature list
     }
 
-    DrawUIText("Wild creatures — attempt a tame (4s):", 20, y, 13, kColorAccent);
+    DrawUIText("Wild creatures - attempt a tame (4s):", 20, y, 13, kColorAccent);
     y += 20;
     int listTop = y;
     int listHeight = 160;
@@ -19455,7 +19741,7 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
 // ---------------------------------------------------------------------
 // Ambush & innocent-encounter panels: rendered in place of whatever screen
 // is active whenever one is pending, blocking every other action until
-// it's resolved — mirrors how the JS's ambush/innocent panels take over
+// it's resolved - mirrors how the JS's ambush/innocent panels take over
 // the current tab. Notoriety/Fame/Karma/Shaken status also lives here as
 // a shared footer line, drawn from main() on every screen.
 // ---------------------------------------------------------------------
@@ -19493,7 +19779,7 @@ static int DrawWrappedText(const std::string& text, int x, int y, int size, Colo
 }
 
 // Innocent encounter panel (2026-09-24 deep-dive): portrait, memory-aware
-// greeting, the four classic actions (Spare/Snoop/Steal/Murder — mechanics
+// greeting, the four classic actions (Spare/Snoop/Steal/Murder - mechanics
 // unchanged), plus Silas's shop, request listen/hand-over, and a farewell beat
 // after Spare or a completed fetch so the thanks/rumor actually gets read.
 static void DrawInnocentPanel(GameState& s, int screenW) {
@@ -19501,7 +19787,7 @@ static void DrawInnocentPanel(GameState& s, int screenW) {
     int id = std::clamp(enc.identity, 0, 3);
     const InnocentDef& def = kInnocentDefs[id];
 
-    DrawUIText((InnocentName(id) + " — " + def.role).c_str(), 20, 140, 20, kColorHeading);
+    DrawUIText((InnocentName(id) + " - " + def.role).c_str(), 20, 140, 20, kColorHeading);
     if (g_assets.innocentTexOk[id]) {
         const Texture2D& tex = g_assets.innocentTex[id];
         float hgt = 150.0f, wdt = hgt * (float)tex.width / (float)tex.height;
@@ -19517,13 +19803,13 @@ static void DrawInnocentPanel(GameState& s, int screenW) {
     }
 
     if (enc.shopOpen) { // --- Silas's traveling shop ---
-        DrawUIText("Silas's pack — road prices, friend.", 20, 172, 13, kColorAccent);
+        DrawUIText("Silas's pack - road prices, friend.", 20, 172, 13, kColorAccent);
         DrawUIText(("Your gold: " + std::to_string(s.gold)).c_str(), screenW - 220, 172, 13, kColorText);
         int y = 200;
         for (int si = 0; si < 5; si++) {
             int price = MerchantPrice(s, si);
             std::string row = std::string(kMerchantStockDefs[si].label) + "  x" +
-                              std::to_string(s.merchantStock[si]) + "  —  " +
+                              std::to_string(s.merchantStock[si]) + "  -  " +
                               std::to_string(price) + "g";
             DrawUIText(row.c_str(), 20, y + 6, 13, kColorText);
             if (Button({ (float)screenW - 140, (float)y, 120, 26 },
@@ -19543,7 +19829,7 @@ static void DrawInnocentPanel(GameState& s, int screenW) {
             y += 30;
         }
         if (s.backpack.size() > 4)
-            DrawUIText("(+ more in your pack — the Provisioner buys in bulk.)", 20, y, 12, Fade(DARKGRAY, 0.8f));
+            DrawUIText("(+ more in your pack - the Provisioner buys in bulk.)", 20, y, 12, Fade(DARKGRAY, 0.8f));
         if (Button({ 20, (float)(y + 24), 120, 32 }, "Back", true)) enc.shopOpen = false;
         return;
     }
@@ -19639,7 +19925,7 @@ static void DrawNotorietyFooter(const GameState& s, int screenW, int screenH) {
 
 static void DrawBankScreen(GameState& s, int screenW, int screenH) {
     int y = 116;
-    DrawUIText(TextFormat("The Vaultkeep — Bank gold: %d", s.bankGold), 20, y, 15, kColorText);
+    DrawUIText(TextFormat("The Vaultkeep - Bank gold: %d", s.bankGold), 20, y, 15, kColorText);
     y += 22;
 
     if (Button({ 20, (float)y, 70, 26 }, "Dep 10g", s.gold >= 10)) DepositGold(s, 10);
@@ -19692,7 +19978,7 @@ static void DrawBankScreen(GameState& s, int screenW, int screenH) {
     CheckWeeklyReset(s);
     long long secondsLeft = std::max(0LL, (s.weekStartEpoch + kWeekSeconds) - (long long)std::time(nullptr));
     long long daysLeft = secondsLeft / 86400;
-    DrawUIText(TextFormat("The Hearthmoot — resets in ~%lld day%s", daysLeft, daysLeft == 1 ? "" : "s"),
+    DrawUIText(TextFormat("The Hearthmoot - resets in ~%lld day%s", daysLeft, daysLeft == 1 ? "" : "s"),
                20, y, 13, kColorAccent);
     y += 20;
     if (HasWeeklyBlessing(s))
@@ -19711,18 +19997,18 @@ static void DrawBankScreen(GameState& s, int screenW, int screenH) {
 }
 
 // ---------------------------------------------------------------------
-// House screen — ported from the JS's House panel (HOUSE_TIERS/HOUSE_HUES/
+// House screen - ported from the JS's House panel (HOUSE_TIERS/HOUSE_HUES/
 // HOME_MODULE_DEF/HOME_MODULE_LEVELS, see those tables for the numbers and the
 // porting-history comment above kHouseTiers). Phase 1 of a bigger housing feature
 // Mark wants eventually (freeform decoration/placement, well beyond what the JS ever
-// speced) — this slice is the faithful port: tiers grow backpack capacity, hues/name
+// speced) - this slice is the faithful port: tiers grow backpack capacity, hues/name
 // are the cosmetic angle, workshop wings are the "hub" that gives a real reason to
 // come home instead of just visiting town.
 // ---------------------------------------------------------------------
 
-// Simple single-line text entry — captures typed characters and Backspace every frame
+// Simple single-line text entry - captures typed characters and Backspace every frame
 // this is called, up to maxLen. No focus/click management since only two screens
-// (Character, House) ever call this, each on its own field — it's just "always live"
+// (Character, House) ever call this, each on its own field - it's just "always live"
 // whenever that screen is showing.
 static void UpdateTextInput(std::string& text, size_t maxLen) {
     int key = GetCharPressed();
@@ -19738,10 +20024,10 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     const HouseTier& tier = kHouseTiers[s.houseTierIdx];
 
     int y = 116;
-    DrawUIText(("Your House — " + tier.name).c_str(), 20, y, 18, kColorHeading);
+    DrawUIText(("Your House - " + tier.name).c_str(), 20, y, 18, kColorHeading);
     y += 24;
 
-    // Name entry — same always-live pattern as the Character screen's name field.
+    // Name entry - same always-live pattern as the Character screen's name field.
     Rectangle nameBox = { 20, (float)y, (float)(screenW - 40), 26 };
     DrawRectangleRec(nameBox, Fade(WHITE, 0.6f));
     DrawRectangleRoundedLines(nameBox, 0.15f, 4, Fade(BLACK, 0.4f));
@@ -19763,7 +20049,7 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     DrawUIText("Homestead:", 20, y, 13, kColorAccent);
     y += 18;
     if (s.housePlotIdx < 0) {
-        DrawUIText("No plot claimed. Walk the wilderness — plots with", 20, y, 12, kColorText);
+        DrawUIText("No plot claimed. Walk the wilderness - plots with", 20, y, 12, kColorText);
         y += 16;
         DrawUIText("for-sale signs can be bought (one per adventurer).", 20, y, 12, kColorText);
         y += 20;
@@ -19773,8 +20059,8 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
                     std::to_string(hp.cells) + ")").c_str(), 20, y, 12, kColorText);
         y += 16;
         bool hasDoor = HouseHasDoor(s.houseLayout, hp.cells);
-        DrawUIText(hasDoor ? "Status: built — press E at your door to go inside."
-                           : "Status: no house yet — press E at your plot to design it.",
+        DrawUIText(hasDoor ? "Status: built - press E at your door to go inside."
+                           : "Status: no house yet - press E at your plot to design it.",
                    20, y, 12, kColorText);
         y += 20;
         bool ghostBlock = s.playerIsGhost || s.playerDeathAnimT > 0.0f;
@@ -19786,7 +20072,7 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
             }
         } else {
             if (Button({ 20, (float)y, 170, 26 }, "Recall to Homestead", !ghostBlock)) {
-                CancelEscort(s, "parts ways at the hearth — the escort is broken.");
+                CancelEscort(s, "parts ways at the hearth - the escort is broken.");
                 s.screen = Screen::Wilderness;
                 s.wildernessPlayerPos = HouseDoorPos(hp, s.houseLayout);
                 s.houseDesignerOpen = false;
@@ -19829,8 +20115,8 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
         y += 32;
     }
 
-    // --- Workshop wings (scrollable — 4 modules, each with its recipe list once built) ---
-    DrawUIText(TextFormat("Home Workshop — %d/%d wings built (each stays one tier behind town)",
+    // --- Workshop wings (scrollable - 4 modules, each with its recipe list once built) ---
+    DrawUIText(TextFormat("Home Workshop - %d/%d wings built (each stays one tier behind town)",
                             BuiltHouseModuleCount(s), tier.moduleSlots), 20, y, 12, kColorAccent);
     y += 20;
     if (tier.moduleSlots <= 0) {
@@ -19900,7 +20186,7 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
 // ---------------------------------------------------------------------
 // Skills screen (the Echo system): the 700-point active-skill budget bar,
 // and every capped skill with its value and an Active/Bench toggle.
-// Benching frees budget for something else without losing any progress —
+// Benching frees budget for something else without losing any progress -
 // mirrors setSkillActive()'s all-or-nothing per-skill toggle.
 // ---------------------------------------------------------------------
 
@@ -19916,7 +20202,7 @@ static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
     DrawRectangleRec({ budgetBar.x, budgetBar.y, budgetBar.width * pct, budgetBar.height },
                        activeTotal >= kTotalSkillCap ? kColorSlate : Color{ 63, 94, 63, 255 });
     y += 24;
-    DrawUIText("Every skill trains freely to its own cap regardless of Active/Benched —", 20, y, 13, Fade(DARKGRAY, 0.8f));
+    DrawUIText("Every skill trains freely to its own cap regardless of Active/Benched -", 20, y, 13, Fade(DARKGRAY, 0.8f));
     y += 14;
     DrawUIText("benching just frees budget for something else without losing progress.", 20, y, 13, Fade(DARKGRAY, 0.8f));
     y += 20;
@@ -19944,8 +20230,8 @@ static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
 }
 
 // ---------------------------------------------------------------------
-// Character screen — the page missing from the original port. Name entry,
-// the title/vocation display, HP/Mana (Stamina is not shown — there's no
+// Character screen - the page missing from the original port. Name entry,
+// the title/vocation display, HP/Mana (Stamina is not shown - there's no
 // stamina stat in this scaffold, flagged back in the Magic section),
 // STR/DEX/INT, the 8-slot equipment grid, weapon power/defense totals,
 // core resources, and the real "Use Bandage" action. Mirrors the JS's
@@ -19954,7 +20240,7 @@ static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
 // stamina stat.
 // ---------------------------------------------------------------------
 
-// Dotted horizontal rule — used by the Character screen's ornate equipment card to
+// Dotted horizontal rule - used by the Character screen's ornate equipment card to
 // separate rows (2026-09-23 redesign) instead of a solid line, matching the reference
 // layout Mark supplied. Plain small filled rectangles rather than a dashed line style
 // (raylib has no built-in dashed-line primitive), spaced by eye to read as "dotted" at
@@ -19971,9 +20257,9 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     DrawUIText(("Character  " + TitleFor(overallSkill)).c_str(), 20, y, 18, kColorHeading);
     y += 24;
 
-    // Name entry — this is the only text field in the whole game (no click-to-focus:
+    // Name entry - this is the only text field in the whole game (no click-to-focus:
     // typing works any time this screen is open), which wasn't obvious with no visible
-    // cursor — a blinking caret after the text makes it read as "live" the way a normal
+    // cursor - a blinking caret after the text makes it read as "live" the way a normal
     // text box would, instead of looking like inert label text.
     Rectangle nameBox = { 20, (float)y, (float)(screenW - 40), 26 };
     DrawRectangleRec(nameBox, Fade(WHITE, 0.6f));
@@ -19987,7 +20273,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     }
     y += 32;
 
-    // Subtitle — bumped from plain DARKGRAY to the accent color/a slightly bigger size
+    // Subtitle - bumped from plain DARKGRAY to the accent color/a slightly bigger size
     // so naming a character reads as more consequential than inert label text (2026-09-22
     // UI polish pass; the name box itself already had a bordered card, just this line
     // was flat).
@@ -20003,20 +20289,20 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     }
     y += 6;
 
-    // Resources (2026-09-23 redesign) — Mark asked for gold/resources to be listed on
+    // Resources (2026-09-23 redesign) - Mark asked for gold/resources to be listed on
     // this page again (they were trimmed to just Reagents in the 2026-09-22 pass, on
     // the reasoning that Gold/Wood/Ore/Leather already show in the top bar on every
-    // screen — that reasoning still holds, this is deliberate duplication he asked for
+    // screen - that reasoning still holds, this is deliberate duplication he asked for
     // back, not a regression of that earlier decision).
     DrawUIText(TextFormat("Gold: %d   Wood: %d   Ore: %d   Leather: %d   Fish: %d   Reagents: %d",
                             s.gold, s.wood, s.ore, s.leather, s.fish, s.reagents), 20, y, 13, kColorAccent);
     y += 26;
 
-    // Equipment card redesign (2026-09-23) — Mark supplied a reference layout (ornate
+    // Equipment card redesign (2026-09-23) - Mark supplied a reference layout (ornate
     // parchment/wood-frame card, single-column icon+label+value rows, a "DERIVED STATS"
     // footer) and asked to match its look exactly, replacing the paperdoll + 2-column
     // equipment grid this screen used before. Colors are local to this one card on
-    // purpose — the rest of the game deliberately moved off a gold/parchment palette
+    // purpose - the rest of the game deliberately moved off a gold/parchment palette
     // some time ago (see the kColorText/kColorPanelBg block's own comment on that), so
     // this is a one-screen departure, not a reversion of that earlier decision, unless
     // asked to spread it further.
@@ -20067,7 +20353,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
         cy += 16;
 
         // One row per equipment slot: icon thumbnail, then "LABEL: item name" (or
-        // "- Empty -"), a dotted rule beneath each — DrawItemIcon is the exact same
+        // "- Empty -"), a dotted rule beneath each - DrawItemIcon is the exact same
         // per-item icon lookup the backpack list below already uses.
         for (const EquipRow& row : rows) {
             const std::optional<Item>& item = *row.item;
@@ -20085,10 +20371,10 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
             DrawDottedLineH(card.x + 20, card.x + card.width - 20, (float)cy - 8, Fade(kWoodBorder, 0.35f));
         }
 
-        // Derived stats footer — Weapon Power and Total Defense are real, computed
+        // Derived stats footer - Weapon Power and Total Defense are real, computed
         // stats (CombatPower/TotalDefense, same formulas used everywhere else in the
         // game); the reference layout's Load/Weight/set-bonus line was left out on
-        // purpose rather than faked — this game has no encumbrance or item-set-bonus
+        // purpose rather than faked - this game has no encumbrance or item-set-bonus
         // system to report a real number for, and showing invented values that don't
         // affect anything would be misleading, not just decorative.
         cy += 12;
@@ -20108,10 +20394,10 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
         y += (int)card.height + 12;
     }
 
-    // Backpack — was previously only visible on the Craft screen (where Sell also makes
+    // Backpack - was previously only visible on the Craft screen (where Sell also makes
     // sense); shown here too as a quick "what am I carrying" reference, with just Equip
     // (this page is about the character, not the shop). Shares s.backpackScroll with the
-    // Craft screen's list — one scroll-position field, not worth a second for this.
+    // Craft screen's list - one scroll-position field, not worth a second for this.
     DrawUIText(TextFormat("Backpack (%d/%d)", (int)s.backpack.size(), BackpackCap(s)), 20, y, 13, kColorAccent);
     y += 18;
     int packTop = y;
@@ -20136,7 +20422,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
 }
 
 // Hoisted out of main() so UpdateDrawFrame() (a plain function pointer, called every
-// frame either by the desktop while-loop below or by emscripten_set_main_loop on web —
+// frame either by the desktop while-loop below or by emscripten_set_main_loop on web -
 // see main()) can reach them; there's exactly one of each for the process's lifetime
 // either way, so file-scope statics cost nothing bar naming a global.
 static GameState g_state;
@@ -20145,15 +20431,15 @@ static const int kScreenH = 900;
 static float g_autosaveTimer = 0.0f;
 static float g_resetArmedTimer = 0.0f; // >0 while the Reset button is armed, waiting for a confirm click
 
-// Desktop-only "zoom the whole view" — Mark asked for the game to look ~10-15% bigger.
+// Desktop-only "zoom the whole view" - Mark asked for the game to look ~10-15% bigger.
 // Every draw call in this file is an absolute pixel coordinate tuned for the fixed
 // 540x900 internal resolution, so scaling *that* directly would mean re-tuning hundreds
 // of Rectangle/font-size constants. Instead: keep every existing draw call completely
 // untouched, rendering into a RenderTexture2D still sized 540x900, then present that
-// texture scaled up to fill a proportionally bigger actual window — see UpdateDrawFrame
+// texture scaled up to fill a proportionally bigger actual window - see UpdateDrawFrame
 // and main(). SetMouseScale compensates so GetMousePosition()/Button() hit-tests keep
 // seeing the original 540x900 coordinate space, unaware anything changed.
-// **Not applied to the web build** — the canvas there is already independently scaled
+// **Not applied to the web build** - the canvas there is already independently scaled
 // to fit the browser viewport by shell.html's CSS (unrelated to this constant), and
 // raylib's Emscripten layer has its own canvas-buffer-to-CSS-size mouse mapping; adding
 // SetMouseScale on top of that risked double-compensating and breaking tap targets in a
@@ -20165,16 +20451,16 @@ static RenderTexture2D g_zoomTarget;
 #endif
 
 // One frame's worth of update+draw. Split out of main() so it can be handed to
-// emscripten_set_main_loop on web — a blocking `while(!WindowShouldClose())` loop only
+// emscripten_set_main_loop on web - a blocking `while(!WindowShouldClose())` loop only
 // "works" there via -s ASYNCIFY around WindowShouldClose()'s internal emscripten_sleep(),
 // which turned out to be fragile (it hung indefinitely partway through startup once this
-// build grew past some threshold) — emscripten_set_main_loop is the robust, standard
+// build grew past some threshold) - emscripten_set_main_loop is the robust, standard
 // pattern raylib's own web examples use instead, with the browser's requestAnimationFrame
 // driving each call rather than a C++-side blocking sleep.
 static void UpdateDrawFrame() {
 #ifdef __EMSCRIPTEN__
     // Hold off on everything else until the async IndexedDB load (kicked off by
-    // JS_InitPersistence in main()) has actually landed — reading the save file before
+    // JS_InitPersistence in main()) has actually landed - reading the save file before
     // then would see an empty directory and silently start a fresh game even when a
     // real save exists on this device. Desktop has no equivalent wait (LoadGame already
     // ran synchronously in main(), before the loop even started, since its filesystem
@@ -20238,7 +20524,7 @@ static void UpdateDrawFrame() {
                 std::string next = NextAutoGatherType(state);
                 if (next.empty()) {
                     state.autoGather = false;
-                    state.logLine = "Auto-gather complete — Mining and Lumberjacking both reached 100.";
+                    state.logLine = "Auto-gather complete - Mining and Lumberjacking both reached 100.";
                 } else {
                     TryStartGather(state, next);
                 }
@@ -20310,7 +20596,7 @@ static void UpdateDrawFrame() {
         if (state.screen == Screen::Town && state.town3DView) Town3DShadowPass(state);
         else if (state.screen == Screen::Wilderness && state.wild3DView) {
             // Frustum cull for the shadow pass (Phase 1 deferred item): reuse the
-            // damped main camera — calling Wild3DGetCam twice a frame just eases
+            // damped main camera - calling Wild3DGetCam twice a frame just eases
             // the damping a touch faster, visually negligible.
             Town3DCam wildCull = Wild3DGetCam(state, screenW, screenH);
             Wild3DShadowPass(state, &wildCull);
@@ -20328,7 +20614,7 @@ static void UpdateDrawFrame() {
         DrawUIText("Your power comes from what you build", 20, 40, 13, DARKGRAY);
 
         // Reset (top-right corner): first click arms it, a second click within 3s
-        // confirms — a small safety net the JS's single-click reset link didn't have.
+        // confirms - a small safety net the JS's single-click reset link didn't have.
         bool resetArmed = resetArmedTimer > 0.0f;
         std::string resetLabel = resetArmed ? "Confirm?" : "Reset";
         if (Button({ (float)(screenW - 78), 16, 58, 22 }, resetLabel, !encounterPending && !state.combat.has_value())) {
@@ -20341,7 +20627,7 @@ static void UpdateDrawFrame() {
         // tail) so the dungeon gets nearly the full screen in 2D and 3D.
         bool inDungeon = (state.screen == Screen::Hunt && state.selectedDungeon.has_value());
         if (!inDungeon) {
-        // Resource HUD (mirrors .resources pill row in the HTML) — shown on all screens
+        // Resource HUD (mirrors .resources pill row in the HTML) - shown on all screens
         std::string hud = TextFormat("Gold: %d   Wood: %d   Ore: %d   Leather: %d   Fish: %d   Furs: %d   Ice: %d",
                                        state.gold, state.wood, state.ore, state.leather, state.fish, state.furs, state.ice);
         DrawUIText(hud.c_str(), 20, 60, 15, kColorText);
@@ -20350,14 +20636,14 @@ static void UpdateDrawFrame() {
         // there are 9 of them.
         bool tabsEnabled = !state.combat.has_value() && !encounterPending &&
                              !state.playerIsGhost && state.playerDeathAnimT <= 0.0f; // ghosts can't tab-travel
-        // Hunt tab hidden 2026-09-23 at Mark's request — now that every dungeon has a
+        // Hunt tab hidden 2026-09-23 at Mark's request - now that every dungeon has a
         // real Wilderness entrance you can walk to (see kWildernessDungeonEntrances),
         // the tab was just a redundant "teleport straight to a dungeon picker"
         // shortcut, and looting/skinning already work identically in live Wilderness
         // combat (EndWildMonsterWin already pushes a corpse with real leather, same as
         // dungeons). The Hunt *screen* itself is untouched and still fully reachable by
         // walking into a Wilderness dungeon entrance (tryEnterDungeon still sets
-        // Screen::Hunt) — only this tab-bar shortcut is gone. Single switch, not a
+        // Screen::Hunt) - only this tab-bar shortcut is gone. Single switch, not a
         // deletion, same pattern as kAmbushSystemEnabled/kBloodstainedRoadEnabled.
         // Remaining tabs shift left to fill the gap (via `tabX` not advancing past
         // Hunt's slot) rather than leaving an empty space in the bar.
@@ -20416,27 +20702,27 @@ static void UpdateDrawFrame() {
         } else if (state.screen == Screen::Guide) {
             DrawGuideScreen(state, screenW); // newbie walkthrough, reopenable anytime
         } else if (state.screen == Screen::Provisioner) {
-            // No tab-bar button and not in the Tab-key cycle below — same treatment as
+            // No tab-bar button and not in the Tab-key cycle below - same treatment as
             // Wilderness, reached only by walking to the building (see DrawTownScreen's
             // AmenityLink for Provisioner). The tab bar's 9 buttons already fill the row.
             DrawProvisionerScreen(state, screenW, screenH);
         } else if (state.screen == Screen::FurTrader) {
-            // Phase 3 — same treatment as Provisioner: reached only by walking to the
+            // Phase 3 - same treatment as Provisioner: reached only by walking to the
             // Fur Trader in Frostmere.
             DrawFurTraderScreen(state, screenW, screenH);
         } else if (state.screen == Screen::MinersGuild) {
-            // Phase 4 — same treatment as Provisioner/FurTrader: reached only by
+            // Phase 4 - same treatment as Provisioner/FurTrader: reached only by
             // walking to the Miners' Guild in Cragmoor.
             DrawMinersGuildScreen(state, screenW, screenH);
         } else if (state.screen == Screen::Refuge) {
-            // Phase 6 — reached only by walking to the outlaw refuge as a red.
+            // Phase 6 - reached only by walking to the outlaw refuge as a red.
             DrawRefugeScreen(state, screenW, screenH);
         } else {
             DrawWildernessScreen(state, screenW, screenH);
         }
 
         // Newbie guide (2026-09-25): on a fresh save's first visit to town or
-        // the wilderness — and only then — open the walkthrough overlay. Never
+        // the wilderness - and only then - open the walkthrough overlay. Never
         // inside dungeons, never mid-fight; a fresh save that somehow opens
         // mid-dungeon simply defers until town/wilderness.
         bool guideHome = (state.screen == Screen::Town || state.screen == Screen::Wilderness);
@@ -20448,8 +20734,16 @@ static void UpdateDrawFrame() {
             state.guidePage = 0;
         }
         if (state.guideOpen && guideHome) DrawGuideOverlay(state);
+        // UO-style travel (2026-09-25): arriving in a town marks it as a recall
+        // destination. selectedTown only changes on real arrivals (gates, tabs,
+        // resurrect, recall), so this one hook catches every path - no per-gate
+        // calls needed.
+        if ((state.screen == Screen::Town) && state.selectedTown != state.lastTownMarkedIdx) {
+            MarkTownVisited(state, state.selectedTown);
+            state.lastTownMarkedIdx = state.selectedTown;
+        }
 
-        // Log line (mirrors the JS log panel) — shown on all screens
+        // Log line (mirrors the JS log panel) - shown on all screens
         DrawUIText(state.logLine.c_str(), 20, screenH - 30, 13, Color{ 90, 74, 52, 255 });
         DrawNotorietyFooter(state, screenW, screenH);
 
@@ -20457,7 +20751,7 @@ static void UpdateDrawFrame() {
         EndTextureMode();
         BeginDrawing();
         ClearBackground(BLACK); // letterbox color; shouldn't actually show since the aspect ratio matches exactly
-        // RenderTexture2D textures are Y-flipped relative to a normal draw — negative
+        // RenderTexture2D textures are Y-flipped relative to a normal draw - negative
         // source height corrects it (the standard raylib render-to-texture pattern).
         DrawTexturePro(g_zoomTarget.texture,
                          { 0, 0, (float)kScreenW, -(float)kScreenH },
@@ -20557,22 +20851,22 @@ int main() {
     // 2026-09-24: raylib's desktop build (RL_CULL_DISTANCE_FAR=4000) and the
     // web/em++ build (raylib-src default 1000) disagreed on the far clip
     // plane, so the 3D Wilderness sky/scatter got silently far-clipped on web
-    // only — a bug the desktop sandbox structurally cannot reproduce.
-    // Setting an explicit, platform-independent far plane here — comfortably
-    // past every 3D view's farthest zoom/sky radius — removes the discrepancy
+    // only - a bug the desktop sandbox structurally cannot reproduce.
+    // Setting an explicit, platform-independent far plane here - comfortably
+    // past every 3D view's farthest zoom/sky radius - removes the discrepancy
     // for good.
     rlSetClipPlanes(0.05, 5000.0);
     InitSfx(); // audio device + synthesized SFX bank (missing files stay silent)
-    LoadGameAssets(); // must come after InitWindow — texture loading needs a graphics context
+    LoadGameAssets(); // must come after InitWindow - texture loading needs a graphics context
 
 #ifdef __EMSCRIPTEN__
     // Kick off the async IndexedDB mount+load now; LoadGame itself is deferred to
     // inside UpdateDrawFrame until JS_PersistReady() confirms the load landed, rather
-    // than called here synchronously — see the comments above kSaveFilePath and at the
+    // than called here synchronously - see the comments above kSaveFilePath and at the
     // top of UpdateDrawFrame.
     JS_InitPersistence();
     // The browser's requestAnimationFrame drives each call; no blocking loop, no
-    // WindowShouldClose() polling, no ASYNCIFY needed — see UpdateDrawFrame's comment.
+    // WindowShouldClose() polling, no ASYNCIFY needed - see UpdateDrawFrame's comment.
     emscripten_set_main_loop(UpdateDrawFrame, 0, 1);
 #else
     bool hadSave = LoadGame(g_state); // applies offline Auto-Gather catch-up internally
