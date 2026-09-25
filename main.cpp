@@ -396,21 +396,74 @@ static const int kHouseFloorCost = 5;
 static const int kHouseWallCost = 15;
 static const int kHouseDoorCost = 50;
 static const int kHouseChestCap = 60;
-struct HousePlot { Vector2 pos; int cells; int price; const char* name; };
+
+// ---------------------------------------------------------------------------
+// Phase 0: region scaffolding (2026-09-25) — see region-build-plan.md.
+// The wilderness is divided into four regions. RegionAt() derives a region from
+// any wilderness position; every town gate, dungeon entrance, monster spot,
+// gather node, house plot, and innocent spawn carries an explicit RegionId tag
+// initialized from it, so later phases can reassign tags without touching the
+// boundary math. Boundaries: north of y=700 is Frostwastes, east of x=1950 is
+// the Salt Coast corridor, west of x=500 is the Stonepeaks; the rest is
+// Whisperwood (the central heartland).
+enum class RegionId { Whisperwood, SaltCoast, Frostwastes, Stonepeaks };
+static constexpr RegionId RegionAt(Vector2 p) {
+    if (p.y < 700.0f) return RegionId::Frostwastes;  // northern reaches (snow in Phase 3)
+    if (p.x > 1950.0f) return RegionId::SaltCoast;   // Saltmere corridor (coast in Phase 2)
+    if (p.x < 500.0f) return RegionId::Stonepeaks;    // Dragontooth mountains (peaks in Phase 4)
+    return RegionId::Whisperwood;                    // central heartland
+}
+static const char* RegionName(RegionId r) {
+    switch (r) {
+        case RegionId::Whisperwood: return "Whisperwood";
+        case RegionId::SaltCoast:   return "Salt Coast";
+        case RegionId::Frostwastes: return "Frostwastes";
+        case RegionId::Stonepeaks:  return "Stonepeaks";
+    }
+    return "Whisperwood";
+}
+// King's Road — the trade road between the two towns, defined as waypoints so
+// later phases can extend it north (Frostmere) and east (Cragmoor). Both the 2D
+// and 3D views draw it from this one table.
+static const std::array<Vector2, 6> kKingsRoadWaypoints = {{
+    {900, 1750},   // Town return gate
+    {1400, 1710},  // bend south of the Whisper Crypt approach
+    {1900, 1680},  // Whisperwood edge
+    {2300, 1720},  // Saltmere corridor
+    {2600, 1700},  // Saltmere corridor
+    {2900, 1750},  // Saltmere gate
+}};
+// Distance from p to the nearest King's Road segment — reserved for Phase 6
+// patrol logic; Phase 0 keeps it for road-proximity checks.
+static float DistToKingsRoad(Vector2 p) {
+    float best = 1e9f;
+    for (size_t i = 0; i + 1 < kKingsRoadWaypoints.size(); i++) {
+        Vector2 a = kKingsRoadWaypoints[i], b = kKingsRoadWaypoints[i + 1];
+        Vector2 ab = { b.x - a.x, b.y - a.y };
+        float len2 = ab.x * ab.x + ab.y * ab.y;
+        float t = len2 > 0.0f ? ((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / len2 : 0.0f;
+        t = std::clamp(t, 0.0f, 1.0f);
+        float dx = p.x - (a.x + ab.x * t), dy = p.y - (a.y + ab.y * t);
+        float d = std::sqrt(dx * dx + dy * dy);
+        if (d < best) best = d;
+    }
+    return best;
+}
+struct HousePlot { Vector2 pos; int cells; int price; const char* name; RegionId region; };
 // Positions were hand-picked against kWildernessMonsterSpots, kWildernessDungeonEntrances,
 // the two town gates, and kWildernessGatherNodes (all >= ~250 units away except a few
 // gather nodes at >= 120, which read fine next to a house).
 static const std::array<HousePlot, 10> kHousePlots = {{
-    {{450, 600},     7, 2500, "West Woods Plot"},
-    {{1150, 420},    7, 2500, "Northfield Plot"},
-    {{1750, 1150},   9, 5000, "Eastmarch Plot"},
-    {{600, 1550},    9, 5000, "Southfen Plot"},
-    {{800, 2150},    7, 2500, "Far South Plot"},
-    {{1600, 2150},   9, 5000, "Southgate Plot"},
-    {{2150, 1200},   7, 2500, "Highridge Plot"},
-    {{2450, 2150},   9, 5000, "Duskmere Plot"},
-    {{2650, 900},    7, 2500, "Far East Plot"},
-    {{1950, 400},   12, 9000, "Kingswood Plot"},
+    {{450, 600},     7, 2500, "West Woods Plot",  RegionAt({450, 600})},
+    {{1150, 420},    7, 2500, "Northfield Plot",  RegionAt({1150, 420})},
+    {{1750, 1150},   9, 5000, "Eastmarch Plot",   RegionAt({1750, 1150})},
+    {{600, 1550},    9, 5000, "Southfen Plot",    RegionAt({600, 1550})},
+    {{800, 2150},    7, 2500, "Far South Plot",   RegionAt({800, 2150})},
+    {{1600, 2150},   9, 5000, "Southgate Plot",   RegionAt({1600, 2150})},
+    {{2150, 1200},   7, 2500, "Highridge Plot",   RegionAt({2150, 1200})},
+    {{2450, 2150},   9, 5000, "Duskmere Plot",    RegionAt({2450, 2150})},
+    {{2650, 900},    7, 2500, "Far East Plot",    RegionAt({2650, 900})},
+    {{1950, 400},   12, 9000, "Kingswood Plot",   RegionAt({1950, 400})},
 }};
 // Layout helpers. The layout string always has cells*cells chars for the owned plot.
 static std::string HouseEmptyLayout(int cells) { return std::string((size_t)cells * cells, '.'); }
@@ -935,6 +988,7 @@ struct GameState {
     std::string houseLayout;        // row-major layout string ('.', 'F', 'W', 'D'); see helpers above
     std::vector<Item> houseChest;   // persistent storage chest contents
     bool hearthBound = false;       // hearth recall bound to the owned plot
+    bool minimapOpen = true;        // wilderness minimap widget (M toggles; transient, not saved)
     bool wildHouseMigrated = false; // one-time town-house retirement migration ran
     bool interiorFromWild = false;  // ExitInterior returns to the wilderness house plot
     bool houseDesignerOpen = false; // grid designer overlay active on the wilderness screen
@@ -1289,6 +1343,7 @@ struct GameState {
         bool isBoss = false;
     };
     std::optional<FlagTarget> flagTarget;
+    float disengageGraceT = 0.0f; // (2026-09-25) post-disengage window where contact auto-engage is suppressed, so clicking empty ground to break away doesn't instantly re-engage while the monster is still standing on you. Transient, not saved.
     struct SpellProjectile {
         bool active = false;
         int zone = 0;              // 0 wilderness, 1 dungeon
@@ -3749,7 +3804,13 @@ static float AmbushNotorietyMultiplier(NotorietyTier t) {
 }
 
 static bool IsShaken(const GameState& s) { return s.shaken > 0; }
-static void ApplyShaken(GameState& s) { s.shaken = 3; }
+// Mark's call (2026-09-25): only criminals and murderers suffer Shaken on death.
+// Innocents who die (e.g. to monsters) skip it entirely and go straight to
+// ghost/corpse recovery, so they can get back after it right away.
+static void ApplyShaken(GameState& s) {
+    if (GetNotorietyTier(s) == NotorietyTier::Innocent) return;
+    s.shaken = 3;
+}
 static void DecrementShaken(GameState& s) {
     if (s.shaken > 0) {
         s.shaken -= 1;
@@ -6131,15 +6192,15 @@ static const Vector2 kWildernessGatePos = { 500, 900 };
 // in kWildCreatures but never exposed) got closed properly: Mark generated all 6 with
 // Gemini ("Medieval Animal Set"), so every kWildCreatures entry now has real art and a
 // spot below, not just the original 5.
-struct WildernessGatherNode { Vector2 pos; std::string resource; }; // "wood" or "ore"
+struct WildernessGatherNode { Vector2 pos; std::string resource; RegionId region; }; // "wood" or "ore"
 static const std::array<WildernessGatherNode, 12> kWildernessGatherNodes = {{
-    { {500, 1400}, "wood" }, { {1300, 1400}, "wood" }, { {900, 1100}, "wood" },
-    { {400, 900}, "ore" },   { {1400, 900}, "ore" },   { {900, 600}, "ore" },
-    { {1700, 150}, "wood" }, { {1650, 450}, "wood" }, // Dense Forest zone (NE)
-    { {250, 300}, "ore" },   { {300, 1300}, "ore" },   // Dragontooth mountain zone (W)
+    { {500, 1400}, "wood", RegionAt({500, 1400}) }, { {1300, 1400}, "wood", RegionAt({1300, 1400}) }, { {900, 1100}, "wood", RegionAt({900, 1100}) },
+    { {400, 900}, "ore", RegionAt({400, 900}) },   { {1400, 900}, "ore", RegionAt({1400, 900}) },   { {900, 600}, "ore", RegionAt({900, 600}) },
+    { {1700, 150}, "wood", RegionAt({1700, 150}) }, { {1650, 450}, "wood", RegionAt({1650, 450}) }, // Dense Forest zone (NE)
+    { {250, 300}, "ore", RegionAt({250, 300}) },   { {300, 1300}, "ore", RegionAt({300, 1300}) },   // Dragontooth mountain zone (W)
     // The new stretch toward Saltmere (2026-09-22, "second town" plan) — a couple of
     // waypoints so the longer walk isn't completely empty, not an exhaustive re-scatter.
-    { {2200, 1550}, "wood" }, { {2550, 1900}, "ore" },
+    { {2200, 1550}, "wood", RegionAt({2200, 1550}) }, { {2550, 1900}, "ore", RegionAt({2550, 1900}) },
 }};
 // Index into kWildCreatures — a spread of difficulties so there's an easy tame near the
 // entrance and a real challenge (Forest Dragon) at the far end of the map.
@@ -6154,9 +6215,9 @@ static const std::array<WildernessGatherNode, 12> kWildernessGatherNodes = {{
 // (MonsterWanderOffset, same as monsters/Town NPCs) and, once resolved one way or
 // another, sits empty for a while before a fresh traveler appears — same "respawns
 // after a cooldown" shape as a gather node, not a one-time encounter.
-struct WildernessInnocentSpot { Vector2 pos; };
+struct WildernessInnocentSpot { Vector2 pos; RegionId region; };
 static const std::array<WildernessInnocentSpot, 4> kWildernessInnocentSpots = {{
-    { {450, 1150} }, { {1450, 1150} }, { {1150, 450} }, { {2100, 1350} }, // last one along the Saltmere stretch
+    { {450, 1150}, RegionAt({450, 1150}) }, { {1450, 1150}, RegionAt({1450, 1150}) }, { {1150, 450}, RegionAt({1150, 450}) }, { {2100, 1350}, RegionAt({2100, 1350}) }, // last one along the Saltmere stretch
 }};
 // (kInnocentRespawnSeconds is defined just above the innocent deep-dive section.)
 // Called once per frame from DrawWildernessScreen — rolls a fresh traveler into
@@ -6218,6 +6279,14 @@ static const Vector2 kWildernessReturnGatePos = { 900, 1750 };
 // Saltmere-side gate position (mirrors the wilderness entry point for town 2).
 static const Vector2 kSaltmereGatePos = { 2900, 1650 };
 
+// Phase 0: the two towns' wilderness gates, tagged with their regions. (kTown2Name
+// is "Saltmere"; the Town 1 gate has no name constant — "Town" matches its HUD usage.)
+struct TownGate { const char* townName; Vector2 wildernessPos; RegionId region; };
+static const std::array<TownGate, 2> kTownGates = {{
+    { "Town", kWildernessReturnGatePos, RegionAt(kWildernessReturnGatePos) },
+    { "Saltmere", kWildernessTown2GatePos, RegionAt(kWildernessTown2GatePos) },
+}};
+
 // Escort follow (2026-09-24): the escorted innocent walks toward you until close,
 // and the escort completes when they reach either town gate. Times out eventually;
 // a ghost can't be escorting anyone (BeginPlayerDeath clears it).
@@ -6261,24 +6330,24 @@ static void UpdateEscort(GameState& s, float dt) {
 // all (see GameState::rivalLevel's comment and the "Rival hunts you" plan) — it's now a
 // fully separate roaming entity, so every entry left in this array is an ordinary
 // always-melee monster again, no per-entry AI-variant flag needed.
-struct WildernessMonsterSpot { Vector2 pos; std::string name; int level; int baseLeather; int baseGold; int iconIdx; };
+struct WildernessMonsterSpot { Vector2 pos; std::string name; int level; int baseLeather; int baseGold; int iconIdx; RegionId region; };
 static const std::array<WildernessMonsterSpot, 12> kWildernessMonsterSpots = {{
-    { {1150, 1250}, "Wild Bat", 2, 1, 2, 0 },
-    { {600, 1000}, "Wandering Goblin", 5, 3, 4, 1 },
-    { {1150, 700}, "Lone Wolf", 9, 5, 7, 2 },
-    { {600, 350}, "Lesser Imp", 14, 7, 10, 3 },
-    { {1300, 150}, "Highway Bandit", 20, 10, 15, 4 },
-    { {300, 1550}, "Mountain Bandit", 20, 10, 15, 4 }, // same art/stats as Highway Bandit — Dragontooth zone (W)
+    { {1150, 1250}, "Wild Bat", 2, 1, 2, 0, RegionAt({1150, 1250}) },
+    { {600, 1000}, "Wandering Goblin", 5, 3, 4, 1, RegionAt({600, 1000}) },
+    { {1150, 700}, "Lone Wolf", 9, 5, 7, 2, RegionAt({1150, 700}) },
+    { {600, 350}, "Lesser Imp", 14, 7, 10, 3, RegionAt({600, 350}) },
+    { {1300, 150}, "Highway Bandit", 20, 10, 15, 4, RegionAt({1300, 150}) },
+    { {300, 1550}, "Mountain Bandit", 20, 10, 15, 4, RegionAt({300, 1550}) }, // same art/stats as Highway Bandit — Dragontooth zone (W)
     // Density pass + Saltmere corridor coverage (2026-09-24, Mark asked for monsters
     // "all thru the wilderness") — two fill in gaps in the original zone, four cover
     // the corridor east toward Saltmere (which had zero monster spots at all before
     // this). All reuse the existing 5 monster art types; no new assets needed.
-    { {900, 1400}, "Wandering Goblin", 5, 3, 4, 1 },   // south-central gap, original zone
-    { {1500, 900}, "Lesser Imp", 14, 7, 10, 3 },        // east-central gap, original zone
-    { {2000, 1650}, "Wild Bat", 2, 1, 2, 0 },           // corridor, near the Town 1 side
-    { {2300, 1750}, "Highway Bandit", 20, 10, 15, 4 },  // corridor, a real "road danger"
-    { {2600, 1650}, "Wandering Goblin", 5, 3, 4, 1 },   // corridor
-    { {2750, 1850}, "Lone Wolf", 9, 5, 7, 2 },          // corridor, near the Saltmere side
+    { {900, 1400}, "Wandering Goblin", 5, 3, 4, 1, RegionAt({900, 1400}) },   // south-central gap, original zone
+    { {1500, 900}, "Lesser Imp", 14, 7, 10, 3, RegionAt({1500, 900}) },        // east-central gap, original zone
+    { {2000, 1650}, "Wild Bat", 2, 1, 2, 0, RegionAt({2000, 1650}) },           // corridor, near the Town 1 side
+    { {2300, 1750}, "Highway Bandit", 20, 10, 15, 4, RegionAt({2300, 1750}) },  // corridor, a real "road danger"
+    { {2600, 1650}, "Wandering Goblin", 5, 3, 4, 1, RegionAt({2600, 1650}) },   // corridor
+    { {2750, 1850}, "Lone Wolf", 9, 5, 7, 2, RegionAt({2750, 1850}) },          // corridor, near the Saltmere side
 }};
 static_assert(kWildernessMonsterSpots.size() == kWildMonsterSpotCount,
               "wildSpotRespawn is sized by kWildMonsterSpotCount — keep them in sync");
@@ -6565,13 +6634,13 @@ static const Texture2D* WildFoliageIcon(int variant) {
 // instead of a tab click. The Hunt tab's own dungeon picker is untouched — this is a
 // second way in, not a replacement. One per far corner/edge of the map, clear of every
 // gather/tame/monster/gate node already out here.
-struct WildernessDungeonEntrance { Vector2 pos; int dungeonIdx; Color color; };
+struct WildernessDungeonEntrance { Vector2 pos; int dungeonIdx; Color color; RegionId region; };
 static const std::array<WildernessDungeonEntrance, 5> kWildernessDungeonEntrances = {{
-    { {150, 900}, 0, Color{ 180, 70, 55, 255 } },   // Emberveil Hollow
-    { {1650, 900}, 1, Color{ 130, 100, 60, 255 } }, // Bloodtusk Hold
-    { {1650, 1650}, 2, Color{ 65, 95, 135, 255 } }, // The Sunken Crypt
-    { {150, 150}, 3, Color{ 95, 115, 75, 255 } },   // Wyrmscar Depths
-    { {150, 1650}, 4, Color{ 110, 100, 90, 255 } }, // The Hollow Warrens — remaining free corner
+    { {150, 900}, 0, Color{ 180, 70, 55, 255 }, RegionAt({150, 900}) },   // Emberveil Hollow
+    { {1650, 900}, 1, Color{ 130, 100, 60, 255 }, RegionAt({1650, 900}) }, // Bloodtusk Hold
+    { {1650, 1650}, 2, Color{ 65, 95, 135, 255 }, RegionAt({1650, 1650}) }, // The Sunken Crypt
+    { {150, 150}, 3, Color{ 95, 115, 75, 255 }, RegionAt({150, 150}) },   // Wyrmscar Depths
+    { {150, 1650}, 4, Color{ 110, 100, 90, 255 }, RegionAt({150, 1650}) }, // The Hollow Warrens — remaining free corner
 }};
 
 static void UpdateRivalRoaming(GameState& s, float dt) {
@@ -8976,6 +9045,101 @@ static Rectangle TargetButtonRect() {
     return { kViewport.x + kViewport.width - 150.0f, kViewport.y + kViewport.height - 160.0f, 130.0f, 60.0f };
 }
 
+// --- Wilderness minimap (2026-09-25): display-only v1, top-right of the viewport
+// in both 2D and 3D wilderness views (drawn once from the shared HUD tail of
+// DrawWildernessScreen, which covers both). Toggle with M or the MAP button;
+// tap/click the map itself to close it. Every marker comes from the same tables
+// the world uses (kTownGates, kWildernessDungeonEntrances, kHousePlots,
+// kWildernessMonsterSpots, kKingsRoadWaypoints) — no duplicated coordinates.
+static Rectangle MinimapRect() {
+    return { kViewport.x + kViewport.width - 164.0f, 140.0f, 154.0f, 154.0f };
+}
+static Rectangle MinimapToggleRect() {
+    return { kViewport.x + kViewport.width - 62.0f, 140.0f, 52.0f, 30.0f };
+}
+
+static void DrawMinimap(GameState& s) {
+    // Closed: just the small MAP button (always visible, touch or desktop).
+    if (!s.minimapOpen) {
+        if (Button(MinimapToggleRect(), "MAP", true)) s.minimapOpen = true;
+        return;
+    }
+    Rectangle mm = MinimapRect();
+    // Tap/click the map to close it (display-only v1 — no click-to-travel).
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), mm)) {
+        s.minimapOpen = false;
+        return;
+    }
+    const float sc = mm.width / kWildernessWorldSize; // world units -> minimap px
+    auto toMap = [&](Vector2 w) -> Vector2 { return { mm.x + w.x * sc, mm.y + w.y * sc }; };
+    DrawRectangleRec(mm, Fade(BLACK, 0.62f));
+    // Region washes — match the Phase 0 2D ground washes, slightly stronger so
+    // the regions read at minimap scale.
+    DrawRectangle((int)mm.x, (int)mm.y, (int)mm.width, (int)(700.0f * sc), Color{ 200, 214, 228, 70 });
+    DrawRectangle((int)(mm.x + 1950.0f * sc), (int)(mm.y + 700.0f * sc),
+                  (int)(mm.width - 1950.0f * sc), (int)(mm.height - 700.0f * sc), Color{ 216, 196, 150, 70 });
+    DrawRectangle((int)mm.x, (int)(mm.y + 700.0f * sc),
+                  (int)(500.0f * sc), (int)(mm.height - 700.0f * sc), Color{ 150, 150, 150, 55 });
+    // Region boundary lines.
+    Color boundCol = Color{ 120, 100, 75, 160 };
+    DrawLineEx({ mm.x, mm.y + 700.0f * sc }, { mm.x + mm.width, mm.y + 700.0f * sc }, 1.0f, boundCol);
+    DrawLineEx({ mm.x + 1950.0f * sc, mm.y + 700.0f * sc }, { mm.x + 1950.0f * sc, mm.y + mm.height }, 1.0f, boundCol);
+    DrawLineEx({ mm.x + 500.0f * sc, mm.y + 700.0f * sc }, { mm.x + 500.0f * sc, mm.y + mm.height }, 1.0f, boundCol);
+    // King's Road.
+    for (size_t i = 0; i + 1 < kKingsRoadWaypoints.size(); i++)
+        DrawLineEx(toMap(kKingsRoadWaypoints[i]), toMap(kKingsRoadWaypoints[i + 1]), 2.0f, Color{ 208, 182, 126, 255 });
+    // Monster spots (faint red dots).
+    for (const auto& msp : kWildernessMonsterSpots)
+        DrawCircleV(toMap(msp.pos), 2.5f, Color{ 200, 60, 60, 140 });
+    // Dungeon entrances (their themed colors).
+    for (const auto& e : kWildernessDungeonEntrances) {
+        Vector2 p = toMap(e.pos);
+        DrawCircleV(p, 4.0f, e.color);
+        DrawCircleLines((int)p.x, (int)p.y, 4.0f, Fade(BLACK, 0.6f));
+    }
+    // Town gates (gold squares + tiny labels).
+    for (const auto& g : kTownGates) {
+        Vector2 p = toMap(g.wildernessPos);
+        DrawRectangle((int)(p.x - 3), (int)(p.y - 3), 6, 6, Color{ 232, 200, 120, 255 });
+        DrawUIText(g.townName, (int)(p.x - 14), (int)(p.y + 5), 9, Color{ 232, 200, 120, 255 });
+    }
+    // Housing plots: owned = green square, for sale = yellow outline.
+    for (size_t i = 0; i < kHousePlots.size(); i++) {
+        Vector2 p = toMap(kHousePlots[i].pos);
+        if ((int)i == s.housePlotIdx)
+            DrawRectangle((int)(p.x - 3), (int)(p.y - 3), 6, 6, Color{ 110, 200, 120, 255 });
+        else
+            DrawRectangleLinesEx({ p.x - 3.0f, p.y - 3.0f, 6.0f, 6.0f }, 1.0f, Color{ 230, 210, 130, 220 });
+    }
+    // Player arrow: gold triangle rotated to the facing direction.
+    {
+        Vector2 p = toMap(s.wildernessPlayerPos);
+        float ang = atan2f(s.playerFacing.y, s.playerFacing.x);
+        Vector2 tip = { p.x + cosf(ang) * 7.0f, p.y + sinf(ang) * 7.0f };
+        Vector2 bl = { p.x + cosf(ang + 2.5f) * 5.0f, p.y + sinf(ang + 2.5f) * 5.0f };
+        Vector2 br = { p.x + cosf(ang - 2.5f) * 5.0f, p.y + sinf(ang - 2.5f) * 5.0f };
+        DrawTriangle(tip, bl, br, Color{ 255, 240, 200, 255 });
+        DrawCircleV(p, 2.0f, Color{ 255, 240, 200, 255 });
+    }
+    DrawRectangleLinesEx(mm, 1.5f, Fade(Color{ 232, 200, 120, 255 }, 0.7f));
+    // Tiny legend under the map.
+    int lx = (int)mm.x + 2, ly = (int)(mm.y + mm.height + 5);
+    Color legCol = Color{ 210, 190, 150, 255 };
+    DrawRectangle(lx, ly, 7, 7, Color{ 232, 200, 120, 255 });
+    DrawUIText("Town", lx + 10, ly - 1, 9, legCol);
+    DrawCircle(lx + 68, ly + 3, 4, Color{ 150, 90, 160, 255 });
+    DrawUIText("Dungeon", lx + 76, ly - 1, 9, legCol);
+    DrawRectangle(lx, ly + 13, 7, 7, Color{ 110, 200, 120, 255 });
+    DrawUIText("Home", lx + 10, ly + 12, 9, legCol);
+    DrawRectangleLinesEx({ (float)lx + 65, (float)ly + 13, 7.0f, 7.0f }, 1.0f, Color{ 230, 210, 130, 255 });
+    DrawUIText("Plot", lx + 76, ly + 12, 9, legCol);
+    DrawCircle(lx + 3, ly + 29, 3, Color{ 200, 60, 60, 200 });
+    DrawUIText("Monster", lx + 10, ly + 25, 9, legCol);
+    DrawLineEx({ (float)lx + 65, (float)ly + 28 }, { (float)lx + 72, (float)ly + 28 }, 2.0f, Color{ 208, 182, 126, 255 });
+    DrawUIText("Road", lx + 76, ly + 25, 9, legCol);
+    DrawUIText("[M] toggles map", lx, ly + 38, 9, Fade(legCol, 0.75f));
+}
+
 static bool Town3DPointInUI(Vector2 m, const GameState& s, int screenW) {
     if (CheckCollisionPointRec(m, { 20, 120, 130, 30 })) return true;  // Gather Wood
     if (CheckCollisionPointRec(m, { 160, 120, 120, 30 })) return true;  // Gather Ore
@@ -9683,6 +9847,13 @@ static void Wild3DEnsureGround() {
         // Dragontooth mountains (W): gray-brown rock tint
         float mz = 1.0f - Wild3DSmooth(350.0f, 550.0f, wx);
         r += (128.0f - r) * mz * 0.5f; g += (120.0f - g) * mz * 0.5f; b += (106.0f - b) * mz * 0.5f;
+        // Phase 0 regions (light stubs — full biomes arrive in Phases 2-4):
+        // Frostwastes snow tint, fading in north of y=700
+        float sz = Wild3DSmooth(700.0f, 500.0f, wz);
+        r += (214.0f - r) * sz * 0.65f; g += (222.0f - g) * sz * 0.65f; b += (235.0f - b) * sz * 0.65f;
+        // Salt Coast sand tint along the Saltmere corridor
+        float cz = Wild3DSmooth(1950.0f, 2150.0f, wx) * Wild3DSmooth(500.0f, 700.0f, wz);
+        r += (196.0f - r) * cz * 0.45f; g += (178.0f - g) * cz * 0.45f; b += (132.0f - b) * cz * 0.45f;
         // Dirt patches where the dirt noise runs high
         float dn = dp[i].r / 255.0f;
         if (dn > 0.60f) {
@@ -9696,10 +9867,12 @@ static void Wild3DEnsureGround() {
     }
     Color* dst = (Color*)ground.data;
     for (int i = 0; i < SZ * SZ; i++) dst[i] = gp[i];
-    // Dirt paths: Return Gate -> each dungeon entrance, plus the Saltmere trade road.
+    // Dirt paths: Return Gate -> each dungeon entrance, plus the King's Road
+    // (waypoint path from kKingsRoadWaypoints) between the two towns.
     for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances)
         Wild3DGroundPath(&ground, kWildernessReturnGatePos, e.pos, pathCol);
-    Wild3DGroundPath(&ground, kWildernessReturnGatePos, kWildernessTown2GatePos, pathCol);
+    for (size_t i = 0; i + 1 < kKingsRoadWaypoints.size(); i++)
+        Wild3DGroundPath(&ground, kKingsRoadWaypoints[i], kKingsRoadWaypoints[i + 1], pathCol);
     UnloadImageColors(gp);
     UnloadImageColors(np);
     UnloadImageColors(bp);
@@ -10605,6 +10778,8 @@ static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
     if (CheckCollisionPointRec(m, { kViewport.x + kViewport.width - 150.0f,
                                     kViewport.y + kViewport.height - 90.0f, 130.0f, 60.0f })) return true; // tap-to-interact
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return true; // TARGET button
+    if (s.minimapOpen && CheckCollisionPointRec(m, MinimapRect())) return true; // minimap (tap closes it)
+    if (!s.minimapOpen && CheckCollisionPointRec(m, MinimapToggleRect())) return true; // MAP button
     if (CheckCollisionPointRec(m, kJoystickZone)) return true;
     if (s.wildEngaged.has_value()) {
         if (CheckCollisionPointRec(m, { 20, 110, 330, 60 })) return true; // HP/mana strip
@@ -10731,6 +10906,15 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     }
     DrawUIText("3D view: drag to orbit, wheel to zoom. [V] toggles 2D.", 20, 196, 12,
                Color{ 90, 74, 52, 255 });
+    // Phase 0: HUD region label (3D view) — same top-center pill as the 2D view,
+    // computed live from the player position so it flips at boundaries.
+    {
+        const char* regionName = RegionName(RegionAt(s.wildernessPlayerPos));
+        int w = MeasureUIText(regionName, 16);
+        int sx = (int)(screenW - w) / 2;
+        DrawRectangle(sx - 10, 106, w + 20, 26, Fade(BLACK, 0.45f));
+        DrawUIText(regionName, sx, 110, 16, Color{ 232, 200, 120, 255 });
+    }
 }
 
 
@@ -13374,6 +13558,34 @@ static std::string FlagTargetName(const GameState& s) {
 
 static void ClearFlagTarget(GameState& s) { s.flagTarget.reset(); }
 
+static const float kDisengageGraceSeconds = 1.5f; // bump-engage suppression after a manual disengage
+
+// Full disengage (2026-09-25): clicking/tapping empty ground while fighting
+// normal monsters ends the WHOLE fight — engagement, pack, and flag. The old
+// flag-only stand-down was a no-op: the per-frame flag/engagement sync above
+// resurrected the marker from the still-live engagement within one frame, so
+// the player could never actually stand down. Rival/blade duels and boss
+// fights stay locked 1v1 by design — callers check those first and never call
+// this for them. The grace timer stops contact auto-engage from instantly
+// re-engaging while the monsters are still standing on the player.
+static void DisengageFromNormals(GameState& s, int zone) {
+    if (zone == 0) {
+        if (!s.wildEngaged.has_value()) { s.flagTarget.reset(); return; }
+        const auto& am = *s.wildEngaged;
+        if (am.isRival || am.bladeIdx >= 0) return; // duels stay locked
+        s.wildEngaged.reset();
+        s.wildExtraAttackers.clear(); // the pack stands down too
+    } else {
+        if (!s.dungeonEngaged.has_value()) { s.flagTarget.reset(); return; }
+        if (s.dungeonEngaged->isBoss) return; // boss stays locked
+        s.dungeonEngaged.reset();
+        s.dungeonExtraAttackers.clear();
+    }
+    s.flagTarget.reset();
+    s.disengageGraceT = kDisengageGraceSeconds;
+    s.logLine = "You break away from the fight!";
+}
+
 // Steers the player toward the flagged target when it isn't already a fight.
 // Yields to everything: manual movement (caller only steers when the player
 // didn't move), engagement, panels, death, ghost form.
@@ -13433,6 +13645,8 @@ static void Wild2DClickFlag(GameState& s, Vector2 camera, int screenW, int scree
     if (CheckCollisionPointRec(m, kJoystickZone)) return;
     if (m.x > screenW - 170 && m.y > screenH - 170) return; // interact button
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return; // TARGET button (shared HUD handles it)
+    if (s.minimapOpen && CheckCollisionPointRec(m, MinimapRect())) return; // minimap (tap closes it)
+    if (!s.minimapOpen && CheckCollisionPointRec(m, MinimapToggleRect())) return; // MAP button
     if (s.wildEngaged.has_value()) {
         if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return; // quick items
         if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return; // spell hotbar
@@ -13459,8 +13673,13 @@ static void Wild2DClickFlag(GameState& s, Vector2 camera, int screenW, int scree
             s.flagTarget = f;
             s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
         }
-    } else if (s.flagTarget.has_value()) {
-        s.flagTarget.reset(); // clicked empty ground: stand down
+    } else if (duelLocked) {
+        s.logLine = "You're locked in — finish the duel first!";
+    } else {
+        // Clicked empty ground: FULL disengage (2026-09-25), not just the flag —
+        // the per-frame flag/engagement sync would otherwise resurrect the marker
+        // from the still-live fight within one frame.
+        DisengageFromNormals(s, 0);
     }
 }
 
@@ -13528,8 +13747,11 @@ static void Dungeon2DClickFlag(GameState& s, Vector2 camera, int screenW, int sc
             s.flagTarget = f;
             s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
         }
-    } else if (s.flagTarget.has_value()) {
-        s.flagTarget.reset();
+    } else if (s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss) {
+        s.logLine = "You're locked in — finish the boss first!";
+    } else {
+        // Clicked empty ground: FULL disengage (2026-09-25), not just the flag.
+        DisengageFromNormals(s, 1);
     }
 }
 
@@ -13819,8 +14041,11 @@ static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
             s.flagTarget = f;
             s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
         }
-    } else if (s.flagTarget.has_value()) {
-        s.flagTarget.reset();
+    } else if (duelLocked) {
+        s.logLine = "You're locked in — finish the duel first!";
+    } else {
+        // Clicked empty ground: FULL disengage (2026-09-25), not just the flag.
+        DisengageFromNormals(s, 0);
     }
 }
 
@@ -13915,8 +14140,11 @@ static void Dungeon3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
             s.flagTarget = f;
             s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
         }
-    } else if (s.flagTarget.has_value()) {
-        s.flagTarget.reset();
+    } else if (s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss) {
+        s.logLine = "You're locked in — finish the boss first!";
+    } else {
+        // Clicked empty ground: FULL disengage (2026-09-25), not just the flag.
+        DisengageFromNormals(s, 1);
     }
 }
 
@@ -14527,6 +14755,15 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     if (s.houseDesignerOpen) { DrawHouseDesigner(s, screenW, screenH); return; }
     if (GetTouchPointCount() > 0) g_touchSeen = true; // latch: TARGET button appears on touch devices
     DrawUIText("The Wilderness — gather wood/ore or tame a creature. Watch for trouble.", 20, 112, 13, kColorAccent);
+    // Phase 0: HUD region label — always visible, flips live as the player crosses
+    // a boundary. Top-center pill, clear of the target frame (left) and HUD buttons.
+    {
+        const char* regionName = RegionName(RegionAt(s.wildernessPlayerPos));
+        int w = MeasureUIText(regionName, 16);
+        int sx = (int)(kViewport.x + (kViewport.width - w) / 2);
+        DrawRectangle(sx - 10, 106, w + 20, 26, Fade(BLACK, 0.45f));
+        DrawUIText(regionName, sx, 110, 16, Color{ 232, 200, 120, 255 });
+    }
 
     UpdateRivalRoaming(s, GetFrameTime()); // before the nearest-search below, so rivalPos is current this frame
     for (int bi = 0; bi < kBladeCount; bi++) UpdateBladeRoaming(s, bi, GetFrameTime()); // the Murder Inc. crew roams too
@@ -15208,6 +15445,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == (int)i) continue;
         Vector2 livePos = WildernessMonsterLivePos((int)i, s.worldTime);
         if (!s.wildEngaged.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
+            s.disengageGraceT <= 0.0f && // manual-disengage grace (2026-09-25): don't instantly re-engage
             Dist(s.wildernessPlayerPos, livePos) < kPlayerRadius + kNodeRadius * 0.7f)
             tryEngageWildMonster((int)i);
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, livePos, kNodeRadius * 0.7f);
@@ -15263,6 +15501,39 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     Vector2 camera = CameraTopLeft(s.wildernessPlayerPos, kWildernessWorldSize);
     DrawTiledGround(g_assets.groundGrassOk ? &g_assets.groundGrass : nullptr, kViewport, camera, 48.0f,
                       Color{ 170, 188, 148, 255 }); // a shade greener/wilder than Town's tended-grass tint
+
+    // Phase 0 region visuals (2D): light ground washes per region + thin boundary
+    // lines, so crossing a region reads on the map. Full biomes arrive in Phases 2-4.
+    {
+        auto washRect = [&](float x, float y, float w, float h, Color c) {
+            Vector2 tl = WorldToScreen({ x, y }, camera);
+            DrawRectangle((int)tl.x, (int)tl.y, (int)w, (int)h, c);
+        };
+        const float WS = kWildernessWorldSize;
+        washRect(0, 0, WS, 700, Color{ 200, 214, 228, 36 });          // Frostwastes: icy wash
+        washRect(1950, 700, WS - 1950, WS - 700, Color{ 216, 196, 150, 36 }); // Salt Coast: sandy wash
+        washRect(0, 700, 500, WS - 700, Color{ 150, 150, 150, 28 });  // Stonepeaks: gray wash
+        Color boundCol = Color{ 90, 70, 50, 110 };
+        Vector2 b1a = WorldToScreen({ 0, 700 }, camera), b1b = WorldToScreen({ WS, 700 }, camera);
+        Vector2 b2a = WorldToScreen({ 1950, 700 }, camera), b2b = WorldToScreen({ 1950, WS }, camera);
+        Vector2 b3a = WorldToScreen({ 500, 700 }, camera), b3b = WorldToScreen({ 500, WS }, camera);
+        DrawLineEx(b1a, b1b, 3.0f, boundCol);
+        DrawLineEx(b2a, b2b, 3.0f, boundCol);
+        DrawLineEx(b3a, b3b, 3.0f, boundCol);
+    }
+
+    // The King's Road (Phase 0): drawn as a proper waypoint polyline in both views.
+    {
+        Color roadOuter = { 178, 148, 98, 255 }, roadInner = { 208, 182, 126, 255 };
+        for (size_t i = 0; i + 1 < kKingsRoadWaypoints.size(); i++) {
+            Vector2 a = WorldToScreen(kKingsRoadWaypoints[i], camera);
+            Vector2 b = WorldToScreen(kKingsRoadWaypoints[i + 1], camera);
+            DrawLineEx(a, b, 26.0f, roadOuter);
+            DrawLineEx(a, b, 14.0f, roadInner);
+        }
+        Vector2 lbl = WorldToScreen({ 1900, 1630 }, camera);
+        DrawUIText("King's Road", (int)lbl.x - 38, (int)lbl.y, 12, Color{ 96, 74, 50, 255 });
+    }
 
     // Dirt paths from the Return Gate to each dungeon entrance — same DrawWallBand/
     // outline treatment as Town's roads, so the map reads as a connected place instead
@@ -15561,6 +15832,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         tryInteract();
     }
     DrawGhostStatus(s); // death animation / ghost walk banner
+    DrawMinimap(s); // wilderness minimap (shared by the 2D and 3D views)
 
     // Spell hotbar — only while actually engaged (2026-09-22 fix: it used to also show
     // while just exploring "so it could be configured between fights," but that spot
@@ -16259,6 +16531,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (s.dungeonEngaged.has_value() && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
         Vector2 livePos = DungeonMonsterLivePos(*s.selectedDungeon, i, s.worldTime);
         if (!s.dungeonEngaged.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
+            s.disengageGraceT <= 0.0f && // manual-disengage grace (2026-09-25)
             Dist(s.dungeonPlayerPos, livePos) < kPlayerRadius + kNodeRadius * 0.8f)
             tryEngageDungeonMonster(i, false);
         ResolveCircleCollision(s.dungeonPlayerPos, kPlayerRadius, livePos, kNodeRadius * 0.8f);
@@ -16267,6 +16540,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         s.dungeonSpawnRespawn[*s.selectedDungeon][kDungeonBossSlot] <= 0.0f) {
         Vector2 bossLivePos = DungeonMonsterLivePos(*s.selectedDungeon, kDungeonBossSlot, s.worldTime);
         if (bossUnlocked && !s.dungeonEngaged.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
+            s.disengageGraceT <= 0.0f && // manual-disengage grace (2026-09-25)
             Dist(s.dungeonPlayerPos, bossLivePos) < kPlayerRadius + kNodeRadius)
             tryEngageDungeonMonster(kDungeonBossSlot, true);
         ResolveCircleCollision(s.dungeonPlayerPos, kPlayerRadius, bossLivePos, kNodeRadius); // boss, locked or not
@@ -17779,6 +18053,7 @@ static void UpdateDrawFrame() {
         UpdateTameAttempt(state, dt);
         RegenNotoriety(state, dt);
         state.worldTime += dt;
+        if (state.disengageGraceT > 0.0f) state.disengageGraceT -= dt; // manual-disengage grace (2026-09-25)
         UpdateCombatAnim(state, dt);
         UpdateDeathAndRespawn(state, dt); // death anims, ghost timer, monster respawns, corpse fades
 
@@ -17827,6 +18102,7 @@ static void UpdateDrawFrame() {
         }
         if (!encounterPending && state.screen == Screen::Wilderness) {
             if (IsKeyPressed(KEY_V)) state.wild3DView = !state.wild3DView; // 3D wilderness view toggle
+            if (IsKeyPressed(KEY_M)) state.minimapOpen = !state.minimapOpen; // minimap toggle
         }
         if (!encounterPending && state.screen == Screen::Interior) {
             // Interiors stay part of the town: V toggles the indoor 2D/3D view,
