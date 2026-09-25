@@ -7140,9 +7140,9 @@ static float T3CHash01(float x, float y) {
     return h - floorf(h);
 }
 
-// Town3DApplyShadowShader is defined below with the town view; the kit only
+// Town3DApplyLitShader is defined below with the town view; the kit only
 // needs it for the per-frame sun-shader assignment on its shared models.
-static void Town3DApplyShadowShader(Model& m);
+static void Town3DApplyLitShader(Model& m);
 
 // ---- Flat-shaded primitive mesh builder ----
 // Non-indexed triangles with per-face normals: every part comes out faceted,
@@ -7611,7 +7611,7 @@ static void T3CKitEnsure() {
 // shared with the dungeon view, which swaps them to the torch shader.
 static void T3CKitUseSunShader() {
     T3CKitEnsure();
-    for (size_t i = 0; i < g_t3cKitModels.size(); i++) Town3DApplyShadowShader(*g_t3cKitModels[i]);
+    for (size_t i = 0; i < g_t3cKitModels.size(); i++) Town3DApplyLitShader(*g_t3cKitModels[i]);
 }
 
 // Arbitrary shader assignment (the dungeon view passes the torch shader).
@@ -8217,11 +8217,53 @@ static void Town3DEnsureShadow() {
     S.ready = true;
 }
 
-// Point a loaded model at the shadow shader (every material), so buildings and
-// the ground render lit + shadowed + fogged. No-op when shadows are off.
-static void Town3DApplyShadowShader(Model& m) {
-    if (!g_t3dShadow.ready || m.meshCount <= 0) return;
-    for (int i = 0; i < m.materialCount; i++) m.materials[i].shader = g_t3dShadow.shader;
+// ---- 3D town lighting take 2: diffuse+specular+fog, no shadow map (2026-09-24) ----
+// The shadow-map SAMPLING above is what triggered the mobile "shadow acne"
+// flashing bug, not the plain per-vertex lighting math — those are
+// independent, and the old shadow shader/pass above stay completely
+// untouched and permanently disabled (kT3DShadowsEnabled) rather than
+// risk re-entangling this with that unresolved issue. This is
+// assets/shaders/lit.vs/.fs — shadowmap.fs with the shadow-map sampling
+// section removed, nothing else — so every model gets real directional
+// shading instead of the flat, unlit fallback that shipped while shadows
+// were off. Deliberately NOT used for Dungeon (torchlight.vs/.fs handles
+// indoor lighting on its own) or building Interiors (kept dark/moody like
+// the dungeons, by design — see DrawInterior3DWorld's own comment).
+struct Town3DLit {
+    bool ready = false, tried = false;
+    Shader shader{};
+    int viewPosLoc = -1;
+};
+static Town3DLit g_t3dLit;
+static void Town3DEnsureLit() {
+    Town3DLit& L = g_t3dLit;
+    if (L.ready || L.tried) return;
+    L.tried = true;
+    L.shader = LoadShader("assets/shaders/lit.vs", "assets/shaders/lit.fs");
+    if (L.shader.id == 0) return; // missing shader files: stay on flat lighting
+    L.shader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(L.shader, "viewPos");
+    L.viewPosLoc = L.shader.locs[SHADER_LOC_VECTOR_VIEW];
+    Vector3 sunDir = kT3DSunDir;
+    SetShaderValue(L.shader, GetShaderLocation(L.shader, "lightDir"), &sunDir, SHADER_UNIFORM_VEC3);
+    Vector4 sunCol = ColorNormalize(Color{ 255, 242, 220, 255 }); // warm afternoon sun
+    SetShaderValue(L.shader, GetShaderLocation(L.shader, "lightColor"), &sunCol, SHADER_UNIFORM_VEC4);
+    float ambient[4] = { 0.45f, 0.40f, 0.33f, 1.0f };
+    SetShaderValue(L.shader, GetShaderLocation(L.shader, "ambient"), ambient, SHADER_UNIFORM_VEC4);
+    Vector3 fogCol = { kT3DSkyHorizon.r / 255.0f, kT3DSkyHorizon.g / 255.0f,
+                       kT3DSkyHorizon.b / 255.0f };
+    SetShaderValue(L.shader, GetShaderLocation(L.shader, "fogColor"), &fogCol, SHADER_UNIFORM_VEC3);
+    float fogRange[2] = { 900.0f, 2600.0f }; // subtle: only the far side hazes out
+    SetShaderValue(L.shader, GetShaderLocation(L.shader, "fogRange"), fogRange, SHADER_UNIFORM_VEC2);
+    L.ready = true;
+}
+
+// Point a loaded model at the lit shader (every material), so buildings and
+// the ground render properly shaded + fogged instead of flat. No-op if the
+// shader failed to load (stays on the flat default, same as always).
+static void Town3DApplyLitShader(Model& m) {
+    Town3DEnsureLit();
+    if (!g_t3dLit.ready || m.meshCount <= 0) return;
+    for (int i = 0; i < m.materialCount; i++) m.materials[i].shader = g_t3dLit.shader;
 }
 
 // ---- 3D town ground: procedural grass texture (2026-09-24) ----
@@ -8401,7 +8443,7 @@ static void Town3DEnsureGround(const GameState& s) {
     SetTextureFilter(G.tex, TEXTURE_FILTER_TRILINEAR);
     G.model = LoadModelFromMesh(GenMeshPlane(1000, 1000, 1, 1));
     G.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = G.tex;
-    Town3DApplyShadowShader(G.model);
+    Town3DApplyLitShader(G.model);
     G.town = s.selectedTown;
     G.loaded = true;
 }
@@ -8503,28 +8545,28 @@ static void Town3DLoadModels() {
     M.chest           = LoadModel("assets/models/chest.glb");
     M.fenceSingle     = LoadModel("assets/models/Prop_WoodenFence_Single.gltf");
     M.fenceExt        = LoadModel("assets/models/Prop_WoodenFence_Extension1.gltf");
-    Town3DApplyShadowShader(M.wallPlaster);
-    Town3DApplyShadowShader(M.wallPlasterDoor);
-    Town3DApplyShadowShader(M.wallPlasterWin);
-    Town3DApplyShadowShader(M.wallBrick);
-    Town3DApplyShadowShader(M.wallBrickDoor);
-    Town3DApplyShadowShader(M.wallBrickWin);
-    Town3DApplyShadowShader(M.roof44);
-    Town3DApplyShadowShader(M.roof46);
-    Town3DApplyShadowShader(M.chimney);
-    Town3DApplyShadowShader(M.crate);
-    Town3DApplyShadowShader(M.wagon);
-    Town3DApplyShadowShader(M.vine);
-    Town3DApplyShadowShader(M.treeOak);
-    Town3DApplyShadowShader(M.treePine);
-    Town3DApplyShadowShader(M.treeDetailed);
-    Town3DApplyShadowShader(M.treeDefault);
-    Town3DApplyShadowShader(M.treeFat);
-    Town3DApplyShadowShader(M.bush);
-    Town3DApplyShadowShader(M.barrel);
-    Town3DApplyShadowShader(M.chest);
-    Town3DApplyShadowShader(M.fenceSingle);
-    Town3DApplyShadowShader(M.fenceExt);
+    Town3DApplyLitShader(M.wallPlaster);
+    Town3DApplyLitShader(M.wallPlasterDoor);
+    Town3DApplyLitShader(M.wallPlasterWin);
+    Town3DApplyLitShader(M.wallBrick);
+    Town3DApplyLitShader(M.wallBrickDoor);
+    Town3DApplyLitShader(M.wallBrickWin);
+    Town3DApplyLitShader(M.roof44);
+    Town3DApplyLitShader(M.roof46);
+    Town3DApplyLitShader(M.chimney);
+    Town3DApplyLitShader(M.crate);
+    Town3DApplyLitShader(M.wagon);
+    Town3DApplyLitShader(M.vine);
+    Town3DApplyLitShader(M.treeOak);
+    Town3DApplyLitShader(M.treePine);
+    Town3DApplyLitShader(M.treeDetailed);
+    Town3DApplyLitShader(M.treeDefault);
+    Town3DApplyLitShader(M.treeFat);
+    Town3DApplyLitShader(M.bush);
+    Town3DApplyLitShader(M.barrel);
+    Town3DApplyLitShader(M.chest);
+    Town3DApplyLitShader(M.fenceSingle);
+    Town3DApplyLitShader(M.fenceExt);
 }
 
 // DrawModelEx guarded against a failed/missing asset, so a partially-filled
@@ -9164,29 +9206,14 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
     BeginMode3D(cam3d);
     Town3DDrawSky(c.pos); // gradient sky, default shader (unlit, unfogged)
-    bool shadowsOn = g_t3dShadow.ready;
-    if (shadowsOn) {
-        // Per-frame shader state: camera pos for specular/fog, the sun VP matrix
-        // captured by Town3DShadowPass, and the shadowmap depth texture on slot 10.
-        SetShaderValue(g_t3dShadow.shader, g_t3dShadow.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
-        SetShaderValueMatrix(g_t3dShadow.shader, g_t3dShadow.lightVPLoc, g_t3dLightVP);
-        rlEnableShader(g_t3dShadow.shader.id);
-        int shadowSlot = 10;
-        rlActiveTextureSlot(shadowSlot);
-        rlEnableTexture(g_t3dShadow.map.depth.id);
-        rlSetUniform(g_t3dShadow.shadowMapLoc, &shadowSlot, SHADER_UNIFORM_INT, 1);
-    }
-    T3DGrassFrameUpdate(c.pos); // sway clock + sun VP for the grass shader
+    // Per-frame shader state: just the camera position, for the specular
+    // highlight and distance fog (see Town3DEnsureLit — no shadow map to
+    // bind, so no texture-slot dance or shader restore needed afterward).
+    Town3DEnsureLit();
+    if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
+    T3DGrassFrameUpdate(c.pos); // sway clock for the grass shader
     Town3DDrawSceneContents(s, false);
-    T3DGrassDrawTown(); // main pass only — never in the shadow pass
-    if (shadowsOn) {
-        // Unbind the depth texture and restore the default shader so the 2D
-        // overlay labels below (and the rest of the frame) render normally.
-        rlActiveTextureSlot(10);
-        rlDisableTexture();
-        rlActiveTextureSlot(0);
-        rlEnableShader(rlGetShaderIdDefault());
-    }
+    T3DGrassDrawTown();
     // Ambience (smoke + birds): unlit, one batched draw call, main pass only.
     Town3DUpdateAmbience(GetFrameTime());
     Town3DDrawAmbience(c);
@@ -9391,7 +9418,7 @@ static void Wild3DEnsureGround() {
     SetTextureFilter(G.tex, TEXTURE_FILTER_TRILINEAR);
     G.model = LoadModelFromMesh(GenMeshPlane(WS, WS, 1, 1));
     G.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = G.tex;
-    Town3DApplyShadowShader(G.model);
+    Town3DApplyLitShader(G.model);
     G.loaded = true;
 }
 
@@ -9419,13 +9446,13 @@ static void Wild3DLoadModels() {
     M.rockSmallB = LoadModel("assets/models/rock_smallB.glb");
     M.rockSmallC = LoadModel("assets/models/rock_smallC.glb");
     M.stump      = LoadModel("assets/models/stump_roundDetailed.glb");
-    Town3DApplyShadowShader(M.rockLargeA);
-    Town3DApplyShadowShader(M.rockLargeB);
-    Town3DApplyShadowShader(M.rockLargeC);
-    Town3DApplyShadowShader(M.rockSmallA);
-    Town3DApplyShadowShader(M.rockSmallB);
-    Town3DApplyShadowShader(M.rockSmallC);
-    Town3DApplyShadowShader(M.stump);
+    Town3DApplyLitShader(M.rockLargeA);
+    Town3DApplyLitShader(M.rockLargeB);
+    Town3DApplyLitShader(M.rockLargeC);
+    Town3DApplyLitShader(M.rockSmallA);
+    Town3DApplyLitShader(M.rockSmallB);
+    Town3DApplyLitShader(M.rockSmallC);
+    Town3DApplyLitShader(M.stump);
 }
 
 // Damped follow camera for the wilderness: same orbit tech as the town
@@ -9463,7 +9490,7 @@ static const int kT3DGrassWildMax = 260;
 struct T3DGrassShader {
     bool ready = false, tried = false;
     Shader shader{};
-    int timeLoc = -1, viewPosLoc = -1, lightVPLoc = -1;
+    int timeLoc = -1, viewPosLoc = -1;
 };
 static T3DGrassShader g_t3dGrassShader;
 
@@ -9518,38 +9545,33 @@ static void T3DGrassEnsureShader() {
     T3DGrassShader& G = g_t3dGrassShader;
     if (G.ready || G.tried) return;
     G.tried = true;
-    if (!g_t3dShadow.ready) return; // no sun pipeline: grass keeps the default shader
-    G.shader = LoadShader("assets/shaders/grass.vs", "assets/shaders/shadowmap.fs");
+    Town3DEnsureLit();
+    if (!g_t3dLit.ready) return; // no lit pipeline: grass keeps the default shader
+    G.shader = LoadShader("assets/shaders/grass.vs", "assets/shaders/lit.fs");
     if (G.shader.id == 0) return;
     G.timeLoc = GetShaderLocation(G.shader, "time");
     G.viewPosLoc = GetShaderLocation(G.shader, "viewPos");
-    G.lightVPLoc = GetShaderLocation(G.shader, "lightVP");
-    // Static uniforms mirror Town3DEnsureShadow's values.
+    // Static uniforms mirror Town3DEnsureLit's values.
     Vector3 sunDir = kT3DSunDir;
     SetShaderValue(G.shader, GetShaderLocation(G.shader, "lightDir"), &sunDir, SHADER_UNIFORM_VEC3);
     Vector4 sunCol = ColorNormalize(Color{ 255, 242, 220, 255 });
     SetShaderValue(G.shader, GetShaderLocation(G.shader, "lightColor"), &sunCol, SHADER_UNIFORM_VEC4);
     float ambient[4] = { 0.45f, 0.40f, 0.33f, 1.0f };
     SetShaderValue(G.shader, GetShaderLocation(G.shader, "ambient"), ambient, SHADER_UNIFORM_VEC4);
-    int res = T3D_SHADOWMAP_RES;
-    SetShaderValue(G.shader, GetShaderLocation(G.shader, "shadowMapResolution"), &res, SHADER_UNIFORM_INT);
     Vector3 fogCol = { kT3DSkyHorizon.r / 255.0f, kT3DSkyHorizon.g / 255.0f,
                        kT3DSkyHorizon.b / 255.0f };
     SetShaderValue(G.shader, GetShaderLocation(G.shader, "fogColor"), &fogCol, SHADER_UNIFORM_VEC3);
     float fogRange[2] = { 900.0f, 2600.0f };
     SetShaderValue(G.shader, GetShaderLocation(G.shader, "fogRange"), fogRange, SHADER_UNIFORM_VEC2);
-    int slot = 10; // main passes bind the shadowmap depth texture here
-    SetShaderValue(G.shader, GetShaderLocation(G.shader, "shadowMap"), &slot, SHADER_UNIFORM_INT);
     G.ready = true;
 }
 
-// Per-frame: camera pos, sun VP (same values the main passes set on the
-// shadow shader), and the sway clock.
+// Per-frame: camera pos (for specular/fog, same as the lit shader's other
+// users) and the sway clock.
 static void T3DGrassFrameUpdate(const Vector3& camPos) {
     T3DGrassShader& G = g_t3dGrassShader;
     if (!G.ready) return;
     SetShaderValue(G.shader, G.viewPosLoc, &camPos, SHADER_UNIFORM_VEC3);
-    SetShaderValueMatrix(G.shader, G.lightVPLoc, g_t3dLightVP);
     float t = (float)GetTime();
     SetShaderValue(G.shader, G.timeLoc, &t, SHADER_UNIFORM_FLOAT);
 }
@@ -10239,26 +10261,12 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
     BeginMode3D(cam3d);
     Wild3DDrawSky(c.pos); // gradient sky, default shader (unlit, unfogged)
-    bool shadowsOn = g_t3dShadow.ready;
-    if (shadowsOn) {
-        // Per-frame shader state, same as the town pass: camera pos, the sun VP
-        // matrix captured by Wild3DShadowPass, and the shadowmap depth on slot 10.
-        SetShaderValue(g_t3dShadow.shader, g_t3dShadow.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
-        SetShaderValueMatrix(g_t3dShadow.shader, g_t3dShadow.lightVPLoc, g_t3dLightVP);
-        rlEnableShader(g_t3dShadow.shader.id);
-        int shadowSlot = 10;
-        rlActiveTextureSlot(shadowSlot);
-        rlEnableTexture(g_t3dShadow.map.depth.id);
-        rlSetUniform(g_t3dShadow.shadowMapLoc, &shadowSlot, SHADER_UNIFORM_INT, 1);
-    }
-    T3DGrassFrameUpdate(c.pos); // sway clock + sun VP for the grass shader
+    // Per-frame shader state, same as the town pass: just the camera position
+    // for specular/fog (see Town3DEnsureLit — no shadow map in this system).
+    Town3DEnsureLit();
+    if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
+    T3DGrassFrameUpdate(c.pos); // sway clock for the grass shader
     Wild3DDrawSceneContents(s, false, &c);
-    if (shadowsOn) {
-        rlActiveTextureSlot(10);
-        rlDisableTexture();
-        rlActiveTextureSlot(0);
-        rlEnableShader(rlGetShaderIdDefault());
-    }
     Wild3DDrawAmbience(c); // birds, unlit, one batched draw call, main pass only
     // Nearest-interactable ring (warm) + red ring on the engaged monster.
     Wild3DNearest nearest = Wild3DNearestInfo(s);
@@ -10376,7 +10384,7 @@ static void Dungeon3DEnsureTorch() {
 
 // Assign the torch shader to a model's materials — required, not optional:
 // DrawModel enables the MATERIAL's shader, so a bare rlEnableShader before
-// DrawModel would be overridden (same reason Town3DApplyShadowShader exists).
+// DrawModel would be overridden (same reason Town3DApplyLitShader exists).
 static void Dungeon3DApplyTorchShader(Model& m) {
     Dungeon3DEnsureTorch();
     if (!g_dung3dTorch.ready || m.meshCount <= 0) return;
