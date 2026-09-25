@@ -576,6 +576,53 @@ static const std::array<Spell, 16> kSpells = {{
     {"Summon Fiend", 8, SpellType::Summon, 80, 120, 50, 5, 32},
 }};
 
+// --- SFX (2026-09-25): tiny synthesized sound-effect system ------------------
+// 15 WAVs live in assets/sfx/. Loaded once at startup with file-exists guards —
+// a missing file is a silent no-op, never a crash. Plain LoadSound/PlaySound so
+// the Emscripten build works unchanged. Volumes kept modest (0.55).
+enum class SfxId {
+    Swing, Hit, Cast, Fireball, Heal, Coin, MonsterDie, Hurt,
+    Click, Victory, Ghost, Door, Hunt, Buy, Quest,
+    Count
+};
+static const char* kSfxFileNames[] = {
+    "swing.wav", "hit.wav", "cast.wav", "fireball.wav", "heal.wav",
+    "coin.wav", "monster_die.wav", "hurt.wav", "click.wav", "victory.wav",
+    "ghost.wav", "door.wav", "hunt.wav", "buy.wav", "quest.wav"
+};
+static_assert(sizeof(kSfxFileNames) / sizeof(kSfxFileNames[0]) == (int)SfxId::Count,
+              "kSfxFileNames must cover every SfxId");
+struct SfxBank {
+    Sound sounds[(int)SfxId::Count];
+    bool ok[(int)SfxId::Count] = {};
+};
+static SfxBank g_sfx;
+static bool SfxIsFireSpell(int spellIdx) {
+    if (spellIdx < 0 || spellIdx >= (int)kSpells.size()) return false;
+    const std::string& n = kSpells[spellIdx].name;
+    return n == "Ember Burst" || n == "Inferno Strike";
+}
+static void InitSfx() {
+    InitAudioDevice();
+    for (int i = 0; i < (int)SfxId::Count; i++) {
+        std::string path = std::string("assets/sfx/") + kSfxFileNames[i];
+        if (!FileExists(path.c_str())) continue; // missing file: stay silent
+        g_sfx.sounds[i] = LoadSound(path.c_str());
+        g_sfx.ok[i] = true;
+        SetSoundVolume(g_sfx.sounds[i], 0.55f);
+    }
+}
+static void UnloadSfx() {
+    for (int i = 0; i < (int)SfxId::Count; i++)
+        if (g_sfx.ok[i]) UnloadSound(g_sfx.sounds[i]);
+    CloseAudioDevice();
+}
+static void PlaySfx(SfxId id) {
+    int i = (int)id;
+    if (i < 0 || i >= (int)SfxId::Count || !g_sfx.ok[i]) return;
+    PlaySound(g_sfx.sounds[i]);
+}
+
 enum class CombatPhase { PlayerTurn, Won, Lost };
 
 // Which knight sprite-sheet is currently playing on the combat panel — Idle loops
@@ -3995,6 +4042,7 @@ static std::string InnocentGift(GameState& s, int id) {
     if (roll == 0) {
         int g = 5 + (std::rand() % 11);
         s.gold += g;
+        PlaySfx(SfxId::Coin);
         return "In gratitude, they press " + std::to_string(g) + " gold into your hand.";
     }
     if (roll == 1) { s.bandages += 2; return "In gratitude, they give you 2 bandages."; }
@@ -4076,6 +4124,7 @@ static void CompleteFetchRequest(GameState& s, int id) {
     else if (kind == 1) { s.ore -= 4; pay = 35; }
     else { s.leather -= 4; pay = 35; }
     s.gold += pay;
+    PlaySfx(SfxId::Coin);
     GainKarma(s, 5.0f); GainFame(s, 3.0f);
     s.innocentMem[id].helped++;
     s.innocentReqState[id] = 0;
@@ -4093,6 +4142,7 @@ static void StartEscort(GameState& s, int id, Vector2 fromPos) {
     s.innocentReqState[id] = 2; // active
     s.innocentEncounter.reset(); // they fall in beside you; the panel closes
     s.logLine = InnocentName(id) + " falls in beside you. \"Walk me to the town gate.\"";
+    PlaySfx(SfxId::Quest);
 }
 static void CompleteEscort(GameState& s) {
     int id = s.escortInnocent;
@@ -4102,6 +4152,7 @@ static void CompleteEscort(GameState& s) {
     s.innocentReqCooldown[std::clamp(id, 0, 3)] = kInnocentRequestCooldown;
     int pay = 45;
     s.gold += pay;
+    PlaySfx(SfxId::Coin);
     GainKarma(s, 8.0f); GainFame(s, 5.0f);
     s.logLine = "You see " + InnocentName(id) + " safely to the gate. \"" +
                 InnocentRequestThanks(id) + "\" (+" + std::to_string(pay) + " gold, Karma and Fame rise.)";
@@ -4159,6 +4210,7 @@ static void MerchantBuy(GameState& s, int stockIdx) {
     else s.backpack.push_back(Item{ s.nextItemId++, "Traveler's Tunic", ItemType::Armor, "chest", "", 3, "" });
     s.logLine = "Bought " + std::string(kMerchantStockDefs[stockIdx].label) +
                 " from Silas for " + std::to_string(price) + " gold.";
+    PlaySfx(SfxId::Buy);
 }
 
 static void SnoopInnocent(GameState& s) {
@@ -5776,6 +5828,7 @@ static void SkinCorpse(GameState& s, int corpseIdx) {
     int leatherGained = std::max(1, (int)std::round(c.baseLeather * yieldMult));
     s.leather += leatherGained;
     s.gold += c.gold;
+    PlaySfx(SfxId::Coin);
     float gain = GainSkillCapped(s.skinning, RollGatherSkillGain(s.skinning), 120.0f);
     std::string gainNote = gain > 0 ? " (Skinning +" + std::to_string(gain).substr(0, 4) + ")" : "";
     if (MaybeGainStat(s, &GameState::dex, 0.06f)) gainNote += " (DEX +1)";
@@ -6163,6 +6216,7 @@ static void BladeStartHunt(GameState& s, int bi, int partner) {
     }
     s.rivalBannerTimer = kRivalBannerTime;
     s.logLine = s.rivalBanner;
+    PlaySfx(SfxId::Hunt);
 }
 static void BladeStartStalk(GameState& s, int bi) {
     auto& b = s.blades[bi];
@@ -6171,6 +6225,7 @@ static void BladeStartStalk(GameState& s, int bi) {
     s.rivalBanner = "You feel watched...";
     s.rivalBannerTimer = kRivalBannerTime * 0.75f;
     s.logLine = "You feel watched...";
+    PlaySfx(SfxId::Hunt);
 }
 
 static void RivalStartHunt(GameState& s) {
@@ -6184,6 +6239,7 @@ static void RivalStartHunt(GameState& s) {
     s.rivalBanner = "The " + nm + " is hunting you!";
     s.rivalBannerTimer = kRivalBannerTime;
     s.logLine = "The " + nm + " is hunting you!";
+    PlaySfx(SfxId::Hunt);
 }
 static void RivalStartStalk(GameState& s) {
     s.rivalActivity = GameState::RivalActivity::Stalking;
@@ -6191,6 +6247,7 @@ static void RivalStartStalk(GameState& s) {
     s.rivalBanner = "You feel watched...";
     s.rivalBannerTimer = kRivalBannerTime * 0.75f;
     s.logLine = "You feel watched...";
+    PlaySfx(SfxId::Hunt);
 }
 // UO red loots your corpse: 15% of carried gold on every rival kill (bank gold is
 // never touched), plus one random backpack item on the ordinary-loss path — the
@@ -6922,7 +6979,9 @@ static bool Button(Rectangle r, const std::string& label, bool enabled) {
     int tw = MeasureUIText(label.c_str(), 14);
     DrawUIText(label.c_str(), (int)(big.x + (big.width - tw) / 2.0f), (int)(big.y + (big.height - 14) / 2.0f),
               14, kColorText);
-    return enabled && hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    bool clicked = enabled && hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (clicked) PlaySfx(SfxId::Click); // central UI click — one place covers all buttons
+    return clicked;
 }
 
 // Tap-to-interact button — the touch equivalent of the [E] key, shown only while in
@@ -11331,6 +11390,7 @@ static void EnterInterior(GameState& s, const std::string& key) {
     s.selectedTile.reset();
     s.interiorGreeted = false;
     s.logLine = "You step inside " + TileNameFor(key) + ".";
+    PlaySfx(SfxId::Door);
 }
 
 static void ExitInterior(GameState& s) {
@@ -11348,6 +11408,7 @@ static void ExitInterior(GameState& s) {
         }
     }
     s.logLine = "You step back outside.";
+    PlaySfx(SfxId::Door);
 }
 
 // Cached interior models — plain LoadModel, no town shadow shader: interiors
@@ -12082,6 +12143,7 @@ static void BeginPlayerDeath(GameState& s) {
 static void FinishPlayerDeathAnim(GameState& s) {
     s.playerDeathAnimT = 0.0f;
     s.playerIsGhost = true;
+    PlaySfx(SfxId::Ghost); // death anim ends — the ghost transition
     s.ghostTimer = kGhostDuration;
     s.logLine += " You are a ghost. Walk where you will — nothing can touch you, and you can touch nothing, for a little while.";
 }
@@ -12107,6 +12169,7 @@ static void ResurrectPlayer(GameState& s) {
 // animation completes.
 static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& am,
                                   const std::string& name, int baseGold, int baseLeather) {
+    PlaySfx(SfxId::MonsterDie);
     GameState::DyingMonster dm;
     dm.zone = 0;
     dm.pos = am.pos;
@@ -12129,6 +12192,7 @@ static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& 
 static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeonMonster& am,
                                      int dungeonIdx, bool wasBoss, const std::string& name,
                                      int level, int baseGold, int baseLeather) {
+    PlaySfx(SfxId::MonsterDie);
     GameState::DyingMonster dm;
     dm.zone = 1;
     dm.pos = am.pos;
@@ -12169,6 +12233,7 @@ static void FinishMonsterDeath(GameState& s) {
     }
     LiveMaybeGainMagicResist(s);
     s.logLine = msg;
+    PlaySfx(SfxId::Victory); // the deferred win resolves here — fight won
     DecrementShaken(s); // JS: every win eases Shaken by one fight
     AddWeeklyProgress(s, kGoalDefeat, 1);
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) return; // can't happen, but never chain an encounter onto a ghost
@@ -12360,6 +12425,7 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
             int dmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
             am.hp -= dmg;
             am.monsterHurtT = 0.0f;
+            PlaySfx(SfxId::Hit);
             s.logLine = spell.name + " hits the " + mname + " for " + std::to_string(dmg) + " damage" + trainNote;
             if (am.hp <= 0) {
                 // Death handling mirrors tryCastSpellAtEngagedMonster's kill branch
@@ -12393,6 +12459,7 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
             int dmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
             am.hp -= dmg;
             am.monsterHurtT = 0.0f;
+            PlaySfx(SfxId::Hit);
             s.logLine = spell.name + " hits the " + mname + " for " + std::to_string(dmg) + " damage" + trainNote;
             if (am.hp <= 0) {
                 int mgold = m.baseGold, mleather = m.baseLeather;
@@ -12452,6 +12519,7 @@ static void ResolveEnemyRangedImpact(GameState& s, bool castByRival, int castByB
         int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
         s.hp -= dmg;
         s.playerHurtT = 0.0f;
+        PlaySfx(SfxId::Hurt);
         s.logLine = "The " + mname + " strikes you from range for " + std::to_string(dmg) + " damage!";
         if (s.hp <= 0) {
             if (am.bladeIdx >= 0) { BladeFightEnded(s, am.bladeIdx, am); EndWildMonsterLoss(s, mname); return; }
@@ -12482,6 +12550,7 @@ static void FiendStrikeLive(GameState& s, int zone) {
         am.hp -= dmg;
         am.monsterHurtT = 0.0f;
         SpawnSpellImpact(s, 0, am.pos, 14, 0.55f);
+        PlaySfx(SfxId::Hit);
         s.logLine = "Your fiend lashes the " + mname + " for " + std::to_string(dmg) + " damage!";
         if (am.hp <= 0) {
             int mgold = spot.baseGold, mleather = spot.baseLeather;
@@ -12508,6 +12577,7 @@ static void FiendStrikeLive(GameState& s, int zone) {
         am.hp -= dmg;
         am.monsterHurtT = 0.0f;
         SpawnSpellImpact(s, 1, am.pos, 14, 0.55f);
+        PlaySfx(SfxId::Hit);
         s.logLine = "Your fiend lashes the " + m.name + " for " + std::to_string(dmg) + " damage!";
         if (am.hp <= 0) {
             int mgold = m.baseGold, mleather = m.baseLeather;
@@ -13117,6 +13187,7 @@ static void CastLiveDebuffSpell(GameState& s, int spellIdx, int zone) {
     s.reagents -= kLiveCombatReagentCost;
     std::string note;
     ApplySpellTraining(s, spell, note);
+    PlaySfx(SfxId::Cast);
     if (zone == 0) {
         auto& am = *s.wildEngaged;
         am.castEffectTimer = kCastEffectDuration;
@@ -13154,6 +13225,7 @@ static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
     std::string note;
     bool success = RandUnit() * 100.0f < SpellSuccessChance(s, spell);
     ApplySpellTraining(s, spell, note);
+    PlaySfx(SfxId::Cast);
     auto setCastPose = [&]() {
         if (zone == 0 && s.wildEngaged.has_value()) {
             s.wildEngaged->castEffectTimer = kCastEffectDuration;
@@ -13196,6 +13268,7 @@ static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
     if (success) {
         int healAmt = SpellPowerFor(s, spell);
         s.hp = std::min(s.maxHp, s.hp + healAmt);
+        PlaySfx(SfxId::Heal);
         s.healGlowT = 0.0f; s.healGlowKind = 0;
         Vector2 ppos = (zone == 0) ? s.wildernessPlayerPos : s.dungeonPlayerPos;
         SpawnSpellImpact(s, zone, ppos, -10, 0.9f);
@@ -13438,6 +13511,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                 s.hp -= dmg;
                 s.playerHurtT = 0.0f; // hit-flash + knockback
+                PlaySfx(SfxId::Hurt);
                 s.logLine = "The " + mname + " hits you for " + std::to_string(dmg) + " damage";
             } else {
                 s.logLine = "The " + mname + " misses";
@@ -13569,6 +13643,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                 s.hp -= dmg;
                 s.playerHurtT = 0.0f; // hit-flash + knockback
+                PlaySfx(SfxId::Hurt);
                 s.logLine = "The " + mname + " hits you for " + std::to_string(dmg) + " damage";
             } else {
                 s.logLine = "The " + mname + " misses";
@@ -13619,6 +13694,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (Dist(am.pos, s.wildernessPlayerPos) >= kWildMeleeRange || am.playerAttackCooldown > 0) return;
         am.playerAttackCooldown = PlayerSwingCooldown(s);
         am.swingEffectTimer = kSwingEffectDuration;
+        PlaySfx(SfxId::Swing); // melee swing starts — world combat only
         int power = CombatPower(s);
         float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
         float hitChance = std::clamp(50.0f + (power - spot.level) * 4.0f + weaponSkillBonus, 5.0f, 95.0f);
@@ -13629,6 +13705,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             if (s.vigorT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.25f)); // Blessing of Vigor
             am.hp -= dmg;
             am.monsterHurtT = 0.0f; // hit-flash on the monster
+            PlaySfx(SfxId::Hit);
             s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage";
             if (am.hp <= 0) {
                 if (am.isRival) {
@@ -13674,6 +13751,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // The bolt flies now; the success roll, damage, and kill handling run in
         // ResolvePlayerSpellImpact on arrival — same formulas, visible travel.
         SpawnSpellProjectile(s, 0, s.wildernessPlayerPos, am.pos, spellIdx, true, note);
+        PlaySfx(SfxId::Cast);
+        if (SfxIsFireSpell(spellIdx)) PlaySfx(SfxId::Fireball);
     };
     // Walking into a dungeon entrance does exactly what its Hunt-tab does today —
     // s.selectedDungeon is left as-is if you're re-entering the one you were already in
@@ -14588,6 +14667,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                 s.hp -= dmg;
                 s.playerHurtT = 0.0f; // hit-flash + knockback
+                PlaySfx(SfxId::Hurt);
                 s.logLine = "The " + mname + " hits you for " + std::to_string(dmg) + " damage";
                 s.hp -= dmg;
                 s.logLine = "The " + mname + " hits you for " + std::to_string(dmg) + " damage";
@@ -14618,6 +14698,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (Dist(am.pos, s.dungeonPlayerPos) >= kWildMeleeRange || am.playerAttackCooldown > 0) return;
         am.playerAttackCooldown = PlayerSwingCooldown(s);
         am.swingEffectTimer = kSwingEffectDuration;
+        PlaySfx(SfxId::Swing); // melee swing starts — world combat only
         int power = CombatPower(s);
         float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
         float hitChance = std::clamp(50.0f + (power - m.level) * 4.0f + weaponSkillBonus, 5.0f, 95.0f);
@@ -14629,6 +14710,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             if (s.vigorT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.25f)); // Blessing of Vigor
             am.hp -= dmg;
             am.monsterHurtT = 0.0f; // hit-flash on the monster
+            PlaySfx(SfxId::Hit);
             s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage";
             if (am.hp <= 0) BeginDungeonMonsterDeath(s, am, dungeonIdx, wasBoss, mname, level, mgold, mleather);
         } else {
@@ -14654,6 +14736,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         ApplySpellTraining(s, spell, note);
         // Same projectile treatment as Wilderness — resolution on arrival.
         SpawnSpellProjectile(s, 1, s.dungeonPlayerPos, am.pos, spellIdx, true, note);
+        PlaySfx(SfxId::Cast);
+        if (SfxIsFireSpell(spellIdx)) PlaySfx(SfxId::Fireball);
     };
 
     Vector2 prevDungeonPos = s.dungeonPlayerPos; // wall-slide against this if the move ends in a wall
@@ -15538,6 +15622,7 @@ static void DrawInnocentPanel(GameState& s, int screenW) {
                 s.innocentReqState[id] = 2; // active fetch
                 s.logLine = "You agree to bring " + InnocentName(id) + " " +
                             InnocentRequestNeed(kind) + ".";
+                PlaySfx(SfxId::Quest);
             }
         }
         if (Button({ 150, 340, 120, 36 }, "Decline", true)) {
@@ -16431,6 +16516,7 @@ static void CleanupAndClose() {
 #ifndef __EMSCRIPTEN__
     UnloadRenderTexture(g_zoomTarget);
 #endif
+    UnloadSfx();
     CloseWindow();
 }
 
@@ -16452,6 +16538,7 @@ int main() {
     // past every 3D view's farthest zoom/sky radius — removes the discrepancy
     // for good.
     rlSetClipPlanes(0.05, 5000.0);
+    InitSfx(); // audio device + synthesized SFX bank (missing files stay silent)
     LoadGameAssets(); // must come after InitWindow — texture loading needs a graphics context
 
 #ifdef __EMSCRIPTEN__
