@@ -710,6 +710,10 @@ static const std::array<WeeklyGoalDef, kWeeklyGoalCount> kWeeklyGoals = {{
 }};
 static const long long kWeekSeconds = 7LL * 24 * 60 * 60;
 
+// Murder Inc. guild size (2026-09-24) — declared up here because GameState's
+// blades array, SaveGame, and LoadGame all need it, and they sit well above the
+// PK tuning block below.
+static const int kBladeCount = 3;
 struct GameState {
     int gold = 100;
     int wood = 10;
@@ -835,10 +839,40 @@ struct GameState {
     float rivalLevel = 16.0f; // starting value matches the old static spot's level
     Vector2 rivalPos = { 900, 900 }; // the old spot's position, now just a starting point
     bool rivalHasBeatenPlayer = false; // once true, losing to it again is a harsher "murderer" loss
-    enum class RivalActivity { Patrol, Hunting };
+    int rivalKillsOnPlayer = 0; // PERSISTED — drives the epithet ladder (Ruthless/Relentless/Merciless/Bane)
+    enum class RivalActivity { Patrol, Stalking, Hunting };
     RivalActivity rivalActivity = RivalActivity::Patrol;
     Vector2 rivalPatrolTarget = { 900, 900 };
     float rivalActivityTimer = 0.0f; // counts down to the next patrol-target pick, or the next hunt attempt
+    // --- UO player-killer transients (2026-09-24) — not saved, same reasoning as above ---
+    float rivalStalkTimer = 0.0f;      // counts down a stalk before the commit/break-off roll
+    bool rivalSprinting = false;       // current hunt gait: sprint vs recover
+    float rivalSprintTimer = 0.0f;     // time left in the current gait phase
+    float rivalSprintStartDist = 0.0f; // player distance when the current sprint began (stuck/juke detection)
+    Vector2 rivalSprintStartVel = { 0, 0 }; // smoothed player velocity when the sprint began (sharp-turn detection)
+    Vector2 rivalPlayerVel = { 0, 0 }; // smoothed player velocity, for intercept steering
+    Vector2 rivalPrevPlayerPos = { 0, 0 }; // previous frame's player pos, for velocity computation
+
+    // --- Murder Inc. guild blades (2026-09-24) — the champion's crew. Three
+    // weaker PKs with their own persistent levels/positions. Activity state is
+    // transient like the champion's; levels/positions save like the champion's.
+    struct BladeState {
+        float level = 12.0f; // PERSISTED — grows slowly, capped below the champion
+        Vector2 pos = { 400.0f, 900.0f }; // PERSISTED
+        RivalActivity activity = RivalActivity::Patrol; // transient
+        Vector2 patrolTarget = { 400.0f, 900.0f };      // transient
+        float activityTimer = 0.0f;  // transient — patrol pause / hunt give-up countdown
+        float stalkTimer = 0.0f;     // transient — counts down a stalk before commit/break-off
+        bool autoEngage = false;     // transient — set when a hunt closes to catch range
+    };
+    std::array<BladeState, kBladeCount> blades = {{ // persistent levels/positions; activities transient
+        { 12.0f, { 400.0f, 900.0f } },    // Blade II — west woods
+        { 12.0f, { 1400.0f, 1200.0f } },  // Blade III — central wilds
+        { 12.0f, { 2200.0f, 1500.0f } }, // Blade IV — Saltmere corridor
+    }};
+    bool rivalAutoEngage = false;      // set by UpdateRivalRoaming when a hunt closes to catch range
+    std::string rivalBanner;           // unmissable center-screen banner text (hunt/stalk warnings)
+    float rivalBannerTimer = 0.0f;     // seconds remaining on the banner
 
     // --- Notoriety, murderers & innocents — mirrors state.notoriety/fame/karma/
     // shaken/ambush/innocentEncounter in the JS ---
@@ -971,6 +1005,11 @@ struct GameState {
         // `spotIdx` is meaningless for it (left at -1) and every lookup that used to go
         // through kWildernessMonsterSpots[spotIdx] checks this flag first instead.
         bool isRival = false;
+        // Murder Inc. guild blade index (2026-09-24): 0..kBladeCount-1 when the engaged
+        // opponent is one of the champion's crew, -1 otherwise. Blades share the
+        // champion's tactical AI and the "as if a monster spot" stats path, but never
+        // loot, never earn epithets, and never touch the champion's kill counter.
+        int bladeIdx = -1;
     };
     std::optional<ActiveMonster> wildEngaged;
 
@@ -4682,7 +4721,14 @@ static void SaveGame(const GameState& s) {
     out << "nextItemId=" << s.nextItemId << "\nnextPetId=" << s.nextPetId << "\n";
     out << "lastActiveEpoch=" << (long long)std::time(nullptr) << "\n";
     out << "rivalLevel=" << s.rivalLevel << "\nrivalPosX=" << s.rivalPos.x << "\nrivalPosY=" << s.rivalPos.y <<
-           "\nrivalHasBeatenPlayer=" << (s.rivalHasBeatenPlayer ? 1 : 0) << "\n";
+           "\nrivalHasBeatenPlayer=" << (s.rivalHasBeatenPlayer ? 1 : 0) <<
+           "\nrivalKillsOnPlayer=" << s.rivalKillsOnPlayer << "\n";
+    // Murder Inc. blades (2026-09-24) — levels and positions persist like the champion's
+    for (int bi = 0; bi < kBladeCount; bi++) {
+        out << "blade" << bi << "Level=" << s.blades[bi].level << "\n"
+            << "blade" << bi << "PosX=" << s.blades[bi].pos.x << "\n"
+            << "blade" << bi << "PosY=" << s.blades[bi].pos.y << "\n";
+    }
     out << "poisoning=" << s.poisoning << "\nweaponPoisonCharges=" << s.weaponPoisonCharges <<
            "\nweaponPoisonPotency=" << s.weaponPoisonPotency << "\n";
     out << "bankGold=" << s.bankGold << "\n";
@@ -4822,6 +4868,17 @@ static bool LoadGame(GameState& s) {
         else if (key == "rivalPosX") s.rivalPos.x = (float)std::atof(val.c_str());
         else if (key == "rivalPosY") s.rivalPos.y = (float)std::atof(val.c_str());
         else if (key == "rivalHasBeatenPlayer") s.rivalHasBeatenPlayer = std::atoi(val.c_str()) != 0;
+        else if (key == "rivalKillsOnPlayer") s.rivalKillsOnPlayer = std::atoi(val.c_str());
+        // Murder Inc. blades (2026-09-24) — old saves without these keys keep the defaults
+        else if (key.compare(0, 5, "blade") == 0 && key.size() > 6 && std::isdigit((unsigned char)key[5])) {
+            int bi = key[5] - '0';
+            if (bi >= 0 && bi < kBladeCount) {
+                std::string field = key.substr(6);
+                if (field == "Level") s.blades[bi].level = (float)std::atof(val.c_str());
+                else if (field == "PosX") s.blades[bi].pos.x = (float)std::atof(val.c_str());
+                else if (field == "PosY") s.blades[bi].pos.y = (float)std::atof(val.c_str());
+            }
+        }
         else if (key == "poisoning") s.poisoning = (float)std::atof(val.c_str());
         else if (key == "weaponPoisonCharges") s.weaponPoisonCharges = std::atoi(val.c_str());
         else if (key == "weaponPoisonPotency") s.weaponPoisonPotency = std::atoi(val.c_str());
@@ -5418,6 +5475,134 @@ static const std::array<WildernessMonsterSpot, 12> kWildernessMonsterSpots = {{
     { {2600, 1650}, "Wandering Goblin", 5, 3, 4, 1 },   // corridor
     { {2750, 1850}, "Lone Wolf", 9, 5, 7, 2 },          // corridor, near the Saltmere side
 }};
+// --- UO player-killer Rival (2026-09-24): epithet ladder, tuning, and helpers ---
+// Display name escalates with rivalKillsOnPlayer — the red earns its reputation.
+static std::string RivalEpithetName(const GameState& s) {
+    if (s.rivalKillsOnPlayer >= 8) return "Rival Adventurer, Bane of the Wilderness";
+    if (s.rivalKillsOnPlayer >= 5) return "Rival Adventurer the Merciless";
+    if (s.rivalKillsOnPlayer >= 3) return "Rival Adventurer the Relentless";
+    if (s.rivalKillsOnPlayer >= 1) return "Rival Adventurer the Ruthless";
+    return "Rival Adventurer";
+}
+// All rival-hunt tuning in one place.
+static const float kRivalSprintSpeed = 260.0f;   // faster than kPlayerSpeed (220): it CAN run you down in the open
+static const float kRivalSprintDuration = 3.0f;
+static const float kRivalRecoverSpeed = 110.0f;  // the breather gait (== the old flat hunt speed)
+static const float kRivalRecoverDuration = 4.0f;
+static const float kRivalSprintStuckTime = 1.5f;  // grace period before the stuck/juke check runs
+static const float kRivalSprintStuckEps = 40.0f;  // sprint breaks if it closes less than this (blocked on something)
+static const float kRivalCatchRange = 55.0f;     // auto-engage when a hunt closes to this (inside melee+collision)
+static const float kRivalHuntBaseChance = 0.5f;
+static const float kRivalHuntVulnerableBonus = 0.25f; // gathering / mid-fight / below half HP: it smells blood
+static const float kRivalHuntSafetyPenalty = 0.35f;   // near return gate / dungeon entrances / Town2 gate
+static const float kRivalSafetyRadius = 420.0f;
+static const float kRivalStalkChance = 0.35f;    // share of hunts that begin as a visible stalk
+static const float kRivalStalkMin = 10.0f, kRivalStalkMax = 20.0f;
+static const float kRivalStalkRange = 400.0f;    // preferred shadowing distance
+static const float kRivalStalkSpeed = 150.0f;
+static const float kRivalPursuitTime = 15.0f;    // overworld chase after you break away from its fight
+static const float kRivalCorpseLootPct = 0.15f;  // of CARRIED gold (bank gold is never touched)
+static const float kRivalBannerTime = 4.0f;
+static const float kRivalVelSmooth = 6.0f;       // exponential smoothing rate for the intercept velocity
+static const float kRivalTeleportGuard = 300.0f;  // frame-to-frame player jump above this zeroes velocity (gate travel)
+static const float kRivalHuntGiveUpTime = 25.0f; // seconds of hunting without catching the player before it gives up
+
+// --- Murder Inc. guild blades (2026-09-24) -------------------------------------
+// The champion's crew: weaker, simpler, longer leashes. They reuse the champion's
+// hunt/stalk/intercept code paths but never sprint, never loot, never earn
+// epithets, and never touch rivalKillsOnPlayer. Pair hunts are the signature:
+// 30% of blade hunts become a two-blade jump ("Murder Inc. is hunting you!").
+// Coordination: the champion never pair-hunts (solo predator — his identity);
+// while the champion is hunting/stalking, blades don't start hunts; blades never
+// freelance while another blade is hunting (pairs form ONLY via the pair roll).
+// Cap: 2 hunters at once, never all 3 + the champion — that's unplayable.
+static const float kBladeHuntBaseChance = 0.25f;  // ~half the champion's appetite
+static const float kBladeHuntGiveUpTime = 12.0f;  // shorter leash than the champion's 25s
+static const float kBladeHuntSpeed = 130.0f;       // flat — no sprint bursts. Scary in pairs, outrunnable solo
+static const float kBladePatrolSpeed = 55.0f;     // same amble as the champion's patrol
+static const float kBladeStalkChance = 0.25f;     // share of blade hunts that begin as a visible stalk
+static const float kBladeStalkRange = 350.0f;     // blades shadow a little closer than the champion
+static const float kBladePairChance = 0.30f;      // share of blade hunt commits that become pair hunts
+static const float kBladeLevelFracMin = 0.45f;    // blades track 45-60% of the champion's
+static const float kBladeLevelFracMax = 0.60f;    // target power — always beatable, never the main event
+
+// Fixed guild names — no epithet ladder for the crew, just rank numerals.
+static std::string BladeName(int bi) {
+    static const char* numerals[3] = { "II", "III", "IV" };
+    return std::string("Murder Inc. Blade ") + numerals[bi < 0 || bi > 2 ? 0 : bi];
+}
+// True while the guild has an active threat — used to keep hunts to one at a time.
+static bool GuildThreatActive(const GameState& s, int exceptBlade = -1) {
+    if (s.rivalActivity == GameState::RivalActivity::Hunting ||
+        s.rivalActivity == GameState::RivalActivity::Stalking) return true;
+    for (int j = 0; j < kBladeCount; j++) {
+        if (j == exceptBlade) continue;
+        if (s.blades[j].activity == GameState::RivalActivity::Hunting ||
+            s.blades[j].activity == GameState::RivalActivity::Stalking) return true;
+    }
+    return false;
+}
+static void BladeStartHunt(GameState& s, int bi, int partner) {
+    auto& b = s.blades[bi];
+    b.activity = GameState::RivalActivity::Hunting;
+    b.activityTimer = kBladeHuntGiveUpTime;
+    if (partner >= 0 && partner < kBladeCount && partner != bi) {
+        auto& p = s.blades[partner];
+        p.activity = GameState::RivalActivity::Hunting;
+        p.activityTimer = kBladeHuntGiveUpTime;
+        s.rivalBanner = "Murder Inc. is hunting you!";
+    } else {
+        s.rivalBanner = "The " + BladeName(bi) + " is hunting you!";
+    }
+    s.rivalBannerTimer = kRivalBannerTime;
+    s.logLine = s.rivalBanner;
+}
+static void BladeStartStalk(GameState& s, int bi) {
+    auto& b = s.blades[bi];
+    b.activity = GameState::RivalActivity::Stalking;
+    b.stalkTimer = kRivalStalkMin + RandUnit() * (kRivalStalkMax - kRivalStalkMin);
+    s.rivalBanner = "You feel watched...";
+    s.rivalBannerTimer = kRivalBannerTime * 0.75f;
+    s.logLine = "You feel watched...";
+}
+
+static void RivalStartHunt(GameState& s) {
+    s.rivalActivity = GameState::RivalActivity::Hunting;
+    s.rivalActivityTimer = kRivalHuntGiveUpTime;
+    s.rivalSprinting = true; // opens with a sprint — the burst out of the treeline
+    s.rivalSprintTimer = kRivalSprintDuration;
+    s.rivalSprintStartDist = Dist(s.rivalPos, s.wildernessPlayerPos);
+    s.rivalSprintStartVel = s.rivalPlayerVel;
+    std::string nm = RivalEpithetName(s);
+    s.rivalBanner = "The " + nm + " is hunting you!";
+    s.rivalBannerTimer = kRivalBannerTime;
+    s.logLine = "The " + nm + " is hunting you!";
+}
+static void RivalStartStalk(GameState& s) {
+    s.rivalActivity = GameState::RivalActivity::Stalking;
+    s.rivalStalkTimer = kRivalStalkMin + RandUnit() * (kRivalStalkMax - kRivalStalkMin);
+    s.rivalBanner = "You feel watched...";
+    s.rivalBannerTimer = kRivalBannerTime * 0.75f;
+    s.logLine = "You feel watched...";
+}
+// UO red loots your corpse: 15% of carried gold on every rival kill (bank gold is
+// never touched), plus one random backpack item on the ordinary-loss path — the
+// murderer-loss path already strips the whole backpack, so the empty check skips it
+// there naturally. Called AFTER the loss function so it appends to that log line.
+static void RivalCorpseLoot(GameState& s) {
+    s.rivalKillsOnPlayer++;
+    int loot = (int)std::round(s.gold * kRivalCorpseLootPct);
+    s.gold = std::max(0, s.gold - loot);
+    std::string msg = "The " + RivalEpithetName(s) + " loots your corpse (" +
+                      std::to_string(loot) + " gold)";
+    if (!s.backpack.empty()) {
+        int idx = std::rand() % (int)s.backpack.size();
+        msg += " and takes your " + s.backpack[idx].name;
+        s.backpack.erase(s.backpack.begin() + idx);
+    }
+    msg += ".";
+    s.logLine += " " + msg;
+}
 // "As if it were a WildernessMonsterSpot" stats for whichever monster is currently
 // engaged. The Rival no longer has a real kWildernessMonsterSpots row (see
 // GameState::rivalLevel's comment) — everything that used to read
@@ -5429,7 +5614,11 @@ struct EngagedMonsterStats { std::string name; int level; int baseGold; int base
 static EngagedMonsterStats EngagedWildMonsterStats(const GameState& s, const GameState::ActiveMonster& am) {
     if (am.isRival) {
         int lvl = std::max(1, (int)std::round(s.rivalLevel));
-        return { "Rival Adventurer", lvl, std::max(1, (int)std::round(lvl * 0.75f)), std::max(1, (int)std::round(lvl * 0.5f)) };
+        return { RivalEpithetName(s), lvl, std::max(1, (int)std::round(lvl * 0.75f)), std::max(1, (int)std::round(lvl * 0.5f)) };
+    }
+    if (am.bladeIdx >= 0 && am.bladeIdx < kBladeCount) {
+        int lvl = std::max(1, (int)std::round(s.blades[am.bladeIdx].level));
+        return { BladeName(am.bladeIdx), lvl, std::max(1, (int)std::round(lvl * 0.75f)), std::max(1, (int)std::round(lvl * 0.5f)) };
     }
     const WildernessMonsterSpot& spot = kWildernessMonsterSpots[am.spotIdx];
     return { spot.name, spot.level, spot.baseGold, spot.baseLeather };
@@ -5447,6 +5636,20 @@ static void RivalFightEnded(GameState& s, const GameState::ActiveMonster& am) {
     s.rivalLevel = std::clamp(s.rivalLevel + (target - s.rivalLevel) * kRivalGrowthLerpPerFight, 5.0f, 500.0f);
     s.rivalActivity = GameState::RivalActivity::Patrol;
     s.rivalActivityTimer = 0.0f; // pick a fresh patrol target immediately rather than waiting out a stale timer
+}
+// Called when a fight against a blade ends (win, loss, or disengage) — persists
+// its position and nudges its level toward 45-60% of the champion's target power,
+// never above the champion's own level. The crew stays beneath the boss.
+static void BladeFightEnded(GameState& s, int bi, const GameState::ActiveMonster& am) {
+    auto& b = s.blades[bi];
+    b.pos = am.pos;
+    float target = (float)CombatPower(s) *
+                   (kBladeLevelFracMin + RandUnit() * (kBladeLevelFracMax - kBladeLevelFracMin));
+    target = std::min(target, std::max(5.0f, s.rivalLevel)); // never out-level the champion
+    b.level = std::clamp(b.level + (target - b.level) * kRivalGrowthLerpPerFight, 5.0f, 500.0f);
+    b.activity = GameState::RivalActivity::Patrol;
+    b.activityTimer = 0.0f; // pick a fresh patrol target immediately
+    b.autoEngage = false;
 }
 // Tuning for the live engagement above. Melee range (60) sits just past where
 // ResolveCircleCollision already naturally separates two kNodeRadius*0.7 (35) circles
@@ -5466,61 +5669,14 @@ static const float kWildDisengageRange = 320.0f;
 // actually chasing anything); Hunting is faster than kWildMonsterChaseSpeed so it reads
 // as a real escalation once it commits to coming after the player.
 static const float kRivalPatrolSpeed = 55.0f;
-static const float kRivalHuntSpeed = 110.0f;
 static const float kRivalArrivalRadius = 24.0f; // "close enough" to a patrol waypoint to pause there
 static const float kRivalPauseDuration = 4.0f;  // how long it lingers at a waypoint (the "gathering/fighting" beat)
 static const float kRivalHuntCheckMin = 30.0f, kRivalHuntCheckMax = 90.0f; // how often it re-rolls whether to start hunting
-static const float kRivalHuntChance = 0.5f;      // odds it actually commits to a hunt when the timer fires, vs. picking a new patrol target instead
-static const float kRivalHuntGiveUpTime = 25.0f; // seconds of hunting without reaching the player before it gives up
+// (Hunt speed/chance/give-up now live in the UO player-killer tuning block above:
+// kRivalSprintSpeed/kRivalRecoverSpeed, kRivalHuntBaseChance, kRivalHuntGiveUpTime.)
 // Called once per frame from DrawWildernessScreen, before the nearest-interactable
 // search, so s.rivalPos is current for this frame's distance checks — only while it
 // isn't already the thing you're fighting (updateTacticalOpponentAI owns movement then).
-static void UpdateRivalRoaming(GameState& s, float dt) {
-    if (s.wildEngaged.has_value() && s.wildEngaged->isRival) return;
-    if (s.rivalActivity == GameState::RivalActivity::Hunting) {
-        s.rivalActivityTimer -= dt;
-        Vector2 dir = { s.wildernessPlayerPos.x - s.rivalPos.x, s.wildernessPlayerPos.y - s.rivalPos.y };
-        float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-        if (len > 0.0001f) {
-            s.rivalPos.x += dir.x / len * kRivalHuntSpeed * dt;
-            s.rivalPos.y += dir.y / len * kRivalHuntSpeed * dt;
-        }
-        // Give up and go back to patrolling if it's been hunting too long without
-        // reaching interact range — tryEngageRival (DrawWildernessScreen) is what
-        // actually starts the fight once close enough, this just stops the chase.
-        if (s.rivalActivityTimer <= 0.0f) s.rivalActivity = GameState::RivalActivity::Patrol;
-        return;
-    }
-    // Patrolling: walk toward rivalPatrolTarget — the timer only counts down once
-    // actually AT the target (not during travel, or a long walk would eat the whole
-    // pause before it even arrives), then either pick a new patrol target or commit to
-    // a hunt. Doubles as "time until next decision" in both the paused and hunting
-    // cases — simplest thing that reads as intentional rather than literally
-    // simulating gathering/fighting.
-    Vector2 toTarget = { s.rivalPatrolTarget.x - s.rivalPos.x, s.rivalPatrolTarget.y - s.rivalPos.y };
-    float distToTarget = std::sqrt(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
-    if (distToTarget > kRivalArrivalRadius) {
-        s.rivalPos.x += toTarget.x / distToTarget * kRivalPatrolSpeed * dt;
-        s.rivalPos.y += toTarget.y / distToTarget * kRivalPatrolSpeed * dt;
-        return;
-    }
-    s.rivalActivityTimer -= dt;
-    if (s.rivalActivityTimer > 0.0f) return; // arrived, still pausing ("gathering/fighting") here
-    if (RandUnit() < kRivalHuntChance) {
-        s.rivalActivity = GameState::RivalActivity::Hunting;
-        s.rivalActivityTimer = kRivalHuntGiveUpTime;
-        return;
-    }
-    // Pick a new patrol waypoint among the gather nodes and the other real monsters'
-    // spots — the same set of "places" that sell the it's-out-there-doing-things
-    // fiction without actually running the gather/combat systems against them.
-    int totalSpots = (int)kWildernessGatherNodes.size() + (int)kWildernessMonsterSpots.size();
-    int pick = std::rand() % totalSpots;
-    s.rivalPatrolTarget = pick < (int)kWildernessGatherNodes.size()
-        ? kWildernessGatherNodes[pick].pos
-        : kWildernessMonsterSpots[pick - (int)kWildernessGatherNodes.size()].pos;
-    s.rivalActivityTimer = kRivalPauseDuration;
-}
 static const float kWildPlayerAttackCooldown = 0.8f;
 static const float kWildMonsterAttackCooldown = 1.3f;
 // Flat (not DEX-scaled) cast time for Wilderness spellcasting — magic's rhythm is
@@ -5606,6 +5762,264 @@ static const std::array<WildernessDungeonEntrance, 5> kWildernessDungeonEntrance
     { {150, 150}, 3, Color{ 95, 115, 75, 255 } },   // Wyrmscar Depths
     { {150, 1650}, 4, Color{ 110, 100, 90, 255 } }, // The Hollow Warrens — remaining free corner
 }};
+
+static void UpdateRivalRoaming(GameState& s, float dt) {
+    if (s.wildEngaged.has_value() && s.wildEngaged->isRival) return;
+
+    // Smoothed player velocity for intercept steering. Movement runs after this in
+    // DrawWildernessScreen, so this is one frame stale — fine for prediction.
+    // Teleport guard: gate travel zeroes it instead of whipping the intercept.
+    if (dt > 0.0001f) {
+        Vector2 d = { s.wildernessPlayerPos.x - s.rivalPrevPlayerPos.x,
+                      s.wildernessPlayerPos.y - s.rivalPrevPlayerPos.y };
+        float dl = std::sqrt(d.x * d.x + d.y * d.y);
+        if (dl > kRivalTeleportGuard) {
+            s.rivalPlayerVel = { 0, 0 };
+        } else {
+            Vector2 inst = { d.x / dt, d.y / dt };
+            float a = std::min(1.0f, kRivalVelSmooth * dt);
+            s.rivalPlayerVel.x += (inst.x - s.rivalPlayerVel.x) * a;
+            s.rivalPlayerVel.y += (inst.y - s.rivalPlayerVel.y) * a;
+        }
+    }
+    s.rivalPrevPlayerPos = s.wildernessPlayerPos;
+
+    // --- Stalking: visibly shadow the player at range, then commit or break off ---
+    // Pure dread — no damage during the stalk, just the label and the banner.
+    if (s.rivalActivity == GameState::RivalActivity::Stalking) {
+        s.rivalStalkTimer -= dt;
+        Vector2 away = { s.rivalPos.x - s.wildernessPlayerPos.x, s.rivalPos.y - s.wildernessPlayerPos.y };
+        float alen = std::sqrt(away.x * away.x + away.y * away.y);
+        if (alen > 0.0001f) {
+            Vector2 target = { s.wildernessPlayerPos.x + away.x / alen * kRivalStalkRange,
+                               s.wildernessPlayerPos.y + away.y / alen * kRivalStalkRange };
+            Vector2 to = { target.x - s.rivalPos.x, target.y - s.rivalPos.y };
+            float tl = std::sqrt(to.x * to.x + to.y * to.y);
+            if (tl > kRivalArrivalRadius) {
+                s.rivalPos.x += to.x / tl * kRivalStalkSpeed * dt;
+                s.rivalPos.y += to.y / tl * kRivalStalkSpeed * dt;
+            }
+        }
+        if (s.rivalStalkTimer <= 0.0f) {
+            if (RandUnit() < 0.5f) RivalStartHunt(s); // commits — the banner fires
+            else { s.rivalActivity = GameState::RivalActivity::Patrol; s.rivalActivityTimer = 0.0f; }
+        }
+        return;
+    }
+
+    // --- Hunting: intercept course, sprint/recover gait, catch ---
+    if (s.rivalActivity == GameState::RivalActivity::Hunting) {
+        s.rivalActivityTimer -= dt;
+        // Gait machine: alternate sprint (faster than the player) and recover.
+        s.rivalSprintTimer -= dt;
+        if (s.rivalSprintTimer <= 0.0f) {
+            s.rivalSprinting = !s.rivalSprinting;
+            s.rivalSprintTimer = s.rivalSprinting ? kRivalSprintDuration : kRivalRecoverDuration;
+            if (s.rivalSprinting) {
+                s.rivalSprintStartDist = Dist(s.rivalPos, s.wildernessPlayerPos);
+                s.rivalSprintStartVel = s.rivalPlayerVel;
+            }
+        }
+        float distNow = Dist(s.rivalPos, s.wildernessPlayerPos);
+        float speed = s.rivalSprinting ? kRivalSprintSpeed : kRivalRecoverSpeed;
+        if (s.rivalSprinting && s.rivalSprintTimer < kRivalSprintDuration - kRivalSprintStuckTime) {
+            // Break the sprint when juked or blocked: barely closing distance, or
+            // the player sharply reversed direction since the sprint began.
+            bool stuck = (s.rivalSprintStartDist - distNow) < kRivalSprintStuckEps;
+            float cv = std::sqrt(s.rivalPlayerVel.x * s.rivalPlayerVel.x + s.rivalPlayerVel.y * s.rivalPlayerVel.y);
+            float sv = std::sqrt(s.rivalSprintStartVel.x * s.rivalSprintStartVel.x +
+                                 s.rivalSprintStartVel.y * s.rivalSprintStartVel.y);
+            bool juked = false;
+            if (cv > 60.0f && sv > 60.0f) {
+                float dot = (s.rivalPlayerVel.x * s.rivalSprintStartVel.x +
+                             s.rivalPlayerVel.y * s.rivalSprintStartVel.y) / (cv * sv);
+                juked = dot < -0.15f; // turned >~99 degrees since the sprint began
+            }
+            if (stuck || juked) { s.rivalSprinting = false; s.rivalSprintTimer = kRivalRecoverDuration; }
+        }
+        // Intercept: steer toward where the player WILL be, not where they are —
+        // juking matters, bee-lining doesn't.
+        float tti = distNow / std::max(1.0f, speed);
+        Vector2 predicted = { s.wildernessPlayerPos.x + s.rivalPlayerVel.x * tti,
+                              s.wildernessPlayerPos.y + s.rivalPlayerVel.y * tti };
+        predicted = ClampToWorld(predicted, kPlayerEdgeMargin, kWildernessWorldSize);
+        Vector2 dir = { predicted.x - s.rivalPos.x, predicted.y - s.rivalPos.y };
+        float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+        if (len > 0.0001f) {
+            s.rivalPos.x += dir.x / len * speed * dt;
+            s.rivalPos.y += dir.y / len * speed * dt;
+        }
+        // Caught you — the red doesn't ask for a duel. DrawWildernessScreen
+        // converts the flag into a real fight if you're still in range.
+        if (Dist(s.rivalPos, s.wildernessPlayerPos) < kRivalCatchRange) {
+            s.rivalAutoEngage = true;
+            return;
+        }
+        // Give up and go back to patrolling if the hunt times out.
+        if (s.rivalActivityTimer <= 0.0f) s.rivalActivity = GameState::RivalActivity::Patrol;
+        return;
+    }
+    // Patrolling: walk toward rivalPatrolTarget — the timer only counts down once
+    // actually AT the target (not during travel, or a long walk would eat the whole
+    // pause before it even arrives), then either pick a new patrol target or commit to
+    // a hunt. Doubles as "time until next decision" in both the paused and hunting
+    // cases — simplest thing that reads as intentional rather than literally
+    // simulating gathering/fighting.
+    Vector2 toTarget = { s.rivalPatrolTarget.x - s.rivalPos.x, s.rivalPatrolTarget.y - s.rivalPos.y };
+    float distToTarget = std::sqrt(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
+    if (distToTarget > kRivalArrivalRadius) {
+        s.rivalPos.x += toTarget.x / distToTarget * kRivalPatrolSpeed * dt;
+        s.rivalPos.y += toTarget.y / distToTarget * kRivalPatrolSpeed * dt;
+        return;
+    }
+    s.rivalActivityTimer -= dt;
+    if (s.rivalActivityTimer > 0.0f) return; // arrived, still pausing ("gathering/fighting") here
+    // Opportunistic hunt roll — the red strikes when you're vulnerable, not on a
+    // schedule: gathering, mid-fight, or hurt raises the odds; lingering near the
+    // return gate, dungeon entrances, or the Town2 gate lowers them.
+    float huntChance = kRivalHuntBaseChance;
+    bool vulnerable = s.gatheringResource.has_value() ||
+                      (s.wildEngaged.has_value() && !s.wildEngaged->isRival) ||
+                      (float)s.hp < (float)s.maxHp * 0.5f;
+    if (vulnerable) huntChance += kRivalHuntVulnerableBonus;
+    bool nearSafety = Dist(s.wildernessPlayerPos, kWildernessReturnGatePos) < kRivalSafetyRadius ||
+                      Dist(s.wildernessPlayerPos, kWildernessTown2GatePos) < kRivalSafetyRadius;
+    if (!nearSafety) {
+        for (const auto& e : kWildernessDungeonEntrances) {
+            if (Dist(s.wildernessPlayerPos, e.pos) < kRivalSafetyRadius) { nearSafety = true; break; }
+        }
+    }
+    if (nearSafety) huntChance -= kRivalHuntSafetyPenalty;
+    huntChance = std::clamp(huntChance, 0.05f, 0.95f);
+    // Murder Inc. coordination (2026-09-24): one threat at a time — the champion is a
+    // solo predator and won't pile onto a blade's hunt. His own speeds, chances,
+    // and loot below are untouched.
+    if (!GuildThreatActive(s) && RandUnit() < huntChance) {
+        if (RandUnit() < kRivalStalkChance) RivalStartStalk(s);
+        else RivalStartHunt(s);
+        return;
+    }
+    // Pick a new patrol waypoint among the gather nodes and the other real monsters'
+    // spots — the same set of "places" that sell the it's-out-there-doing-things
+    // fiction without actually running the gather/combat systems against them.
+    int totalSpots = (int)kWildernessGatherNodes.size() + (int)kWildernessMonsterSpots.size();
+    int pick = std::rand() % totalSpots;
+    s.rivalPatrolTarget = pick < (int)kWildernessGatherNodes.size()
+        ? kWildernessGatherNodes[pick].pos
+        : kWildernessMonsterSpots[pick - (int)kWildernessGatherNodes.size()].pos;
+    s.rivalActivityTimer = kRivalPauseDuration;
+}
+
+// Murder Inc. guild blade roaming (2026-09-24) — the champion's crew. Same
+// patrol/hunt/stalk shape as UpdateRivalRoaming (same waypoint fiction, same
+// intercept steering off the shared smoothed player velocity) but simpler:
+// flat hunt speed (no sprint bursts), shorter leash, half the appetite, and the
+// pair-hunt roll that makes two blades jump you at once. Called once per frame
+// per blade from DrawWildernessScreen, right after UpdateRivalRoaming (which owns
+// the shared s.rivalPlayerVel tracking the blades read).
+static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
+    auto& b = s.blades[bi];
+    if (s.wildEngaged.has_value() && s.wildEngaged->bladeIdx == bi) return;
+
+    // --- Stalking: shadow the player at range, then commit (solo) or break off ---
+    if (b.activity == GameState::RivalActivity::Stalking) {
+        b.stalkTimer -= dt;
+        Vector2 away = { b.pos.x - s.wildernessPlayerPos.x, b.pos.y - s.wildernessPlayerPos.y };
+        float alen = std::sqrt(away.x * away.x + away.y * away.y);
+        if (alen > 0.0001f) {
+            Vector2 target = { s.wildernessPlayerPos.x + away.x / alen * kBladeStalkRange,
+                               s.wildernessPlayerPos.y + away.y / alen * kBladeStalkRange };
+            Vector2 to = { target.x - b.pos.x, target.y - b.pos.y };
+            float tl = std::sqrt(to.x * to.x + to.y * to.y);
+            if (tl > kRivalArrivalRadius) {
+                b.pos.x += to.x / tl * kRivalStalkSpeed * dt;
+                b.pos.y += to.y / tl * kRivalStalkSpeed * dt;
+            }
+        }
+        if (b.stalkTimer <= 0.0f) {
+            if (RandUnit() < 0.5f) BladeStartHunt(s, bi, -1); // commits solo — pairs only form on fresh patrol commits
+            else { b.activity = GameState::RivalActivity::Patrol; b.activityTimer = 0.0f; }
+        }
+        return;
+    }
+
+    // --- Hunting: intercept course at a flat, outrunnable speed ---
+    if (b.activity == GameState::RivalActivity::Hunting) {
+        b.activityTimer -= dt;
+        float distNow = Dist(b.pos, s.wildernessPlayerPos);
+        float tti = distNow / kBladeHuntSpeed;
+        Vector2 predicted = { s.wildernessPlayerPos.x + s.rivalPlayerVel.x * tti,
+                              s.wildernessPlayerPos.y + s.rivalPlayerVel.y * tti };
+        predicted = ClampToWorld(predicted, kPlayerEdgeMargin, kWildernessWorldSize);
+        Vector2 dir = { predicted.x - b.pos.x, predicted.y - b.pos.y };
+        float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+        if (len > 0.0001f) {
+            b.pos.x += dir.x / len * kBladeHuntSpeed * dt;
+            b.pos.y += dir.y / len * kBladeHuntSpeed * dt;
+        }
+        if (Dist(b.pos, s.wildernessPlayerPos) < kRivalCatchRange) {
+            b.autoEngage = true;
+            return;
+        }
+        if (b.activityTimer <= 0.0f) b.activity = GameState::RivalActivity::Patrol;
+        return;
+    }
+
+    // --- Patrolling: walk the waypoint, pause, then decide ---
+    Vector2 toTarget = { b.patrolTarget.x - b.pos.x, b.patrolTarget.y - b.pos.y };
+    float distToTarget = std::sqrt(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
+    if (distToTarget > kRivalArrivalRadius) {
+        b.pos.x += toTarget.x / distToTarget * kBladePatrolSpeed * dt;
+        b.pos.y += toTarget.y / distToTarget * kBladePatrolSpeed * dt;
+        return;
+    }
+    b.activityTimer -= dt;
+    if (b.activityTimer > 0.0f) return; // arrived, still pausing here
+    // Hunt roll — same vulnerability/safety instincts as the champion, at half the
+    // base appetite. Any fight (even the champion's) smells like blood to the crew.
+    // One threat at a time: never while the champion is on the prowl, never while
+    // another blade is hunting — pairs form ONLY via the pair roll below.
+    float huntChance = kBladeHuntBaseChance;
+    bool vulnerable = s.gatheringResource.has_value() ||
+                      s.wildEngaged.has_value() ||
+                      (float)s.hp < (float)s.maxHp * 0.5f;
+    if (vulnerable) huntChance += kRivalHuntVulnerableBonus;
+    bool nearSafety = Dist(s.wildernessPlayerPos, kWildernessReturnGatePos) < kRivalSafetyRadius ||
+                      Dist(s.wildernessPlayerPos, kWildernessTown2GatePos) < kRivalSafetyRadius;
+    if (!nearSafety) {
+        for (const auto& e : kWildernessDungeonEntrances) {
+            if (Dist(s.wildernessPlayerPos, e.pos) < kRivalSafetyRadius) { nearSafety = true; break; }
+        }
+    }
+    if (nearSafety) huntChance -= kRivalHuntSafetyPenalty;
+    huntChance = std::clamp(huntChance, 0.05f, 0.95f);
+    if (!GuildThreatActive(s, bi) && RandUnit() < huntChance) {
+        if (RandUnit() < kBladeStalkChance) { BladeStartStalk(s, bi); return; }
+        // Pair hunt — the signature Murder Inc. jump: 30% chance a second blade
+        // joins the same hunt. Only a patrolling/stalking, non-engaged blade can
+        // be pulled in; the champion never pair-hunts.
+        int partner = -1;
+        if (RandUnit() < kBladePairChance) {
+            for (int j = 0; j < kBladeCount; j++) {
+                if (j == bi) continue;
+                auto aj = s.blades[j].activity;
+                if (aj != GameState::RivalActivity::Patrol && aj != GameState::RivalActivity::Stalking) continue;
+                if (s.wildEngaged.has_value() && s.wildEngaged->bladeIdx == j) continue;
+                partner = j;
+                break;
+            }
+        }
+        BladeStartHunt(s, bi, partner);
+        return;
+    }
+    // New patrol waypoint — the same gather-node/monster-spot set the champion walks.
+    int totalSpots = (int)kWildernessGatherNodes.size() + (int)kWildernessMonsterSpots.size();
+    int pick = std::rand() % totalSpots;
+    b.patrolTarget = pick < (int)kWildernessGatherNodes.size()
+        ? kWildernessGatherNodes[pick].pos
+        : kWildernessMonsterSpots[pick - (int)kWildernessGatherNodes.size()].pos;
+    b.activityTimer = kRivalPauseDuration;
+}
 
 // ---------------------------------------------------------------------
 // Dungeon room layouts — real rooms and corridors, one distinct shape per dungeon
@@ -6368,7 +6782,10 @@ static T3CQuadParts T3CBuildQuad(const T3CQuadSpec& s) {
             T3CSphere(b, 0.0f, 0.0f, 0.0f, segR, segR * 0.9f, segR * 0.9f, 6, 8, WHITE);
             P.segBody = T3CFinish(b);
         }
-        P.neckP = { s.bodyLen * 0.5f + 4.0f, s.neckUp, 0.0f };
+        // Head pivot matches the animated rest pose in T3CDrawSerpent (half a
+        // segment ahead of the chain front) so the merged mesh's head sits on
+        // the body instead of floating ~30 units ahead of it.
+        P.neckP = { P.segSpacing * 0.5f + 4.0f, s.neckUp, 0.0f };
         {
             T3CMeshBuilder b;
             T3CSphere(b, 0.0f, 0.0f, 0.0f, s.headR, s.headR * 0.9f, s.headR * 0.85f, 6, 8, WHITE);
@@ -6670,7 +7087,10 @@ static void T3CDrawQuad(const T3CQuadParts& P, float x, float z, float yawRad, f
     Color coatV = T3CTintVar(coat, a.seed);
     Color darkV = T3CTintVar(ColorBrightness(coat, -0.35f), a.seed);
     if (shadowPass || distToPlayer > kT3CFarLOD) {
-        DrawModelEx(P.merged, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f },
+        // Hoverers (bat) keep their hover height in the merged draw too, or
+        // the shadow / far LOD would show them sitting on the ground.
+        float lodY = P.hover ? (6.0f + sinf(a.t * 3.0f + a.seed) * 3.0f) : 0.0f;
+        DrawModelEx(P.merged, { x, lodY, z }, { 0.0f, 1.0f, 0.0f },
                     -yawRad * kT3CDeg, { scale, scale, scale }, coatV);
         return;
     }
@@ -6940,6 +7360,7 @@ static const int kT3CTrackPlayerWild = 20;
 static const int kT3CTrackCreatureWild = 30; // + creature spot idx
 static const int kT3CTrackMonsterWild = 60;  // + monster spot idx
 static const int kT3CTrackRival = 90;
+static const int kT3CTrackBladeWild = 91; // + blade idx (0..2) — one track per blade so they don't animate in lockstep
 static const int kT3CTrackInnocentWild = 100; // + innocent idx
 static const int kT3CTrackCompanion = 120;
 static const int kT3CTrackPlayerDungeon = 130;
@@ -6966,6 +7387,18 @@ static const float kT3DDistMax = 1500.0f;// farthest zoom: whole town in frame
 static const float kT3DCamDamp = 9.0f;   // orbit smoothing speed (per second; higher = snappier)
 static const float kT3DZoomDamp = 7.0f;  // zoom smoothing speed (per second)
 static const float kT3DTargetDamp = 6.0f;// how fast the camera follows the walking player
+// Diablo-style follow camera (2026-09-24): fixed yaw/pitch, damped follow with
+// movement lookahead. Default ON in 3D; toggle with KEY_C or the HUD camera
+// button. The old free-orbit camera is one toggle away (g_t3dFollowMode=false).
+static bool g_t3dFollowMode = true;
+static const float kT3DFollowYaw = 0.7f;   // fixed yaw (matches the old default view)
+static const float kT3DFollowPitch = 0.96f;// fixed pitch: ~55 deg down, Diablo-style
+static const float kT3DLookTime = 0.35f;   // lookahead = smoothed velocity * this (seconds of travel)
+static const float kT3DLookMax = 130.0f;   // max lookahead offset (world units)
+static const float kT3DVelDamp = 8.0f;      // velocity smoothing speed (per second)
+static const float kT3DVelDead = 6.0f;      // below this speed the player counts as stopped
+static Vector2 g_t3dVelSm = { 0.0f, 0.0f }; // smoothed player velocity (world units/sec)
+static Vector2 g_t3dLastPP = { 0.0f, 0.0f };// player pos last frame (velocity source)
 static bool g_t3dOrbiting = false;
 static Vector2 g_t3dLastMouse = {0, 0};
 static float g_t3dDragDist = 0.0f;
@@ -6975,6 +7408,23 @@ static float g_t3dDragDist = 0.0f;
 // damping), so orbit/zoom/follow all glide. First call (or a screen switch)
 // snaps the follow target to the new player instead of sweeping across the world.
 struct Town3DCam { Vector3 pos, target, fwd, right, up; float fovY, aspect, vw, vh; };
+
+// Two-finger pinch zoom for touch (mobile): spread to zoom in, pinch to zoom
+// out. Tracked across frames; a pinch in progress cancels any orbit drag.
+static float g_t3dPinchDist = 0.0f;
+static void Town3DPinchZoom(float distMin, float distMax) {
+    if (GetTouchPointCount() == 2) {
+        Vector2 t0 = GetTouchPosition(0), t1 = GetTouchPosition(1);
+        float dx = t1.x - t0.x, dy = t1.y - t0.y;
+        float d = sqrtf(dx * dx + dy * dy);
+        if (g_t3dPinchDist > 1.0f && d > 1.0f)
+            g_t3dDist = std::clamp(g_t3dDist * (g_t3dPinchDist / d), distMin, distMax);
+        g_t3dPinchDist = d;
+        g_t3dOrbiting = false;
+    } else {
+        g_t3dPinchDist = 0.0f;
+    }
+}
 static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, int screenId,
                                  float distMin, float distMax) {
     float dt = GetFrameTime();
@@ -6985,6 +7435,38 @@ static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, in
         // Entering a world with tighter zoom limits never starts out of range.
         g_t3dDist = std::clamp(g_t3dDist, distMin, distMax);
         g_t3dDistSm = std::clamp(g_t3dDistSm, distMin, distMax);
+        // Velocity tracker restarts too: a screen switch isn't movement.
+        g_t3dVelSm = { 0.0f, 0.0f };
+        g_t3dLastPP = playerPos;
+    }
+    if (dt <= 0.0f) dt = 1.0f / 60.0f;
+    // --- Follow-mode lookahead: smoothed player velocity, deadzoned at rest so
+    // the camera never jitters when the player stands still. Teleport-guarded.
+    Vector2 rawV = { (playerPos.x - g_t3dLastPP.x) / dt, (playerPos.y - g_t3dLastPP.y) / dt };
+    g_t3dLastPP = playerPos;
+    float rawSpeed = sqrtf(rawV.x * rawV.x + rawV.y * rawV.y);
+    if (rawSpeed > 900.0f) {
+        // Teleport / 2D-to-3D switch after walking in 2D: not movement, so the
+        // camera must not lean. (Normal walk speeds are far below this.)
+        g_t3dVelSm = { 0.0f, 0.0f };
+    } else {
+        float tvv = 1.0f - expf(-dt * kT3DVelDamp);
+        g_t3dVelSm.x += (rawV.x - g_t3dVelSm.x) * tvv;
+        g_t3dVelSm.y += (rawV.y - g_t3dVelSm.y) * tvv;
+    }
+    Vector2 look = { 0.0f, 0.0f };
+    if (g_t3dFollowMode) {
+        float speed = sqrtf(g_t3dVelSm.x * g_t3dVelSm.x + g_t3dVelSm.y * g_t3dVelSm.y);
+        if (speed > kT3DVelDead) {
+            float want = speed * kT3DLookTime;
+            if (want > kT3DLookMax) want = kT3DLookMax;
+            look.x = g_t3dVelSm.x / speed * want;
+            look.y = g_t3dVelSm.y / speed * want;
+        }
+        // Follow mode drives the orbit targets to the fixed Diablo-style angle;
+        // the smoothed copies glide there, so toggling modes never snaps.
+        g_t3dYaw = kT3DFollowYaw;
+        g_t3dPitch = kT3DFollowPitch;
     }
     float ty = 1.0f - expf(-dt * kT3DCamDamp);
     float tz = 1.0f - expf(-dt * kT3DZoomDamp);
@@ -6992,7 +7474,7 @@ static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, in
     g_t3dYawSm += (g_t3dYaw - g_t3dYawSm) * ty;
     g_t3dPitchSm += (g_t3dPitch - g_t3dPitchSm) * ty;
     g_t3dDistSm += (g_t3dDist - g_t3dDistSm) * tz;
-    Vector3 pw = { playerPos.x, 0.0f, playerPos.y };
+    Vector3 pw = { playerPos.x + look.x, 0.0f, playerPos.y + look.y };
     g_t3dTargetSm = T3VAdd(g_t3dTargetSm, T3VScale(T3VSub(pw, g_t3dTargetSm), tt));
     Town3DCam c;
     c.target = g_t3dTargetSm;
@@ -7097,12 +7579,12 @@ static RenderTexture2D Town3DLoadShadowmapRT(int width, int height) {
     return target;
 }
 
-// 2026-09-24: shadows disabled pending real-device tuning — see the
-// kT3DShadowsEnabled comment in the previous fix commit (empty-screen sky
-// bug + WebGL shadow-acne flashing bug, both found and fixed on the
-// pre-Muse 3D milestone). Re-applied here since this drop was built on the
-// pre-fix baseline. The 3D views already fall back to flat-lit rendering
-// when shadows are off, so nothing else needs to change.
+// 2026-09-24: shadows disabled pending real-device tuning — WebGL/mobile GPUs
+// honor the shadow shader's `precision mediump float` far more literally than
+// desktop drivers, causing depth-precision banding ("shadow acne") that
+// flashed while moving on a real phone but never reproduced on desktop.
+// Re-applied here since this drop was built on the pre-fix baseline; the 3D
+// views already fall back to flat-lit rendering when shadows are off.
 static const bool kT3DShadowsEnabled = false;
 static void Town3DEnsureShadow() {
     Town3DShadow& S = g_t3dShadow;
@@ -7570,6 +8052,7 @@ static bool Town3DPointInUI(Vector2 m, const GameState& s, int screenW) {
     if (CheckCollisionPointRec(m, { 160, 120, 120, 30 })) return true;  // Gather Ore
     if (CheckCollisionPointRec(m, { 290, 120, 150, 30 })) return true;  // Auto-Gather
     if (CheckCollisionPointRec(m, { 452, 120, 68, 30 })) return true;   // 3D/2D toggle
+    if (CheckCollisionPointRec(m, { 528, 120, 96, 30 })) return true;   // camera mode button
     if (CheckCollisionPointRec(m, { kViewport.x + kViewport.width - 150.0f,
                                     kViewport.y + kViewport.height - 90.0f, 130.0f, 60.0f })) return true; // tap-to-interact
     if (CheckCollisionPointRec(m, kJoystickZone)) return true;
@@ -7727,13 +8210,11 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     // large flat outer field so the horizon never shows a hard edge.
     DrawModel(g_t3dGround.model, { 500, 0, 500 }, 1.0f, WHITE);
     Color outerCol = (s.selectedTown == 0) ? Color{ 96, 138, 76, 255 } : Color{ 90, 124, 82, 255 };
-    // 2026-09-24: was -1.5 — z-fought with the ground model at long view
-    // distances once the far clip plane was extended to 5000 (see
-    // rlSetClipPlanes in main()) to fix a web-only clipping bug; depth
-    // precision gets coarser the farther the far plane sits, and 1.5 units
-    // stopped being a resolvable gap at the town's max zoom. -15 is still
-    // visually nothing (this plane is a flat-color horizon filler, never
-    // seen edge-on) but leaves enough margin to stay unambiguous.
+    // 2026-09-24: was -1.5 — z-fights with the ground model at long view
+    // distances once the far clip plane is extended (see rlSetClipPlanes in
+    // main(), fixing a web-only clipping bug); depth precision gets coarser
+    // the farther the far plane sits. -15 is still visually nothing (flat-
+    // color horizon filler, never seen edge-on) but leaves enough margin.
     DrawPlane({ 500, -15.0f, 500 }, { 4000, 4000 }, outerCol);
 
     // Buildings — Quaternius MegaKit assemblies (see Town3DDrawBuilding), one per
@@ -8031,10 +8512,19 @@ static void Town3DDrawGroundRing(float x, float z, float y, float rIn, float rOu
     rlEnableBackfaceCulling();
 }
 
+// Grass tufts (defined with the wilderness view below): per-frame shader
+// update + main-pass draws. Skipped in the shadow pass by construction.
+static void T3DGrassFrameUpdate(const Vector3& camPos);
+static void T3DGrassDrawTown();
 static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     Vector2 mouse = GetMousePosition();
     bool panelOpen = s.selectedTile.has_value() || s.greetedNPC.has_value();
 
+    // --- Camera input: follow mode (fixed Diablo-style angle) or free orbit ---
+    // C key or the HUD camera button toggles; pinch zooms on touch. In follow
+    // mode drags don't orbit (clicks still pick); wheel/pinch zoom always works.
+    if (IsKeyPressed(KEY_C)) g_t3dFollowMode = !g_t3dFollowMode;
+    Town3DPinchZoom(kT3DDistMin, kT3DDistMax);
     // --- Orbit / zoom / pick input (left-drag orbits, wheel zooms, click picks) ---
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !panelOpen &&
         CheckCollisionPointRec(mouse, kViewport) && !Town3DPointInUI(mouse, s, screenW)) {
@@ -8046,8 +8536,10 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
         Vector2 d = { mouse.x - g_t3dLastMouse.x, mouse.y - g_t3dLastMouse.y };
         g_t3dLastMouse = mouse;
         g_t3dDragDist += fabsf(d.x) + fabsf(d.y);
-        g_t3dYaw -= d.x * 0.006f; // unbounded; the smoothed yaw follows continuously
-        g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
+        if (!g_t3dFollowMode) {
+            g_t3dYaw -= d.x * 0.006f; // unbounded; the smoothed yaw follows continuously
+            g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
+        }
     }
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) {
         bool wasClick = g_t3dDragDist < 8.0f;
@@ -8091,7 +8583,9 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
         rlEnableTexture(g_t3dShadow.map.depth.id);
         rlSetUniform(g_t3dShadow.shadowMapLoc, &shadowSlot, SHADER_UNIFORM_INT, 1);
     }
+    T3DGrassFrameUpdate(c.pos); // sway clock + sun VP for the grass shader
     Town3DDrawSceneContents(s, false);
+    T3DGrassDrawTown(); // main pass only — never in the shadow pass
     if (shadowsOn) {
         // Unbind the depth texture and restore the default shader so the 2D
         // overlay labels below (and the rest of the frame) render normally.
@@ -8361,6 +8855,268 @@ static bool Wild3DInView(const Town3DCam& c, float x, float z, float radius) {
     return fabsf(xc) < zc * tanF * c.aspect + m && fabsf(yc) < zc * tanF + m;
 }
 
+// ---- Swaying 3D grass tufts (2026-09-24) ----
+// Sparse crossed-quad tufts with a GPU wind wobble (assets/shaders/grass.vs,
+// paired with the existing shadowmap.fs so tufts get the same sun, shadow
+// receive, and fog as every other model). Perf: one merged mesh per area —
+// the town is a single draw call, the wilderness is 4 quadrant chunks culled
+// by the camera. Skipped in the shadow pass (like the ambience batch): tufts
+// neither cast shadows nor pay the depth-pass cost. No dungeon grass.
+static const float kT3DGrassTuftH = 26.0f;
+static const float kT3DGrassTuftW = 15.0f;
+static const int kT3DGrassTownMax = 200;
+static const int kT3DGrassWildMax = 260;
+
+struct T3DGrassShader {
+    bool ready = false, tried = false;
+    Shader shader{};
+    int timeLoc = -1, viewPosLoc = -1, lightVPLoc = -1;
+};
+static T3DGrassShader g_t3dGrassShader;
+
+struct T3DGrassField { bool built = false; Model model{}; };
+static T3DGrassField g_t3dGrassTown;
+static T3DGrassField g_t3dGrassWild[4];
+static bool g_t3dGrassWildBuilt = false;
+
+// Per-vertex-color triangle (the kit's T3CPushTri takes one color per tri;
+// grass wants a dark-base -> light-tip gradient).
+static void T3DGrassTri(T3CMeshBuilder& b, const float p0[3], const float p1[3],
+                        const float p2[3], Color c0, Color c1, Color c2) {
+    float ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    float vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    float l = sqrtf(nx * nx + ny * ny + nz * nz);
+    if (l < 1e-9f) return;
+    nx /= l; ny /= l; nz /= l;
+    const float* ps[3] = { p0, p1, p2 };
+    const Color cs[3] = { c0, c1, c2 };
+    for (int i = 0; i < 3; i++) {
+        b.pos.push_back(ps[i][0]); b.pos.push_back(ps[i][1]); b.pos.push_back(ps[i][2]);
+        b.nor.push_back(nx); b.nor.push_back(ny); b.nor.push_back(nz);
+        b.uv.push_back(0.0f); b.uv.push_back(0.0f);
+        b.col.push_back(cs[i].r); b.col.push_back(cs[i].g);
+        b.col.push_back(cs[i].b); b.col.push_back(255);
+    }
+}
+
+// One tuft: two crossed tapered quads, double-sided, gradient-shaded.
+static void T3DGrassTuft(T3CMeshBuilder& b, float x, float z, float s,
+                         Color cDark, Color cLight) {
+    float H = kT3DGrassTuftH * s, W = kT3DGrassTuftW * s;
+    float lean  = (Town3DHash01(x * 3.1f, z * 7.7f) - 0.5f) * 8.0f * s;
+    float leanZ = (Town3DHash01(z * 5.3f, x * 1.9f) - 0.5f) * 8.0f * s;
+    float base = Town3DHash01(x, z) * 3.14159265f;
+    for (int q = 0; q < 2; q++) {
+        float a = base + (float)q * 1.5707963f;
+        float dx = cosf(a) * W * 0.5f, dz = sinf(a) * W * 0.5f;
+        float v0[3] = { x - dx, 0.0f, z - dz };
+        float v1[3] = { x + dx, 0.0f, z + dz };
+        float v2[3] = { x + dx * 0.3f + lean, H, z + dz * 0.3f + leanZ };
+        float v3[3] = { x - dx * 0.3f + lean, H, z - dz * 0.3f + leanZ };
+        T3DGrassTri(b, v0, v1, v2, cDark, cDark, cLight);
+        T3DGrassTri(b, v0, v2, v3, cDark, cLight, cLight);
+        T3DGrassTri(b, v0, v2, v1, cDark, cLight, cDark);
+        T3DGrassTri(b, v0, v3, v2, cDark, cLight, cLight);
+    }
+}
+
+static void T3DGrassEnsureShader() {
+    T3DGrassShader& G = g_t3dGrassShader;
+    if (G.ready || G.tried) return;
+    G.tried = true;
+    if (!g_t3dShadow.ready) return; // no sun pipeline: grass keeps the default shader
+    G.shader = LoadShader("assets/shaders/grass.vs", "assets/shaders/shadowmap.fs");
+    if (G.shader.id == 0) return;
+    G.timeLoc = GetShaderLocation(G.shader, "time");
+    G.viewPosLoc = GetShaderLocation(G.shader, "viewPos");
+    G.lightVPLoc = GetShaderLocation(G.shader, "lightVP");
+    // Static uniforms mirror Town3DEnsureShadow's values.
+    Vector3 sunDir = kT3DSunDir;
+    SetShaderValue(G.shader, GetShaderLocation(G.shader, "lightDir"), &sunDir, SHADER_UNIFORM_VEC3);
+    Vector4 sunCol = ColorNormalize(Color{ 255, 242, 220, 255 });
+    SetShaderValue(G.shader, GetShaderLocation(G.shader, "lightColor"), &sunCol, SHADER_UNIFORM_VEC4);
+    float ambient[4] = { 0.45f, 0.40f, 0.33f, 1.0f };
+    SetShaderValue(G.shader, GetShaderLocation(G.shader, "ambient"), ambient, SHADER_UNIFORM_VEC4);
+    int res = T3D_SHADOWMAP_RES;
+    SetShaderValue(G.shader, GetShaderLocation(G.shader, "shadowMapResolution"), &res, SHADER_UNIFORM_INT);
+    Vector3 fogCol = { kT3DSkyHorizon.r / 255.0f, kT3DSkyHorizon.g / 255.0f,
+                       kT3DSkyHorizon.b / 255.0f };
+    SetShaderValue(G.shader, GetShaderLocation(G.shader, "fogColor"), &fogCol, SHADER_UNIFORM_VEC3);
+    float fogRange[2] = { 900.0f, 2600.0f };
+    SetShaderValue(G.shader, GetShaderLocation(G.shader, "fogRange"), fogRange, SHADER_UNIFORM_VEC2);
+    int slot = 10; // main passes bind the shadowmap depth texture here
+    SetShaderValue(G.shader, GetShaderLocation(G.shader, "shadowMap"), &slot, SHADER_UNIFORM_INT);
+    G.ready = true;
+}
+
+// Per-frame: camera pos, sun VP (same values the main passes set on the
+// shadow shader), and the sway clock.
+static void T3DGrassFrameUpdate(const Vector3& camPos) {
+    T3DGrassShader& G = g_t3dGrassShader;
+    if (!G.ready) return;
+    SetShaderValue(G.shader, G.viewPosLoc, &camPos, SHADER_UNIFORM_VEC3);
+    SetShaderValueMatrix(G.shader, G.lightVPLoc, g_t3dLightVP);
+    float t = (float)GetTime();
+    SetShaderValue(G.shader, G.timeLoc, &t, SHADER_UNIFORM_FLOAT);
+}
+
+static void T3DGrassApplyShader(Model& m) {
+    T3DGrassEnsureShader();
+    if (!g_t3dGrassShader.ready || m.meshCount <= 0) return;
+    for (int i = 0; i < m.materialCount; i++) m.materials[i].shader = g_t3dGrassShader.shader;
+}
+
+static void T3DGrassShade(float x, float z, Color cDark, Color cLight, Color& cd, Color& cl) {
+    float v = 0.9f + 0.2f * Town3DHash01(x + 9.0f, z + 3.0f);
+    cd = { (unsigned char)fminf(cDark.r * v, 255.0f), (unsigned char)fminf(cDark.g * v, 255.0f),
+           (unsigned char)fminf(cDark.b * v, 255.0f), 255 };
+    cl = { (unsigned char)fminf(cLight.r * v, 255.0f), (unsigned char)fminf(cLight.g * v, 255.0f),
+           (unsigned char)fminf(cLight.b * v, 255.0f), 255 };
+}
+
+// Town lawns: grid jitter, kept off streets, plaza, buildings, and the gate.
+static void T3DGrassBuildTown() {
+    T3DGrassField& F = g_t3dGrassTown;
+    if (F.built) return;
+    F.built = true;
+    std::vector<std::vector<Vector2>> streets;
+    Town3DStreetPolylines(streets);
+    Color cDark = { 88, 128, 70, 255 }, cLight = { 150, 192, 114, 255 };
+    T3CMeshBuilder b;
+    int count = 0;
+    for (float gx = 60.0f; gx <= 940.0f && count < kT3DGrassTownMax; gx += 46.0f) {
+        for (float gz = 60.0f; gz <= 940.0f && count < kT3DGrassTownMax; gz += 46.0f) {
+            float jx = gx + (Town3DHash01(gx, gz) - 0.5f) * 30.0f;
+            float jz = gz + (Town3DHash01(gz, gx + 11.0f) - 0.5f) * 30.0f;
+            if (Town3DHash01(jx * 1.3f, jz * 2.9f) > 0.45f) continue;
+            if (hypotf(jx - 500.0f, jz - 500.0f) < 104.0f) continue; // plaza
+            bool onRoad = false;
+            for (auto& pl : streets) {
+                for (size_t i = 0; i + 1 < pl.size(); i++) {
+                    if (Town3DDistPtSeg(jx, jz, pl[i].x, pl[i].y, pl[i + 1].x, pl[i + 1].y) < 30.0f) {
+                        onRoad = true; break;
+                    }
+                }
+                if (onRoad) break;
+            }
+            if (onRoad) continue;
+            bool nearB = false;
+            for (auto& n : kTownNodePositions) {
+                float dx = jx - n.pos.x, dz = jz - n.pos.y;
+                if (dx * dx + dz * dz < 85.0f * 85.0f) { nearB = true; break; }
+            }
+            if (nearB) continue;
+            { // wilderness gate
+                float dx = jx - kWildernessGatePos.x, dz = jz - kWildernessGatePos.y;
+                if (dx * dx + dz * dz < 60.0f * 60.0f) continue;
+            }
+            float s = 0.75f + 0.55f * Town3DHash01(jz, jx + 5.0f);
+            Color cd, cl;
+            T3DGrassShade(jx, jz, cDark, cLight, cd, cl);
+            T3DGrassTuft(b, jx, jz, s, cd, cl);
+            count++;
+        }
+    }
+    if (count == 0) return;
+    F.model = T3CFinish(b);
+    T3DGrassApplyShader(F.model);
+}
+
+// Wilderness: tufts along the dirt paths (offset from the path center) plus a
+// small ring at each dungeon entrance. Chunked into quadrants for culling.
+static void T3DGrassBuildWild() {
+    if (g_t3dGrassWildBuilt) return;
+    g_t3dGrassWildBuilt = true;
+    std::vector<Vector2> clear;
+    for (auto& n : kWildernessGatherNodes) clear.push_back(n.pos);
+    for (auto& sp : kWildernessCreatureSpots) clear.push_back(sp.pos);
+    for (auto& m : kWildernessMonsterSpots) clear.push_back(m.pos);
+    for (auto& f : kWildernessFoliage) clear.push_back(f.pos);
+    for (auto& ip : kWildernessInnocentSpots) clear.push_back(ip.pos);
+    clear.push_back(kWildernessReturnGatePos);
+    clear.push_back(kWildernessTown2GatePos);
+    auto isClear = [&](float x, float z) {
+        for (const Vector2& p : clear) {
+            float dx = x - p.x, dz = z - p.y;
+            if (dx * dx + dz * dz < 45.0f * 45.0f) return false;
+        }
+        return true;
+    };
+    struct Tuft { float x, z, s; };
+    std::vector<Tuft> quads[4];
+    int total = 0;
+    auto addTuft = [&](float x, float z) {
+        if (total >= kT3DGrassWildMax) return;
+        if (x < 40.0f || x > 3160.0f || z < 40.0f || z > 3160.0f) return;
+        int q = (x >= 1600.0f ? 1 : 0) + (z >= 1600.0f ? 2 : 0);
+        quads[q].push_back({ x, z, 0.8f + 0.6f * Town3DHash01(z, x + 5.0f) });
+        total++;
+    };
+    std::vector<Vector2> ends;
+    for (auto& e : kWildernessDungeonEntrances) ends.push_back(e.pos);
+    ends.push_back(kWildernessTown2GatePos);
+    for (Vector2 end : ends) {
+        Vector2 a = kWildernessReturnGatePos;
+        float len = hypotf(end.x - a.x, end.y - a.y);
+        if (len < 1.0f) continue;
+        float px = -(end.y - a.y) / len, pz = (end.x - a.x) / len; // perpendicular
+        int n = (int)(len / 90.0f);
+        for (int i = 1; i < n; i++) {
+            float t = (float)i / (float)n;
+            float cxp = a.x + (end.x - a.x) * t, czp = a.y + (end.y - a.y) * t;
+            int k = 1 + (Town3DHash01(cxp, czp) > 0.5f ? 1 : 0);
+            for (int j = 0; j < k; j++) {
+                float side = (Town3DHash01(cxp + (float)j * 7.0f, czp) > 0.5f) ? 1.0f : -1.0f;
+                float off = side * (22.0f + 26.0f * Town3DHash01(czp + (float)j * 3.0f, cxp));
+                float jx = cxp + px * off + (Town3DHash01(cxp * 2.0f, czp) - 0.5f) * 20.0f;
+                float jz = czp + pz * off + (Town3DHash01(czp * 2.0f, cxp + 9.0f) - 0.5f) * 20.0f;
+                if (isClear(jx, jz)) addTuft(jx, jz);
+            }
+        }
+    }
+    for (auto& e : kWildernessDungeonEntrances) { // small ring at each entrance
+        for (int j = 0; j < 8; j++) {
+            float an = Town3DHash01(e.pos.x + (float)j, e.pos.y) * 6.2831853f;
+            float rr = 48.0f + 26.0f * Town3DHash01(e.pos.y + (float)j * 3.0f, e.pos.x);
+            addTuft(e.pos.x + cosf(an) * rr, e.pos.y + sinf(an) * rr);
+        }
+    }
+    Color cDark = { 80, 122, 62, 255 }, cLight = { 144, 188, 106, 255 };
+    for (int q = 0; q < 4; q++) {
+        T3DGrassField& F = g_t3dGrassWild[q];
+        F.built = true;
+        if (quads[q].empty()) continue;
+        T3CMeshBuilder b;
+        for (auto& tf : quads[q]) {
+            Color cd, cl;
+            T3DGrassShade(tf.x, tf.z, cDark, cLight, cd, cl);
+            T3DGrassTuft(b, tf.x, tf.z, tf.s, cd, cl);
+        }
+        F.model = T3CFinish(b);
+        T3DGrassApplyShader(F.model);
+    }
+}
+
+static void T3DGrassDrawTown() {
+    T3DGrassBuildTown();
+    T3DGrassField& F = g_t3dGrassTown;
+    if (!F.built || F.model.meshCount <= 0) return;
+    DrawModel(F.model, { 0.0f, 0.0f, 0.0f }, 1.0f, WHITE);
+}
+
+static void T3DGrassDrawWild(const Town3DCam* cull) {
+    T3DGrassBuildWild();
+    for (int q = 0; q < 4; q++) {
+        T3DGrassField& F = g_t3dGrassWild[q];
+        if (!F.built || F.model.meshCount <= 0) continue;
+        float cx = (q % 2 == 0) ? 800.0f : 2400.0f;
+        float cz = (q < 2) ? 800.0f : 2400.0f;
+        if (cull && !Wild3DInView(*cull, cx, cz, 1150.0f)) continue;
+        DrawModel(F.model, { 0.0f, 0.0f, 0.0f }, 1.0f, WHITE);
+    }
+}
+
 // Gather nodes as real 3D objects at their EXACT 2D positions
 // (kWildernessGatherNodes, untouched). Wood: a full-size tree plus a cut stump
 // beside it. Ore: a gray rock cluster studded with colored ore flecks (tint
@@ -8538,9 +9294,8 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     DrawModel(g_wild3dGround.model, { 1600, 0, 1600 }, 1.0f, WHITE);
     // 2026-09-24: was -1.5 — visibly z-fought (flickering horizontal bands)
     // against the ground model at the wilderness's max zoom (2600 units) once
-    // the far clip plane was extended to 5000 to fix a web-only clipping bug;
-    // found by testing this exact zoom level, not guessed. -15 keeps the same
-    // "invisible flat-color filler" role with enough depth margin at range.
+    // the far clip plane was extended to fix a web-only clipping bug. -15
+    // keeps the same "invisible flat-color filler" role with enough margin.
     DrawPlane({ 1600, -15.0f, 1600 }, { 8000, 8000 }, Color{ 92, 132, 70, 255 });
 
     // Extra scatter (3D-only filler; see Wild3DBuildScatter).
@@ -8548,6 +9303,8 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         if (!vis(it.x, it.z, 80.0f)) continue;
         Wild3DDrawScatterOne(it, shadowPass);
     }
+    // Swaying grass tufts along the paths (main pass only — never shadows).
+    if (!shadowPass) T3DGrassDrawWild(cull);
     // Decorative foliage from the 2D data.
     for (const WildernessFoliage& f : kWildernessFoliage) {
         if (!vis(f.pos.x, f.pos.y, 60.0f)) continue;
@@ -8614,6 +9371,19 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             T3CDrawHumanoid(g_t3cHumans[0].parts, rp.x, rp.y, ryaw, 1.0f,
                             Color{ 150, 60, 55, 255 }, Color{ 60, 50, 55, 255 },
                             Color{ 235, 200, 170, 255 }, ra, shadowPass);
+        }
+    }
+    // Murder Inc. blades — the same humanoid kit as the champion, but in dark
+    // dried-blood guild colors and slightly smaller, so the crew reads as the
+    // crew and the champion stays the champion.
+    for (int bi = 0; bi < kBladeCount; bi++) {
+        Vector2 bp = (wasEngaged && s.wildEngaged->bladeIdx == bi) ? s.wildEngaged->pos : s.blades[bi].pos;
+        if (vis(bp.x, bp.y, 70.0f)) {
+            float byaw = atan2f(s.wildernessPlayerPos.y - bp.y, s.wildernessPlayerPos.x - bp.x);
+            T3CAnim ba = T3CMakeAnim(kT3CTrackBladeWild + bi, bp.x, bp.y, !shadowPass);
+            T3CDrawHumanoid(g_t3cHumans[0].parts, bp.x, bp.y, byaw, 0.95f,
+                            Color{ 70, 25, 30, 255 }, Color{ 35, 30, 35, 255 },
+                            Color{ 220, 190, 165, 255 }, ba, shadowPass);
         }
     }
     // Roaming innocents (only the ones currently present).
@@ -8750,6 +9520,10 @@ static Wild3DNearest Wild3DNearestInfo(const GameState& s) {
         consider(mp, "Fight " + kWildernessMonsterSpots[i].name);
     }
     consider((wasEngaged && s.wildEngaged->isRival) ? s.wildEngaged->pos : s.rivalPos, "Fight Rival Adventurer");
+    for (int bi = 0; bi < kBladeCount; bi++) {
+        Vector2 bp = (wasEngaged && s.wildEngaged->bladeIdx == bi) ? s.wildEngaged->pos : s.blades[bi].pos;
+        consider(bp, "Fight " + BladeName(bi));
+    }
     for (size_t i = 0; i < kWildernessInnocentSpots.size(); i++) {
         if (!s.innocentSpots[i].present) continue;
         consider(WildernessInnocentLivePos((int)i, s.worldTime), "Approach " + s.innocentSpots[i].name);
@@ -8767,6 +9541,7 @@ static Wild3DNearest Wild3DNearestInfo(const GameState& s) {
 // and the live-combat UI while engaged).
 static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
     if (CheckCollisionPointRec(m, { 452, 120, 68, 30 })) return true; // 3D/2D toggle
+    if (CheckCollisionPointRec(m, { 528, 120, 96, 30 })) return true; // camera mode button
     if (CheckCollisionPointRec(m, { kViewport.x + kViewport.width - 150.0f,
                                     kViewport.y + kViewport.height - 90.0f, 130.0f, 60.0f })) return true; // tap-to-interact
     if (CheckCollisionPointRec(m, kJoystickZone)) return true;
@@ -8781,6 +9556,11 @@ static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
 static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const std::string& prompt) {
     Vector2 mouse = GetMousePosition();
 
+    // --- Camera input: follow mode (fixed Diablo-style angle) or free orbit ---
+    // C key or the HUD camera button toggles; pinch zooms on touch. In follow
+    // mode drags don't orbit; wheel/pinch zoom always works.
+    if (IsKeyPressed(KEY_C)) g_t3dFollowMode = !g_t3dFollowMode;
+    Town3DPinchZoom(kWild3DDistMin, kWild3DDistMax);
     // --- Orbit / zoom input (same feel as the town 3D view; the orbit state is
     // shared). No click-picking in Phase 1 — interaction stays walk-up + E / tap,
     // exactly like the 2D wilderness.
@@ -8794,8 +9574,10 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
         Vector2 d = { mouse.x - g_t3dLastMouse.x, mouse.y - g_t3dLastMouse.y };
         g_t3dLastMouse = mouse;
         g_t3dDragDist += fabsf(d.x) + fabsf(d.y);
-        g_t3dYaw -= d.x * 0.006f; // unbounded; the smoothed yaw follows continuously
-        g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
+        if (!g_t3dFollowMode) {
+            g_t3dYaw -= d.x * 0.006f; // unbounded; the smoothed yaw follows continuously
+            g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
+        }
     }
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) g_t3dOrbiting = false;
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
@@ -8824,6 +9606,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
         rlEnableTexture(g_t3dShadow.map.depth.id);
         rlSetUniform(g_t3dShadow.shadowMapLoc, &shadowSlot, SHADER_UNIFORM_INT, 1);
     }
+    T3DGrassFrameUpdate(c.pos); // sway clock + sun VP for the grass shader
     Wild3DDrawSceneContents(s, false, &c);
     if (shadowsOn) {
         rlActiveTextureSlot(10);
@@ -9209,6 +9992,7 @@ static void Dungeon3DDrawPlayer(const GameState& s) {
 static bool Dung3DPointInUI(Vector2 m, const GameState& s) {
     (void)s;
     if (CheckCollisionPointRec(m, { 452, 116, 68, 30 })) return true; // the 2D/3D toggle button
+    if (CheckCollisionPointRec(m, { 528, 116, 96, 30 })) return true; // the camera mode button
     if (CheckCollisionPointRec(m, { 20, 110, 330, 60 })) return true; // HP strip
     if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return true; // quick items
     if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return true; // spell hotbar
@@ -9220,6 +10004,12 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
     int di = *s.selectedDungeon; // caller guarantees a selected dungeon
     Vector2 mouse = GetMousePosition();
 
+    // --- Camera input: follow mode (fixed Diablo-style angle) or free orbit ---
+    // C key or the HUD camera button toggles; pinch zooms on touch. In follow
+    // mode drags don't orbit; wheel/pinch zoom always works. The indoor clamp in
+    // Dungeon3DGetCam still applies on top of the follow+lookahead target.
+    if (IsKeyPressed(KEY_C)) g_t3dFollowMode = !g_t3dFollowMode;
+    Town3DPinchZoom(kDung3DDistMin, kDung3DDistMax);
     // --- Orbit / zoom input (the shared orbit state; tighter dungeon limits).
     // No click-picking — interaction stays walk-up + E / tap, like the 2D view.
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
@@ -9232,8 +10022,10 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         Vector2 d = { mouse.x - g_t3dLastMouse.x, mouse.y - g_t3dLastMouse.y };
         g_t3dLastMouse = mouse;
         g_t3dDragDist += fabsf(d.x) + fabsf(d.y);
-        g_t3dYaw -= d.x * 0.006f;
-        g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
+        if (!g_t3dFollowMode) {
+            g_t3dYaw -= d.x * 0.006f;
+            g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
+        }
     }
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) g_t3dOrbiting = false;
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
@@ -9654,6 +10446,10 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     if (Button({ 290, 120, 150, 30 }, autoLabel, true)) ToggleAutoGather(s);
     // 3D view toggle (2026-09-24 milestone) - same view switch as the V key below.
     if (Button({ 452, 120, 68, 30 }, s.town3DView ? "2D [V]" : "3D [V]", true)) s.town3DView = !s.town3DView;
+    // Camera mode button (2026-09-24): Diablo-style follow is the 3D default;
+    // C key or this button switches back to the old free-orbit camera.
+    if (s.town3DView && Button({ 528, 120, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
+        g_t3dFollowMode = !g_t3dFollowMode;
     // Solid-backed (DrawInfoLine, not bare DrawUIText) and split across two short lines
     // instead of one concatenated one — 2026-09-22 fix: this text sits directly on the
     // tiled ground with nothing else guaranteeing contrast (same class of bug already
@@ -9747,12 +10543,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     DrawUIText("The Wilderness — gather wood/ore or tame a creature. Watch for trouble.", 20, 112, 13, kColorAccent);
 
     UpdateRivalRoaming(s, GetFrameTime()); // before the nearest-search below, so rivalPos is current this frame
+    for (int bi = 0; bi < kBladeCount; bi++) UpdateBladeRoaming(s, bi, GetFrameTime()); // the Murder Inc. crew roams too
     UpdateInnocentSpots(s, GetFrameTime());
 
     // --- Nearest interactable: gather nodes, creature spots, monster spots, and the
     // return gate all compete in one search, same pattern as the Wilderness Gate vs.
     // buildings in Town.
-    enum class WildNodeKind { Gather, Creature, Monster, Rival, Innocent, ReturnGate, DungeonEntrance, Town2Gate };
+    enum class WildNodeKind { Gather, Creature, Monster, Rival, Blade, Innocent, ReturnGate, DungeonEntrance, Town2Gate };
     WildNodeKind nearestKind = WildNodeKind::ReturnGate;
     int nearestIdx = -1;
     float nearestDist = 1e9f;
@@ -9780,6 +10577,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         Vector2 pos = (wasEngaged && s.wildEngaged->isRival) ? s.wildEngaged->pos : s.rivalPos;
         float d = Dist(s.wildernessPlayerPos, pos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Rival; nearestIdx = -1; }
+    }
+    for (int bi = 0; bi < kBladeCount; bi++) {
+        // Murder Inc. blades — same dedicated distance check as the champion.
+        Vector2 pos = (wasEngaged && s.wildEngaged->bladeIdx == bi) ? s.wildEngaged->pos : s.blades[bi].pos;
+        float d = Dist(s.wildernessPlayerPos, pos);
+        if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Blade; nearestIdx = bi; }
     }
     for (size_t i = 0; i < kWildernessInnocentSpots.size(); i++) {
         if (!s.innocentSpots[i].present) continue; // empty/respawning — not interactable
@@ -9826,7 +10629,19 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         am.maxHp = std::max(1.0f, s.rivalLevel * 3.0f);
         am.hp = am.maxHp;
         s.wildEngaged = am;
-        s.logLine = "The Rival Adventurer turns to face you!";
+        s.logLine = "The " + RivalEpithetName(s) + " turns to face you!";
+    };
+    auto tryEngageBlade = [&](int bi) {
+        GameState::ActiveMonster am;
+        am.spotIdx = -1;
+        am.isRival = false;
+        am.bladeIdx = bi;
+        am.pos = s.blades[bi].pos;
+        am.spawnPos = s.blades[bi].pos; // unused for blades, kept sane like the champion's
+        am.maxHp = std::max(1.0f, s.blades[bi].level * 3.0f);
+        am.hp = am.maxHp;
+        s.wildEngaged = am;
+        s.logLine = "The " + BladeName(bi) + " turns to face you!";
     };
     // Walking up to a roaming Innocent NPC and pressing E opens the exact same
     // DrawInnocentPanel (Murder/Steal/Snoop/Spare) the old random popup already used —
@@ -9843,6 +10658,24 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         spot.present = false;
         spot.respawnTimer = kInnocentRespawnSeconds;
     };
+    // A hunt that closed to catch range converts into a real fight — but only if
+    // you're still right there, not already fighting something else, and not
+    // mid-panel with an ambush or innocent encounter. (If the moment passes, it passes.)
+    if (s.rivalAutoEngage) {
+        s.rivalAutoEngage = false;
+        if (!s.wildEngaged.has_value() && !s.ambush.has_value() && !s.innocentEncounter.has_value() &&
+            Dist(s.rivalPos, s.wildernessPlayerPos) < kRivalCatchRange * 1.5f)
+            tryEngageRival();
+    }
+    // Murder Inc. blades convert a closed hunt into a real fight the same way —
+    // never mid-panel, never while you're already fighting something else.
+    for (int bi = 0; bi < kBladeCount; bi++) {
+        if (!s.blades[bi].autoEngage) continue;
+        s.blades[bi].autoEngage = false;
+        if (!s.wildEngaged.has_value() && !s.ambush.has_value() && !s.innocentEncounter.has_value() &&
+            Dist(s.blades[bi].pos, s.wildernessPlayerPos) < kRivalCatchRange * 1.5f)
+            tryEngageBlade(bi);
+    }
 
     // --- Live combat with whichever monster is already engaged (if any) ---
     // AI: chase toward the player (leashed to spawn so it can't wander into a
@@ -9977,6 +10810,27 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             }
         }
         if (Dist(am.pos, s.wildernessPlayerPos) > kWildDisengageRange) {
+            if (am.isRival) {
+                // UO red doesn't give up because you ran — it RUNS YOU DOWN. Instead of
+                // resuming patrol, it keeps hunting in the overworld for kRivalPursuitTime.
+                RivalFightEnded(s, am); // persists its position + growth nudge
+                s.wildEngaged.reset();
+                s.rivalActivity = GameState::RivalActivity::Hunting;
+                s.rivalActivityTimer = kRivalPursuitTime;
+                s.rivalSprinting = true;
+                s.rivalSprintTimer = kRivalSprintDuration;
+                s.rivalSprintStartDist = Dist(s.rivalPos, s.wildernessPlayerPos);
+                s.rivalSprintStartVel = s.rivalPlayerVel;
+                s.logLine = "The " + RivalEpithetName(s) + " gives chase!";
+                return;
+            }
+            if (am.bladeIdx >= 0) {
+                // Blades don't pursue — longer leash. Back to patrol, no drama.
+                BladeFightEnded(s, am.bladeIdx, am);
+                s.wildEngaged.reset();
+                s.logLine = "The " + spot.name + " loses interest.";
+                return;
+            }
             s.logLine = "The " + spot.name + " loses interest.";
             RivalFightEnded(s, am); // persists its position/resumes roaming from here — no win/loss, so no growth nudge beyond that
             s.wildEngaged.reset();
@@ -10000,10 +10854,18 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 s.logLine = "The " + mname + "'s ranged strike misses";
             }
             if (s.hp <= 0) {
+                if (am.bladeIdx >= 0) {
+                    // Blades beat you up and move on — only the champion loots corpses,
+                    // tracks kills, or escalates to murderer-tier losses. Ordinary loss.
+                    BladeFightEnded(s, am.bladeIdx, am);
+                    EndWildMonsterLoss(s, mname);
+                    return;
+                }
                 bool wasAlreadyBeaten = s.rivalHasBeatenPlayer;
                 RivalFightEnded(s, am);
                 s.rivalHasBeatenPlayer = true;
                 if (wasAlreadyBeaten) EndWildMonsterMurdererLoss(s, mname); else EndWildMonsterLoss(s, mname);
+                RivalCorpseLoot(s); // the red loots your corpse — 15% of carried gold + one item
                 return;
             }
         } else if (inMelee && am.monsterAttackCooldown <= 0) {
@@ -10018,10 +10880,18 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 s.logLine = "The " + mname + " misses";
             }
             if (s.hp <= 0) {
+                if (am.bladeIdx >= 0) {
+                    // Blades beat you up and move on — only the champion loots corpses,
+                    // tracks kills, or escalates to murderer-tier losses. Ordinary loss.
+                    BladeFightEnded(s, am.bladeIdx, am);
+                    EndWildMonsterLoss(s, mname);
+                    return;
+                }
                 bool wasAlreadyBeaten = s.rivalHasBeatenPlayer;
                 RivalFightEnded(s, am);
                 s.rivalHasBeatenPlayer = true;
                 if (wasAlreadyBeaten) EndWildMonsterMurdererLoss(s, mname); else EndWildMonsterLoss(s, mname);
+                RivalCorpseLoot(s); // the red loots your corpse — 15% of carried gold + one item
                 return;
             }
         }
@@ -10070,6 +10940,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                     RivalFightEnded(s, am);
                     EndWildMonsterWin(s, mname, mgold, mleather);
                     if (wasMurdererTier) { GainFame(s, 10.0f); s.notoriety = std::max(0.0f, s.notoriety - 10.0f); }
+                } else if (am.bladeIdx >= 0) {
+                    BladeFightEnded(s, am.bladeIdx, am); // persist position + slow level growth
+                    EndWildMonsterWin(s, mname, mgold, mleather);
                 } else {
                     EndWildMonsterWin(s, mname, mgold, mleather);
                 }
@@ -10115,6 +10988,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                     RivalFightEnded(s, am);
                     EndWildMonsterWin(s, mname, mgold, mleather);
                     if (wasMurdererTier) { GainFame(s, 10.0f); s.notoriety = std::max(0.0f, s.notoriety - 10.0f); }
+                } else if (am.bladeIdx >= 0) {
+                    BladeFightEnded(s, am.bladeIdx, am); // persist position + slow level growth
+                    EndWildMonsterWin(s, mname, mgold, mleather);
                 } else {
                     EndWildMonsterWin(s, mname, mgold, mleather);
                 }
@@ -10138,6 +11014,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         else if (nearestKind == WildNodeKind::Creature) TryStartTameAttempt(s, kWildernessCreatureSpots[nearestIdx].creatureIdx);
         else if (nearestKind == WildNodeKind::Monster) tryEngageWildMonster(nearestIdx);
         else if (nearestKind == WildNodeKind::Rival) tryEngageRival();
+        else if (nearestKind == WildNodeKind::Blade) tryEngageBlade(nearestIdx);
         else if (nearestKind == WildNodeKind::Innocent) tryEngageInnocentSpot(nearestIdx);
         else if (nearestKind == WildNodeKind::DungeonEntrance) tryEnterDungeon(kWildernessDungeonEntrances[nearestIdx].dungeonIdx);
         else if (nearestKind == WildNodeKind::Town2Gate) {
@@ -10159,13 +11036,18 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     if (wasEngaged) {
         // Melee is automatic now (see trySwingAtEngagedMonster's call site below) — no
         // button/prompt needed for it, just naming who you're fighting.
-        prompt = "Fighting " + kWildernessMonsterSpots[s.wildEngaged->spotIdx].name;
+        // (The Rival has no kWildernessMonsterSpots row — spotIdx is -1 for it, so it
+        // gets its epithet name here instead of an out-of-bounds read.)
+        prompt = "Fighting " + (s.wildEngaged->isRival ? RivalEpithetName(s)
+                               : s.wildEngaged->bladeIdx >= 0 ? BladeName(s.wildEngaged->bladeIdx)
+                               : kWildernessMonsterSpots[s.wildEngaged->spotIdx].name);
     } else if (inRange) {
         if (nearestKind == WildNodeKind::Gather) prompt = "[E] Gather " + kWildernessGatherNodes[nearestIdx].resource;
         else if (nearestKind == WildNodeKind::Creature)
             prompt = "[E] Tame " + kWildCreatures[kWildernessCreatureSpots[nearestIdx].creatureIdx].name;
         else if (nearestKind == WildNodeKind::Monster) prompt = "[E] Fight " + kWildernessMonsterSpots[nearestIdx].name;
         else if (nearestKind == WildNodeKind::Rival) prompt = "[E] Fight Rival Adventurer";
+        else if (nearestKind == WildNodeKind::Blade) prompt = "[E] Fight " + BladeName(nearestIdx);
         else if (nearestKind == WildNodeKind::Innocent) prompt = "[E] Approach " + s.innocentSpots[nearestIdx].name;
         else if (nearestKind == WildNodeKind::DungeonEntrance)
             prompt = "[E] Enter " + kDungeons[kWildernessDungeonEntrances[nearestIdx].dungeonIdx].name;
@@ -10202,7 +11084,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // own swing is a separate action so it can also be triggered by touch, below. The
     // Rival Adventurer (ActiveMonster::isRival) gets its own AI function instead — see
     // updateTacticalOpponentAI's comment.
-    if (s.wildEngaged.has_value() && s.wildEngaged->isRival)
+    if (s.wildEngaged.has_value() && (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0))
         updateTacticalOpponentAI();
     else
         updateEngagedMonsterAI();
@@ -10306,7 +11188,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // swing" instead of "close enough to engage", reusing DrawWorldNode's existing
         // ring rather than adding a second visual for the same idea.
         EngagedMonsterStats spot = EngagedWildMonsterStats(s, *s.wildEngaged);
-        const DirSpriteSheet& sheet = s.wildEngaged->isRival ? g_assets.rivalAdventurerSheet : g_assets.wildMonsterTex[kWildernessMonsterSpots[s.wildEngaged->spotIdx].iconIdx];
+        const DirSpriteSheet& sheet = (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0) ? g_assets.rivalAdventurerSheet : g_assets.wildMonsterTex[kWildernessMonsterSpots[s.wildEngaged->spotIdx].iconIdx];
         Vector2 screenPos = WorldToScreen(s.wildEngaged->pos, camera);
         bool inMelee = Dist(s.wildEngaged->pos, s.wildernessPlayerPos) < kWildMeleeRange;
         if (sheet.ok) {
@@ -10332,18 +11214,43 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // legibility and because "Hunting..." is a genuinely useful warning.
         Vector2 screenPos = WorldToScreen(s.rivalPos, camera);
         bool near = nearestKind == WildNodeKind::Rival && inRange;
-        std::string sub = s.rivalActivity == GameState::RivalActivity::Hunting ? "Hunting..." : "Patrolling";
+        std::string sub = s.rivalActivity == GameState::RivalActivity::Hunting ? "Hunting..."
+            : s.rivalActivity == GameState::RivalActivity::Stalking ? "Stalking..." : "Patrolling";
         const DirSpriteSheet& sheet = g_assets.rivalAdventurerSheet;
         if (sheet.ok) {
-            Vector2 dir = s.rivalActivity == GameState::RivalActivity::Hunting
-                ? Vector2{ s.wildernessPlayerPos.x - s.rivalPos.x, s.wildernessPlayerPos.y - s.rivalPos.y }
-                : Vector2{ s.rivalPatrolTarget.x - s.rivalPos.x, s.rivalPatrolTarget.y - s.rivalPos.y };
+            Vector2 dir = s.rivalActivity == GameState::RivalActivity::Patrol
+                ? Vector2{ s.rivalPatrolTarget.x - s.rivalPos.x, s.rivalPatrolTarget.y - s.rivalPos.y }
+                : Vector2{ s.wildernessPlayerPos.x - s.rivalPos.x, s.wildernessPlayerPos.y - s.rivalPos.y };
             float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
             Vector2 facing = len > 0.001f ? Vector2{ dir.x / len, dir.y / len } : Vector2{ 0, 1 };
             Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
-            DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, "Rival Adventurer", near, sub, &sheet.tex, WHITE, &src);
+            DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, RivalEpithetName(s), near, sub, &sheet.tex, WHITE, &src);
         } else {
-            DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, "Rival Adventurer", near, sub);
+            DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, RivalEpithetName(s), near, sub);
+        }
+    }
+    // Murder Inc. blades — drawn like the champion's node but a darker dried-blood
+    // red, with numbered guild names and the same activity sub-labels. Unlike the
+    // champion's node they stay visible while you're fighting something else, so a
+    // pair-hunt partner closing in never surprises you unfairly.
+    for (int bi = 0; bi < kBladeCount; bi++) {
+        if (s.wildEngaged.has_value() && s.wildEngaged->bladeIdx == bi) continue; // drawn above with its HP bar
+        const auto& b = s.blades[bi];
+        Vector2 bScreenPos = WorldToScreen(b.pos, camera);
+        bool bNear = nearestKind == WildNodeKind::Blade && nearestIdx == bi && inRange;
+        std::string bSub = b.activity == GameState::RivalActivity::Hunting ? "Hunting..."
+            : b.activity == GameState::RivalActivity::Stalking ? "Stalking..." : "Patrolling";
+        const DirSpriteSheet& bSheet = g_assets.rivalAdventurerSheet;
+        if (bSheet.ok) {
+            Vector2 bDir = b.activity == GameState::RivalActivity::Patrol
+                ? Vector2{ b.patrolTarget.x - b.pos.x, b.patrolTarget.y - b.pos.y }
+                : Vector2{ s.wildernessPlayerPos.x - b.pos.x, s.wildernessPlayerPos.y - b.pos.y };
+            float bLen = std::sqrt(bDir.x * bDir.x + bDir.y * bDir.y);
+            Vector2 bFacing = bLen > 0.001f ? Vector2{ bDir.x / bLen, bDir.y / bLen } : Vector2{ 0, 1 };
+            Rectangle bSrc = ActorSrcRect(bSheet, bFacing, ActorAnim::Walk, s.worldTime);
+            DrawWorldNode(bScreenPos, kNodeRadius * 0.7f, Color{ 96, 28, 34, 255 }, BladeName(bi), bNear, bSub, &bSheet.tex, WHITE, &bSrc);
+        } else {
+            DrawWorldNode(bScreenPos, kNodeRadius * 0.7f, Color{ 96, 28, 34, 255 }, BladeName(bi), bNear, bSub);
         }
     }
     for (size_t i = 0; i < kWildernessInnocentSpots.size(); i++) {
@@ -10446,6 +11353,23 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 
     // 3D view toggle (2026-09-24, Phase 1) - same view switch as the V key below.
     if (Button({ 452, 120, 68, 30 }, s.wild3DView ? "2D [V]" : "3D [V]", true)) s.wild3DView = !s.wild3DView;
+    // Camera mode button (2026-09-24): Diablo-style follow is the 3D default;
+    // C key or this button switches back to the old free-orbit camera.
+    if (s.wild3DView && Button({ 528, 120, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
+        g_t3dFollowMode = !g_t3dFollowMode;
+
+    // UO-red banner (2026-09-24): unmissable center-screen hunt/stalk warning. Drawn
+    // here — past the 2D/3D view branch — so it shows in both wilderness views.
+    if (s.rivalBannerTimer > 0.0f && !s.rivalBanner.empty()) {
+        s.rivalBannerTimer -= GetFrameTime();
+        const char* btxt = s.rivalBanner.c_str();
+        int bfs = 26;
+        int btw = MeasureText(btxt, bfs);
+        int bbx = (screenW - btw) / 2 - 20, bby = 220;
+        DrawRectangle(bbx, bby - 12, btw + 40, bfs + 24, Fade(BLACK, 0.7f));
+        DrawRectangleLines(bbx, bby - 12, btw + 40, bfs + 24, Color{ 180, 40, 40, 255 });
+        DrawUIText(btxt, (screenW - btw) / 2, bby, bfs, Color{ 255, 130, 115, 255 });
+    }
 
     // Status strip, mirrors Town's gather HUD — solid-backed and split across separate
     // short lines rather than one long concatenated string (2026-09-22 fix, same reason
@@ -10757,6 +11681,10 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // the Town/Wilderness views. Only the explorable arena below goes 3D; the
     // picker tabs, combat panel, and HUD stay 2D.
     if (Button({ 452, 116, 68, 30 }, s.hunt3DView ? "2D [V]" : "3D [V]", true)) s.hunt3DView = !s.hunt3DView;
+    // Camera mode button (2026-09-24): Diablo-style follow is the 3D default;
+    // C key or this button switches back to the old free-orbit camera.
+    if (s.hunt3DView && Button({ 528, 116, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
+        g_t3dFollowMode = !g_t3dFollowMode;
 
     // Mana bar — only while actually engaged in a live fight; HP is already always
     // shown at the top of this screen (see the header above), so only Mana is missing.
@@ -12543,13 +13471,9 @@ int main() {
     // (raylib-src, used by the em++ build) defaults to 1000. The 3D Wilderness
     // view's camera can zoom out to 2600 units and its sky dome sits at a
     // 4200-unit radius, both fine against the desktop default but silently
-    // clipped away on web — ground, trees, and the sky itself would vanish at
-    // moderate zoom on the web build while looking completely fine on desktop
-    // (found by reading rlgl.h for both copies, not by seeing it happen — the
-    // desktop sandbox this project is built in can't reproduce a web-only
-    // clipping bug by screenshotting the desktop build). Setting an explicit,
-    // platform-independent far plane here — comfortably past every 3D view's
-    // farthest zoom/sky radius — removes the discrepancy for good.
+    // clipped away on web. Setting an explicit, platform-independent far
+    // plane here — comfortably past every 3D view's farthest zoom/sky
+    // radius — removes the discrepancy for good.
     rlSetClipPlanes(0.05, 5000.0);
     LoadGameAssets(); // must come after InitWindow — texture loading needs a graphics context
 
