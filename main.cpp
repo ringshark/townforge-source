@@ -841,6 +841,8 @@ struct GameState {
         int zone;              // 0 = wilderness, 1 = dungeon
         int iconIdx = -1;      // wilderness monster icon for the 2D sprite, -1 = generic
         std::string name;
+        int dungeonIdx = -1;   // HD-2D: dungeon corpse sprite family, -1 = generic mound
+        int monsterIdx = -1;   // HD-2D: dungeon slot (kDungeonBossSlot = boss)
     };
     std::vector<WorldCorpse> worldCorpses;
     std::array<float, kWildMonsterSpotCount> wildSpotRespawn{}; // 0 = available, else seconds until the spot refills
@@ -1081,6 +1083,13 @@ struct GameState {
         bool isFleeing = false;
         float fleeTimer = 0.0f;
         float monsterSpecialCooldown = 0.0f; // the opponent's own ranged-strike cooldown
+        // World-space combat FX (2026-09-24): monster attack lunge / hit-reaction
+        // timers and the live-combat debuff state for Sap Strength, Cloud Mind, and
+        // Fumbling Curse. Purely visual/steering — no damage or economy rules here.
+        float monsterAttackT = -1.0f; // >=0: seconds since this fight's last monster attack started
+        float monsterHurtT = -1.0f;  // >=0: seconds since the player last hurt this monster
+        int debuffKind = 0;          // 0 none, 1 Sap Strength, 2 Cloud Mind, 3 Fumbling Curse
+        float debuffT = 0.0f;        // seconds remaining on debuffKind
         // True for the Rival Adventurer specifically (2026-09-23) — it no longer has a
         // kWildernessMonsterSpots row at all (see GameState::rivalLevel's comment), so
         // `spotIdx` is meaningless for it (left at -1) and every lookup that used to go
@@ -1110,8 +1119,63 @@ struct GameState {
         float playerSpellCooldown = 0.0f;
         float swingEffectTimer = 0.0f;
         float castEffectTimer = 0.0f;
+        float monsterAttackT = -1.0f; // >=0: seconds since this fight's last monster attack started
+        float monsterHurtT = -1.0f;  // >=0: seconds since the player last hurt this monster
+        int debuffKind = 0;          // 0 none, 1 Sap Strength, 2 Cloud Mind, 3 Fumbling Curse
+        float debuffT = 0.0f;        // seconds remaining on debuffKind
     };
     std::optional<ActiveDungeonMonster> dungeonEngaged;
+
+    // UO-style attack flagging + world-space combat FX state (2026-09-24). All of
+    // this is visual or steering state — no damage numbers, economy, notoriety, or
+    // karma rules live here. Flagging lets the player deliberately pick a target;
+    // projectiles/impacts are the visible half of spell casts and ranged strikes
+    // whose mechanical outcomes are unchanged.
+    struct FlagTarget {
+        int zone = 0;        // 0 = wilderness, 1 = dungeon
+        int spotIdx = -1;    // wilderness monster spot, or -1
+        bool isRival = false;
+        int bladeIdx = -1;   // Murder Inc. blade, or -1
+        int monsterIdx = -1; // dungeon slot, or -1
+        bool isBoss = false;
+    };
+    std::optional<FlagTarget> flagTarget;
+    struct SpellProjectile {
+        bool active = false;
+        int zone = 0;              // 0 wilderness, 1 dungeon
+        int spellIdx = -1;         // kSpells index; -2 = rival/blade shadow bolt (enemy)
+        bool fromPlayer = true;
+        Vector2 from = { 0, 0 };
+        Vector2 pos = { 0, 0 };
+        Vector2 target = { 0, 0 }; // homing target, refreshed each frame
+        float t = 0.0f;
+        float dur = 0.5f;
+        std::string trainNote;   // magery training text, appended to the arrival log line
+        // Enemy-bolt target identity (2026-09-24): the rival/blade that cast it.
+        // If the engagement changed before arrival, the bolt fizzles instead of
+        // hitting the wrong opponent.
+        bool castByRival = false;
+        int castByBladeIdx = -1;
+    };
+    SpellProjectile spellProjectiles[8];
+    struct SpellImpact {
+        bool active = false;
+        int zone = 0;
+        int spellIdx = -1;         // kSpells index; -2 enemy bolt, -3 generic burst (heal/vigor/summon)
+        Vector2 pos = { 0, 0 };
+        float t = 0.0f;
+        float dur = 0.35f;
+        float sizeMul = 1.0f;
+    };
+    SpellImpact spellImpacts[8];
+    float playerHurtT = -1.0f; // >=0: seconds since the player was last hit (flash + knockback)
+    float healGlowT = -1.0f;   // >=0: seconds since a self-targeted spell visual fired
+    int healGlowKind = 0;      // 0 mending, 1 vigor, 2 summoning
+    float vigorT = 0.0f;       // Blessing of Vigor: +25% melee/spell damage, seconds left
+    float fiendT = 0.0f;       // Summon Fiend: seconds left
+    float fiendTickT = 0.0f;
+    int fiendZone = 0;           // zone the fiend was summoned in (0 wilderness, 1 dungeon)
+    Vector2 fiendPos = { 0, 0 }; // follows the player while active
 };
 
 // ---------------------------------------------------------------------
@@ -2856,12 +2920,13 @@ static Rectangle ActorSrcRect(const DirSpriteSheet& sheet, Vector2 facing, Actor
 // since some callers may still pass a nonzero rotation during the transition off that
 // effect).
 static void DrawActorSprite(const DirSpriteSheet& sheet, Vector2 facing, ActorAnim anim, float worldTime,
-                              Vector2 center, float size, float fps = 8.0f, float rotationDeg = 0.0f) {
+                              Vector2 center, float size, float fps = 8.0f, float rotationDeg = 0.0f,
+                              Color tint = WHITE) {
     if (!sheet.ok) return;
     Rectangle src = ActorSrcRect(sheet, facing, anim, worldTime, fps);
     Rectangle dest = { center.x, center.y, size, size };
     Vector2 origin = { size / 2.0f, size / 2.0f };
-    DrawTexturePro(sheet.tex, src, dest, origin, rotationDeg, WHITE);
+    DrawTexturePro(sheet.tex, src, dest, origin, rotationDeg, tint);
 }
 static bool AnyMoveKeyDown() {
     return IsKeyDown(KEY_W) || IsKeyDown(KEY_UP) || IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN) ||
@@ -2879,13 +2944,14 @@ static bool AnyMoveKeyDown() {
 // specifically over the movement-based choice. Only the heroSheet path uses it — the
 // paperdoll/icon/circle fallbacks are static art with no equivalent animation states.
 static void DrawPlayer(const GameState& s, Vector2 screenPos, Vector2 facing, const std::string& interactPrompt,
-                         float visualScale = 1.0f, ActorAnim combatAnim = ActorAnim::Idle) {
+                         float visualScale = 1.0f, ActorAnim combatAnim = ActorAnim::Idle,
+                         Color tint = WHITE) {
     float kPlayerRadius = ::kPlayerRadius * visualScale; // shadows the global on purpose — see
                                                            // DrawBuildingNode's identical trick.
     if (g_assets.heroSheet.ok) {
         bool moving = AnyMoveKeyDown() || VirtualJoystickIsMoving();
         ActorAnim anim = (combatAnim != ActorAnim::Idle) ? combatAnim : (moving ? ActorAnim::Walk : ActorAnim::Idle);
-        DrawActorSprite(g_assets.heroSheet, facing, anim, s.worldTime, screenPos, kPlayerRadius * kHeroSpriteScale, kHeroWalkFps);
+        DrawActorSprite(g_assets.heroSheet, facing, anim, s.worldTime, screenPos, kPlayerRadius * kHeroSpriteScale, kHeroWalkFps, 0.0f, tint);
     } else if (FindPaperdollTexture("base")) {
         DrawPaperdollLayers(s, screenPos, kPlayerRadius * 2.4f);
     } else if (g_assets.playerOk) {
@@ -4759,21 +4825,8 @@ static void CastHealSpell(GameState& s, int spellIdx) {
 // same simplification the offensive live casts already make — no equivalent state to
 // read out on the map). Cooldown/affordability are checked by the caller (the hotbar
 // row), same division of responsibility as tryCastSpellAtEngagedMonster's call sites.
-static void CastLiveUtilitySpell(GameState& s, int spellIdx) {
-    const Spell& spell = kSpells[spellIdx];
-    s.mana -= spell.manaCost;
-    s.reagents -= kLiveCombatReagentCost;
-    std::string note;
-    bool success = RandUnit() * 100.0f < SpellSuccessChance(s, spell);
-    ApplySpellTraining(s, spell, note);
-    if (success) {
-        int healAmt = SpellPowerFor(s, spell);
-        s.hp = std::min(s.maxHp, s.hp + healAmt);
-        s.logLine = spell.name + " heals you for " + std::to_string(healAmt) + note;
-    } else {
-        s.logLine = spell.name + " fizzles!" + note;
-    }
-}
+// (CastLiveUtilitySpell moved down to the world-combat FX section, next to the
+// other live-cast routers — it needs kCastEffectDuration/kWildSpellCastCooldown.)
 
 // Risk-free practice outside combat — mirrors startCast()/tickCast(): spends mana
 // (not reagents) purely to train Magery/Eval Int/Meditation, no combat effect.
@@ -7674,7 +7727,8 @@ static const float kT3CDeg = 57.29578f;
 static const float kT3CFarLOD = 750.0f; // past this, quadrupeds draw merged
 
 static void T3CDrawQuad(const T3CQuadParts& P, float x, float z, float yawRad, float scale,
-                        Color coat, T3CAnim a, float distToPlayer, bool shadowPass) {
+                        Color coat, T3CAnim a, float distToPlayer, bool shadowPass,
+                        float attackT = -1.0f) {
     Color coatV = T3CTintVar(coat, a.seed);
     Color darkV = T3CTintVar(ColorBrightness(coat, -0.35f), a.seed);
     if (shadowPass || distToPlayer > kT3CFarLOD) {
@@ -7701,6 +7755,11 @@ static void T3CDrawQuad(const T3CQuadParts& P, float x, float z, float yawRad, f
     rlPushMatrix();
     rlTranslatef(x, 0.0f, z);
     rlRotatef(-yawRad * kT3CDeg, 0.0f, 1.0f, 0.0f);
+    // Combat pose (2026-09-24): forward lunge with the head dipping into the
+    // bite, on a 0→1→0 sine.
+    float qAtk = 0.0f;
+    if (attackT >= 0.0f) qAtk = sinf(std::clamp(attackT, 0.0f, 1.0f) * 3.14159265f);
+    if (qAtk > 0.0f) rlTranslatef(qAtk * 18.0f, 0.0f, 0.0f);
     rlScalef(scale, scale, scale);
     rlPushMatrix(); // torso
     rlTranslatef(0.0f, bobY, 0.0f);
@@ -7709,7 +7768,7 @@ static void T3CDrawQuad(const T3CQuadParts& P, float x, float z, float yawRad, f
     rlPushMatrix(); // head
     rlTranslatef(P.neckP.x, P.neckP.y + bobY, 0.0f);
     rlRotatef(-headYaw * kT3CDeg, 0.0f, 1.0f, 0.0f);
-    rlRotatef(headPitch * kT3CDeg, 0.0f, 0.0f, 1.0f);
+    rlRotatef((headPitch - 0.5f * qAtk) * kT3CDeg, 0.0f, 0.0f, 1.0f); // dips into the bite on attack
     DrawModel(P.head, { 0.0f, 0.0f, 0.0f }, 1.0f, coatV);
     rlPopMatrix();
     // Legs — diagonal pairs (FL+BR phase 0, FR+BL phase PI), the trot cycle.
@@ -7748,7 +7807,7 @@ static void T3CDrawQuad(const T3CQuadParts& P, float x, float z, float yawRad, f
 // (amplitude grows toward the tail, cadence rises with movement speed), head
 // leading the wave. Dungeons have few entities so per-segment draws are fine.
 static void T3CDrawSerpent(const T3CQuadParts& P, float x, float z, float yawRad, float scale,
-                           Color coat, T3CAnim a, bool shadowPass) {
+                           Color coat, T3CAnim a, bool shadowPass, float attackT = -1.0f) {
     Color coatV = T3CTintVar(coat, a.seed);
     if (shadowPass) {
         DrawModelEx(P.merged, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f },
@@ -7758,9 +7817,13 @@ static void T3CDrawSerpent(const T3CQuadParts& P, float x, float z, float yawRad
     float t = a.t, mv = a.move;
     float slither = 0.35f + 0.65f * mv;
     float freq = 2.2f + 3.0f * mv;
+    // Combat pose (2026-09-24): the head strikes forward and up, 0→1→0.
+    float sAtk = 0.0f;
+    if (attackT >= 0.0f) sAtk = sinf(std::clamp(attackT, 0.0f, 1.0f) * 3.14159265f);
     rlPushMatrix();
     rlTranslatef(x, 0.0f, z);
     rlRotatef(-yawRad * kT3CDeg, 0.0f, 1.0f, 0.0f);
+    if (sAtk > 0.0f) rlTranslatef(sAtk * 14.0f, 0.0f, 0.0f);
     rlScalef(scale, scale, scale);
     int n = P.segCount > 0 ? P.segCount : 1;
     for (int i = 0; i < n; i++) {
@@ -7779,7 +7842,7 @@ static void T3CDrawSerpent(const T3CQuadParts& P, float x, float z, float yawRad
     { // head — leads the wave, raised, yawing with it
         float ph = t * freq + a.seed;
         rlPushMatrix();
-        rlTranslatef(P.segSpacing * 0.5f + 4.0f, 10.0f + sinf(ph * 0.5f) * 1.5f,
+        rlTranslatef(P.segSpacing * 0.5f + 4.0f + sAtk * 26.0f, 10.0f + sinf(ph * 0.5f) * 1.5f + sAtk * 8.0f,
                      sinf(ph) * 7.0f * 0.3f * slither);
         rlRotatef(-cosf(ph) * 18.0f * slither, 0.0f, 1.0f, 0.0f);
         DrawModel(P.head, { 0.0f, 0.0f, 0.0f }, 1.0f, coatV);
@@ -7789,7 +7852,8 @@ static void T3CDrawSerpent(const T3CQuadParts& P, float x, float z, float yawRad
 }
 
 static void T3CDrawHumanoid(const T3CHumanParts& P, float x, float z, float yawRad, float scale,
-                            Color shirt, Color pants, Color skin, T3CAnim a, bool shadowPass) {
+                            Color shirt, Color pants, Color skin, T3CAnim a, bool shadowPass,
+                            float attackT = -1.0f, float castT = -1.0f) {
     if (shadowPass) { // shadow pass: one merged rest-pose draw
         DrawModelEx(P.merged, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f },
                     -yawRad * kT3CDeg, { scale, scale, scale }, shirt);
@@ -7805,10 +7869,18 @@ static void T3CDrawHumanoid(const T3CHumanParts& P, float x, float z, float yawR
     float bobY = fabsf(sinf(ph)) * 2.2f * mv + sinf(t * 2.0f + a.seed) * 1.0f;
     float hs = sinf(t * 0.4f + a.seed * 1.3f);
     float headYaw = hs * hs * hs * 0.8f;
+    // Combat poses (2026-09-24): attack = overhead chop on the right arm with a
+    // forward body lunge; cast = both arms raised with a small rise. Each rides
+    // a 0→1→0 sine so the motion reads at any frame rate.
+    float atkSw = 0.0f, castRaise = 0.0f;
+    if (attackT >= 0.0f) atkSw = sinf(std::clamp(attackT, 0.0f, 1.0f) * 3.14159265f);
+    if (castT >= 0.0f) castRaise = sinf(std::clamp(castT, 0.0f, 1.0f) * 3.14159265f);
 
     rlPushMatrix();
     rlTranslatef(x, 0.0f, z);
     rlRotatef(-yawRad * kT3CDeg, 0.0f, 1.0f, 0.0f);
+    if (atkSw > 0.0f) rlTranslatef(atkSw * 14.0f, 0.0f, 0.0f); // lunge with the chop
+    if (castRaise > 0.0f) rlTranslatef(0.0f, castRaise * 4.0f, 0.0f); // rise as arms come up
     rlScalef(scale, scale, scale);
     rlPushMatrix(); // torso
     rlTranslatef(0.0f, bobY, 0.0f);
@@ -7821,12 +7893,13 @@ static void T3CDrawHumanoid(const T3CHumanParts& P, float x, float z, float yawR
     rlPopMatrix();
     rlPushMatrix(); // arm L
     rlTranslatef(P.armLP.x, P.armLP.y + bobY, P.armLP.z);
-    rlRotatef(armSw * kT3CDeg, 0.0f, 0.0f, 1.0f);
+    rlRotatef((armSw * (1.0f - castRaise) + 2.2f * castRaise) * kT3CDeg, 0.0f, 0.0f, 1.0f);
     DrawModel(P.arm, { 0.0f, 0.0f, 0.0f }, 1.0f, shirtV);
     rlPopMatrix();
     rlPushMatrix(); // arm R
     rlTranslatef(P.armRP.x, P.armRP.y + bobY, P.armRP.z);
-    rlRotatef(-armSw * kT3CDeg, 0.0f, 0.0f, 1.0f);
+    rlRotatef((-armSw * (1.0f - atkSw) * (1.0f - castRaise) + 2.6f * atkSw + 2.2f * castRaise) * kT3CDeg,
+              0.0f, 0.0f, 1.0f);
     DrawModel(P.arm, { 0.0f, 0.0f, 0.0f }, 1.0f, shirtV);
     rlPopMatrix();
     rlPushMatrix(); // leg L
@@ -7985,7 +8058,9 @@ static const float kT3DTargetDamp = 6.0f;// how fast the camera follows the walk
 // button. The old free-orbit camera is one toggle away (g_t3dFollowMode=false).
 static bool g_t3dFollowMode = true;
 static const float kT3DFollowYaw = 0.7f;   // fixed yaw (matches the old default view)
-static const float kT3DFollowPitch = 0.96f;// fixed pitch: ~55 deg down, Diablo-style
+static const float kT3DFollowPitch = 0.96f;// fixed pitch: ~55 deg down, Diablo-style (dungeons + interiors)
+static const float kT3DOverheadFollowPitch = 1.20f;// ~69 deg down, near-overhead so town and
+                                          // wilderness read like their charming 2D maps (less occlusion)
 static const float kT3DLookTime = 0.35f;   // lookahead = smoothed velocity * this (seconds of travel)
 static const float kT3DLookMax = 130.0f;   // max lookahead offset (world units)
 static const float kT3DVelDamp = 8.0f;      // velocity smoothing speed (per second)
@@ -8019,7 +8094,7 @@ static void Town3DPinchZoom(float distMin, float distMax) {
     }
 }
 static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, int screenId,
-                                 float distMin, float distMax) {
+                                 float distMin, float distMax, float followPitch) {
     float dt = GetFrameTime();
     if (!g_t3dCamInit || g_t3dCamScreen != screenId) {
         g_t3dYawSm = g_t3dYaw; g_t3dPitchSm = g_t3dPitch; g_t3dDistSm = g_t3dDist;
@@ -8056,10 +8131,10 @@ static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, in
             look.x = g_t3dVelSm.x / speed * want;
             look.y = g_t3dVelSm.y / speed * want;
         }
-        // Follow mode drives the orbit targets to the fixed Diablo-style angle;
-        // the smoothed copies glide there, so toggling modes never snaps.
+        // Follow mode drives the orbit targets to the fixed follow angle (per-view
+        // pitch); the smoothed copies glide there, so toggling modes never snaps.
         g_t3dYaw = kT3DFollowYaw;
-        g_t3dPitch = kT3DFollowPitch;
+        g_t3dPitch = followPitch;
     }
     float ty = 1.0f - expf(-dt * kT3DCamDamp);
     float tz = 1.0f - expf(-dt * kT3DZoomDamp);
@@ -8085,7 +8160,8 @@ static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, in
     return c;
 }
 static Town3DCam Town3DGetCam(const GameState& s, int screenW, int screenH) {
-    return Town3DGetCamFor(s.townPlayerPos, screenW, screenH, 0, kT3DDistMin, kT3DDistMax);
+    return Town3DGetCamFor(s.townPlayerPos, screenW, screenH, 0, kT3DDistMin, kT3DDistMax,
+                           kT3DOverheadFollowPitch);
 }
 
 // Picking ray from a virtual-canvas mouse position (see the section header on
@@ -8172,9 +8248,10 @@ static RenderTexture2D Town3DLoadShadowmapRT(int width, int height) {
     return target;
 }
 
-// 2026-09-24: shadows disabled pending real-device tuning — WebGL/mobile GPUs
-// honor the shadow shader's `precision mediump float` far more literally than
-// desktop drivers, causing depth-precision banding ("shadow acne") that
+// 2026-09-24: real shadow-mapping caused a WebGL/mobile-only "shadow acne"
+// flashing bug — this shader's `precision mediump float` is honored far more
+// literally on mobile GPUs than desktop drivers, and the PCF depth comparison
+// below is precision-sensitive in a way desktop testing can't reproduce. It
 // flashed while moving on a real phone but never reproduced on desktop.
 // Re-applied here since this drop was built on the pre-fix baseline; the 3D
 // views already fall back to flat-lit rendering when shadows are off.
@@ -8217,6 +8294,13 @@ static void Town3DEnsureShadow() {
     S.ready = true;
 }
 
+// Point a loaded model at the shadow shader (every material), so buildings and
+// the ground render lit + shadowed + fogged. No-op when shadows are off.
+static void Town3DApplyShadowShader(Model& m) {
+    if (!g_t3dShadow.ready || m.meshCount <= 0) return;
+    for (int i = 0; i < m.materialCount; i++) m.materials[i].shader = g_t3dShadow.shader;
+}
+
 // ---- 3D town lighting take 2: diffuse+specular+fog, no shadow map (2026-09-24) ----
 // The shadow-map SAMPLING above is what triggered the mobile "shadow acne"
 // flashing bug, not the plain per-vertex lighting math — those are
@@ -8228,7 +8312,10 @@ static void Town3DEnsureShadow() {
 // shading instead of the flat, unlit fallback that shipped while shadows
 // were off. Deliberately NOT used for Dungeon (torchlight.vs/.fs handles
 // indoor lighting on its own) or building Interiors (kept dark/moody like
-// the dungeons, by design — see DrawInterior3DWorld's own comment).
+// the dungeons, by design — see DrawInterior3DWorld's own comment). Note
+// this is orthogonal to the HD-2D billboard system below: billboards draw
+// unlit by design (HD2DBeginUnlit/EndUnlit), so this shader only ever
+// touches the 3D terrain/building/prop models, never living entities.
 struct Town3DLit {
     bool ready = false, tried = false;
     Shader shader{};
@@ -8833,10 +8920,201 @@ static void Town3DDrawFoliageOne(const TownFoliage& f, float x, float z) {
     }
 }
 
+// Forward: the combat lunge curve is defined with the 2D combat code below,
+// but the HD-2D billboards need it up here.
+static float CombatLungeCurve(float t);
+
+// ---------------------------------------------------------------------
+// HD-2D billboard actors (2026-09-24): a 3D diorama world with 2D souls.
+// Every living entity in the 3D views — player, town NPCs, wilderness
+// creatures and monsters, the Rival, Murder Inc. blades, innocents, the
+// escort, pets, dungeon monsters and bosses, interior shopkeepers, ghosts
+// and corpses — renders as a camera-facing billboard cut from the SAME
+// sprite sheets the 2D views draw. Buildings, terrain, trees, props,
+// dungeon walls and interior furniture stay 3D. The old procedural
+// creature/humanoid kit (T3C-KIT, below) is retired for living things.
+//
+// Billboards are unlit: each living-entity block is bracketed with
+// HD2DBeginUnlit/HD2DEndUnlit so sprites and blob shadows draw under the
+// default shader while the rest of the scene keeps its sun/torch shader.
+// A cheap manual fog match keeps distant sprites consistent with the
+// fogged 3D world. Billboards never draw in the shadow pass — the soft
+// blob shadow is their only shadow.
+// ---------------------------------------------------------------------
+static const float kHD2DHumanH = 62.0f; // world-unit sprite height, calibrated to the retired humanoid kit at scale 1.0
+static const float kHD2DQuadH = 46.0f;  // world-unit sprite height, calibrated to the retired quadruped kit at scale 1.0
+static const Color kHD2DHurtTint = { 255, 130, 130, 255 }; // hit flash, matches the 2D views
+static const Color kHD2DCorpseTint = { 90, 85, 80, 255 };  // drained-corpse tint, matches the 2D views
+
+// --- soft blob shadows ------------------------------------------------
+static Texture2D s_hd2dShadowTex{};
+static Mesh s_hd2dShadowMesh{};
+static Material s_hd2dShadowMat{};
+static bool s_hd2dShadowInit = false;
+static void HD2DShadowEnsure() {
+    if (s_hd2dShadowInit) return;
+    s_hd2dShadowInit = true;
+    Image img = GenImageGradientRadial(64, 64, 0.08f, Color{ 0, 0, 0, 255 }, Color{ 0, 0, 0, 0 });
+    s_hd2dShadowTex = LoadTextureFromImage(img);
+    UnloadImage(img);
+    s_hd2dShadowMesh = GenMeshPlane(2.0f, 2.0f, 1, 1);
+    s_hd2dShadowMat = LoadMaterialDefault();
+    s_hd2dShadowMat.maps[MATERIAL_MAP_DIFFUSE].texture = s_hd2dShadowTex;
+}
+// Flat radial blob at ground level. Draw only under the default shader.
+static void HD2DDrawShadow(float x, float z, float radius, float alpha) {
+    if (radius <= 0.0f || alpha <= 0.0f) return;
+    HD2DShadowEnsure();
+    s_hd2dShadowMat.maps[MATERIAL_MAP_DIFFUSE].color = Fade(WHITE, alpha);
+    // translate(x, 1.5, z) * scale(radius, 1, radius), built by hand (no raymath.h here)
+    Matrix m{};
+    m.m0 = radius; m.m5 = 1.0f; m.m10 = radius;
+    m.m12 = x; m.m13 = 1.5f; m.m14 = z; m.m15 = 1.0f;
+    DrawMesh(s_hd2dShadowMesh, s_hd2dShadowMat, m);
+}
+
+// --- unlit bracketing ---------------------------------------------------
+// Sprites + blob shadows draw under the default shader; the caller passes
+// the scene shader it had bound so it can be restored after.
+static void HD2DBeginUnlit() { rlEnableShader(rlGetShaderIdDefault()); }
+static void HD2DEndUnlit(unsigned int sceneShader) { rlEnableShader(sceneShader); }
+
+// Slight warm grade so unlit sprites sit in torch light (dungeons,
+// interiors at night) instead of looking flat-lit.
+static Color HD2DWarmTorch(Color c) {
+    return { (unsigned char)((float)c.r * 0.96f), (unsigned char)((float)c.g * 0.85f),
+             (unsigned char)((float)c.b * 0.71f), c.a };
+}
+
+// --- atmosphere: warm grade + vignette (2D overlay) -----------------------
+static Texture2D s_hd2dVignetteTex{};
+static bool s_hd2dVignetteInit = false;
+static void HD2DVignetteEnsure() {
+    if (s_hd2dVignetteInit) return;
+    s_hd2dVignetteInit = true;
+    // 256x256 radial: transparent center, dark warm edges.
+    Image img = GenImageGradientRadial(256, 256, 0.45f, Color{ 0, 0, 0, 0 }, Color{ 26, 12, 6, 255 });
+    s_hd2dVignetteTex = LoadTextureFromImage(img);
+    UnloadImage(img);
+}
+// Warm grade + soft vignette over a 3D view: one flat warm wash plus one
+// stretched radial texture. Call right after EndMode3D, before the 2D
+// overlay labels/HUD so the UI stays crisp.
+static void HD2DGradeOverlay(int screenW, int screenH, bool warm) {
+    HD2DVignetteEnsure();
+    if (warm) DrawRectangle(0, 0, screenW, screenH, Color{ 255, 176, 118, 13 });
+    DrawTexturePro(s_hd2dVignetteTex,
+                   { 0.0f, 0.0f, (float)s_hd2dVignetteTex.width, (float)s_hd2dVignetteTex.height },
+                   { 0.0f, 0.0f, (float)screenW, (float)screenH },
+                   { 0.0f, 0.0f }, 0.0f, Color{ 255, 255, 255, 110 });
+}
+
+// --- atmosphere: drifting dust motes / embers (3D, unlit) -----------------
+static Texture2D s_hd2dMoteTex{};
+static bool s_hd2dMoteInit = false;
+static void HD2DMoteEnsure() {
+    if (s_hd2dMoteInit) return;
+    s_hd2dMoteInit = true;
+    Image img = GenImageGradientRadial(32, 32, 0.25f, Color{ 255, 255, 255, 255 }, Color{ 255, 255, 255, 0 });
+    s_hd2dMoteTex = LoadTextureFromImage(img);
+    UnloadImage(img);
+}
+// A handful of soft dots drifting in a box around the camera target — dust
+// in daylight, embers in the dungeon. Call inside BeginMode3D while the
+// default shader is active; ~36 billboards, trivially cheap.
+static void HD2DDrawMotes(Vector3 camPos, Vector3 camTarget, float worldTime,
+                          int count, float span, float baseY, float height, Color tint) {
+    HD2DMoteEnsure();
+    Camera3D cam = { camPos, camTarget, { 0.0f, 1.0f, 0.0f }, 60.0f, CAMERA_PERSPECTIVE };
+    for (int i = 0; i < count; i++) {
+        float fi = (float)i;
+        float h1 = Town3DHash01(fi * 12.9f, 78.2f);
+        float h2 = Town3DHash01(fi * 39.7f, 11.4f);
+        float h3 = Town3DHash01(fi * 74.3f, 45.9f);
+        float ox = fmodf(h1 * span + worldTime * (5.0f + 4.0f * h2), span) - span * 0.5f;
+        float oz = fmodf(h2 * span + worldTime * (4.0f + 3.0f * h3), span) - span * 0.5f;
+        float oy = baseY + h3 * height + sinf(worldTime * 0.8f + fi * 1.7f) * 10.0f;
+        float tw = 0.55f + 0.45f * sinf(worldTime * 1.3f + fi * 2.9f);
+        float sz = 5.0f + 5.0f * h2;
+        Color c = tint;
+        c.a = (unsigned char)((float)tint.a * tw);
+        DrawBillboard(cam, s_hd2dMoteTex, { camTarget.x + ox, oy, camTarget.z + oz }, sz, c);
+    }
+}
+
+// --- the billboard itself ------------------------------------------------
+// One living entity. Provide either a directional sheet (preferred) or a
+// single static texture.
+struct HD2DActorOpts {
+    const DirSpriteSheet* sheet = nullptr;
+    Texture2D tex{};
+    bool texOk = false;
+    Vector2 facing = { 0.0f, 1.0f }; // world-space facing: x = world x, y = world z
+    ActorAnim anim = ActorAnim::Idle;
+    float heightWorld = kHD2DHumanH; // sprite height in world units
+    Color tint = WHITE;
+    float alphaMul = 1.0f; // extra fade (dying shrink-fade, ghost)
+    float squashY = 1.0f;  // corpse flatten
+    float lungeDx = 0.0f, lungeDz = 0.0f; // attack hop toward the target
+    float bobY = 0.0f; // hover offset (ghost drift)
+    float shadowRadius = 20.0f; // 0 disables the blob shadow
+    bool applyFog = true; // match the sun shader's distance fog (town/wilderness)
+};
+
+static void HD2DDrawActor(Vector3 camPos, Vector3 camTarget, float x, float z,
+                          const HD2DActorOpts& o, float worldTime) {
+    const Texture2D* texp = nullptr;
+    Rectangle src{ 0.0f, 0.0f, 0.0f, 0.0f };
+    float frameAspect = 1.0f;
+    if (o.sheet && o.sheet->ok) {
+        // Camera-relative facing: the sprite's "Down" row faces the camera,
+        // so remap the world facing into (screen-right, toward-camera) —
+        // the same convention the 2D views use.
+        Vector2 cf = { camTarget.x - camPos.x, camTarget.z - camPos.z };
+        float cl = sqrtf(cf.x * cf.x + cf.y * cf.y);
+        if (cl > 1e-6f) { cf.x /= cl; cf.y /= cl; }
+        float towardCam = -(o.facing.x * cf.x + o.facing.y * cf.y);
+        float toRight = o.facing.x * (-cf.y) + o.facing.y * cf.x;
+        src = ActorSrcRect(*o.sheet, { toRight, towardCam }, o.anim, worldTime);
+        texp = &o.sheet->tex;
+        frameAspect = (float)o.sheet->frameW / (float)(o.sheet->frameH > 0 ? o.sheet->frameH : 1);
+    } else if (o.texOk) {
+        texp = &o.tex;
+        src = { 0.0f, 0.0f, (float)o.tex.width, (float)o.tex.height };
+        frameAspect = (float)o.tex.width / (float)(o.tex.height > 0 ? o.tex.height : 1);
+    } else {
+        return;
+    }
+
+    float h = o.heightWorld * o.squashY;
+    float w = h * frameAspect;
+
+    Color tint = o.tint;
+    if (o.alphaMul < 1.0f) tint.a = (unsigned char)((float)tint.a * o.alphaMul);
+    if (o.applyFog) {
+        // Match the sun shader's subtle distance fog (900 -> 2600) so far
+        // sprites haze out like the 3D world around them.
+        float dx = x - camPos.x, dz = z - camPos.z;
+        float f = std::clamp((sqrtf(dx * dx + dz * dz) - 900.0f) / 1700.0f, 0.0f, 1.0f);
+        if (f > 0.0f) {
+            tint.r = (unsigned char)((float)tint.r + ((float)kT3DSkyHorizon.r - (float)tint.r) * f);
+            tint.g = (unsigned char)((float)tint.g + ((float)kT3DSkyHorizon.g - (float)tint.g) * f);
+            tint.b = (unsigned char)((float)tint.b + ((float)kT3DSkyHorizon.b - (float)tint.b) * f);
+        }
+    }
+
+    HD2DDrawShadow(x + o.lungeDx, z + o.lungeDz, o.shadowRadius * o.alphaMul, 0.32f * o.alphaMul);
+
+    float px = x + o.lungeDx, pz = z + o.lungeDz;
+    // fovY is unused by DrawBillboardRec (only position/target/up matter).
+    Camera3D cam = { camPos, camTarget, { 0.0f, 1.0f, 0.0f }, 60.0f, CAMERA_PERSPECTIVE };
+    DrawBillboardRec(cam, *texp, src, { px, h * 0.5f + o.bobY, pz }, { w, h }, tint);
+}
+
 // The 3D town's drawable contents, shared by the shadow pass (depth from the
 // sun's POV) and the main pass (lit + shadowed). The sky is NOT included — it
 // is drawn only in the main pass, unlit, before the shadow shader is enabled.
-static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
+static void Town3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DCam* cull) {
     (void)shadowPass;
     Town3DLoadModels();
     Town3DEnsureGround(s);
@@ -8982,27 +9260,39 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
         Town3DDrawPiece(M.fenceExt,    { xE, 0, 502.5f }, 90.0f);
     }
 
-    // Player + wandering townsfolk (Phase 3: procedural humanoids from the
-    // creature kit — walk swing tied to movement speed, idle bob + head turns).
-    T3CKitUseSunShader();
-    {
-        float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
-        T3CAnim pa = T3CMakeAnim(kT3CTrackPlayerTown, s.townPlayerPos.x, s.townPlayerPos.y, !shadowPass);
-        T3CDrawHumanoid(g_t3cHumans[0].parts, s.townPlayerPos.x, s.townPlayerPos.y, pyaw, 1.0f,
-                        Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
-                        Color{ 240, 210, 180, 255 }, pa, shadowPass);
-    }
-    const auto& activeNPCs = (s.selectedTown == 0) ? kTownNPCs : kTown2NPCs;
-    for (int i = 0; i < (int)activeNPCs.size(); i++) {
-        Vector2 np = TownNPCLivePos(i, s.worldTime, s.selectedTown);
-        Vector2 na = TownNPCLivePos(i, s.worldTime + 0.6f, s.selectedTown);
-        float ndx = na.x - np.x, ndz = na.y - np.y;
-        float nyaw = (ndx * ndx + ndz * ndz < 0.04f)
-                     ? Town3DHash01(np.x, np.y) * 6.2832f : atan2f(ndz, ndx);
-        T3CAnim na2 = T3CMakeAnim(kT3CTrackNPCTown + i, np.x, np.y, !shadowPass);
-        T3CDrawHumanoid(g_t3cHumans[0].parts, np.x, np.y, nyaw, 0.97f,
-                        kT3CNPCShirts[i % 6], Color{ 70, 62, 55, 255 },
-                        Color{ 235, 205, 175, 255 }, na2, shadowPass);
+    // Player + wandering townsfolk — HD-2D billboards: the same sprite
+    // sheets the 2D town draws, camera-facing, with soft blob shadows.
+    // (No shadow-pass draw: billboards don't cast into the shadowmap.)
+    if (!shadowPass && cull) {
+        unsigned int sceneShader = g_t3dLit.ready ? g_t3dLit.shader.id : rlGetShaderIdDefault();
+        HD2DBeginUnlit();
+        {
+            bool moving = AnyMoveKeyDown() || VirtualJoystickIsMoving();
+            HD2DActorOpts o;
+            o.sheet = &g_assets.heroSheet;
+            o.facing = s.playerFacing;
+            o.anim = moving ? ActorAnim::Walk : ActorAnim::Idle;
+            o.heightWorld = kHD2DHumanH;
+            o.shadowRadius = 20.0f;
+            HD2DDrawActor(cull->pos, cull->target, s.townPlayerPos.x, s.townPlayerPos.y, o, s.worldTime);
+        }
+        const auto& activeNPCs = (s.selectedTown == 0) ? kTownNPCs : kTown2NPCs;
+        const auto& npcSheets = (s.selectedTown == 0) ? g_assets.townNPCSheets : g_assets.saltmereNPCSheets;
+        for (int i = 0; i < (int)activeNPCs.size(); i++) {
+            Vector2 np = TownNPCLivePos(i, s.worldTime, s.selectedTown);
+            Vector2 na = TownNPCLivePos(i, s.worldTime + 0.6f, s.selectedTown);
+            float ndx = na.x - np.x, ndz = na.y - np.y;
+            bool npcMoving = (ndx * ndx + ndz * ndz >= 0.04f);
+            float nyaw = npcMoving ? atan2f(ndz, ndx) : Town3DHash01(np.x, np.y) * 6.2832f;
+            HD2DActorOpts o;
+            o.sheet = &npcSheets[i];
+            o.facing = { cosf(nyaw), sinf(nyaw) };
+            o.anim = npcMoving ? ActorAnim::Walk : ActorAnim::Idle;
+            o.heightWorld = kHD2DHumanH * 0.97f;
+            o.shadowRadius = 19.0f;
+            HD2DDrawActor(cull->pos, cull->target, np.x, np.y, o, s.worldTime);
+        }
+        HD2DEndUnlit(sceneShader);
     }
 }
 
@@ -9027,7 +9317,7 @@ static void Town3DShadowPass(GameState& s) {
     ClearBackground(WHITE); // depth cleared; no color attachment on this FBO
     BeginMode3D(g_t3dLightCam);
     g_t3dLightVP = T3DMatMul(rlGetMatrixModelview(), rlGetMatrixProjection());
-    Town3DDrawSceneContents(s, true);
+    Town3DDrawSceneContents(s, true, nullptr);
     EndMode3D();
     EndTextureMode();
 }
@@ -9212,8 +9502,11 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     Town3DEnsureLit();
     if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
     T3DGrassFrameUpdate(c.pos); // sway clock for the grass shader
-    Town3DDrawSceneContents(s, false);
-    T3DGrassDrawTown();
+    Town3DDrawSceneContents(s, false, &c);
+    T3DGrassDrawTown(); // main pass only — never in the shadow pass
+    // HD-2D atmosphere: dust motes drifting in the sunlight (the default
+    // shader is active here — HD2DEndUnlit restored it after the actors above).
+    HD2DDrawMotes(c.pos, c.target, s.worldTime, 36, 900.0f, 30.0f, 170.0f, Color{ 255, 240, 210, 40 });
     // Ambience (smoke + birds): unlit, one batched draw call, main pass only.
     Town3DUpdateAmbience(GetFrameTime());
     Town3DDrawAmbience(c);
@@ -9239,6 +9532,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
         }
     }
     EndMode3D();
+    HD2DGradeOverlay(screenW, screenH, true);
 
     // --- 2D overlay: building labels projected from 3D, interaction prompt, hints ---
     // Labels fade and shrink as the camera pulls back (tuning constants below),
@@ -9459,7 +9753,8 @@ static void Wild3DLoadModels() {
 // (Town3DGetCamFor), following s.wildernessPlayerPos with wider zoom limits
 // for the 3200-unit world. Orbit yaw/pitch/zoom state is shared with the town.
 static Town3DCam Wild3DGetCam(const GameState& s, int screenW, int screenH) {
-    return Town3DGetCamFor(s.wildernessPlayerPos, screenW, screenH, 1, kWild3DDistMin, kWild3DDistMax);
+    return Town3DGetCamFor(s.wildernessPlayerPos, screenW, screenH, 1, kWild3DDistMin, kWild3DDistMax,
+                           kT3DOverheadFollowPitch);
 }
 
 // Cheap camera-space frustum test so the big world's scatter doesn't cost draw
@@ -9898,6 +10193,16 @@ static float Wild3DWanderFacing(int idx, float x, float z, float worldTime) {
     return atan2f(dz, dx);
 }
 
+// Forward declarations for the combat FX / flagging helpers defined later in
+// the world-space combat section (2026-09-24) — the 3D scene draws above call
+// them before their definitions appear in the file.
+static void PlayerCombatPhases3D(const GameState& s, float* atk, float* cast);
+static float MonsterCombatPhase3D(float monsterAttackT);
+static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m);
+static void Dungeon3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m);
+static void DrawFlagMarker3D(const GameState& s, int zone);
+static void DrawSpellFX3D(GameState& s, int zone);
+
 static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DCam* cull) {
     Wild3DLoadModels();
     Wild3DEnsureGround();
@@ -9907,10 +10212,6 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     // Ground: procedural meadow with baked paths, plus a large flat outer field
     // so the horizon never shows a hard edge.
     DrawModel(g_wild3dGround.model, { 1600, 0, 1600 }, 1.0f, WHITE);
-    // 2026-09-24: was -1.5 — visibly z-fought (flickering horizontal bands)
-    // against the ground model at the wilderness's max zoom (2600 units) once
-    // the far clip plane was extended to fix a web-only clipping bug. -15
-    // keeps the same "invisible flat-color filler" role with enough margin.
     DrawPlane({ 1600, -15.0f, 1600 }, { 8000, 8000 }, Color{ 92, 132, 70, 255 });
 
     // Extra scatter (3D-only filler; see Wild3DBuildScatter).
@@ -9945,20 +10246,25 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                        Color{ 150, 148, 142, 255 }, Color{ 118, 116, 110, 255 });
 
     bool wasEngaged = s.wildEngaged.has_value();
-    // Phase 3 procedural creatures (kit shader matches the sun/shadow pipeline).
-    T3CKitUseSunShader();
-    auto kitDist = [&](float x, float z) {
-        return (cull && !shadowPass) ? hypotf(cull->pos.x - x, cull->pos.z - z) : 0.0f;
-    };
+    // HD-2D living things: camera-facing billboards cut from the 2D sprite
+    // sheets, drawn unlit with soft blob shadows. Skipped entirely in the
+    // shadow pass — billboards don't cast into the shadowmap.
+    if (!shadowPass && cull) {
+        unsigned int wildSceneShader = g_t3dLit.ready ? g_t3dLit.shader.id : rlGetShaderIdDefault();
+        HD2DBeginUnlit();
     // Tameable creatures at their exact 2D spawn spots.
     for (size_t i = 0; i < kWildernessCreatureSpots.size(); i++) {
         const WildernessCreatureSpot& sp = kWildernessCreatureSpots[i];
         if (!vis(sp.pos.x, sp.pos.y, 70.0f)) continue;
         T3CQuadLook look = T3CCreatureLook(sp.creatureIdx);
-        T3CAnim ca = T3CMakeAnim(kT3CTrackCreatureWild + (int)i, sp.pos.x, sp.pos.y, !shadowPass);
-        T3CDrawQuad(g_t3cQuads[look.specIdx].parts, sp.pos.x, sp.pos.y,
-                    Town3DHash01(sp.pos.x, sp.pos.y) * 6.2832f,
-                    look.scale, look.coat, ca, kitDist(sp.pos.x, sp.pos.y), shadowPass);
+        float cyaw = Town3DHash01(sp.pos.x, sp.pos.y) * 6.2832f;
+        HD2DActorOpts o;
+        o.sheet = &g_assets.wildCreatureTex[sp.creatureIdx];
+        o.facing = { cosf(cyaw), sinf(cyaw) };
+        o.anim = ActorAnim::Idle;
+        o.heightWorld = kHD2DQuadH * look.scale;
+        o.shadowRadius = 15.0f * look.scale;
+        HD2DDrawActor(cull->pos, cull->target, sp.pos.x, sp.pos.y, o, s.worldTime);
     }
     // Monsters at their live positions (the engaged one at its fight position).
     bool wildDying = s.dyingMonster.has_value() && s.dyingMonster->zone == 0;
@@ -9973,15 +10279,25 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         float face = eng ? atan2f(s.wildernessPlayerPos.y - mp.y, s.wildernessPlayerPos.x - mp.x)
                          : Wild3DWanderFacing((int)i, mp.x, mp.y, s.worldTime);
         T3CMonLook mlook = T3CMonsterLook(kWildernessMonsterSpots[i].iconIdx);
-        T3CAnim ma = T3CMakeAnim(kT3CTrackMonsterWild + (int)i, mp.x, mp.y, !shadowPass);
         float shrink = isDying ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
-        if (mlook.humanoid) {
-            T3CDrawHumanoid(g_t3cHumans[0].parts, mp.x, mp.y, face, mlook.scale * shrink,
-                            mlook.shirt, mlook.pants, mlook.skin, ma, shadowPass);
-        } else {
-            T3CDrawQuad(g_t3cQuads[mlook.specIdx].parts, mp.x, mp.y, face,
-                        mlook.scale * shrink, mlook.coat, ma, kitDist(mp.x, mp.y), shadowPass);
+        // Combat read (2026-09-24): the engaged monster's lunge rides
+        // monsterAttackT; it flashes red while monsterHurtT is live.
+        float mAtk = (eng && !isDying) ? MonsterCombatPhase3D(s.wildEngaged->monsterAttackT) : -1.0f;
+        bool mHurt = eng && !isDying && s.wildEngaged->monsterHurtT >= 0.0f;
+        HD2DActorOpts o;
+        o.sheet = &g_assets.wildMonsterTex[kWildernessMonsterSpots[i].iconIdx];
+        o.facing = { cosf(face), sinf(face) };
+        o.anim = (mAtk >= 0.0f) ? ActorAnim::Attack : ActorAnim::Idle;
+        o.heightWorld = (mlook.humanoid ? kHD2DHumanH : kHD2DQuadH) * mlook.scale * shrink;
+        o.tint = mHurt ? kHD2DHurtTint : WHITE;
+        o.alphaMul = shrink;
+        if (mAtk >= 0.0f) {
+            float lunge = CombatLungeCurve(mAtk);
+            o.lungeDx = o.facing.x * lunge;
+            o.lungeDz = o.facing.y * lunge;
         }
+        o.shadowRadius = 15.0f * mlook.scale * shrink;
+        HD2DDrawActor(cull->pos, cull->target, mp.x, mp.y, o, s.worldTime);
     }
     // The Rival Adventurer — while their death animation plays, the fading body at
     // the kill site is drawn instead of the patrolling rival (no double-draw);
@@ -9992,17 +10308,32 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         Vector2 rp = rivalDying3D ? s.dyingMonster->pos
                      : ((wasEngaged && s.wildEngaged->isRival) ? s.wildEngaged->pos : s.rivalPos);
         if (vis(rp.x, rp.y, 70.0f)) {
-            float ryaw = atan2f(s.wildernessPlayerPos.y - rp.y, s.wildernessPlayerPos.x - rp.x);
-            T3CAnim ra = T3CMakeAnim(kT3CTrackRival, rp.x, rp.y, !shadowPass);
-            float rscale = rivalDying3D ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
-            T3CDrawHumanoid(g_t3cHumans[0].parts, rp.x, rp.y, ryaw, rscale,
-                            Color{ 150, 60, 55, 255 }, Color{ 60, 50, 55, 255 },
-                            Color{ 235, 200, 170, 255 }, ra, shadowPass);
+            Vector2 toP = { s.wildernessPlayerPos.x - rp.x, s.wildernessPlayerPos.y - rp.y };
+            float pd = sqrtf(toP.x * toP.x + toP.y * toP.y);
+            Vector2 rface = (pd > 0.001f) ? Vector2{ toP.x / pd, toP.y / pd } : Vector2{ 0.0f, 1.0f };
+            float rshrink = rivalDying3D ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
+            // Combat read (2026-09-24): engaged Rival lunges/flashes with its timers.
+            bool rEng = wasEngaged && s.wildEngaged->isRival && !rivalDying3D;
+            float rAtk = rEng ? MonsterCombatPhase3D(s.wildEngaged->monsterAttackT) : -1.0f;
+            HD2DActorOpts o;
+            o.sheet = &g_assets.rivalAdventurerSheet;
+            o.facing = rface;
+            o.anim = (rAtk >= 0.0f) ? ActorAnim::Attack : (rEng ? ActorAnim::Idle : ActorAnim::Walk);
+            o.heightWorld = kHD2DHumanH * rshrink;
+            o.tint = (rEng && s.wildEngaged->monsterHurtT >= 0.0f) ? kHD2DHurtTint : WHITE;
+            o.alphaMul = rshrink;
+            if (rAtk >= 0.0f) {
+                float lunge = CombatLungeCurve(rAtk);
+                o.lungeDx = rface.x * lunge;
+                o.lungeDz = rface.y * lunge;
+            }
+            o.shadowRadius = 20.0f * rshrink;
+            HD2DDrawActor(cull->pos, cull->target, rp.x, rp.y, o, s.worldTime);
         }
     }
-    // Murder Inc. blades — the same humanoid kit as the champion, but in dark
-    // dried-blood guild colors and slightly smaller, so the crew reads as the
-    // crew and the champion stays the champion.
+    // Murder Inc. blades — the same real sprite as the champion, dark-tinted,
+    // slightly smaller, so the crew reads as the crew and the champion stays
+    // the champion.
     for (int bi = 0; bi < kBladeCount; bi++) {
         // While a blade's death animation plays, the fading body at the kill site
         // is drawn instead of the patrolling blade (no double-draw) — same
@@ -10011,81 +10342,166 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         Vector2 bp = bladeDying3D ? s.dyingMonster->pos
                      : ((wasEngaged && s.wildEngaged->bladeIdx == bi) ? s.wildEngaged->pos : s.blades[bi].pos);
         if (vis(bp.x, bp.y, 70.0f)) {
-            float byaw = atan2f(s.wildernessPlayerPos.y - bp.y, s.wildernessPlayerPos.x - bp.x);
-            T3CAnim ba = T3CMakeAnim(kT3CTrackBladeWild + bi, bp.x, bp.y, !shadowPass);
-            float bscale = (bladeDying3D ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f) * 0.95f;
-            T3CDrawHumanoid(g_t3cHumans[0].parts, bp.x, bp.y, byaw, bscale,
-                            Color{ 70, 25, 30, 255 }, Color{ 35, 30, 35, 255 },
-                            Color{ 220, 190, 165, 255 }, ba, shadowPass);
+            Vector2 toP = { s.wildernessPlayerPos.x - bp.x, s.wildernessPlayerPos.y - bp.y };
+            float pd = sqrtf(toP.x * toP.x + toP.y * toP.y);
+            Vector2 bface = (pd > 0.001f) ? Vector2{ toP.x / pd, toP.y / pd } : Vector2{ 0.0f, 1.0f };
+            float bshrink = bladeDying3D ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
+            // Combat read (2026-09-24): engaged blade lunges/flashes with its timers.
+            bool bEng = wasEngaged && s.wildEngaged->bladeIdx == bi && !bladeDying3D;
+            float bAtk = bEng ? MonsterCombatPhase3D(s.wildEngaged->monsterAttackT) : -1.0f;
+            HD2DActorOpts o;
+            o.sheet = &g_assets.rivalAdventurerSheet;
+            o.facing = bface;
+            o.anim = (bAtk >= 0.0f) ? ActorAnim::Attack : (bEng ? ActorAnim::Idle : ActorAnim::Walk);
+            o.heightWorld = kHD2DHumanH * 0.95f * bshrink;
+            o.tint = (bEng && s.wildEngaged->monsterHurtT >= 0.0f) ? kHD2DHurtTint : Color{ 160, 130, 135, 255 };
+            o.alphaMul = bshrink;
+            if (bAtk >= 0.0f) {
+                float lunge = CombatLungeCurve(bAtk);
+                o.lungeDx = bface.x * lunge;
+                o.lungeDz = bface.y * lunge;
+            }
+            o.shadowRadius = 19.0f * bshrink;
+            HD2DDrawActor(cull->pos, cull->target, bp.x, bp.y, o, s.worldTime);
         }
     }
-    // Roaming innocents (only the ones currently present) — fixed per-identity
-    // tints from kInnocentDefs so Tam/Liora/Silas/Garran read as distinct people.
+    // Roaming innocents (only the ones currently present) — their real
+    // portrait sprites from assets/innocents, so Tam/Liora/Silas/Garran read
+    // as distinct people.
     for (size_t i = 0; i < kWildernessInnocentSpots.size(); i++) {
         if (!s.innocentSpots[i].present) continue;
         Vector2 ip = WildernessInnocentLivePos((int)i, s.worldTime);
         if (!vis(ip.x, ip.y, 70.0f)) continue;
         Vector2 ia = WildernessInnocentLivePos((int)i, s.worldTime + 0.6f);
         float idx2 = ia.x - ip.x, idz = ia.y - ip.y;
-        float iyaw = (idx2 * idx2 + idz * idz < 0.04f)
-                     ? Town3DHash01(ip.x, ip.y) * 6.2832f : atan2f(idz, idx2);
-        T3CAnim ia2 = T3CMakeAnim(kT3CTrackInnocentWild + (int)i, ip.x, ip.y, !shadowPass);
-        const InnocentDef& idef = kInnocentDefs[std::clamp(s.innocentSpots[i].identity, 0, 3)];
-        T3CDrawHumanoid(g_t3cHumans[0].parts, ip.x, ip.y, iyaw, 0.95f,
-                        idef.shirt, idef.pants, idef.skin, ia2, shadowPass);
+        bool iMoving = (idx2 * idx2 + idz * idz >= 0.04f);
+        float iyaw = iMoving ? atan2f(idz, idx2) : Town3DHash01(ip.x, ip.y) * 6.2832f;
+        int ident = std::clamp(s.innocentSpots[i].identity, 0, 3);
+        HD2DActorOpts o;
+        o.tex = g_assets.innocentTex[ident];
+        o.texOk = g_assets.innocentTexOk[ident];
+        o.facing = { cosf(iyaw), sinf(iyaw) };
+        o.heightWorld = kHD2DHumanH * 0.95f;
+        o.shadowRadius = 18.0f;
+        HD2DDrawActor(cull->pos, cull->target, ip.x, ip.y, o, s.worldTime);
     }
     // An innocent you're escorting walks beside you in the 3D world too.
     if (s.escortInnocent >= 0) {
         Vector2 ep = s.escortPos;
         if (vis(ep.x, ep.y, 70.0f)) {
-            float eyaw = atan2f(s.wildernessPlayerPos.y - ep.y, s.wildernessPlayerPos.x - ep.x);
-            T3CAnim ea = T3CMakeAnim(kT3CTrackInnocentWild + 10, ep.x, ep.y, !shadowPass);
-            const InnocentDef& edef = kInnocentDefs[std::clamp(s.escortInnocent, 0, 3)];
-            T3CDrawHumanoid(g_t3cHumans[0].parts, ep.x, ep.y, eyaw, 0.95f,
-                            edef.shirt, edef.pants, edef.skin, ea, shadowPass);
+            Vector2 toP = { s.wildernessPlayerPos.x - ep.x, s.wildernessPlayerPos.y - ep.y };
+            float pd = sqrtf(toP.x * toP.x + toP.y * toP.y);
+            int ident = std::clamp(s.escortInnocent, 0, 3);
+            HD2DActorOpts o;
+            o.tex = g_assets.innocentTex[ident];
+            o.texOk = g_assets.innocentTexOk[ident];
+            o.facing = (pd > 0.001f) ? Vector2{ toP.x / pd, toP.y / pd } : Vector2{ 0.0f, 1.0f };
+            o.heightWorld = kHD2DHumanH * 0.95f;
+            o.shadowRadius = 18.0f;
+            HD2DDrawActor(cull->pos, cull->target, ep.x, ep.y, o, s.worldTime);
         }
     }
-    // Fallen monsters linger where they died — dark flattened mounds that fade
-    // with the corpse timer. Purely visual; the lootable corpse list is separate.
+    // Fallen monsters linger where they died — the slain monster's own sprite,
+    // dark and flattened, fading with the corpse timer (a dark mound for kills
+    // with no known sprite, as before). Purely visual; the lootable corpse
+    // list is separate.
     for (const GameState::WorldCorpse& c : s.worldCorpses) {
         if (c.zone != 0) continue;
         if (!vis(c.pos.x, c.pos.y, 70.0f)) continue;
         float cfade = std::clamp(c.timer / c.duration, 0.0f, 1.0f);
-        Color mound = Fade(Color{ 55, 45, 42, 255 }, 0.85f * cfade);
-        DrawSphereEx({ c.pos.x, 6.0f, c.pos.y }, 16.0f, 8, 6, mound);
+        const DirSpriteSheet* csheet = (c.iconIdx >= 0 && c.iconIdx < 5 &&
+                                        g_assets.wildMonsterTex[c.iconIdx].ok)
+                                       ? &g_assets.wildMonsterTex[c.iconIdx] : nullptr;
+        if (csheet) {
+            T3CMonLook clook = T3CMonsterLook(c.iconIdx);
+            HD2DActorOpts o;
+            o.sheet = csheet;
+            o.facing = { 0.0f, 1.0f };
+            o.anim = ActorAnim::Idle;
+            o.heightWorld = (clook.humanoid ? kHD2DHumanH : kHD2DQuadH) * clook.scale;
+            o.tint = kHD2DCorpseTint;
+            o.alphaMul = 0.75f * cfade;
+            o.squashY = 0.5f;
+            o.shadowRadius = 12.0f * clook.scale;
+            HD2DDrawActor(cull->pos, cull->target, c.pos.x, c.pos.y, o, s.worldTime);
+        } else {
+            Color mound = Fade(Color{ 55, 45, 42, 255 }, 0.85f * cfade);
+            DrawSphereEx({ c.pos.x, 6.0f, c.pos.y }, 16.0f, 8, 6, mound);
+        }
     }
     // AI companion.
     if (Pet* ap = ActivePet(s)) {
         if (vis(s.companionPos.x, s.companionPos.y, 70.0f)) {
             Vector2 d = { s.wildernessPlayerPos.x - s.companionPos.x,
                           s.wildernessPlayerPos.y - s.companionPos.y };
-            float face = (d.x * d.x + d.y * d.y > 1.0f) ? atan2f(d.y, d.x) : 0.0f;
+            float dd = sqrtf(d.x * d.x + d.y * d.y);
             T3CQuadLook plook = T3CPetLook(ap->role);
-            T3CAnim pa2 = T3CMakeAnim(kT3CTrackCompanion, s.companionPos.x, s.companionPos.y, !shadowPass);
-            T3CDrawQuad(g_t3cQuads[plook.specIdx].parts, s.companionPos.x, s.companionPos.y,
-                        face, plook.scale, plook.coat, pa2,
-                        kitDist(s.companionPos.x, s.companionPos.y), shadowPass);
+            HD2DActorOpts o;
+            o.sheet = &WildCreatureSheetForRole(ap->role);
+            o.facing = (dd > 0.001f) ? Vector2{ d.x / dd, d.y / dd } : Vector2{ 0.0f, 1.0f };
+            o.anim = (dd > 40.0f) ? ActorAnim::Walk : ActorAnim::Idle;
+            o.heightWorld = kHD2DQuadH * plook.scale;
+            o.shadowRadius = 13.0f * plook.scale;
+            HD2DDrawActor(cull->pos, cull->target, s.companionPos.x, s.companionPos.y, o, s.worldTime);
         }
     }
-    // Player, same humanoid kit as the town 3D view — shrinks during the death
-    // animation, ghostly-translucent while a ghost.
+    // Player — shrinks and fades during the death animation,
+    // ghostly-translucent while a ghost.
     {
-        float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
-        T3CAnim pa3 = T3CMakeAnim(kT3CTrackPlayerWild, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y, !shadowPass);
+        float px = s.wildernessPlayerPos.x, pz = s.wildernessPlayerPos.y;
         if (s.playerDeathAnimT > 0.0f) {
             float pshrink = std::max(0.05f, s.playerDeathAnimT / kPlayerDeathAnimTime);
-            T3CDrawHumanoid(g_t3cHumans[0].parts, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y,
-                            pyaw, pshrink, Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
-                            Color{ 240, 210, 180, 255 }, pa3, shadowPass);
+            HD2DActorOpts o;
+            o.sheet = &g_assets.heroSheet;
+            o.facing = s.playerFacing;
+            o.anim = ActorAnim::Idle;
+            o.heightWorld = kHD2DHumanH * pshrink;
+            o.alphaMul = pshrink;
+            o.shadowRadius = 20.0f * pshrink;
+            HD2DDrawActor(cull->pos, cull->target, px, pz, o, s.worldTime);
         } else if (s.playerIsGhost) {
-            Color g = Fade(Color{ 170, 205, 255, 255 }, 0.45f);
-            T3CDrawHumanoid(g_t3cHumans[0].parts, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y,
-                            pyaw, 1.0f, g, g, Fade(Color{ 220, 235, 255, 255 }, 0.45f), pa3, shadowPass);
+            HD2DActorOpts o;
+            o.sheet = &g_assets.heroSheet;
+            o.facing = s.playerFacing;
+            o.anim = ActorAnim::Idle;
+            o.heightWorld = kHD2DHumanH;
+            o.tint = Color{ 170, 205, 255, 255 };
+            o.alphaMul = 0.45f;
+            o.bobY = 4.0f * sinf(s.worldTime * 3.0f);
+            o.shadowRadius = 0.0f; // ghosts cast no shadow
+            HD2DDrawActor(cull->pos, cull->target, px, pz, o, s.worldTime);
         } else {
-            T3CDrawHumanoid(g_t3cHumans[0].parts, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y,
-                            pyaw, 1.0f, Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
-                            Color{ 240, 210, 180, 255 }, pa3, shadowPass);
+            // Combat read (2026-09-24): swing/cast poses ride the engaged
+            // monster's timers; the player flashes red and reels on playerHurtT.
+            float pAtk = -1.0f, pCast = -1.0f;
+            PlayerCombatPhases3D(s, &pAtk, &pCast);
+            Color ptint = WHITE;
+            if (s.playerHurtT >= 0.0f) {
+                ptint = kHD2DHurtTint;
+                if (s.wildEngaged.has_value()) {
+                    Vector2 away = { s.wildernessPlayerPos.x - s.wildEngaged->pos.x,
+                                     s.wildernessPlayerPos.y - s.wildEngaged->pos.y };
+                    float al = std::sqrt(away.x * away.x + away.y * away.y);
+                    if (al > 0.001f) {
+                        float kb = 16.0f * (1.0f - s.playerHurtT / 0.30f);
+                        px += away.x / al * kb; pz += away.y / al * kb;
+                    }
+                }
+            }
+            bool moving = AnyMoveKeyDown() || VirtualJoystickIsMoving();
+            HD2DActorOpts o;
+            o.sheet = &g_assets.heroSheet;
+            o.facing = s.playerFacing;
+            o.anim = (pCast >= 0.0f) ? ActorAnim::Cast
+                     : (pAtk >= 0.0f) ? ActorAnim::Attack
+                     : moving ? ActorAnim::Walk : ActorAnim::Idle;
+            o.heightWorld = kHD2DHumanH;
+            o.tint = ptint;
+            o.shadowRadius = 20.0f;
+            HD2DDrawActor(cull->pos, cull->target, px, pz, o, s.worldTime);
         }
+    }
+        HD2DEndUnlit(wildSceneShader);
     }
 }
 
@@ -10246,7 +10662,16 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
             g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
         }
     }
-    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) g_t3dOrbiting = false;
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) {
+        // Tap-to-flag (2026-09-24): a tap that wasn't a drag picks a monster the
+        // same way the 2D click does — flagging it for auto-approach.
+        bool wasClick = g_t3dDragDist < 8.0f;
+        g_t3dOrbiting = false;
+        if (wasClick && CheckCollisionPointRec(mouse, kViewport) && !Wild3DPointInUI(mouse, s)) {
+            Town3DCam pc = Wild3DGetCam(s, screenW, screenH);
+            Wild3DPickFlag(s, pc, mouse);
+        }
+    }
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
     float wheel = GetMouseWheelMove();
     if (wheel != 0.0f && CheckCollisionPointRec(mouse, kViewport) && !Wild3DPointInUI(mouse, s))
@@ -10267,7 +10692,14 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
     T3DGrassFrameUpdate(c.pos); // sway clock for the grass shader
     Wild3DDrawSceneContents(s, false, &c);
+    // HD-2D atmosphere: dust motes on the wind (the default shader is active
+    // here — HD2DEndUnlit restored it after the actors above).
+    HD2DDrawMotes(c.pos, c.target, s.worldTime, 36, 1100.0f, 30.0f, 190.0f, Color{ 255, 240, 210, 40 });
     Wild3DDrawAmbience(c); // birds, unlit, one batched draw call, main pass only
+    // Combat FX (2026-09-24): flag marker, spell projectiles/impacts, heal +
+    // vigor auras, summoned fiend — world-space, so they sit in the scene.
+    DrawFlagMarker3D(s, 0);
+    DrawSpellFX3D(s, 0);
     // Nearest-interactable ring (warm) + red ring on the engaged monster.
     Wild3DNearest nearest = Wild3DNearestInfo(s);
     bool inRange = nearest.valid && nearest.dist < kNodeRadius + kInteractRange;
@@ -10281,6 +10713,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
                                  Fade(Color{ 255, 196, 110, 255 }, pulse));
     }
     EndMode3D();
+    HD2DGradeOverlay(screenW, screenH, true);
 
     // --- 2D overlay: gate/entrance labels (distance-faded like the town's) ---
     {
@@ -10591,7 +11024,8 @@ static void Dungeon3DBuildWalls(int dungeonIdx) {
 // (Room walls can still occlude at very low zoom — the tight limits keep that
 // rare; the player marker, torchlight, and labels stay readable regardless.)
 static Town3DCam Dungeon3DGetCam(const GameState& s, int screenW, int screenH) {
-    Town3DCam c = Town3DGetCamFor(s.dungeonPlayerPos, screenW, screenH, 2, kDung3DDistMin, kDung3DDistMax);
+    Town3DCam c = Town3DGetCamFor(s.dungeonPlayerPos, screenW, screenH, 2, kDung3DDistMin, kDung3DDistMax,
+                                 kT3DFollowPitch);
     c.pos.x = std::clamp(c.pos.x, 40.0f, kDungeonWorldSize - 40.0f);
     c.pos.z = std::clamp(c.pos.z, 40.0f, kDungeonWorldSize - 40.0f);
     c.target.x = std::clamp(c.target.x, 40.0f, kDungeonWorldSize - 40.0f);
@@ -10614,43 +11048,85 @@ static Color Dungeon3DMonsterColor(int dungeonIdx, bool boss) {
     return boss ? ColorBrightness(c, 0.3f) : c;
 }
 
-// Phase 3 procedural dungeon monster: per-dungeon body plan from the creature
-// kit (humanoid for orcs/goblins/wraiths/skeletons, quadruped for beasts),
-// with diagonal-pair trot, idle bob and head turns. `tint` is the per-dungeon
-// palette color (boss brightened by the caller).
-static void Dungeon3DDrawMonster(int dungeonIdx, int monsterIdx, int trackId, float x, float z,
-                                 float yawRad, Color tint, float sizeMul) {
+// HD-2D dungeon monster: a billboard cut from the dungeon's own sprite sheet
+// (regulars) or the boss's static art (boss slot), with the same combat
+// reads the kit had — lunge on attackT, red flash while hurt, shrink-fade
+// while dying. `fadeMul` carries the death-animation shrink for both height
+// and alpha.
+static void Dungeon3DDrawMonster(Vector3 camPos, Vector3 camTarget, const GameState& s,
+                                 int dungeonIdx, int monsterIdx,
+                                 float x, float z, Vector2 facing, Color tint, float sizeMul,
+                                 float attackT = -1.0f, bool hurt = false, float fadeMul = 1.0f) {
     T3CDunLook look = T3CDungeonMonsterLook(dungeonIdx, monsterIdx);
-    T3CAnim a = T3CMakeAnim(trackId, x, z);
     float sm = sizeMul * look.scale;
-    if (look.serpent) {
-        T3CDrawSerpent(g_t3cQuads[10].parts, x, z, yawRad, sm, tint, a, false);
-    } else if (look.humanoid) {
-        T3CDrawHumanoid(g_t3cHumans[look.humanIdx].parts, x, z, yawRad, sm, tint,
-                        ColorBrightness(tint, -0.45f), Color{ 200, 170, 140, 255 }, a, false);
+    HD2DActorOpts o;
+    if (monsterIdx == kDungeonBossSlot && g_assets.bossFamilyOk[dungeonIdx]) {
+        o.tex = g_assets.bossFamily[dungeonIdx];
+        o.texOk = true;
     } else {
-        T3CDrawQuad(g_t3cQuads[look.specIdx].parts, x, z, yawRad, sm, tint, a, 0.0f, false);
+        o.sheet = &g_assets.monsterFamily[dungeonIdx];
     }
+    o.facing = facing;
+    o.anim = (attackT >= 0.0f) ? ActorAnim::Attack : ActorAnim::Idle;
+    o.heightWorld = (look.humanoid ? kHD2DHumanH : kHD2DQuadH) * sm;
+    o.tint = HD2DWarmTorch(hurt ? kHD2DHurtTint : tint);
+    o.alphaMul = fadeMul;
+    o.applyFog = false;
+    if (attackT >= 0.0f) {
+        float lunge = CombatLungeCurve(attackT);
+        o.lungeDx = facing.x * lunge;
+        o.lungeDz = facing.y * lunge;
+    }
+    o.shadowRadius = 16.0f * sm * fadeMul;
+    HD2DDrawActor(camPos, camTarget, x, z, o, s.worldTime);
 }
 
-static void Dungeon3DDrawPlayer(const GameState& s) {
+// HD-2D dungeon player: hero sprite billboard with the same combat reads as
+// the wilderness player — attack/cast poses, red hurt flash + knockback,
+// shrink-fade on death, translucent drifting ghost.
+static void Dungeon3DDrawPlayer(Vector3 camPos, Vector3 camTarget, const GameState& s) {
     float x = s.dungeonPlayerPos.x, z = s.dungeonPlayerPos.y;
-    float yaw = atan2f(s.playerFacing.y, s.playerFacing.x);
-    T3CAnim a = T3CMakeAnim(kT3CTrackPlayerDungeon, x, z);
+    float px = x, pz = z;
+    HD2DActorOpts o;
+    o.sheet = &g_assets.heroSheet;
+    o.facing = s.playerFacing;
+    o.anim = ActorAnim::Idle;
+    o.heightWorld = kHD2DHumanH;
+    o.applyFog = false;
+    o.shadowRadius = 20.0f;
     if (s.playerDeathAnimT > 0.0f) {
         float pshrink = std::max(0.05f, s.playerDeathAnimT / kPlayerDeathAnimTime);
-        T3CDrawHumanoid(g_t3cHumans[0].parts, x, z, yaw, pshrink,
-                        Color{ 100, 130, 185, 255 }, Color{ 55, 60, 75, 255 },
-                        Color{ 225, 200, 165, 255 }, a, false);
+        o.heightWorld *= pshrink;
+        o.alphaMul = pshrink;
+        o.shadowRadius *= pshrink;
     } else if (s.playerIsGhost) {
-        Color g = Fade(Color{ 170, 205, 255, 255 }, 0.45f);
-        T3CDrawHumanoid(g_t3cHumans[0].parts, x, z, yaw, 1.0f,
-                        g, g, Fade(Color{ 220, 235, 255, 255 }, 0.45f), a, false);
+        o.tint = Color{ 170, 205, 255, 255 };
+        o.alphaMul = 0.45f;
+        o.bobY = 4.0f * sinf(s.worldTime * 3.0f);
+        o.shadowRadius = 0.0f; // ghosts cast no shadow
     } else {
-        T3CDrawHumanoid(g_t3cHumans[0].parts, x, z, yaw, 1.0f,
-                        Color{ 100, 130, 185, 255 }, Color{ 55, 60, 75, 255 },
-                        Color{ 225, 200, 165, 255 }, a, false);
+        float pAtk = -1.0f, pCast = -1.0f;
+        PlayerCombatPhases3D(s, &pAtk, &pCast);
+        Color ptint = WHITE;
+        if (s.playerHurtT >= 0.0f) {
+            ptint = kHD2DHurtTint;
+            if (s.dungeonEngaged.has_value()) {
+                Vector2 away = { s.dungeonPlayerPos.x - s.dungeonEngaged->pos.x,
+                                 s.dungeonPlayerPos.y - s.dungeonEngaged->pos.y };
+                float al = std::sqrt(away.x * away.x + away.y * away.y);
+                if (al > 0.001f) {
+                    float kb = 16.0f * (1.0f - s.playerHurtT / 0.30f);
+                    px += away.x / al * kb; pz += away.y / al * kb;
+                }
+            }
+        }
+        bool moving = AnyMoveKeyDown() || VirtualJoystickIsMoving();
+        o.anim = (pCast >= 0.0f) ? ActorAnim::Cast
+                 : (pAtk >= 0.0f) ? ActorAnim::Attack
+                 : moving ? ActorAnim::Walk : ActorAnim::Idle;
+        o.tint = HD2DWarmTorch(ptint);
     }
+    HD2DDrawActor(camPos, camTarget, px, pz, o, s.worldTime);
 }
 
 static bool Dung3DPointInUI(Vector2 m, const GameState& s) {
@@ -10691,7 +11167,16 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
             g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
         }
     }
-    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) g_t3dOrbiting = false;
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) {
+        // Tap-to-flag (2026-09-24): a tap that wasn't a drag picks a monster the
+        // same way the 2D click does — flagging it for auto-approach.
+        bool wasClick = g_t3dDragDist < 8.0f;
+        g_t3dOrbiting = false;
+        if (wasClick && CheckCollisionPointRec(mouse, kViewport) && !Dung3DPointInUI(mouse, s)) {
+            Town3DCam pc = Dungeon3DGetCam(s, screenW, screenH);
+            Dungeon3DPickFlag(s, pc, mouse);
+        }
+    }
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
     float wheel = GetMouseWheelMove();
     if (wheel != 0.0f && CheckCollisionPointRec(mouse, kViewport) && !Dung3DPointInUI(mouse, s))
@@ -10724,9 +11209,11 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
     }
     DrawModel(g_dung3dGround.model, { 900, 0, 900 }, 1.0f, WHITE);
     if (g_dung3dWalls.loaded) DrawModel(g_dung3dWalls.model, { 0, 0, 0 }, 1.0f, WHITE);
-    // Phase 3 creatures use the same torch shader as the dungeon geometry
-    // (falling back to the default shader when torch lighting is off).
-    T3CKitUseShader(torchOn ? g_dung3dTorch.shader : T3CKitDefaultShader());
+    // HD-2D living things: camera-facing billboards drawn unlit with soft
+    // blob shadows. The torch shader stays on the geometry; sprites get a
+    // slight warm grade so they sit in the torch light.
+    unsigned int dungSceneShader = torchOn ? g_dung3dTorch.shader.id : T3CKitDefaultShader().id;
+    HD2DBeginUnlit();
     {
         bool engaged = s.dungeonEngaged.has_value();
         const DungeonDef& dungeon = kDungeons[di];
@@ -10744,8 +11231,9 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
             Vector2 mp = isDying ? s.dyingMonster->pos : DungeonMonsterLivePos(di, i, s.worldTime);
             Vector2 f = WanderFacing(i, s.worldTime);
             float shrink = isDying ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
-            Dungeon3DDrawMonster(di, i, kT3CTrackMonsterDungeon + i, mp.x, mp.y, atan2f(f.y, f.x),
-                                 Dungeon3DMonsterColor(di, false), shrink);
+            Dungeon3DDrawMonster(cam3d.position, cam3d.target, s, di, i, mp.x, mp.y, f,
+                                 Dungeon3DMonsterColor(di, false), shrink,
+                                 -1.0f, false, shrink);
         }
         if (!(engaged && s.dungeonEngaged->isBoss)) {
             bool bossDying = dyingHere && s.dyingMonster->isBoss;
@@ -10756,8 +11244,9 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
                 Vector2 f = WanderFacing(kDungeonBossSlot, s.worldTime);
                 Color bc = bossUnlocked ? Dungeon3DMonsterColor(di, true) : Color{ 110, 110, 120, 255 };
                 float shrink = bossDying ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
-                Dungeon3DDrawMonster(di, kDungeonBossSlot, kT3CTrackMonsterDungeon + kDungeonBossSlot, bp.x, bp.y, atan2f(f.y, f.x),
-                                     bc, (bossUnlocked ? 1.0f : 0.9f) * shrink);
+                float bunlockShrink = (bossUnlocked ? 1.0f : 0.9f) * shrink;
+                Dungeon3DDrawMonster(cam3d.position, cam3d.target, s, di, kDungeonBossSlot, bp.x, bp.y, f,
+                                     bc, bunlockShrink, -1.0f, false, shrink);
             }
         }
         if (engaged) {
@@ -10766,30 +11255,62 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
             float len = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
             Vector2 facing = len > 0.001f ? Vector2{ toPlayer.x / len, toPlayer.y / len } : Vector2{ 0, 1 };
             int midx = am.isBoss ? kDungeonBossSlot : am.monsterIdx;
-            Dungeon3DDrawMonster(di, midx, kT3CTrackMonsterDungeon + kDungeonBossSlot + 1, am.pos.x, am.pos.y,
-                                 atan2f(facing.y, facing.x),
-                                 Dungeon3DMonsterColor(di, am.isBoss), 1.0f);
+            Dungeon3DDrawMonster(cam3d.position, cam3d.target, s, di, midx, am.pos.x, am.pos.y,
+                                 facing,
+                                 Dungeon3DMonsterColor(di, am.isBoss), 1.0f,
+                                 MonsterCombatPhase3D(am.monsterAttackT), am.monsterHurtT >= 0.0f, 1.0f);
         }
-    }
-    Dungeon3DDrawPlayer(s);
-    // Fallen monsters linger where they died — dark flattened mounds that fade
-    // with the corpse timer. Purely visual; the lootable corpse list is separate.
+    Dungeon3DDrawPlayer(cam3d.position, cam3d.target, s);
+    // Fallen monsters linger where they died — the slain monster's own sprite
+    // (or the boss's art), dark and flattened, fading with the corpse timer;
+    // a dark mound for kills with no known sprite, as before. Purely visual;
+    // the lootable corpse list is separate.
     for (const GameState::WorldCorpse& c : s.worldCorpses) {
         if (c.zone != 1) continue;
         float cfade = std::clamp(c.timer / c.duration, 0.0f, 1.0f);
-        Color mound = Fade(Color{ 55, 45, 42, 255 }, 0.85f * cfade);
-        DrawSphereEx({ c.pos.x, 6.0f, c.pos.y }, 16.0f, 8, 6, mound);
+        bool cIsBoss = (c.monsterIdx == kDungeonBossSlot);
+        bool cKnown = (c.dungeonIdx >= 0 && c.dungeonIdx < 5 &&
+                       (cIsBoss ? g_assets.bossFamilyOk[c.dungeonIdx]
+                                : g_assets.monsterFamily[c.dungeonIdx].ok));
+        if (cKnown) {
+            T3CDunLook clook = T3CDungeonMonsterLook(c.dungeonIdx, c.monsterIdx);
+            HD2DActorOpts o;
+            if (cIsBoss) { o.tex = g_assets.bossFamily[c.dungeonIdx]; o.texOk = true; }
+            else o.sheet = &g_assets.monsterFamily[c.dungeonIdx];
+            o.facing = { 0.0f, 1.0f };
+            o.anim = ActorAnim::Idle;
+            o.heightWorld = (clook.humanoid ? kHD2DHumanH : kHD2DQuadH) * clook.scale;
+            o.tint = HD2DWarmTorch(kHD2DCorpseTint);
+            o.alphaMul = 0.75f * cfade;
+            o.squashY = 0.5f;
+            o.applyFog = false;
+            o.shadowRadius = 12.0f * clook.scale;
+            HD2DDrawActor(cam3d.position, cam3d.target, c.pos.x, c.pos.y, o, s.worldTime);
+        } else {
+            Color mound = Fade(Color{ 55, 45, 42, 255 }, 0.85f * cfade);
+            DrawSphereEx({ c.pos.x, 6.0f, c.pos.y }, 16.0f, 8, 6, mound);
+        }
     }
     if (ActivePet(s)) {
         Vector2 d = { s.dungeonPlayerPos.x - s.companionPos.x,
                       s.dungeonPlayerPos.y - s.companionPos.y };
-        float face = (d.x * d.x + d.y * d.y > 1.0f) ? atan2f(d.y, d.x) : 0.0f;
+        float dd = sqrtf(d.x * d.x + d.y * d.y);
         T3CQuadLook plook = T3CPetLook(ActivePet(s)->role);
-        T3CAnim pa = T3CMakeAnim(kT3CTrackCompanion, s.companionPos.x, s.companionPos.y);
-        T3CDrawQuad(g_t3cQuads[plook.specIdx].parts, s.companionPos.x, s.companionPos.y,
-                    face, plook.scale, plook.coat, pa, 0.0f, false);
+        HD2DActorOpts o;
+        o.sheet = &WildCreatureSheetForRole(ActivePet(s)->role);
+        o.facing = (dd > 0.001f) ? Vector2{ d.x / dd, d.y / dd } : Vector2{ 0.0f, 1.0f };
+        o.anim = (dd > 40.0f) ? ActorAnim::Walk : ActorAnim::Idle;
+        o.heightWorld = kHD2DQuadH * plook.scale;
+        o.tint = HD2DWarmTorch(WHITE);
+        o.applyFog = false;
+        o.shadowRadius = 13.0f * plook.scale;
+        HD2DDrawActor(cam3d.position, cam3d.target, s.companionPos.x, s.companionPos.y, o, s.worldTime);
+    }
+        HD2DEndUnlit(dungSceneShader);
     }
     if (torchOn) rlEnableShader(rlGetShaderIdDefault());
+    // HD-2D atmosphere: embers/sparks drifting in the torchlight.
+    HD2DDrawMotes(cam3d.position, cam3d.target, s.worldTime, 26, 700.0f, 20.0f, 150.0f, Color{ 255, 190, 120, 46 });
     // --- Unlit dressing: torch poles + flames, exit portal, rings ---
     if (torchOn) {
         for (int i = 0; i < torchCount; i++) {
@@ -10815,7 +11336,12 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
             Town3DDrawGroundRing(nearestPos.x, nearestPos.y, 3.0f, 52.0f, 62.0f, 36,
                                  Fade(Color{ 255, 196, 110, 255 }, pulse));
     }
+    // Combat FX (2026-09-24): flag marker, spell projectiles/impacts, heal +
+    // vigor auras, summoned fiend — world-space, so they sit in the scene.
+    DrawFlagMarker3D(s, 1);
+    DrawSpellFX3D(s, 1);
     EndMode3D();
+    HD2DGradeOverlay(screenW, screenH, false);
 
     // --- 2D overlay: labels (distance-faded), engaged HP bar, prompt ---
     {
@@ -10950,21 +11476,8 @@ static void DrawBuildingDetailPanel(GameState& s, int screenW) {
 static const float kInteriorRoomW = 560.0f;    // room size, 2D world units
 static const float kInteriorRoomH = 760.0f;
 static const float kInteriorWallMargin = 34.0f; // player clamp from the walls
-// 2026-09-24 bugfix: was 150-520. That range reads as "close-up" numbers,
-// but interiors use the same elevated-orbit camera math as Town/Wilderness
-// (position = target + spherical offset at a steep default pitch), where
-// most of the distance becomes camera HEIGHT, not proximity to the floor.
-// At the low end of this range the camera sat almost flush with the floor,
-// close enough that the floor plane (a flat, room-sized slab right in front
-// of it) filled the *entire* frame, HUD strip included, since nothing else
-// was visible to show through — confirmed by sampling the fill color
-// against room.floor's exact RGB, then by testing a deliberately huge
-// distance (1000) and watching the whole room, HUD and all, snap into a
-// normal, clearly-legible bird's-eye view. Rescaled to comfortably frame a
-// 560x760 room from Town's own default pitch/distance, the same way Town's
-// own 150-1500 range frames a ~1000-unit-wide town.
-static const float kInt3DDistMin = 300.0f;
-static const float kInt3DDistMax = 900.0f;
+static const float kInt3DDistMin = 150.0f;       // 3D zoom limits for rooms
+static const float kInt3DDistMax = 520.0f;
 static const int kInteriorCamId = 3;            // Town3DGetCamFor id (0=town 1=wild 2=dungeon)
 
 struct InteriorPropDef {
@@ -11338,29 +11851,10 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
     }
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
 
-    // 2026-09-24 bugfix: every piece of room geometry (walls/floor below,
-    // props, the NPC, the player capsule) is drawn in room-CENTERED space —
-    // shifted by (-hw, -hh) from the room-local (0..W, 0..H) coordinates
-    // s.interiorPlayerPos is actually stored in (see the prop/player/NPC draw
-    // calls below, all subtracting hw/hh). This camera target didn't apply
-    // that same shift, so it pointed at raw room-local coordinates like
-    // (280, 640) while the real geometry sits centered near (0, 0) — for the
-    // default room size that's off by hundreds of units, well outside the
-    // 150-520 unit orbit radius, so the whole room fell outside the visible
-    // frustum: a completely blank 3D view (2D HUD text still rendered, drawn
-    // outside BeginMode3D, which is what made the location label visible
-    // while nothing else was). Fixed by shifting into the same centered
-    // space before handing it to the shared camera rig.
-    float ihw = kInteriorRoomW * 0.5f, ihh = kInteriorRoomH * 0.5f;
-    Vector2 camTargetPos = { s.interiorPlayerPos.x - ihw, s.interiorPlayerPos.y - ihh };
-    Town3DCam c = Town3DGetCamFor(camTargetPos, screenW, screenH, kInteriorCamId,
-                                 kInt3DDistMin, kInt3DDistMax);
-    // Literal {0,1,0}, matching every other 3D view (Town/Wilderness/
-    // Dungeon) — c.up is a hand-computed cross-product vector Town3DCam
-    // carries for its own ray-picking/projection math, not meant to feed
-    // raylib's camera directly.
+    Town3DCam c = Town3DGetCamFor(s.interiorPlayerPos, screenW, screenH, kInteriorCamId,
+                                 kInt3DDistMin, kInt3DDistMax, kT3DFollowPitch);
     Camera3D cam3d = { 0 };
-    cam3d.position = c.pos; cam3d.target = c.target; cam3d.up = { 0, 1, 0 };
+    cam3d.position = c.pos; cam3d.target = c.target; cam3d.up = c.up;
     cam3d.fovy = c.fovY; cam3d.projection = CAMERA_PERSPECTIVE;
     BeginMode3D(cam3d);
 
@@ -11379,20 +11873,39 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
 
     for (auto& p : props) Interior3DDrawProp(p);
 
-    if (npc) { // static shopkeeper
-        T3CAnim na = T3CMakeAnim(kT3CTrackNPCInterior, npc->x, npc->y, true);
-        T3CDrawHumanoid(g_t3cHumans[0].parts, npc->x - hw, npc->y - hh, 0.0f, 0.95f,
-                        Color{ 150, 110, 80, 255 }, Color{ 90, 70, 55, 255 },
-                        Color{ 215, 175, 135, 255 }, na, false);
+    // HD-2D: shopkeeper + player as billboards; furniture stays 3D.
+    HD2DBeginUnlit();
+    if (npc) { // static shopkeeper — real NPC art (Cobb's own sheet; Young
+               // Petra's for Mira the Provisioner, the closest real match)
+        int sheetIdx = (s.interiorKey == "stable") ? 4 : 1;
+        HD2DActorOpts o;
+        o.sheet = &g_assets.townNPCSheets[sheetIdx];
+        o.facing = { 1.0f, 0.0f };
+        o.anim = ActorAnim::Idle;
+        o.heightWorld = kHD2DHumanH * 0.95f;
+        o.tint = HD2DWarmTorch(WHITE);
+        o.applyFog = false;
+        o.shadowRadius = 18.0f;
+        HD2DDrawActor(cam3d.position, cam3d.target, npc->x - hw, npc->y - hh, o, s.worldTime);
     }
     { // player
-        float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
-        T3CAnim pa = T3CMakeAnim(kT3CTrackPlayerInterior, s.interiorPlayerPos.x, s.interiorPlayerPos.y, true);
-        T3CDrawHumanoid(g_t3cHumans[0].parts, s.interiorPlayerPos.x - hw, s.interiorPlayerPos.y - hh,
-                        pyaw, 1.0f, Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
-                        Color{ 240, 210, 180, 255 }, pa, false);
+        bool moving = AnyMoveKeyDown() || VirtualJoystickIsMoving();
+        HD2DActorOpts o;
+        o.sheet = &g_assets.heroSheet;
+        o.facing = s.playerFacing;
+        o.anim = moving ? ActorAnim::Walk : ActorAnim::Idle;
+        o.heightWorld = kHD2DHumanH;
+        o.tint = HD2DWarmTorch(WHITE);
+        o.applyFog = false;
+        o.shadowRadius = 20.0f;
+        HD2DDrawActor(cam3d.position, cam3d.target,
+                      s.interiorPlayerPos.x - hw, s.interiorPlayerPos.y - hh, o, s.worldTime);
     }
+    HD2DEndUnlit(rlGetShaderIdDefault());
+    // HD-2D atmosphere: dust in the lamplight.
+    HD2DDrawMotes(cam3d.position, cam3d.target, s.worldTime, 14, 420.0f, 20.0f, 90.0f, Color{ 255, 220, 170, 36 });
     EndMode3D();
+    HD2DGradeOverlay(screenW, screenH, true);
 }
 
 // Runs one E/tap interaction. Returns true when it left the interior.
@@ -11845,7 +12358,32 @@ static void DrawPlayerLifeState(const GameState& s, Vector2 screenPos, Vector2 f
         DrawCircleV(screenPos, kPlayerRadius * 0.7f, Fade(Color{ 215, 235, 255, 255 }, 0.35f * pulse));
         DrawCircleLines((int)screenPos.x, (int)screenPos.y, kPlayerRadius * 1.1f, Fade(Color{ 200, 225, 255, 255 }, 0.6f));
     } else {
-        DrawPlayer(s, screenPos, facing, interactPrompt, visualScale, combatAnim);
+        // Hurt reaction (2026-09-24): red flash + a small reel away from the
+        // engaged monster, synced to the damage tick. WorldToScreen is 1:1, so
+        // the world-space knockback offsets screen pixels directly.
+        Color tint = WHITE;
+        Vector2 drawPos = screenPos;
+        if (s.playerHurtT >= 0.0f) {
+            tint = Color{ 255, 120, 120, 255 };
+            Vector2 ppos = s.wildernessPlayerPos, mpos = ppos;
+            bool haveM = false;
+            if (s.screen == Screen::Wilderness) {
+                if (s.wildEngaged.has_value()) { mpos = s.wildEngaged->pos; haveM = true; }
+            } else if (s.screen == Screen::Hunt) {
+                ppos = s.dungeonPlayerPos;
+                if (s.dungeonEngaged.has_value()) { mpos = s.dungeonEngaged->pos; haveM = true; }
+            }
+            if (haveM) {
+                Vector2 away = { ppos.x - mpos.x, ppos.y - mpos.y };
+                float al = std::sqrt(away.x * away.x + away.y * away.y);
+                if (al > 0.001f) {
+                    float kb = 12.0f * (1.0f - s.playerHurtT / 0.30f);
+                    drawPos.x += away.x / al * kb;
+                    drawPos.y += away.y / al * kb;
+                }
+            }
+        }
+        DrawPlayer(s, drawPos, facing, interactPrompt, visualScale, combatAnim, tint);
     }
 }
 
@@ -11888,6 +12426,16 @@ static void BeginPlayerDeath(GameState& s) {
     s.dungeonEngaged.reset();
     s.dyingMonster.reset();
     CancelEscort(s, "flees as you fall — the escort is broken."); // a ghost can't be escorting anyone
+    // Combat FX state dies with the player (2026-09-24): the flag, in-flight
+    // spells, the vigor aura, and the fiend don't survive death.
+    s.flagTarget.reset();
+    for (auto& p : s.spellProjectiles) p.active = false;
+    for (auto& im : s.spellImpacts) im.active = false;
+    s.playerHurtT = -1.0f;
+    s.healGlowT = -1.0f;
+    s.vigorT = 0.0f;
+    s.fiendT = 0.0f;
+    s.fiendTickT = 0.0f;
     // The ghost walks where it died. Panel-combat deaths (ambush panel over town,
     // the Hunt picker, etc.) manifest in the wilderness at the last wilderness
     // position — never stranded on a picker screen.
@@ -11946,6 +12494,10 @@ static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& 
     if (am.spotIdx >= 0) s.wildSpotRespawn[am.spotIdx] = RollWildRespawn();
     s.dyingMonster = dm;
     s.wildEngaged.reset();
+    s.flagTarget.reset(); // the target's dead — drop the marker
+    // In-flight bolts die with the fight, but impact bursts play out (2026-09-24):
+    // erasing them here would cut the very hit that killed the monster.
+    for (auto& p : s.spellProjectiles) if (p.zone == 0) p.active = false;
 }
 
 static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeonMonster& am,
@@ -11962,6 +12514,10 @@ static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeo
     s.dungeonSpawnRespawn[dungeonIdx][dm.monsterIdx] = RollDungeonRespawn(wasBoss);
     s.dyingMonster = dm;
     s.dungeonEngaged.reset();
+    s.flagTarget.reset(); // the target's dead — drop the marker
+    // In-flight bolts die with the fight, but impact bursts play out (2026-09-24):
+    // erasing them here would cut the very hit that killed the monster.
+    for (auto& p : s.spellProjectiles) if (p.zone == 1) p.active = false;
 }
 
 // The deferred half of the old EndWildMonsterWin/EndDungeonMonsterWin bodies —
@@ -11972,7 +12528,8 @@ static void FinishMonsterDeath(GameState& s) {
     GameState::DyingMonster dm = *s.dyingMonster; // copy — handlers below touch state
     s.dyingMonster.reset();
     float corpseDur = (dm.isRival || dm.bladeIdx >= 0) ? kRivalCorpseFadeTime : kCorpseFadeTime;
-    s.worldCorpses.push_back({ dm.pos, corpseDur, corpseDur, dm.zone, dm.iconIdx, dm.name });
+    s.worldCorpses.push_back({ dm.pos, corpseDur, corpseDur, dm.zone, dm.iconIdx, dm.name,
+                               dm.dungeonIdx, dm.monsterIdx });
     int goldFound = std::max(1, dm.baseGold + (std::rand() % 3) - 1);
     s.corpses.push_back({ dm.name, dm.baseLeather, goldFound });
     std::string msg = "Defeated the " + dm.name + "! Corpse left behind with leather and " +
@@ -12069,6 +12626,975 @@ static void DrawInnocentSprite2D(Vector2 screenPos, int id, const std::string& l
     } else {
         DrawWorldNode(screenPos, kNodeRadius * 0.6f, Color{ 150, 140, 110, 255 }, label, near);
     }
+}
+
+// ---------------------------------------------------------------------
+// World-space combat FX + UO-style attack flagging (2026-09-24).
+//
+// The old model: the player's swing/cast sprite strips already played, but
+// monsters dealt damage with no attack animation or hit reaction, melee was
+// auto-continuous after engagement with no deliberate targeting, and spells
+// resolved instantly with no projectile or impact. The new model keeps every
+// mechanical number identical (damage, mana, reagents, cooldowns, skill
+// checks, training) and only changes what the player SEES and how targets get
+// CHOSEN:
+//   - monster attack lunges (2D offset + 3D pose), player/monster hit flashes,
+//     player knockback, all synced to the existing damage ticks;
+//   - spells travel as visible projectiles and resolve mechanically on
+//     arrival; the ~0.2-0.5s flight is the only timing change;
+//   - click/tap a monster to FLAG it: a red marker appears and the character
+//     steers toward it until contact auto-engages (bump-to-fight still works).
+// --- Combat anim timing ---
+static const float kCombatLungeTime = 0.28f; // monster attack lunge, out and back
+static const float kCombatHurtTime = 0.30f;  // hit-flash on the monster
+static const float kCombatFlashTime = 0.25f; // hit-flash + knockback on the player
+static const float kCombatDebuffDuration = 20.0f; // Sap/Cloud Mind/Fumbling live in world combat
+
+// Out-and-back lunge distance (world units) for a monster attack at time t.
+static float CombatLungeCurve(float t) {
+    float f = std::clamp(t / kCombatLungeTime, 0.0f, 1.0f);
+    return sinf(f * 3.14159265f) * 26.0f;
+}
+
+// --- Spell visuals: one row per castable spell, indexed by kSpells index ---
+// (-2 = rival/blade shadow bolt, an enemy projectile; debuff indices 2/3/4 fly
+// as wisps.) Colors/sizes/speeds are presentation only.
+struct SpellFX { Color proj; float projRadius; float speed; Color impact; float impactRadius; };
+static SpellFX SpellFXFor(int spellIdx) {
+    switch (spellIdx) {
+        case 0:  return { Color{255,240,180,255},  9, 1400, Color{255,220,120,255}, 42 }; // Spark Dart
+        case 5:  return { Color{220,60,70,255},   10, 1100, Color{200,40,50,255},   46 }; // Wounding Touch
+        case 7:  return { Color{255,150,60,255},  12, 1000, Color{255,120,40,255},   64 }; // Ember Burst
+        case 8:  return { Color{140,230,120,255}, 9, 1200, Color{120,210,90,255},   50 }; // Venom Sting
+        case 10: return { Color{170,230,255,255}, 10, 1700, Color{120,200,255,255}, 56 }; // Storm Lance
+        case 11: return { Color{190,140,255,255}, 11, 1100, Color{160,110,240,255}, 58 }; // Psychic Shatter
+        case 12: return { Color{220,240,255,255},  9, 1500, Color{180,220,255,255}, 48 }; // Arc Bolt
+        case 13: return { Color{255,110,60,255},  15,  800, Color{255,90,40,255},   90 }; // Detonation
+        case 14: return { Color{255,130,40,255},  17,  900, Color{255,100,30,255}, 110 }; // Inferno Strike
+        case 2:  return { Color{170,255,170,255},  8,  700, Color{150,240,150,255}, 44 }; // Sap Strength wisp
+        case 3:  return { Color{170,200,255,255},  8,  700, Color{150,180,240,255}, 44 }; // Cloud Mind wisp
+        case 4:  return { Color{220,190,140,255},  8,  700, Color{210,180,130,255}, 44 }; // Fumbling Curse wisp
+        case -2: return { Color{150,60,180,255},  10, 1100, Color{120,40,150,255},  52 }; // enemy shadow bolt
+        case -10: return { Color{150,255,170,255}, 0, 1200, Color{150,255,170,255}, 60 }; // mending burst
+        case -11: return { Color{255,220,130,255}, 0, 1200, Color{255,220,130,255}, 60 }; // vigor burst
+        case -12: return { Color{255,140,70,255},  0, 1200, Color{255,120,50,255},  80 }; // summoning burst
+        default: return { Color{255,255,255,255},  9, 1200, Color{255,255,255,255}, 44 };
+    }
+}
+
+static GameState::SpellProjectile* SpawnSpellProjectile(GameState& s, int zone, Vector2 from, Vector2 target,
+                                 int spellIdx, bool fromPlayer, const std::string& trainNote = "") {
+    for (auto& p : s.spellProjectiles) {
+        if (p.active) continue;
+        p.active = true;
+        p.zone = zone;
+        p.spellIdx = spellIdx;
+        p.fromPlayer = fromPlayer;
+        p.from = from;
+        p.pos = from;
+        p.target = target;
+        p.castByRival = false;
+        p.castByBladeIdx = -1;
+        SpellFX fx = SpellFXFor(spellIdx);
+        float dist = Dist(from, target);
+        p.dur = std::clamp(dist / fx.speed, 0.18f, 0.8f);
+        p.t = 0.0f;
+        p.trainNote = trainNote;
+        return &p;
+    }
+    return nullptr;
+}
+
+static void SpawnSpellImpact(GameState& s, int zone, Vector2 pos, int spellIdx, float sizeMul = 1.0f) {
+    for (auto& im : s.spellImpacts) {
+        if (im.active) continue;
+        im.active = true;
+        im.zone = zone;
+        im.spellIdx = spellIdx;
+        im.pos = pos;
+        im.t = 0.0f;
+        im.dur = 0.35f;
+        im.sizeMul = sizeMul;
+        return;
+    }
+}
+
+// --- Mechanical resolution on projectile arrival ---
+// These are the bodies that used to run instantly inside the cast lambdas —
+// moved here verbatim so the only change is the visible flight time.
+static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::string& trainNote, int zone) {
+    const Spell& spell = kSpells[spellIdx];
+    if (zone == 0) {
+        if (!s.wildEngaged.has_value()) return;
+        auto& am = *s.wildEngaged;
+        EngagedMonsterStats spot = EngagedWildMonsterStats(s, am);
+        std::string mname = spot.name;
+        if (RandUnit() * 100.0f < SpellSuccessChance(s, spell)) {
+            float base = (float)SpellPowerFor(s, spell);
+            if (s.vigorT > 0.0f) base *= 1.25f; // Blessing of Vigor
+            int dmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
+            am.hp -= dmg;
+            am.monsterHurtT = 0.0f;
+            s.logLine = spell.name + " hits the " + mname + " for " + std::to_string(dmg) + " damage" + trainNote;
+            if (am.hp <= 0) {
+                // Death handling mirrors tryCastSpellAtEngagedMonster's kill branch
+                // verbatim (spell kills don't trigger the melee murderer-loss path).
+                int mgold = spot.baseGold, mleather = spot.baseLeather;
+                if (am.isRival) {
+                    bool wasMurdererTier = s.rivalHasBeatenPlayer;
+                    RivalFightEnded(s, am);
+                    BeginWildMonsterDeath(s, am, mname, mgold, mleather);
+                    if (wasMurdererTier) { GainFame(s, 10.0f); s.notoriety = std::max(0.0f, s.notoriety - 10.0f); }
+                } else if (am.bladeIdx >= 0) {
+                    BladeFightEnded(s, am.bladeIdx, am); // persist position + slow level growth
+                    BeginWildMonsterDeath(s, am, mname, mgold, mleather);
+                } else {
+                    BeginWildMonsterDeath(s, am, mname, mgold, mleather);
+                }
+            }
+        } else {
+            s.logLine = spell.name + " fizzles!" + trainNote;
+        }
+    } else {
+        if (!s.dungeonEngaged.has_value() || !s.selectedDungeon.has_value()) return;
+        auto& am = *s.dungeonEngaged;
+        const DungeonDef& dungeon = kDungeons[*s.selectedDungeon];
+        const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
+        std::string mname = m.name;
+        int level = m.level;
+        if (RandUnit() * 100.0f < SpellSuccessChance(s, spell)) {
+            float base = (float)SpellPowerFor(s, spell);
+            if (s.vigorT > 0.0f) base *= 1.25f;
+            int dmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
+            am.hp -= dmg;
+            am.monsterHurtT = 0.0f;
+            s.logLine = spell.name + " hits the " + mname + " for " + std::to_string(dmg) + " damage" + trainNote;
+            if (am.hp <= 0) {
+                int mgold = m.baseGold, mleather = m.baseLeather;
+                BeginDungeonMonsterDeath(s, am, *s.selectedDungeon, am.isBoss, mname, level, mgold, mleather);
+            }
+        } else {
+            s.logLine = spell.name + " fizzles!" + trainNote;
+        }
+    }
+}
+
+// Debuffs (Sap Strength / Cloud Mind / Fumbling Curse) had data but no live
+// mechanics — the comments said they were dropped. They are now castable in
+// live combat: a wisp flies to the enemy and the debuff applies for 20s.
+// Sap Strength: monster deals 30% less damage. Cloud Mind: -15% monster hit
+// chance. Fumbling Curse: monster attacks 50% slower. (New mechanics —
+// disclosed per the task brief.)
+static void ResolvePlayerDebuffImpact(GameState& s, int spellIdx, const std::string& trainNote, int zone) {
+    const Spell& spell = kSpells[spellIdx];
+    int kind = spellIdx - 1; // 2->1 Sap, 3->2 Cloud Mind, 4->3 Fumbling
+    auto applyTo = [&](auto& am, const std::string& mname) {
+        if (RandUnit() * 100.0f < SpellSuccessChance(s, spell)) {
+            am.debuffKind = kind;
+            am.debuffT = kCombatDebuffDuration;
+            s.logLine = spell.name + " settles over the " + mname + trainNote;
+        } else {
+            s.logLine = spell.name + " fizzles!" + trainNote;
+        }
+    };
+    if (zone == 0) {
+        if (!s.wildEngaged.has_value()) return;
+        auto& am = *s.wildEngaged;
+        applyTo(am, EngagedWildMonsterStats(s, am).name);
+    } else {
+        if (!s.dungeonEngaged.has_value() || !s.selectedDungeon.has_value()) return;
+        auto& am = *s.dungeonEngaged;
+        const DungeonDef& dungeon = kDungeons[*s.selectedDungeon];
+        applyTo(am, (am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx)).name);
+    }
+}
+
+// The Rival/Murder Inc. ranged strike used to damage the player instantly; now
+// a shadow bolt flies first and this runs on arrival. Numbers unchanged.
+static void ResolveEnemyRangedImpact(GameState& s, bool castByRival, int castByBladeIdx) {
+    if (!s.wildEngaged.has_value()) return;
+    auto& am = *s.wildEngaged;
+    // The bolt belongs to its caster — if the fight changed hands mid-flight
+    // (disengage + re-engage on someone else), it fizzles instead of hitting
+    // the wrong opponent.
+    if (am.isRival != castByRival || am.bladeIdx != castByBladeIdx) return;
+    EngagedMonsterStats spot = EngagedWildMonsterStats(s, am);
+    std::string mname = spot.name;
+    float hitCh = MonsterHitChance(s) - (am.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
+    if (RandUnit() * 100.0f < hitCh) {
+        float raw = spot.level * (0.9f + RandUnit() * 0.5f);
+        if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
+        int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
+        s.hp -= dmg;
+        s.playerHurtT = 0.0f;
+        s.logLine = "The " + mname + " strikes you from range for " + std::to_string(dmg) + " damage!";
+        if (s.hp <= 0) {
+            if (am.bladeIdx >= 0) { BladeFightEnded(s, am.bladeIdx, am); EndWildMonsterLoss(s, mname); return; }
+            bool wasAlreadyBeaten = s.rivalHasBeatenPlayer;
+            RivalFightEnded(s, am);
+            s.rivalHasBeatenPlayer = true;
+            if (wasAlreadyBeaten) EndWildMonsterMurdererLoss(s, mname); else EndWildMonsterLoss(s, mname);
+            RivalCorpseLoot(s);
+            return;
+        }
+    } else {
+        s.logLine = "The " + mname + " strikes from range, but misses!";
+    }
+}
+
+// Summon Fiend's combat effect (new mechanics, disclosed): while active the
+// fiend follows the player and lashes the engaged enemy every 2s for
+// (4 + magery*0.1) damage. 25s duration.
+static void FiendStrikeLive(GameState& s, int zone) {
+    if (zone == 0) {
+        if (!s.wildEngaged.has_value()) return;
+        auto& am = *s.wildEngaged;
+        EngagedMonsterStats spot = EngagedWildMonsterStats(s, am);
+        std::string mname = spot.name;
+        float base = 4.0f + s.magery * 0.1f;
+        if (s.vigorT > 0.0f) base *= 1.25f;
+        int dmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
+        am.hp -= dmg;
+        am.monsterHurtT = 0.0f;
+        SpawnSpellImpact(s, 0, am.pos, 14, 0.55f);
+        s.logLine = "Your fiend lashes the " + mname + " for " + std::to_string(dmg) + " damage!";
+        if (am.hp <= 0) {
+            int mgold = spot.baseGold, mleather = spot.baseLeather;
+            if (am.isRival) {
+                bool wasMurdererTier = s.rivalHasBeatenPlayer;
+                RivalFightEnded(s, am);
+                BeginWildMonsterDeath(s, am, mname, mgold, mleather);
+                if (wasMurdererTier) { GainFame(s, 10.0f); s.notoriety = std::max(0.0f, s.notoriety - 10.0f); }
+            } else if (am.bladeIdx >= 0) {
+                BladeFightEnded(s, am.bladeIdx, am);
+                BeginWildMonsterDeath(s, am, mname, mgold, mleather);
+            } else {
+                BeginWildMonsterDeath(s, am, mname, mgold, mleather);
+            }
+        }
+    } else {
+        if (!s.dungeonEngaged.has_value() || !s.selectedDungeon.has_value()) return;
+        auto& am = *s.dungeonEngaged;
+        const DungeonDef& dungeon = kDungeons[*s.selectedDungeon];
+        const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
+        float base = 4.0f + s.magery * 0.1f;
+        if (s.vigorT > 0.0f) base *= 1.25f;
+        int dmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
+        am.hp -= dmg;
+        am.monsterHurtT = 0.0f;
+        SpawnSpellImpact(s, 1, am.pos, 14, 0.55f);
+        s.logLine = "Your fiend lashes the " + m.name + " for " + std::to_string(dmg) + " damage!";
+        if (am.hp <= 0) {
+            int mgold = m.baseGold, mleather = m.baseLeather;
+            BeginDungeonMonsterDeath(s, am, *s.selectedDungeon, am.isBoss, m.name, m.level, mgold, mleather);
+        }
+    }
+}
+
+// Ticks every frame from both wilderness and dungeon updates: combat anim
+// timers, debuff expiry, spell projectiles/impacts, vigor, and the fiend.
+static void UpdateLiveSpellFX(GameState& s, float dt) {
+    auto tickEngagedFX = [&](auto& am) {
+        if (am.monsterAttackT >= 0.0f) { am.monsterAttackT += dt; if (am.monsterAttackT > kCombatLungeTime) am.monsterAttackT = -1.0f; }
+        if (am.monsterHurtT >= 0.0f) { am.monsterHurtT += dt; if (am.monsterHurtT > kCombatHurtTime) am.monsterHurtT = -1.0f; }
+        if (am.debuffT > 0.0f) { am.debuffT -= dt; if (am.debuffT <= 0.0f) { am.debuffKind = 0; am.debuffT = 0.0f; } }
+    };
+    if (s.wildEngaged.has_value()) tickEngagedFX(*s.wildEngaged);
+    if (s.dungeonEngaged.has_value()) tickEngagedFX(*s.dungeonEngaged);
+    if (s.playerHurtT >= 0.0f) { s.playerHurtT += dt; if (s.playerHurtT > kCombatFlashTime) s.playerHurtT = -1.0f; }
+    if (s.healGlowT >= 0.0f) { s.healGlowT += dt; if (s.healGlowT > 0.6f) s.healGlowT = -1.0f; }
+    if (s.vigorT > 0.0f) s.vigorT -= dt;
+
+    // If a fight starts with something other than the flagged target
+    // (bump-engage while steering at something else), re-flag to the actual
+    // opponent so the marker stays honest.
+    if (s.wildEngaged.has_value()) {
+        const auto& am = *s.wildEngaged;
+        bool matches = s.flagTarget.has_value() && s.flagTarget->zone == 0 &&
+            ((s.flagTarget->spotIdx == am.spotIdx && !am.isRival && am.bladeIdx < 0) ||
+             (s.flagTarget->isRival && am.isRival) ||
+             (s.flagTarget->bladeIdx == am.bladeIdx && am.bladeIdx >= 0));
+        if (!matches) {
+            GameState::FlagTarget f;
+            f.zone = 0; f.spotIdx = am.spotIdx; f.isRival = am.isRival; f.bladeIdx = am.bladeIdx;
+            s.flagTarget = f;
+        }
+    }
+    if (s.dungeonEngaged.has_value()) {
+        const auto& am = *s.dungeonEngaged;
+        bool matches = s.flagTarget.has_value() && s.flagTarget->zone == 1 &&
+            s.flagTarget->monsterIdx == am.monsterIdx && s.flagTarget->isBoss == am.isBoss;
+        if (!matches) {
+            GameState::FlagTarget f;
+            f.zone = 1; f.monsterIdx = am.monsterIdx; f.isBoss = am.isBoss;
+            s.flagTarget = f;
+        }
+    }
+
+    // Summoned fiend: follows the player, lashes the engaged enemy every 2s.
+    if (s.fiendT > 0.0f) {
+        s.fiendT -= dt;
+        if (s.fiendT <= 0.0f) { s.fiendT = 0.0f; }
+        else {
+            Vector2 anchor = (s.fiendZone == 1) ? s.dungeonPlayerPos : s.wildernessPlayerPos;
+            Vector2 want = { anchor.x + 42.0f, anchor.y + 30.0f };
+            float k = std::min(1.0f, dt * 6.0f);
+            s.fiendPos.x += (want.x - s.fiendPos.x) * k;
+            s.fiendPos.y += (want.y - s.fiendPos.y) * k;
+            s.fiendTickT -= dt;
+            if (s.fiendTickT <= 0.0f) { s.fiendTickT = 2.0f; FiendStrikeLive(s, s.fiendZone); }
+        }
+    }
+
+    for (auto& p : s.spellProjectiles) {
+        if (!p.active) continue;
+        p.t += dt;
+        if (p.fromPlayer) {
+            if (p.zone == 0 && s.wildEngaged.has_value()) p.target = s.wildEngaged->pos;
+            else if (p.zone == 1 && s.dungeonEngaged.has_value()) p.target = s.dungeonEngaged->pos;
+        } else {
+            p.target = (p.zone == 0) ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+        }
+        float f = std::clamp(p.t / p.dur, 0.0f, 1.0f);
+        p.pos = { p.from.x + (p.target.x - p.from.x) * f, p.from.y + (p.target.y - p.from.y) * f };
+        if (p.t >= p.dur) {
+            p.active = false;
+            if (p.spellIdx == -2) {
+                SpawnSpellImpact(s, p.zone, p.target, -2, 1.0f);
+                if (p.zone == 0) ResolveEnemyRangedImpact(s, p.castByRival, p.castByBladeIdx);
+            } else if (p.spellIdx >= 0 && p.spellIdx < (int)kSpells.size()) {
+                const Spell& sp = kSpells[p.spellIdx];
+                if (sp.type == SpellType::Debuff) {
+                    SpawnSpellImpact(s, p.zone, p.target, p.spellIdx, 0.8f);
+                    ResolvePlayerDebuffImpact(s, p.spellIdx, p.trainNote, p.zone);
+                } else {
+                    SpawnSpellImpact(s, p.zone, p.target, p.spellIdx, 1.0f);
+                    ResolvePlayerSpellImpact(s, p.spellIdx, p.trainNote, p.zone);
+                }
+            }
+        }
+    }
+    for (auto& im : s.spellImpacts) {
+        if (!im.active) continue;
+        im.t += dt;
+        if (im.t >= im.dur) im.active = false;
+    }
+}
+
+// --- Flagging: target selection, steering, markers ---
+static bool FlagTargetLivePos(const GameState& s, Vector2* out) {
+    if (!s.flagTarget.has_value()) return false;
+    const auto& f = *s.flagTarget;
+    if (f.zone == 0) {
+        if (s.wildEngaged.has_value()) { *out = s.wildEngaged->pos; return true; }
+        if (f.isRival) { *out = s.rivalPos; return true; }
+        if (f.bladeIdx >= 0) {
+            if (f.bladeIdx >= kBladeCount) return false;
+            *out = s.blades[f.bladeIdx].pos;
+            return true;
+        }
+        if (f.spotIdx < 0 || f.spotIdx >= (int)kWildernessMonsterSpots.size()) return false;
+        if (s.wildSpotRespawn[f.spotIdx] > 0.0f) return false; // died — flag goes stale
+        *out = WildernessMonsterLivePos(f.spotIdx, s.worldTime);
+        return true;
+    }
+    if (!s.selectedDungeon.has_value()) return false;
+    int di = *s.selectedDungeon;
+    const DungeonDef& dungeon = kDungeons[di];
+    if (s.dungeonEngaged.has_value()) { *out = s.dungeonEngaged->pos; return true; }
+    if (f.monsterIdx == kDungeonBossSlot) {
+        if (s.dungeonXP[di] < dungeon.bossUnlockXp) return false; // still locked
+        if (s.dungeonSpawnRespawn[di][kDungeonBossSlot] > 0.0f) return false;
+        *out = DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime);
+        return true;
+    }
+    if (f.monsterIdx < 0 || f.monsterIdx >= kDungeonRegularSlots) return false;
+    if (s.dungeonSpawnRespawn[di][f.monsterIdx] > 0.0f) return false;
+    *out = DungeonMonsterLivePos(di, f.monsterIdx, s.worldTime);
+    return true;
+}
+
+static std::string FlagTargetName(const GameState& s) {
+    if (!s.flagTarget.has_value()) return "";
+    const auto& f = *s.flagTarget;
+    if (f.zone == 0) {
+        if (s.wildEngaged.has_value()) return EngagedWildMonsterStats(s, *s.wildEngaged).name;
+        if (f.isRival) return RivalEpithetName(s);
+        if (f.bladeIdx >= 0 && f.bladeIdx < kBladeCount) return std::string("Murder Inc. ") + BladeName(f.bladeIdx);
+        if (f.spotIdx >= 0 && f.spotIdx < (int)kWildernessMonsterSpots.size())
+            return kWildernessMonsterSpots[f.spotIdx].name;
+    } else if (s.selectedDungeon.has_value()) {
+        const DungeonDef& dungeon = kDungeons[*s.selectedDungeon];
+        if (s.dungeonEngaged.has_value()) {
+            const auto& am = *s.dungeonEngaged;
+            return (am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx)).name;
+        }
+        if (f.monsterIdx == kDungeonBossSlot) return dungeon.boss.name;
+        if (f.monsterIdx >= 0 && f.monsterIdx < kDungeonRegularSlots)
+            return DungeonSlotMonster(dungeon, f.monsterIdx).name;
+    }
+    return "target";
+}
+
+static void ClearFlagTarget(GameState& s) { s.flagTarget.reset(); }
+
+// Steers the player toward the flagged target when it isn't already a fight.
+// Yields to everything: manual movement (caller only steers when the player
+// didn't move), engagement, panels, death, ghost form.
+static void SteerTowardFlag(GameState& s, Vector2& playerPos, Vector2& playerFacing,
+                            float dt, float worldSize, int zone) {
+    if (s.combat.has_value()) return;
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    if (zone == 0 ? s.wildEngaged.has_value() : s.dungeonEngaged.has_value()) return;
+    Vector2 tgt;
+    if (!FlagTargetLivePos(s, &tgt)) { s.flagTarget.reset(); return; }
+    float d = Dist(playerPos, tgt);
+    if (d <= kWildMeleeRange * 0.9f) return; // close enough — contact engagement fires on its own
+    float step = kPlayerSpeed * dt; // same pace as manual walking
+    if (step >= d) return;
+    Vector2 dir = { (tgt.x - playerPos.x) / d, (tgt.y - playerPos.y) / d };
+    playerPos.x += dir.x * step;
+    playerPos.y += dir.y * step;
+    playerFacing = dir;
+    playerPos = ClampToWorld(playerPos, kPlayerEdgeMargin, worldSize);
+}
+
+// Click-to-flag shared bits: nearest candidate within a screen-space radius.
+static bool Wild2DFlagCandidate(const GameState& s, Vector2 camera, Vector2 m,
+                                GameState::FlagTarget* out, float* outDist) {
+    bool found = false;
+    float best = 52.0f;
+    GameState::FlagTarget bestF;
+    auto consider = [&](Vector2 worldPos, GameState::FlagTarget f) {
+        Vector2 sp = WorldToScreen(worldPos, camera);
+        float d = std::sqrt((sp.x - m.x) * (sp.x - m.x) + (sp.y - m.y) * (sp.y - m.y));
+        if (d < best) { best = d; bestF = f; found = true; }
+    };
+    int n = (int)kWildernessMonsterSpots.size();
+    for (int i = 0; i < n; i++) {
+        if (s.wildSpotRespawn[i] > 0.0f) continue;
+        if (s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0 &&
+            s.wildEngaged->spotIdx == i) continue; // already fighting it — nothing to flag
+        GameState::FlagTarget f; f.zone = 0; f.spotIdx = i;
+        consider(WildernessMonsterLivePos(i, s.worldTime), f);
+    }
+    { GameState::FlagTarget f; f.zone = 0; f.isRival = true; consider(s.rivalPos, f); }
+    for (int bi = 0; bi < kBladeCount; bi++) {
+        GameState::FlagTarget f; f.zone = 0; f.bladeIdx = bi;
+        consider(s.blades[bi].pos, f);
+    }
+    if (found) { *out = bestF; *outDist = best; }
+    return found;
+}
+
+static void Wild2DClickFlag(GameState& s, Vector2 camera, int screenW, int screenH) {
+    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
+    if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    Vector2 m = GetMousePosition();
+    if (!CheckCollisionPointRec(m, kViewport)) return;
+    if (m.y < 200) return; // top HUD strip
+    if (CheckCollisionPointRec(m, kJoystickZone)) return;
+    if (m.x > screenW - 170 && m.y > screenH - 170) return; // interact button
+    if (s.wildEngaged.has_value()) {
+        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return; // quick items
+        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return; // spell hotbar
+    }
+    GameState::FlagTarget f; float fd = 0.0f;
+    if (Wild2DFlagCandidate(s, camera, m, &f, &fd)) {
+        s.flagTarget = f;
+        s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+    } else if (s.flagTarget.has_value()) {
+        s.flagTarget.reset(); // clicked empty ground: stand down
+    }
+}
+
+static bool Dungeon2DFlagCandidate(const GameState& s, Vector2 camera, Vector2 m,
+                                   GameState::FlagTarget* out) {
+    if (!s.selectedDungeon.has_value()) return false;
+    int di = *s.selectedDungeon;
+    const DungeonDef& dungeon = kDungeons[di];
+    bool found = false;
+    float best = 52.0f;
+    GameState::FlagTarget bestF;
+    auto consider = [&](Vector2 worldPos, GameState::FlagTarget f) {
+        Vector2 sp = WorldToScreen(worldPos, camera);
+        float d = std::sqrt((sp.x - m.x) * (sp.x - m.x) + (sp.y - m.y) * (sp.y - m.y));
+        if (d < best) { best = d; bestF = f; found = true; }
+    };
+    for (int i = 0; i < kDungeonRegularSlots; i++) {
+        if (s.dungeonSpawnRespawn[di][i] > 0.0f) continue;
+        if (s.dungeonEngaged.has_value() && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
+        GameState::FlagTarget f; f.zone = 1; f.monsterIdx = i;
+        consider(DungeonMonsterLivePos(di, i, s.worldTime), f);
+    }
+    if (s.dungeonXP[di] >= dungeon.bossUnlockXp && s.dungeonSpawnRespawn[di][kDungeonBossSlot] <= 0.0f) {
+        bool fightingBoss = s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss;
+        if (!fightingBoss) {
+            GameState::FlagTarget f; f.zone = 1; f.monsterIdx = kDungeonBossSlot; f.isBoss = true;
+            consider(DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime), f);
+        }
+    }
+    if (found) *out = bestF;
+    return found;
+}
+
+static void Dungeon2DClickFlag(GameState& s, Vector2 camera, int screenW, int screenH) {
+    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
+    if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    Vector2 m = GetMousePosition();
+    if (!CheckCollisionPointRec(m, kViewport)) return;
+    if (m.y < 200) return; // top HUD strip + dungeon sub-tabs
+    if (CheckCollisionPointRec(m, kJoystickZone)) return;
+    if (m.x > screenW - 170 && m.y > screenH - 170) return; // interact button
+    if (s.dungeonEngaged.has_value()) {
+        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return; // quick items
+        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return; // spell hotbar
+    }
+    GameState::FlagTarget f;
+    if (Dungeon2DFlagCandidate(s, camera, m, &f)) {
+        s.flagTarget = f;
+        s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+    } else if (s.flagTarget.has_value()) {
+        s.flagTarget.reset();
+    }
+}
+
+// Dedicated flag key (2026-09-24): G flags the nearest fightable monster, so a
+// keyboard player can flag without clicking. Same candidates as the click.
+static void FlagNearestEnemy(GameState& s) {
+    if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    if (s.screen != Screen::Wilderness && s.screen != Screen::Hunt) return;
+    if (s.wildEngaged.has_value() || s.dungeonEngaged.has_value()) {
+        s.logLine = "Already fighting — no need to flag.";
+        return;
+    }
+    Vector2 ppos = (s.screen == Screen::Wilderness) ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    bool found = false;
+    float best = 1e9f;
+    GameState::FlagTarget bestF;
+    auto consider = [&](Vector2 wp, GameState::FlagTarget f) {
+        float d = Dist(ppos, wp);
+        if (d < best) { best = d; bestF = f; found = true; }
+    };
+    if (s.screen == Screen::Wilderness) {
+        for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
+            if (s.wildSpotRespawn[i] > 0.0f) continue;
+            GameState::FlagTarget f; f.zone = 0; f.spotIdx = (int)i;
+            consider(WildernessMonsterLivePos((int)i, s.worldTime), f);
+        }
+        { GameState::FlagTarget f; f.zone = 0; f.isRival = true; consider(s.rivalPos, f); }
+        for (int bi = 0; bi < kBladeCount; bi++) {
+            GameState::FlagTarget f; f.zone = 0; f.bladeIdx = bi;
+            consider(s.blades[bi].pos, f);
+        }
+    } else if (s.selectedDungeon.has_value()) {
+        int di = *s.selectedDungeon;
+        const DungeonDef& dungeon = kDungeons[di];
+        for (int i = 0; i < kDungeonRegularSlots; i++) {
+            if (s.dungeonSpawnRespawn[di][i] > 0.0f) continue;
+            GameState::FlagTarget f; f.zone = 1; f.monsterIdx = i;
+            consider(DungeonMonsterLivePos(di, i, s.worldTime), f);
+        }
+        if (s.dungeonXP[di] >= dungeon.bossUnlockXp && s.dungeonSpawnRespawn[di][kDungeonBossSlot] <= 0.0f) {
+            GameState::FlagTarget f; f.zone = 1; f.monsterIdx = kDungeonBossSlot; f.isBoss = true;
+            consider(DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime), f);
+        }
+    }
+    if (found) {
+        s.flagTarget = bestF;
+        s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+    } else {
+        s.logLine = "No quarry in sight.";
+    }
+}
+
+// 3D tap-to-flag: ray-sphere test against the same candidates the 2D click uses.
+static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
+    if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    Ray ray = Town3DMouseRay(c, m);
+    bool found = false;
+    float bestDist = 1e9f;
+    GameState::FlagTarget bestF;
+    auto consider3D = [&](Vector2 worldPos, GameState::FlagTarget f) {
+        RayCollision hit = GetRayCollisionSphere(ray, { worldPos.x, 40.0f, worldPos.y }, 70.0f);
+        if (hit.hit && hit.distance < bestDist) { bestDist = hit.distance; bestF = f; found = true; }
+    };
+    int n = (int)kWildernessMonsterSpots.size();
+    for (int i = 0; i < n; i++) {
+        if (s.wildSpotRespawn[i] > 0.0f) continue;
+        if (s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0 &&
+            s.wildEngaged->spotIdx == i) continue;
+        GameState::FlagTarget f; f.zone = 0; f.spotIdx = i;
+        consider3D(WildernessMonsterLivePos(i, s.worldTime), f);
+    }
+    { GameState::FlagTarget f; f.zone = 0; f.isRival = true; consider3D(s.rivalPos, f); }
+    for (int bi = 0; bi < kBladeCount; bi++) {
+        GameState::FlagTarget f; f.zone = 0; f.bladeIdx = bi;
+        consider3D(s.blades[bi].pos, f);
+    }
+    if (found) {
+        s.flagTarget = bestF;
+        s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+    } else if (s.flagTarget.has_value()) {
+        s.flagTarget.reset();
+    }
+}
+
+static void Dungeon3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
+    if (!s.selectedDungeon.has_value()) return;
+    if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    int di = *s.selectedDungeon;
+    const DungeonDef& dungeon = kDungeons[di];
+    Ray ray = Town3DMouseRay(c, m);
+    bool found = false;
+    float bestDist = 1e9f;
+    GameState::FlagTarget bestF;
+    auto consider3D = [&](Vector2 worldPos, GameState::FlagTarget f) {
+        RayCollision hit = GetRayCollisionSphere(ray, { worldPos.x, 40.0f, worldPos.y }, 70.0f);
+        if (hit.hit && hit.distance < bestDist) { bestDist = hit.distance; bestF = f; found = true; }
+    };
+    for (int i = 0; i < kDungeonRegularSlots; i++) {
+        if (s.dungeonSpawnRespawn[di][i] > 0.0f) continue;
+        if (s.dungeonEngaged.has_value() && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
+        GameState::FlagTarget f; f.zone = 1; f.monsterIdx = i;
+        consider3D(DungeonMonsterLivePos(di, i, s.worldTime), f);
+    }
+    if (s.dungeonXP[di] >= dungeon.bossUnlockXp && s.dungeonSpawnRespawn[di][kDungeonBossSlot] <= 0.0f) {
+        bool fightingBoss = s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss;
+        if (!fightingBoss) {
+            GameState::FlagTarget f; f.zone = 1; f.monsterIdx = kDungeonBossSlot; f.isBoss = true;
+            consider3D(DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime), f);
+        }
+    }
+    if (found) {
+        s.flagTarget = bestF;
+        s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+    } else if (s.flagTarget.has_value()) {
+        s.flagTarget.reset();
+    }
+}
+
+// Pulsing red marker on the flagged target: diamond + ring (2D), floating
+// diamond + ground ring (3D). Drawn for both steering and engaged phases.
+static void DrawFlagMarker2D(const GameState& s, Vector2 camera, int zone) {
+    if (!s.flagTarget.has_value() || s.flagTarget->zone != zone) return;
+    Vector2 tgt;
+    if (!FlagTargetLivePos(s, &tgt)) return;
+    Vector2 sp = WorldToScreen(tgt, camera);
+    float pulse = 0.55f + 0.45f * sinf(s.worldTime * 6.0f);
+    Color rc = Fade(Color{ 255, 60, 60, 255 }, pulse);
+    DrawTriangle({ sp.x, sp.y - 66 }, { sp.x - 9, sp.y - 50 }, { sp.x + 9, sp.y - 50 }, rc);
+    DrawCircleLines((int)sp.x, (int)sp.y, (int)(kNodeRadius * 0.85f + 8.0f + 3.0f * sinf(s.worldTime * 6.0f)), rc);
+}
+
+static void DrawFlagMarker3D(const GameState& s, int zone) {
+    if (!s.flagTarget.has_value() || s.flagTarget->zone != zone) return;
+    Vector2 tgt;
+    if (!FlagTargetLivePos(s, &tgt)) return;
+    float bob = 10.0f * sinf(s.worldTime * 4.0f);
+    DrawSphereEx({ tgt.x, 130.0f + bob, tgt.y }, 9.0f, 8, 6, Fade(Color{ 255, 60, 60, 255 }, 0.9f));
+    DrawCircle3D({ tgt.x, 6.0f, tgt.y }, 46.0f + 6.0f * sinf(s.worldTime * 5.0f),
+                 { 1, 0, 0 }, 90.0f, Fade(Color{ 255, 60, 60, 255 }, 0.7f));
+}
+
+// Small "Target: X" label while steering (the engaged HP bar names it in a fight).
+static void DrawFlagLabel(const GameState& s, int zone) {
+    if (!s.flagTarget.has_value() || s.flagTarget->zone != zone) return;
+    if (zone == 0 ? s.wildEngaged.has_value() : s.dungeonEngaged.has_value()) return;
+    Vector2 tgt;
+    if (!FlagTargetLivePos(s, &tgt)) return;
+    std::string label = "Target: " + FlagTargetName(s);
+    DrawUIText(label.c_str(), 20, 220, 13, Color{ 200, 60, 60, 255 });
+}
+
+// --- Spell FX drawing ---
+static void DrawFiend2D(GameState& s, Vector2 camera) {
+    // A genuinely distinct little demon (2026-09-24): drawn entirely from
+    // shapes — horned head, flapping wings, barbed tail, ember glow — so it
+    // never reads as a recolored adventurer.
+    Vector2 sp = WorldToScreen(s.fiendPos, camera);
+    float flick = 0.7f + 0.3f * sinf(s.worldTime * 13.0f);
+    DrawCircleV(sp, 26.0f, Fade(Color{ 255, 110, 40, 255 }, 0.22f * flick)); // ember aura
+    float bob = sinf(s.worldTime * 6.0f) * 3.0f;
+    float wing = sinf(s.worldTime * 11.0f) * 0.5f; // wing flap
+    Color body = Color{ 178, 52, 44, 255 }, dark = Color{ 110, 28, 26, 255 }, horn = Color{ 240, 220, 170, 255 };
+    // Tail with a barbed tip, curling behind.
+    Vector2 tailBase = { sp.x - 10.0f, sp.y - 8.0f + bob };
+    DrawLineEx(tailBase, { sp.x - 22.0f, sp.y - 2.0f + bob }, 4.0f, dark);
+    DrawTriangle({ sp.x - 26.0f, sp.y - 8.0f + bob }, { sp.x - 26.0f, sp.y + 4.0f + bob },
+                 { sp.x - 18.0f, sp.y - 2.0f + bob }, dark);
+    // Wings.
+    DrawTriangle({ sp.x - 4.0f, sp.y - 18.0f + bob }, { sp.x - 26.0f, sp.y - 34.0f - wing * 10.0f + bob },
+                 { sp.x - 12.0f, sp.y - 12.0f + bob }, Fade(body, 0.85f));
+    DrawTriangle({ sp.x + 4.0f, sp.y - 18.0f + bob }, { sp.x + 26.0f, sp.y - 34.0f - wing * 10.0f + bob },
+                 { sp.x + 12.0f, sp.y - 12.0f + bob }, Fade(body, 0.85f));
+    // Body.
+    DrawEllipse((int)sp.x, (int)(sp.y - 12.0f + bob), 11.0f, 14.0f, body);
+    DrawEllipse((int)sp.x, (int)(sp.y - 10.0f + bob), 6.0f, 9.0f, dark);
+    // Head with horns and glowing eyes.
+    DrawCircleV({ sp.x, sp.y - 30.0f + bob }, 9.0f, body);
+    DrawTriangle({ sp.x - 8.0f, sp.y - 34.0f + bob }, { sp.x - 14.0f, sp.y - 46.0f + bob },
+                 { sp.x - 3.0f, sp.y - 38.0f + bob }, horn);
+    DrawTriangle({ sp.x + 8.0f, sp.y - 34.0f + bob }, { sp.x + 14.0f, sp.y - 46.0f + bob },
+                 { sp.x + 3.0f, sp.y - 38.0f + bob }, horn);
+    DrawCircleV({ sp.x - 3.5f, sp.y - 31.0f + bob }, 2.2f, Color{ 255, 220, 80, 255 });
+    DrawCircleV({ sp.x + 3.5f, sp.y - 31.0f + bob }, 2.2f, Color{ 255, 220, 80, 255 });
+    // Rising embers.
+    for (int i = 0; i < 3; i++) {
+        float ph = fmodf(s.worldTime * 3.0f + i * 0.37f, 1.0f);
+        DrawCircleV({ sp.x + sinf(i * 2.1f + s.worldTime * 5.0f) * 8.0f, sp.y - 34.0f * ph + bob },
+                    5.0f * (1.0f - ph), Fade(Color{ 255, 150, 50, 255 }, 0.6f * (1.0f - ph)));
+    }
+}
+
+static void DrawSpellFX2D(GameState& s, Vector2 camera, int zone) {
+    Vector2 ppos = (zone == 0) ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    for (auto& p : s.spellProjectiles) {
+        if (!p.active || p.zone != zone) continue;
+        SpellFX fx = SpellFXFor(p.spellIdx);
+        float wob = (p.spellIdx >= 2 && p.spellIdx <= 4) ? sinf(p.t * 18.0f) * 10.0f : 0.0f; // wisps wobble
+        for (int k = 3; k >= 1; k--) {
+            float bt = std::clamp((p.t - k * 0.035f) / p.dur, 0.0f, 1.0f);
+            Vector2 bp = { p.from.x + (p.target.x - p.from.x) * bt,
+                           p.from.y + (p.target.y - p.from.y) * bt + wob * bt };
+            DrawCircleV(WorldToScreen(bp, camera), fx.projRadius * (1.0f - k * 0.22f), Fade(fx.proj, 0.35f));
+        }
+        Vector2 sp = WorldToScreen({ p.pos.x, p.pos.y + wob }, camera);
+        DrawCircleV(sp, fx.projRadius, fx.proj);
+        DrawCircleV(sp, fx.projRadius * 0.5f, Color{ 255, 255, 255, 255 });
+    }
+    for (auto& im : s.spellImpacts) {
+        if (!im.active || im.zone != zone) continue;
+        SpellFX fx = SpellFXFor(im.spellIdx);
+        float f = std::clamp(im.t / im.dur, 0.0f, 1.0f);
+        Vector2 sp = WorldToScreen(im.pos, camera);
+        float r = fx.impactRadius * im.sizeMul * (0.4f + 0.6f * f);
+        DrawCircleV(sp, r, Fade(fx.impact, 0.55f * (1.0f - f)));
+        DrawCircleV(sp, r * 0.55f, Fade(Color{ 255, 255, 255, 255 }, 0.5f * (1.0f - f)));
+    }
+    if (s.fiendT > 0.0f && s.fiendZone == zone) DrawFiend2D(s, camera);
+    if (s.healGlowT >= 0.0f) {
+        Color gc = s.healGlowKind == 0 ? Color{ 150, 255, 170, 255 } :
+                   s.healGlowKind == 1 ? Color{ 255, 220, 130, 255 } : Color{ 255, 140, 70, 255 };
+        float f = s.healGlowT / 0.6f;
+        Vector2 pp = WorldToScreen(ppos, camera);
+        DrawCircleLines((int)pp.x, (int)pp.y, (int)(20 + 48 * f), Fade(gc, 0.85f * (1.0f - f)));
+        DrawCircleV(pp, 34.0f * (1.0f - f) + 8.0f, Fade(gc, 0.25f * (1.0f - f)));
+    }
+    if (s.vigorT > 0.0f) { // Blessing of Vigor: faint pulsing gold aura
+        Vector2 pp = WorldToScreen(ppos, camera);
+        float pulse = 0.35f + 0.2f * sinf(s.worldTime * 5.0f);
+        DrawCircleLines((int)pp.x, (int)pp.y, (int)(kPlayerRadius * 1.35f), Fade(Color{ 255, 210, 110, 255 }, pulse));
+    }
+}
+
+static void DrawSpellFX3D(GameState& s, int zone) {
+    Vector3 ppos = (zone == 0)
+        ? Vector3{ s.wildernessPlayerPos.x, 0.0f, s.wildernessPlayerPos.y }
+        : Vector3{ s.dungeonPlayerPos.x, 0.0f, s.dungeonPlayerPos.y };
+    for (auto& p : s.spellProjectiles) {
+        if (!p.active || p.zone != zone) continue;
+        SpellFX fx = SpellFXFor(p.spellIdx);
+        float wob = (p.spellIdx >= 2 && p.spellIdx <= 4) ? sinf(p.t * 18.0f) * 10.0f : 0.0f;
+        for (int k = 3; k >= 1; k--) {
+            float bt = std::clamp((p.t - k * 0.035f) / p.dur, 0.0f, 1.0f);
+            Vector3 bp = { p.from.x + (p.target.x - p.from.x) * bt, 38.0f,
+                           p.from.y + (p.target.y - p.from.y) * bt + wob * bt };
+            DrawSphereEx(bp, fx.projRadius * 0.8f * (1.0f - k * 0.22f), 8, 6, Fade(fx.proj, 0.35f));
+        }
+        DrawSphereEx({ p.pos.x, 38.0f, p.pos.y + wob }, fx.projRadius * 0.8f, 10, 8, fx.proj);
+        DrawSphereEx({ p.pos.x, 38.0f, p.pos.y + wob }, fx.projRadius * 0.4f, 8, 6, WHITE);
+    }
+    for (auto& im : s.spellImpacts) {
+        if (!im.active || im.zone != zone) continue;
+        SpellFX fx = SpellFXFor(im.spellIdx);
+        float f = std::clamp(im.t / im.dur, 0.0f, 1.0f);
+        float r = fx.impactRadius * im.sizeMul * (0.4f + 0.6f * f);
+        DrawCircle3D({ im.pos.x, 8.0f, im.pos.y }, r, { 1, 0, 0 }, 90.0f, Fade(fx.impact, 0.55f * (1.0f - f)));
+        DrawSphereEx({ im.pos.x, 20.0f + f * 46.0f, im.pos.y }, r * 0.45f, 10, 8,
+                     Fade(fx.impact, 0.6f * (1.0f - f)));
+    }
+    if (s.fiendT > 0.0f && s.fiendZone == zone) {
+        // A distinct little demon built from primitives (2026-09-24): squat
+        // body, horn cones, flapping wing planes, barbed tail — no humanoid
+        // kit reuse.
+        float fx0 = s.fiendPos.x, fz0 = s.fiendPos.y;
+        float yaw = atan2f(s.playerFacing.y, s.playerFacing.x);
+        float bob = sinf(s.worldTime * 6.0f) * 3.0f;
+        float flap = sinf(s.worldTime * 11.0f) * 0.45f;
+        float flick = 0.7f + 0.3f * sinf(s.worldTime * 13.0f);
+        Color fbody = Color{ 178, 52, 44, 255 }, fdark = Color{ 110, 28, 26, 255 };
+        DrawSphereEx({ fx0, 26.0f, fz0 }, 30.0f, 10, 8, Fade(Color{ 255, 110, 40, 255 }, 0.20f * flick)); // ember aura
+        DrawSphereEx({ fx0, 24.0f + bob, fz0 }, 13.0f, 10, 8, fbody);            // body
+        DrawSphereEx({ fx0, 38.0f + bob, fz0 }, 8.5f, 10, 8, fbody);             // head
+        Vector3 fwd = { cosf(yaw), 0.0f, sinf(yaw) };
+        Vector3 side = { -sinf(yaw), 0.0f, cosf(yaw) };
+        // Horns.
+        DrawCylinderEx({ fx0 - side.x * 5.0f, 42.0f + bob, fz0 - side.z * 5.0f },
+                       { fx0 - side.x * 9.0f, 54.0f + bob, fz0 - side.z * 9.0f },
+                       3.0f, 0.6f, 6, Color{ 240, 220, 170, 255 });
+        DrawCylinderEx({ fx0 + side.x * 5.0f, 42.0f + bob, fz0 + side.z * 5.0f },
+                       { fx0 + side.x * 9.0f, 54.0f + bob, fz0 + side.z * 9.0f },
+                       3.0f, 0.6f, 6, Color{ 240, 220, 170, 255 });
+        // Glowing eyes.
+        DrawSphereEx({ fx0 + fwd.x * 7.0f - side.x * 3.0f, 39.0f + bob, fz0 + fwd.z * 7.0f - side.z * 3.0f },
+                     1.8f, 8, 6, Color{ 255, 220, 80, 255 });
+        DrawSphereEx({ fx0 + fwd.x * 7.0f + side.x * 3.0f, 39.0f + bob, fz0 + fwd.z * 7.0f + side.z * 3.0f },
+                     1.8f, 8, 6, Color{ 255, 220, 80, 255 });
+        // Wings: flat quads that flap around the body's vertical axis.
+        Vector3 wl0 = { fx0 - side.x * 4.0f, 34.0f + bob, fz0 - side.z * 4.0f };
+        Vector3 wl1 = { fx0 - side.x * 24.0f + fwd.x * (4.0f + flap * 10.0f), 44.0f + flap * 8.0f + bob,
+                        fz0 - side.z * 24.0f + fwd.z * (4.0f + flap * 10.0f) };
+        Vector3 wl2 = { fx0 - side.x * 20.0f + fwd.x * (10.0f + flap * 8.0f), 30.0f + bob,
+                        fz0 - side.z * 20.0f + fwd.z * (10.0f + flap * 8.0f) };
+        DrawTriangle3D(wl0, wl1, wl2, Fade(fbody, 0.9f));
+        Vector3 wr0 = { fx0 + side.x * 4.0f, 34.0f + bob, fz0 + side.z * 4.0f };
+        Vector3 wr1 = { fx0 + side.x * 24.0f + fwd.x * (4.0f + flap * 10.0f), 44.0f + flap * 8.0f + bob,
+                        fz0 + side.z * 24.0f + fwd.z * (4.0f + flap * 10.0f) };
+        Vector3 wr2 = { fx0 + side.x * 20.0f + fwd.x * (10.0f + flap * 8.0f), 30.0f + bob,
+                        fz0 + side.z * 20.0f + fwd.z * (10.0f + flap * 8.0f) };
+        DrawTriangle3D(wr0, wr1, wr2, Fade(fbody, 0.9f));
+        // Barbed tail curling behind.
+        Vector3 tailBase = { fx0 - fwd.x * 10.0f, 18.0f + bob, fz0 - fwd.z * 10.0f };
+        Vector3 tailTip = { fx0 - fwd.x * 24.0f + side.x * 6.0f, 26.0f + bob, fz0 - fwd.z * 24.0f + side.z * 6.0f };
+        DrawCylinderEx(tailBase, tailTip, 2.4f, 1.2f, 6, fdark);
+        DrawSphereEx(tailTip, 3.0f, 8, 6, fdark);
+        // Crown ember.
+        DrawSphereEx({ fx0, 58.0f + bob + 8.0f * sinf(s.worldTime * 9.0f), fz0 }, 4.5f, 8, 6,
+                     Fade(Color{ 255, 150, 50, 255 }, 0.7f * flick));
+    }
+    if (s.healGlowT >= 0.0f) {
+        Color gc = s.healGlowKind == 0 ? Color{ 150, 255, 170, 255 } :
+                   s.healGlowKind == 1 ? Color{ 255, 220, 130, 255 } : Color{ 255, 140, 70, 255 };
+        float f = s.healGlowT / 0.6f;
+        DrawCircle3D({ ppos.x, 8.0f, ppos.z }, 30.0f + 60.0f * f, { 1, 0, 0 }, 90.0f, Fade(gc, 0.8f * (1.0f - f)));
+        DrawSphereEx({ ppos.x, 40.0f + f * 60.0f, ppos.z }, 16.0f, 8, 6, Fade(gc, 0.4f * (1.0f - f)));
+    }
+    if (s.vigorT > 0.0f) {
+        float pulse = 0.35f + 0.2f * sinf(s.worldTime * 5.0f);
+        DrawCircle3D({ ppos.x, 8.0f, ppos.z }, kPlayerRadius * 1.6f, { 1, 0, 0 }, 90.0f,
+                     Fade(Color{ 255, 210, 110, 255 }, pulse));
+    }
+}
+
+// Debuff casting in live combat (2026-09-24): routes through the projectile
+// system; the wisp applies the debuff on arrival. Cooldown/mana/reagent rules
+// match offensive live casts.
+static void CastLiveDebuffSpell(GameState& s, int spellIdx, int zone) {
+    const Spell& spell = kSpells[spellIdx];
+    bool engaged = (zone == 0) ? s.wildEngaged.has_value() : s.dungeonEngaged.has_value();
+    if (!engaged) { s.logLine = "No target for " + spell.name + "."; return; }
+    if (s.mana < spell.manaCost || s.reagents < kLiveCombatReagentCost) {
+        s.logLine = "Not enough mana or reagents for " + spell.name + ".";
+        return;
+    }
+    s.mana -= spell.manaCost;
+    s.reagents -= kLiveCombatReagentCost;
+    std::string note;
+    ApplySpellTraining(s, spell, note);
+    if (zone == 0) {
+        auto& am = *s.wildEngaged;
+        am.castEffectTimer = kCastEffectDuration;
+        am.playerSpellCooldown = kWildSpellCastCooldown;
+        SpawnSpellProjectile(s, 0, s.wildernessPlayerPos, am.pos, spellIdx, true, note);
+    } else {
+        auto& am = *s.dungeonEngaged;
+        am.castEffectTimer = kCastEffectDuration;
+        am.playerSpellCooldown = kWildSpellCastCooldown;
+        SpawnSpellProjectile(s, 1, s.dungeonPlayerPos, am.pos, spellIdx, true, note);
+    }
+}
+
+// Live-cast router for every non-Offensive spell type (2026-09-24), called from
+// the engaged hotbar. The old version only handled the two Mending heals, never
+// set a cooldown or cast timer, and charged resources without checking them —
+// Debuff/Buff/Summon data would have fallen through into the heal path. Now
+// every type routes somewhere real:
+//   Utility (Mending Word, Greater Mending): heal, as before, plus a cast pose,
+//     the shared spell cooldown, and a visible green-gold burst.
+//   Debuff (Sap Strength, Cloud Mind, Fumbling Curse): a wisp flies to the
+//     enemy and applies the debuff for 20s — see ResolvePlayerDebuffImpact.
+//   Buff (Blessing of Vigor): +25% melee/spell damage for 30s, gold aura.
+//   Summon (Summon Fiend): a small demon follows the player for 25s, lashing
+//     the engaged enemy every 2s — see FiendStrikeLive.
+static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
+    const Spell& spell = kSpells[spellIdx];
+    if (s.mana < spell.manaCost || s.reagents < kLiveCombatReagentCost) {
+        s.logLine = "Not enough mana or reagents for " + spell.name + ".";
+        return;
+    }
+    if (spell.type == SpellType::Debuff) { CastLiveDebuffSpell(s, spellIdx, zone); return; }
+    s.mana -= spell.manaCost;
+    s.reagents -= kLiveCombatReagentCost;
+    std::string note;
+    bool success = RandUnit() * 100.0f < SpellSuccessChance(s, spell);
+    ApplySpellTraining(s, spell, note);
+    auto setCastPose = [&]() {
+        if (zone == 0 && s.wildEngaged.has_value()) {
+            s.wildEngaged->castEffectTimer = kCastEffectDuration;
+            s.wildEngaged->playerSpellCooldown = kWildSpellCastCooldown;
+        } else if (zone == 1 && s.dungeonEngaged.has_value()) {
+            s.dungeonEngaged->castEffectTimer = kCastEffectDuration;
+            s.dungeonEngaged->playerSpellCooldown = kWildSpellCastCooldown;
+        }
+    };
+    if (spell.type == SpellType::Buff) {
+        setCastPose();
+        if (success) {
+            s.vigorT = 30.0f;
+            s.healGlowT = 0.0f; s.healGlowKind = 1;
+            Vector2 ppos = (zone == 0) ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+            SpawnSpellImpact(s, zone, ppos, -11, 0.9f);
+            s.logLine = spell.name + " surges through you" + note;
+        } else {
+            s.logLine = spell.name + " fizzles!" + note;
+        }
+        return;
+    }
+    if (spell.type == SpellType::Summon) {
+        setCastPose();
+        if (success) {
+            s.fiendT = 25.0f;
+            s.fiendTickT = 1.0f;
+            s.fiendZone = zone;
+            Vector2 ppos = (zone == 0) ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+            s.fiendPos = { ppos.x + 42.0f, ppos.y + 30.0f };
+            s.healGlowT = 0.0f; s.healGlowKind = 2;
+            SpawnSpellImpact(s, zone, ppos, -12, 1.2f);
+            s.logLine = "A fiend claws its way up to fight beside you!" + note;
+        } else {
+            s.logLine = spell.name + " fizzles!" + note;
+        }
+        return;
+    }
+    setCastPose();
+    if (success) {
+        int healAmt = SpellPowerFor(s, spell);
+        s.hp = std::min(s.maxHp, s.hp + healAmt);
+        s.healGlowT = 0.0f; s.healGlowKind = 0;
+        Vector2 ppos = (zone == 0) ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+        SpawnSpellImpact(s, zone, ppos, -10, 0.9f);
+        s.logLine = spell.name + " heals you for " + std::to_string(healAmt) + note;
+    } else {
+        s.logLine = spell.name + " fizzles!" + note;
+    }
+}
+
+// Player combat phase for the 3D rig: 0→1 over the swing/cast, -1 when idle.
+// The swing/cast timers live on the engaged monster (wilderness or dungeon),
+// so this just reads whichever fight is live.
+static void PlayerCombatPhases3D(const GameState& s, float* atk, float* cast) {
+    *atk = -1.0f; *cast = -1.0f;
+    float swing = -1.0f, ceff = -1.0f;
+    if (s.wildEngaged.has_value()) { swing = s.wildEngaged->swingEffectTimer; ceff = s.wildEngaged->castEffectTimer; }
+    else if (s.dungeonEngaged.has_value()) { swing = s.dungeonEngaged->swingEffectTimer; ceff = s.dungeonEngaged->castEffectTimer; }
+    if (swing > 0.0f) *atk = 1.0f - swing / kSwingEffectDuration;
+    if (ceff > 0.0f) *cast = 1.0f - ceff / kCastEffectDuration;
+}
+
+// Monster combat phase for the 3D rig: 0→1 over its lunge, -1 when idle.
+static float MonsterCombatPhase3D(float monsterAttackT) {
+    return monsterAttackT >= 0.0f ? 1.0f - monsterAttackT / kCombatLungeTime : -1.0f;
 }
 
 static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
@@ -12264,6 +13790,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (Dist(am.pos, s.wildernessPlayerPos) > kWildDisengageRange) {
             s.logLine = "The " + spot.name + " loses interest.";
             s.wildEngaged.reset();
+            ClearFlagTarget(s); // the fight's over — drop the marker too
             return;
         }
 
@@ -12275,12 +13802,17 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 
         bool inMelee = Dist(am.pos, s.wildernessPlayerPos) < kWildMeleeRange;
         if (inMelee && am.monsterAttackCooldown <= 0) {
-            am.monsterAttackCooldown = kWildMonsterAttackCooldown;
+            // Fumbling Curse: the monster attacks 50% slower (2026-09-24).
+            am.monsterAttackCooldown = kWildMonsterAttackCooldown * (am.debuffKind == 3 ? 1.5f : 1.0f);
+            am.monsterAttackT = 0.0f; // world-space lunge anim, synced to this tick
             std::string mname = spot.name;
-            if (RandUnit() * 100.0f < MonsterHitChance(s)) {
+            float hitCh = MonsterHitChance(s) - (am.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
+            if (RandUnit() * 100.0f < hitCh) {
                 float raw = spot.level * (0.8f + RandUnit() * 0.6f);
+                if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                 s.hp -= dmg;
+                s.playerHurtT = 0.0f; // hit-flash + knockback
                 s.logLine = "The " + mname + " hits you for " + std::to_string(dmg) + " damage";
             } else {
                 s.logLine = "The " + mname + " misses";
@@ -12297,7 +13829,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             s.companionAttackCooldown = kCompanionAttackCooldown;
             std::string mname = spot.name; int mgold = spot.baseGold, mleather = spot.baseLeather;
             int level = spot.level;
+            float hpBefore = am.hp;
             ResolvePetTurnLive(s, am.hp, level);
+            if (am.hp < hpBefore) am.monsterHurtT = 0.0f; // pet hits flash the monster too (2026-09-24)
             if (am.hp <= 0) { BeginWildMonsterDeath(s, am, mname, mgold, mleather); return; }
         }
     };
@@ -12371,12 +13905,14 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 // Blades don't pursue — longer leash. Back to patrol, no drama.
                 BladeFightEnded(s, am.bladeIdx, am);
                 s.wildEngaged.reset();
+                ClearFlagTarget(s);
                 s.logLine = "The " + spot.name + " loses interest.";
                 return;
             }
             s.logLine = "The " + spot.name + " loses interest.";
             RivalFightEnded(s, am); // persists its position/resumes roaming from here — no win/loss, so no growth nudge beyond that
             s.wildEngaged.reset();
+            ClearFlagTarget(s);
             return;
         }
 
@@ -12387,37 +13923,27 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         bool inMelee = Dist(am.pos, s.wildernessPlayerPos) < kWildMeleeRange;
         if (am.monsterSpecialCooldown <= 0) {
             am.monsterSpecialCooldown = kTacticalRangedCooldown;
+            am.monsterAttackT = 0.0f; // cast gesture for the ranged strike
             std::string mname = spot.name;
-            if (RandUnit() * 100.0f < MonsterHitChance(s)) {
-                float raw = spot.level * (0.9f + RandUnit() * 0.5f); // slightly harder-hitting than a plain melee swing
-                int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
-                s.hp -= dmg;
-                s.logLine = "The " + mname + " strikes you from range for " + std::to_string(dmg) + " damage";
-            } else {
-                s.logLine = "The " + mname + "'s ranged strike misses";
-            }
-            if (s.hp <= 0) {
-                if (am.bladeIdx >= 0) {
-                    // Blades beat you up and move on — only the champion loots corpses,
-                    // tracks kills, or escalates to murderer-tier losses. Ordinary loss.
-                    BladeFightEnded(s, am.bladeIdx, am);
-                    EndWildMonsterLoss(s, mname);
-                    return;
-                }
-                bool wasAlreadyBeaten = s.rivalHasBeatenPlayer;
-                RivalFightEnded(s, am);
-                s.rivalHasBeatenPlayer = true;
-                if (wasAlreadyBeaten) EndWildMonsterMurdererLoss(s, mname); else EndWildMonsterLoss(s, mname);
-                RivalCorpseLoot(s); // the red loots your corpse — 15% of carried gold + one item
-                return;
+            // The strike is now a visible shadow bolt: it flies first and the
+            // hit roll + damage run in ResolveEnemyRangedImpact on arrival.
+            // Same cooldown, same formulas — the only change is the travel time.
+            if (auto* bp = SpawnSpellProjectile(s, 0, am.pos, s.wildernessPlayerPos, -2, false)) {
+                bp->castByRival = am.isRival;
+                bp->castByBladeIdx = am.bladeIdx;
             }
         } else if (inMelee && am.monsterAttackCooldown <= 0) {
-            am.monsterAttackCooldown = kWildMonsterAttackCooldown;
+            // Fumbling Curse: the monster attacks 50% slower (2026-09-24).
+            am.monsterAttackCooldown = kWildMonsterAttackCooldown * (am.debuffKind == 3 ? 1.5f : 1.0f);
+            am.monsterAttackT = 0.0f; // world-space lunge anim, synced to this tick
             std::string mname = spot.name;
-            if (RandUnit() * 100.0f < MonsterHitChance(s)) {
+            float hitCh = MonsterHitChance(s) - (am.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
+            if (RandUnit() * 100.0f < hitCh) {
                 float raw = spot.level * (0.8f + RandUnit() * 0.6f);
+                if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                 s.hp -= dmg;
+                s.playerHurtT = 0.0f; // hit-flash + knockback
                 s.logLine = "The " + mname + " hits you for " + std::to_string(dmg) + " damage";
             } else {
                 s.logLine = "The " + mname + " misses";
@@ -12475,7 +14001,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         std::string mname = spot.name; int mgold = spot.baseGold, mleather = spot.baseLeather;
         if (RandUnit() * 100.0f < hitChance) {
             int dmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
+            if (s.vigorT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.25f)); // Blessing of Vigor
             am.hp -= dmg;
+            am.monsterHurtT = 0.0f; // hit-flash on the monster
             s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage";
             if (am.hp <= 0) {
                 if (am.isRival) {
@@ -12516,31 +14044,11 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         am.castEffectTimer = kCastEffectDuration;
         s.mana -= spell.manaCost;
         s.reagents -= kLiveCombatReagentCost;
-        EngagedMonsterStats spot = EngagedWildMonsterStats(s, am);
-        std::string mname = spot.name; int mgold = spot.baseGold, mleather = spot.baseLeather;
         std::string note;
-        bool success = RandUnit() * 100.0f < SpellSuccessChance(s, spell);
         ApplySpellTraining(s, spell, note);
-        if (success) {
-            int dmg = std::max(1, (int)std::round(SpellPowerFor(s, spell) * (0.85f + RandUnit() * 0.3f)));
-            am.hp -= dmg;
-            s.logLine = spell.name + " hits the " + mname + " for " + std::to_string(dmg) + " damage" + note;
-            if (am.hp <= 0) {
-                if (am.isRival) {
-                    bool wasMurdererTier = s.rivalHasBeatenPlayer;
-                    RivalFightEnded(s, am);
-                    BeginWildMonsterDeath(s, am, mname, mgold, mleather);
-                    if (wasMurdererTier) { GainFame(s, 10.0f); s.notoriety = std::max(0.0f, s.notoriety - 10.0f); }
-                } else if (am.bladeIdx >= 0) {
-                    BladeFightEnded(s, am.bladeIdx, am); // persist position + slow level growth
-                    BeginWildMonsterDeath(s, am, mname, mgold, mleather);
-                } else {
-                    BeginWildMonsterDeath(s, am, mname, mgold, mleather);
-                }
-            }
-        } else {
-            s.logLine = spell.name + " fizzles!" + note;
-        }
+        // The bolt flies now; the success roll, damage, and kill handling run in
+        // ResolvePlayerSpellImpact on arrival — same formulas, visible travel.
+        SpawnSpellProjectile(s, 0, s.wildernessPlayerPos, am.pos, spellIdx, true, note);
     };
     // Walking into a dungeon entrance does exactly what its Hunt-tab does today —
     // s.selectedDungeon is left as-is if you're re-entering the one you were already in
@@ -12552,6 +14060,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         CancelEscort(s, "won't follow you into the dark — the escort is broken.");
         s.screen = Screen::Hunt;
         s.hunt3DView = s.wild3DView; // entering from the 3D wilderness stays 3D (view state only)
+        // Zone change — the flag and in-flight spells don't cross over.
+        s.flagTarget.reset();
+        for (auto& p : s.spellProjectiles) p.active = false;
+        for (auto& im : s.spellImpacts) im.active = false;
+        s.fiendT = 0.0f;
+        s.vigorT = 0.0f;
     };
     auto tryInteract = [&]() {
         if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
@@ -12606,9 +14120,14 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 
     // No movement during the death animation — the body isn't going anywhere.
     if (s.playerDeathAnimT <= 0.0f) {
-        UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GetFrameTime(), kWildernessWorldSize);
+        bool moved = UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GetFrameTime(), kWildernessWorldSize);
+        // UO-style attack flagging (2026-09-24): when the player isn't driving,
+        // steer toward the flagged target until contact auto-engages. Manual
+        // input always wins — steering only fills the idle gap.
+        if (!moved) SteerTowardFlag(s, s.wildernessPlayerPos, s.playerFacing, GetFrameTime(), kWildernessWorldSize, 0);
         if (ActivePet(s)) UpdateCompanionFollow(s, s.wildernessPlayerPos, s.playerFacing, GetFrameTime());
     }
+    UpdateLiveSpellFX(s, GetFrameTime()); // combat anim timers, projectiles, debuffs, fiend
     for (auto& node : kWildernessGatherNodes)
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, node.pos, kNodeRadius * 0.7f);
     for (auto& spot : kWildernessCreatureSpots)
@@ -12652,6 +14171,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     } else if (inRange && IsKeyPressed(KEY_E)) {
         tryInteract();
     }
+    // Dedicated attack-flag key (2026-09-24): G flags the nearest fightable
+    // monster; the player auto-approaches and the fight starts on contact.
+    if (IsKeyPressed(KEY_G)) FlagNearestEnemy(s);
 
     // 3D wilderness view (2026-09-24, Phase 1): when wild3DView is on, the whole
     // 2D world block below is skipped and DrawWilderness3DWorld renders the 3D
@@ -12755,6 +14277,19 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         EngagedMonsterStats spot = EngagedWildMonsterStats(s, *s.wildEngaged);
         const DirSpriteSheet& sheet = (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0) ? g_assets.rivalAdventurerSheet : g_assets.wildMonsterTex[kWildernessMonsterSpots[s.wildEngaged->spotIdx].iconIdx];
         Vector2 screenPos = WorldToScreen(s.wildEngaged->pos, camera);
+        // Combat FX (2026-09-24): the monster lunges toward the player on its
+        // attack tick and flashes red when hurt — synced to the damage numbers.
+        const auto& amFX = *s.wildEngaged;
+        {
+            Vector2 toP = { s.wildernessPlayerPos.x - amFX.pos.x, s.wildernessPlayerPos.y - amFX.pos.y };
+            float tpl = std::sqrt(toP.x * toP.x + toP.y * toP.y);
+            if (tpl > 0.001f && amFX.monsterAttackT >= 0.0f) {
+                float lunge = CombatLungeCurve(amFX.monsterAttackT);
+                screenPos.x += toP.x / tpl * lunge;
+                screenPos.y += toP.y / tpl * lunge;
+            }
+        }
+        Color fxTint = (amFX.monsterHurtT >= 0.0f) ? Color{ 255, 130, 130, 255 } : WHITE;
         bool inMelee = Dist(s.wildEngaged->pos, s.wildernessPlayerPos) < kWildMeleeRange;
         if (sheet.ok) {
             // Faces the player directly rather than tracking real per-frame velocity —
@@ -12764,7 +14299,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             float toPlayerLen = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
             Vector2 facing = toPlayerLen > 0.001f ? Vector2{ toPlayer.x / toPlayerLen, toPlayer.y / toPlayerLen } : Vector2{ 0, 1 };
             Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
-            DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, inMelee, "", &sheet.tex, WHITE, &src);
+            DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, inMelee, "", &sheet.tex, fxTint, &src);
         } else {
             DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, inMelee, "");
         }
@@ -12913,6 +14448,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     }
     DrawWorldCorpses2D(s, 0, camera); // fallen monsters linger where they died
     DrawPlayerLifeState(s, WorldToScreen(s.wildernessPlayerPos, camera), s.playerFacing, prompt, 1.0f, wildCombatAnim);
+    // Combat FX overlays (2026-09-24): flag marker, projectiles, impacts, heal
+    // aura, vigor aura, summoned fiend — drawn in world space inside the scissor.
+    Wild2DClickFlag(s, camera, screenW, screenH); // tap a monster to flag it
+    DrawFlagMarker2D(s, camera, 0);
+    DrawFlagLabel(s, 0);
+    DrawSpellFX2D(s, camera, 0);
     EndScissorMode();
     } // end else: 2D world view (3D renders via DrawWilderness3DWorld above)
     DrawVirtualJoystick();
@@ -12943,7 +14484,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             if (spellIdx >= 0) {
                 const Spell& sp = kSpells[spellIdx];
                 if (sp.type == SpellType::Offensive) tryCastSpellAtEngagedMonster(spellIdx);
-                else CastLiveUtilitySpell(s, spellIdx);
+                else CastLiveUtilitySpell(s, spellIdx, 0);
             }
         }
     }
@@ -13361,6 +14902,12 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (nearestIsExit) {
             s.screen = Screen::Wilderness;
             s.wild3DView = s.hunt3DView; // leaving in 3D returns to the 3D wilderness (view state only)
+            // Zone change — the flag and in-flight spells don't cross over.
+            s.flagTarget.reset();
+            for (auto& p : s.spellProjectiles) p.active = false;
+            for (auto& im : s.spellImpacts) im.active = false;
+            s.fiendT = 0.0f;
+            s.vigorT = 0.0f;
         }
         else if (nearestIsBoss) tryEngageDungeonMonster(kDungeonBossSlot, true);
         else tryEngageDungeonMonster(std::stoi(nearestKey), false);
@@ -13393,6 +14940,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (Dist(am.pos, s.dungeonPlayerPos) > kWildDisengageRange) {
             s.logLine = m.name + " loses interest.";
             s.dungeonEngaged.reset();
+            ClearFlagTarget(s); // the fight's over — drop the marker too
             return;
         }
 
@@ -13404,11 +14952,18 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
 
         bool inMelee = Dist(am.pos, s.dungeonPlayerPos) < kWildMeleeRange;
         if (inMelee && am.monsterAttackCooldown <= 0) {
-            am.monsterAttackCooldown = kWildMonsterAttackCooldown;
+            // Fumbling Curse: the monster attacks 50% slower (2026-09-24).
+            am.monsterAttackCooldown = kWildMonsterAttackCooldown * (am.debuffKind == 3 ? 1.5f : 1.0f);
+            am.monsterAttackT = 0.0f; // world-space lunge anim, synced to this tick
             std::string mname = m.name;
-            if (RandUnit() * 100.0f < MonsterHitChance(s)) {
+            float hitCh = MonsterHitChance(s) - (am.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
+            if (RandUnit() * 100.0f < hitCh) {
                 float raw = m.level * (0.8f + RandUnit() * 0.6f);
+                if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
+                s.hp -= dmg;
+                s.playerHurtT = 0.0f; // hit-flash + knockback
+                s.logLine = "The " + mname + " hits you for " + std::to_string(dmg) + " damage";
                 s.hp -= dmg;
                 s.logLine = "The " + mname + " hits you for " + std::to_string(dmg) + " damage";
             } else {
@@ -13424,7 +14979,9 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             s.companionAttackCooldown = kCompanionAttackCooldown;
             std::string mname = m.name; int mgold = m.baseGold, mleather = m.baseLeather;
             bool wasBoss = am.isBoss; int dungeonIdx = *s.selectedDungeon; int level = m.level;
+            float hpBefore = am.hp;
             ResolvePetTurnLive(s, am.hp, level);
+            if (am.hp < hpBefore) am.monsterHurtT = 0.0f; // pet hits flash the monster too (2026-09-24)
             if (am.hp <= 0) { BeginDungeonMonsterDeath(s, am, dungeonIdx, wasBoss, mname, level, mgold, mleather); return; }
         }
     };
@@ -13444,7 +15001,9 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         bool wasBoss = am.isBoss; int dungeonIdx = *s.selectedDungeon; int level = m.level;
         if (RandUnit() * 100.0f < hitChance) {
             int dmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
+            if (s.vigorT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.25f)); // Blessing of Vigor
             am.hp -= dmg;
+            am.monsterHurtT = 0.0f; // hit-flash on the monster
             s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage";
             if (am.hp <= 0) BeginDungeonMonsterDeath(s, am, dungeonIdx, wasBoss, mname, level, mgold, mleather);
         } else {
@@ -13466,28 +15025,21 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         am.castEffectTimer = kCastEffectDuration;
         s.mana -= spell.manaCost;
         s.reagents -= kLiveCombatReagentCost;
-        const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
-        std::string mname = m.name; int mgold = m.baseGold, mleather = m.baseLeather;
-        bool wasBoss = am.isBoss; int dungeonIdx = *s.selectedDungeon; int level = m.level;
         std::string note;
-        bool success = RandUnit() * 100.0f < SpellSuccessChance(s, spell);
         ApplySpellTraining(s, spell, note);
-        if (success) {
-            int dmg = std::max(1, (int)std::round(SpellPowerFor(s, spell) * (0.85f + RandUnit() * 0.3f)));
-            am.hp -= dmg;
-            s.logLine = spell.name + " hits the " + mname + " for " + std::to_string(dmg) + " damage" + note;
-            if (am.hp <= 0) BeginDungeonMonsterDeath(s, am, dungeonIdx, wasBoss, mname, level, mgold, mleather);
-        } else {
-            s.logLine = spell.name + " fizzles!" + note;
-        }
+        // Same projectile treatment as Wilderness — resolution on arrival.
+        SpawnSpellProjectile(s, 1, s.dungeonPlayerPos, am.pos, spellIdx, true, note);
     };
 
     Vector2 prevDungeonPos = s.dungeonPlayerPos; // wall-slide against this if the move ends in a wall
     // No movement during the death animation — the body isn't going anywhere.
     if (s.playerDeathAnimT <= 0.0f) {
-        UpdatePlayerMovement(s.dungeonPlayerPos, s.playerFacing, GetFrameTime(), kDungeonWorldSize);
+        bool moved = UpdatePlayerMovement(s.dungeonPlayerPos, s.playerFacing, GetFrameTime(), kDungeonWorldSize);
+        // Flag steering, same as Wilderness — the wall-slide below still applies.
+        if (!moved) SteerTowardFlag(s, s.dungeonPlayerPos, s.playerFacing, GetFrameTime(), kDungeonWorldSize, 1);
         if (ActivePet(s)) UpdateCompanionFollow(s, s.dungeonPlayerPos, s.playerFacing, GetFrameTime());
     }
+    UpdateLiveSpellFX(s, GetFrameTime()); // combat anim timers, projectiles, debuffs, fiend
     for (int i = 0; i < kDungeonRegularSlots; i++) {
         // The engaged one collides against its live position (below); the rest
         // wander (DungeonMonsterLivePos) and auto-engage the player on contact — same
@@ -13533,6 +15085,9 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     } else if (inRange && IsKeyPressed(KEY_E)) {
         tryDungeonInteract();
     }
+    // Dedicated attack-flag key (2026-09-24): G flags the nearest fightable
+    // monster; the player auto-approaches and the fight starts on contact.
+    if (IsKeyPressed(KEY_G)) FlagNearestEnemy(s);
 
     // Prompt + nearest-interactable info, shared by the 2D arena and the 3D view
     // below (computed once here since both branches need them; nothing between
@@ -13713,8 +15268,19 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         }
         const Rectangle* srcRect = bossTex ? nullptr : (monsterSheet && monsterSheet->ok ? &engagedSrc : nullptr);
         Vector2 screenPos = WorldToScreen(am.pos, camera);
+        // Combat FX (2026-09-24): lunge on attack, red flash on hurt — same as Wilderness.
+        {
+            Vector2 toP = { s.dungeonPlayerPos.x - am.pos.x, s.dungeonPlayerPos.y - am.pos.y };
+            float tpl = std::sqrt(toP.x * toP.x + toP.y * toP.y);
+            if (tpl > 0.001f && am.monsterAttackT >= 0.0f) {
+                float lunge = CombatLungeCurve(am.monsterAttackT);
+                screenPos.x += toP.x / tpl * lunge;
+                screenPos.y += toP.y / tpl * lunge;
+            }
+        }
+        Color fxTint = (am.monsterHurtT >= 0.0f) ? Color{ 255, 130, 130, 255 } : WHITE;
         bool inMelee = Dist(am.pos, s.dungeonPlayerPos) < kWildMeleeRange;
-        DrawWorldNode(screenPos, am.isBoss ? kNodeRadius : kNodeRadius * 0.8f, Color{ 122, 46, 46, 255 }, m.name, inMelee, "", tex, WHITE, srcRect);
+        DrawWorldNode(screenPos, am.isBoss ? kNodeRadius : kNodeRadius * 0.8f, Color{ 122, 46, 46, 255 }, m.name, inMelee, "", tex, fxTint, srcRect);
         float hpPct = std::clamp(am.hp / am.maxHp, 0.0f, 1.0f);
         Rectangle hpBg = { screenPos.x - 30, screenPos.y - kNodeRadius * 0.8f - 26, 60, 8 };
         DrawRectangleRec(hpBg, Fade(BLACK, 0.4f));
@@ -13743,6 +15309,12 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     }
     DrawWorldCorpses2D(s, 1, camera); // fallen monsters linger where they died
     DrawPlayerLifeState(s, WorldToScreen(s.dungeonPlayerPos, camera), s.playerFacing, prompt, 1.0f, dungeonCombatAnim);
+    // Combat FX overlays (2026-09-24): flag marker, projectiles, impacts, heal
+    // aura, vigor aura, summoned fiend — drawn in world space inside the scissor.
+    Dungeon2DClickFlag(s, camera, screenW, screenH); // tap a monster to flag it
+    DrawFlagMarker2D(s, camera, 1);
+    DrawFlagLabel(s, 1);
+    DrawSpellFX2D(s, camera, 1);
     EndScissorMode();
     } // end 2D arena branch — the touch/combat HUD below is shared with the 3D view
 
@@ -13771,7 +15343,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             if (spellIdx >= 0) {
                 const Spell& sp = kSpells[spellIdx];
                 if (sp.type == SpellType::Offensive) tryCastSpellAtEngagedDungeonMonster(spellIdx);
-                else CastLiveUtilitySpell(s, spellIdx);
+                else CastLiveUtilitySpell(s, spellIdx, 1);
             }
         }
     }
@@ -15247,15 +16819,13 @@ int main() {
     InitWindow(kScreenW, kScreenH, "Town Forge");
 #endif
     SetTargetFPS(60);
-    // 2026-09-24: the two raylib copies this project builds against disagree on
-    // rlgl's default far cull distance — the desktop copy
-    // (raylib-6.0_win64_mingw-w64) defaults to 4000, but the web copy
-    // (raylib-src, used by the em++ build) defaults to 1000. The 3D Wilderness
-    // view's camera can zoom out to 2600 units and its sky dome sits at a
-    // 4200-unit radius, both fine against the desktop default but silently
-    // clipped away on web. Setting an explicit, platform-independent far
-    // plane here — comfortably past every 3D view's farthest zoom/sky
-    // radius — removes the discrepancy for good.
+    // 2026-09-24: raylib's desktop build (RL_CULL_DISTANCE_FAR=4000) and the
+    // web/em++ build (raylib-src default 1000) disagreed on the far clip
+    // plane, so the 3D Wilderness sky/scatter got silently far-clipped on web
+    // only — a bug the desktop sandbox structurally cannot reproduce.
+    // Setting an explicit, platform-independent far plane here — comfortably
+    // past every 3D view's farthest zoom/sky radius — removes the discrepancy
+    // for good.
     rlSetClipPlanes(0.05, 5000.0);
     LoadGameAssets(); // must come after InitWindow — texture loading needs a graphics context
 
