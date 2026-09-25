@@ -9832,7 +9832,10 @@ static Rectangle MinimapToggleRect() {
 static void DrawMinimap(GameState& s) {
     // Closed: just the small MAP button (always visible, touch or desktop).
     if (!s.minimapOpen) {
-        if (Button(MinimapToggleRect(), "MAP", true)) s.minimapOpen = true;
+        if (Button(MinimapToggleRect(), "MAP", true)) {
+            s.minimapOpen = true;
+            s.journalOpen = false; // 2026-09-25 art-pass fix: same overlap, other direction
+        }
         return;
     }
     Rectangle mm = MinimapRect();
@@ -12544,8 +12547,22 @@ static void DrawBuildingDetailPanel(GameState& s, int screenW) {
 static const float kInteriorRoomW = 560.0f;    // room size, 2D world units
 static const float kInteriorRoomH = 760.0f;
 static const float kInteriorWallMargin = 34.0f; // player clamp from the walls
-static const float kInt3DDistMin = 150.0f;       // 3D zoom limits for rooms
-static const float kInt3DDistMax = 520.0f;
+// 2026-09-25 bugfix, re-derived (the 2026-09-24 fix of 300-900 quietly
+// regressed back to the pre-fix 150-520 at some point across drops, and
+// re-testing found 300-900 itself no longer clears the problem either —
+// interiors now force a steeper follow pitch, kT3DFollowPitch=0.96 rad,
+// than whatever this range was originally tuned against): interiors use the
+// same elevated-orbit camera math as Town/Wilderness, where most of the
+// "distance" value becomes camera *height*, not proximity. A camera entering
+// from Town/Wilderness carries over whatever distance it last had (often
+// ~650, well inside the old 300-900 range), and at this pitch that's still
+// close enough to fill the whole frame with the floor's flat color. Verified
+// empirically (screenshots at 650/900/1200/1500/3000) that ~1200 is the
+// first distance that reliably frames the whole room; kInt3DDistMin is set
+// there so Town3DGetCamFor's entry clamp forces any incoming distance up to
+// a safe minimum regardless of what screen the camera is coming from.
+static const float kInt3DDistMin = 1200.0f;       // 3D zoom limits for rooms
+static const float kInt3DDistMax = 2000.0f;
 static const int kInteriorCamId = 3;            // Town3DGetCamFor id (0=town 1=wild 2=dungeon)
 
 struct InteriorPropDef {
@@ -15970,7 +15987,15 @@ static void DrawJournalUI(GameState& s, Rectangle buttonRect, bool visible) {
     bool toggle = IsKeyPressed(KEY_L) || Button(buttonRect, "LOG", true);
     if (toggle) {
         s.journalOpen = !s.journalOpen;
-        if (s.journalOpen) s.journalScroll = 0.0f; // open at the newest line
+        if (s.journalOpen) {
+            s.journalScroll = 0.0f; // open at the newest line
+            // 2026-09-25 art-pass fix: JournalPanelRect (x180-520, y160-450)
+            // and MinimapRect (top-right, ~x326-480 y140-294) overlap in the
+            // wilderness — the journal drew directly over the minimap,
+            // fully hiding it while open. The two aren't needed at once, so
+            // opening one closes the other rather than letting them stack.
+            s.minimapOpen = false;
+        }
     }
     if (s.journalOpen) DrawJournalPanel(s);
 }
@@ -20234,7 +20259,10 @@ static void UpdateDrawFrame() {
         }
         if (!encounterPending && state.screen == Screen::Wilderness) {
             if (IsKeyPressed(KEY_V)) state.wild3DView = !state.wild3DView; // 3D wilderness view toggle
-            if (IsKeyPressed(KEY_M)) state.minimapOpen = !state.minimapOpen; // minimap toggle
+            if (IsKeyPressed(KEY_M)) { // minimap toggle
+                state.minimapOpen = !state.minimapOpen;
+                if (state.minimapOpen) state.journalOpen = false; // 2026-09-25 art-pass fix: avoid the panel overlap
+            }
         }
         if (!encounterPending && state.screen == Screen::Interior) {
             // Interiors stay part of the town: V toggles the indoor 2D/3D view,
