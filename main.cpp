@@ -158,6 +158,29 @@
 #endif
 
 // ---------------------------------------------------------------------
+// Combat feel: hit-stop + camera shake (2026-09-25).
+// GameDt() is the game-world frame delta, used everywhere the game used to call
+// GetFrameTime() directly. For a few frames right after a landed hit it runs at
+// 3% speed, so the whole world briefly "catches" on the impact (the classic
+// action-game hit pause) - movement, AI, timers and creature animation alike.
+// Real time still drives the hit-stop timer itself and the shake decay, so a
+// pause can never extend itself.
+// ---------------------------------------------------------------------
+static float g_hitStopT = 0.0f;  // seconds of hit-stop left (real time)
+static float g_shakeAmp = 0.0f;  // 3D camera shake amplitude, world units
+static double g_gameClock = 0.0; // hit-stop-aware clock for creature animation
+static float GameDt() { return g_hitStopT > 0.0f ? GetFrameTime() * 0.03f : GetFrameTime(); }
+static void CombatFeelTick() { // once per frame, before any update
+    float rdt = GetFrameTime();
+    g_hitStopT = fmaxf(0.0f, g_hitStopT - rdt);
+    g_shakeAmp *= expf(-rdt * 9.0f);
+    if (g_shakeAmp < 0.05f) g_shakeAmp = 0.0f;
+    g_gameClock += GameDt();
+}
+static void CombatHitStop(float sec) { g_hitStopT = fmaxf(g_hitStopT, sec); }
+static void CombatShake(float amp) { g_shakeAmp = fminf(fmaxf(g_shakeAmp, amp), 14.0f); }
+
+// ---------------------------------------------------------------------
 // Shared UI palette - a deliberate 60/30/10 scheme: soft cream dominates as the page
 // background (60%), sage green marks secondary structure like panels/cards/plates
 // (30%), and warm slate is reserved for highlight/focus - buttons, selection, "in
@@ -8730,7 +8753,7 @@ static T3CSpeedSlot g_t3cSpeed[256];
 static float T3CSpeedTrack(int id, float x, float z, bool update) {
     T3CSpeedSlot& s = g_t3cSpeed[id & 255];
     if (!update) return s.init ? s.v : 0.0f; // shadow pass: read-only, no decay
-    float dt = GetFrameTime();
+    float dt = GameDt();
     float inst = 0.0f;
     if (s.init && dt > 1e-5f) {
         float dx = x - s.x, dz = z - s.z;
@@ -8747,7 +8770,7 @@ struct T3CAnim { float t; float move; float seed; };
 // (main pass) so the shadow pass can't decay the speed toward zero.
 static T3CAnim T3CMakeAnim(int trackId, float x, float z, bool update = true) {
     float v = T3CSpeedTrack(trackId, x, z, update);
-    T3CAnim a{ (float)GetTime(), fminf(v / 140.0f, 1.0f), (float)(trackId * 13 + 5) };
+    T3CAnim a{ (float)g_gameClock, fminf(v / 140.0f, 1.0f), (float)(trackId * 13 + 5) }; // hit-stop freezes poses too
     return a;
 }
 
@@ -8766,11 +8789,72 @@ static Color T3CTintVar(Color c, float seed) {
 static const float kT3CDeg = 57.29578f;
 static const float kT3CFarLOD = 750.0f; // past this, quadrupeds draw merged
 
+// ---- Contact (blob) shadows (2026-09-25) ----
+// Real shadow maps stay off on web (see kT3DShadowsEnabled), which left every
+// creature and character looking like it floats over the ground. A soft dark
+// ellipse under each one, sized and oriented from its merged mesh's footprint,
+// grounds them for the cost of one alpha-blended quad: no depth texture, so
+// none of the mobile precision trouble the shadow map had. Hovering creatures
+// get a smaller, fainter shadow. Default shader (unlit), depth-tested but not
+// depth-written, drawn before the body so the body always covers it.
+static Model g_blobShadowModel{};
+static bool g_blobShadowTried = false;
+struct T3CBlobFootprint { const Model* m; float cx, cz, hx, hz; };
+static std::vector<T3CBlobFootprint> g_blobFootprints;
+static bool T3CBlobEnsure() {
+    if (!g_blobShadowTried) {
+        g_blobShadowTried = true;
+        Image img = GenImageColor(64, 64, BLANK);
+        for (int y = 0; y < 64; y++) {
+            for (int x = 0; x < 64; x++) {
+                float dx = (x - 31.5f) / 32.0f, dy = (y - 31.5f) / 32.0f;
+                float d = sqrtf(dx * dx + dy * dy);
+                float t = std::clamp((1.0f - d) / 0.7f, 0.0f, 1.0f);
+                float a = t * t * (3.0f - 2.0f * t); // smoothstep: dark core, soft rim
+                ImageDrawPixel(&img, x, y, Color{ 0, 0, 0, (unsigned char)(255.0f * a) });
+            }
+        }
+        Texture2D tex = LoadTextureFromImage(img);
+        UnloadImage(img);
+        SetTextureFilter(tex, TEXTURE_FILTER_BILINEAR);
+        g_blobShadowModel = LoadModelFromMesh(GenMeshPlane(1.0f, 1.0f, 1, 1));
+        g_blobShadowModel.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = tex;
+    }
+    return g_blobShadowModel.meshCount > 0;
+}
+static const T3CBlobFootprint& T3CBlobFootprintFor(const Model& m) {
+    for (const T3CBlobFootprint& f : g_blobFootprints) if (f.m == &m) return f;
+    BoundingBox bb = GetModelBoundingBox(m);
+    T3CBlobFootprint f{ &m, (bb.min.x + bb.max.x) * 0.5f, (bb.min.z + bb.max.z) * 0.5f,
+                        (bb.max.x - bb.min.x) * 0.5f, (bb.max.z - bb.min.z) * 0.5f };
+    g_blobFootprints.push_back(f);
+    return g_blobFootprints.back();
+}
+static void T3CDrawBlobShadow(const Model& merged, float x, float z, float yawRad, float scale,
+                              float hoverY = 0.0f) {
+    if (merged.meshCount <= 0 || !T3CBlobEnsure()) return;
+    const T3CBlobFootprint& f = T3CBlobFootprintFor(merged);
+    // Same rotation DrawModelEx applies to the body (-yaw about +Y).
+    float c = cosf(yawRad), sn = sinf(yawRad);
+    float ox = (f.cx * c - f.cz * sn) * scale, oz = (f.cx * sn + f.cz * c) * scale;
+    float lift = std::clamp(hoverY / 40.0f, 0.0f, 0.6f);
+    float w = fmaxf(f.hx * 2.0f * scale * 1.25f, 14.0f) * (1.0f - lift * 0.4f);
+    float d = fmaxf(f.hz * 2.0f * scale * 1.25f, 14.0f) * (1.0f - lift * 0.4f);
+    float alpha = 0.55f * (1.0f - lift);
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
+    DrawModelEx(g_blobShadowModel, { x + ox, 1.0f, z + oz }, { 0.0f, 1.0f, 0.0f },
+                -yawRad * kT3CDeg, { w, 1.0f, d }, Fade(WHITE, alpha));
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
+}
+
 static void T3CDrawQuad(const T3CQuadParts& P, float x, float z, float yawRad, float scale,
                         Color coat, T3CAnim a, float distToPlayer, bool shadowPass,
                         float attackT = -1.0f) {
     Color coatV = T3CTintVar(coat, a.seed);
     Color darkV = T3CTintVar(ColorBrightness(coat, -0.35f), a.seed);
+    if (!shadowPass) T3CDrawBlobShadow(P.merged, x, z, yawRad, scale, P.hover ? 6.0f : 0.0f);
     if (shadowPass || distToPlayer > kT3CFarLOD) {
         // Hoverers (bat) keep their hover height in the merged draw too, or
         // the shadow / far LOD would show them sitting on the ground.
@@ -8854,6 +8938,7 @@ static void T3CDrawSerpent(const T3CQuadParts& P, float x, float z, float yawRad
                     -yawRad * kT3CDeg, { scale, scale, scale }, coatV);
         return;
     }
+    T3CDrawBlobShadow(P.merged, x, z, yawRad, scale);
     float t = a.t, mv = a.move;
     float slither = 0.35f + 0.65f * mv;
     float freq = 2.2f + 3.0f * mv;
@@ -8899,6 +8984,7 @@ static void T3CDrawHumanoid(const T3CHumanParts& P, float x, float z, float yawR
                     -yawRad * kT3CDeg, { scale, scale, scale }, shirt);
         return;
     }
+    T3CDrawBlobShadow(P.merged, x, z, yawRad, scale);
     Color shirtV = T3CTintVar(shirt, a.seed);
     Color pantsV = T3CTintVar(pants, a.seed);
     Color skinV = T3CTintVar(skin, a.seed);
@@ -9176,7 +9262,7 @@ static void Town3DPinchZoom(float distMin, float distMax) {
 }
 static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, int screenId,
                                  float distMin, float distMax, float followPitch) {
-    float dt = GetFrameTime();
+    float dt = GameDt();
     if (!g_t3dCamInit || g_t3dCamScreen != screenId) {
         g_t3dYawSm = g_t3dYaw; g_t3dPitchSm = g_t3dPitch; g_t3dDistSm = g_t3dDist;
         g_t3dTargetSm = { playerPos.x, 0.0f, playerPos.y };
@@ -10552,7 +10638,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     Town3DDrawSceneContents(s, false);
     if (s.selectedTown != 2) T3DGrassDrawTown(); // no grass in snowy Frostmere
     // Ambience (smoke + birds): unlit, one batched draw call, main pass only.
-    Town3DUpdateAmbience(GetFrameTime());
+    Town3DUpdateAmbience(GameDt());
     Town3DDrawAmbience(c, s.selectedTown);
     // Hover / selection ring: warm outline at the building's base. While a
     // detail panel is open the tapped building keeps its ring (touch feedback).
@@ -11302,6 +11388,8 @@ static bool Dungeon3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
                                   float assistPx, int di, GameState::FlagTarget* out);
 static void DrawFlagMarker3D(const GameState& s, int zone);
 static void DrawSpellFX3D(GameState& s, int zone);
+static void DrawHitSparks3D(int zone, const Camera3D& cam);
+static void T3DApplyShake(Town3DCam& c);
 static Color CombatHitTint(float hurtT, Color base, Color tail);
 static void DrawFloatTexts3D(GameState& s, const Town3DCam& c, int zone, int screenW, int screenH);
 // Target switching (2026-09-25) - defined with the flag helpers, called from the
@@ -11821,6 +11909,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     Wild3DEnsureGround();
     Wild3DBuildScatter();
     Town3DCam c = Wild3DGetCam(s, screenW, screenH);
+    T3DApplyShake(c); // combat camera kick (hit / hurt), zero when idle
     Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
     BeginMode3D(cam3d);
     Wild3DDrawSky(c.pos); // gradient sky, default shader (unlit, unfogged)
@@ -11835,6 +11924,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     // vigor auras, summoned fiend - world-space, so they sit in the scene.
     DrawFlagMarker3D(s, 0);
     DrawSpellFX3D(s, 0);
+    DrawHitSparks3D(0, cam3d);
     // Nearest-interactable ring (warm) + red ring on the engaged monster.
     Wild3DNearest nearest = Wild3DNearestInfo(s);
     bool inRange = nearest.valid && nearest.dist < kNodeRadius + kInteractRange;
@@ -11945,7 +12035,9 @@ static void Dungeon3DEnsureTorch() {
     T.torchCountLoc = GetShaderLocation(T.shader, "torchCount");
     T.timeLoc = GetShaderLocation(T.shader, "time");
     T.ambientLoc = GetShaderLocation(T.shader, "ambient");
-    float amb[4] = { 0.30f, 0.27f, 0.30f, 1.0f }; // cool dark ambient - the torches do the work
+    // Cool dark ambient - the torches do the work. Linear-space value since the
+    // 2026-09-25 gamma fix in torchlight.fs (0.30 there read far brighter).
+    float amb[4] = { 0.17f, 0.16f, 0.21f, 1.0f };
     SetShaderValue(T.shader, T.ambientLoc, amb, SHADER_UNIFORM_VEC4);
     // Procedural flame sprite (no new assets): white-yellow core fading to
     // transparent orange, teardrop-narrowed toward the top. Drawn as a
@@ -12336,6 +12428,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
     int torchCount = 0;
     Dungeon3DTorchSpots(di, torchSpots, &torchCount);
     Town3DCam c = Dungeon3DGetCam(s, screenW, screenH);
+    T3DApplyShake(c); // combat camera kick (hit / hurt), zero when idle
     Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
     BeginMode3D(cam3d);
     bool torchOn = g_dung3dTorch.ready;
@@ -12455,6 +12548,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
     // vigor auras, summoned fiend - world-space, so they sit in the scene.
     DrawFlagMarker3D(s, 1);
     DrawSpellFX3D(s, 1);
+    DrawHitSparks3D(1, cam3d);
     EndMode3D();
 
     // --- 2D overlay: labels (distance-faded), engaged HP bar, prompt ---
@@ -13299,7 +13393,7 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
     if (inRange) prompt = "[E] " + label;
 
     if (!uiOpen) {
-        UpdatePlayerMovement(s.interiorPlayerPos, s.playerFacing, GetFrameTime(), 100000.0f);
+        UpdatePlayerMovement(s.interiorPlayerPos, s.playerFacing, GameDt(), 100000.0f);
         for (auto& p : props) {
             if (p.bw <= 0 || p.bh <= 0) continue;
             ResolveCircleRectCollision(s.interiorPlayerPos, kPlayerRadius,
@@ -13380,7 +13474,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
                                   : gateIsNearest ? "Wilderness" : "Enter " + TileNameFor(nearestKey);
 
     if (!s.selectedTile.has_value()) {
-        UpdatePlayerMovement(s.townPlayerPos, s.playerFacing, GetFrameTime(), kTownWorldSize);
+        UpdatePlayerMovement(s.townPlayerPos, s.playerFacing, GameDt(), kTownWorldSize);
         for (auto& node : ActiveTownNodes(s.selectedTown))
             ResolveCircleCollision(s.townPlayerPos, kPlayerRadius, node.pos, kNodeRadius);
         ResolveCircleCollision(s.townPlayerPos, kPlayerRadius, kWildernessGatePos, kNodeRadius);
@@ -14453,6 +14547,59 @@ static void SpawnSpellImpact(GameState& s, int zone, Vector2 pos, int spellIdx, 
     }
 }
 
+static const Color kFloatDmgColor = { 255, 226, 140, 255 }; // player's damage numbers
+static const Color kFloatMissColor = { 175, 175, 175, 255 }; // MISS / fizzle floaters
+static const Color kFloatDenyColor = { 255, 130, 130, 255 }; // failed-cast feedback floaters
+
+// ---- Hit sparks (2026-09-25, combat feel) ----
+// Small additive particle bursts at the point of impact: a bright flash plus
+// warm sparks thrown outward under gravity on a hit, a few grey dust motes on a
+// miss. World-space, transient, never saved. Spawned from SpawnFloatText (every
+// damage number is a landed hit), drawn by DrawHitSparks3D in the wilderness
+// and dungeon 3D passes. Updated with GameDt(), so they hang in the air during
+// the hit-stop along with everything else.
+struct HitSpark {
+    bool active = false;
+    int zone = 0;
+    Vector3 p{}, v{};
+    float t = 0.0f, dur = 0.5f, size = 6.0f, grav = 420.0f;
+    Color col = WHITE;
+};
+static HitSpark g_hitSparks[128];
+static float SparkRand(float lo, float hi) { return lo + (hi - lo) * (GetRandomValue(0, 10000) / 10000.0f); }
+static HitSpark* SparkSlot() {
+    HitSpark* oldest = &g_hitSparks[0];
+    for (HitSpark& h : g_hitSparks) {
+        if (!h.active) return &h;
+        if (h.t / h.dur > oldest->t / oldest->dur) oldest = &h;
+    }
+    return oldest;
+}
+static void SpawnHitSparks(int zone, Vector2 pos, bool hit, int dmg) {
+    const float y = 30.0f; // roughly chest height on the creature kit
+    if (hit) {
+        HitSpark& f = *SparkSlot(); // impact flash
+        f = HitSpark{ true, zone, { pos.x, y, pos.y }, { 0, 0, 0 }, 0.0f, 0.16f,
+                      48.0f + fminf((float)dmg, 30.0f), 0.0f, Color{ 255, 236, 180, 255 } };
+    }
+    int n = hit ? 8 + std::min(dmg / 3, 10) : 5;
+    for (int i = 0; i < n; i++) {
+        HitSpark& h = *SparkSlot();
+        float ang = SparkRand(0.0f, 6.2832f);
+        float spd = hit ? SparkRand(90.0f, 230.0f) : SparkRand(20.0f, 60.0f);
+        h.active = true;
+        h.zone = zone;
+        h.p = { pos.x, y + SparkRand(-4.0f, 4.0f), pos.y };
+        h.v = { cosf(ang) * spd, hit ? SparkRand(80.0f, 220.0f) : SparkRand(10.0f, 40.0f), sinf(ang) * spd };
+        h.t = 0.0f;
+        h.dur = hit ? SparkRand(0.28f, 0.55f) : SparkRand(0.35f, 0.6f);
+        h.size = hit ? SparkRand(9.0f, 15.0f) : SparkRand(12.0f, 20.0f);
+        h.grav = hit ? 520.0f : -30.0f; // misses: dust drifts up
+        h.col = hit ? (GetRandomValue(0, 2) == 0 ? Color{ 255, 240, 170, 255 } : Color{ 255, 140, 40, 255 })
+                    : Color{ 205, 198, 184, 255 };
+    }
+}
+
 // Floating damage number / MISS floater (2026-09-25, combat feel). Steals the
 // oldest slot when all 16 are live - combat never has that many concurrent hits.
 static void SpawnFloatText(GameState& s, int zone, Vector2 pos, const std::string& text, Color color) {
@@ -14469,10 +14616,17 @@ static void SpawnFloatText(GameState& s, int zone, Vector2 pos, const std::strin
     slot->dur = 0.9f;
     slot->text = text;
     slot->color = color;
+    // Combat feel: every damage number is a landed hit - sparks, a short
+    // hit-stop, and a camera kick scaled by the damage. MISS gets a dust puff.
+    if (ColorIsEqual(color, kFloatDmgColor)) {
+        int dmg = std::max(1, std::atoi(text.c_str()));
+        SpawnHitSparks(zone, pos, true, dmg);
+        CombatHitStop(dmg >= 20 ? 0.09f : 0.06f);
+        CombatShake(3.0f + fminf((float)dmg, 40.0f) * 0.12f);
+    } else if (ColorIsEqual(color, kFloatMissColor)) {
+        SpawnHitSparks(zone, pos, false, 0);
+    }
 }
-static const Color kFloatDmgColor = { 255, 226, 140, 255 }; // player's damage numbers
-static const Color kFloatMissColor = { 175, 175, 175, 255 }; // MISS / fizzle floaters
-static const Color kFloatDenyColor = { 255, 130, 130, 255 }; // failed-cast feedback floaters
 
 // Event journal (2026-09-25, UO-style): timestamped combat/event history.
 // Journal() records the line (bounded to the last 100) AND mirrors it to the
@@ -15862,6 +16016,64 @@ static void DrawSpellFX2D(GameState& s, Vector2 camera, int zone) {
     }
 }
 
+// Combat camera kick: offsets eye and target together along the camera's own
+// right/up axes, so the view jolts without changing where it looks. Two
+// incommensurate sines per axis read as noise instead of a wobble.
+static void T3DApplyShake(Town3DCam& c) {
+    if (g_shakeAmp <= 0.0f) return;
+    float t = (float)GetTime();
+    float ox = (sinf(t * 71.0f) + 0.6f * sinf(t * 43.0f + 0.7f)) * 0.625f * g_shakeAmp;
+    float oy = (sinf(t * 59.0f + 1.3f) + 0.6f * sinf(t * 37.0f)) * 0.625f * g_shakeAmp;
+    Vector3 off = { c.right.x * ox + c.up.x * oy, c.right.y * ox + c.up.y * oy,
+                    c.right.z * ox + c.up.z * oy };
+    c.pos = { c.pos.x + off.x, c.pos.y + off.y, c.pos.z + off.z };
+    c.target = { c.target.x + off.x, c.target.y + off.y, c.target.z + off.z };
+}
+
+// Hit sparks (see SpawnHitSparks): soft camera-facing dots, depth-tested but
+// not depth-written so they never punch holes in each other. Plain alpha
+// blending, not additive: additive washes to white on the bright daylight
+// grass, while solid warm colors read on both grass and dark dungeon floors.
+static void DrawHitSparks3D(int zone, const Camera3D& cam) {
+    static Texture2D dot{};
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        Image img = GenImageColor(32, 32, BLANK);
+        for (int y = 0; y < 32; y++) {
+            for (int x = 0; x < 32; x++) {
+                float dx = (x - 15.5f) / 16.0f, dy = (y - 15.5f) / 16.0f;
+                float a = std::clamp(1.0f - sqrtf(dx * dx + dy * dy), 0.0f, 1.0f);
+                ImageDrawPixel(&img, x, y, Color{ 255, 255, 255, (unsigned char)(255.0f * a * a) });
+            }
+        }
+        dot = LoadTextureFromImage(img);
+        UnloadImage(img);
+        SetTextureFilter(dot, TEXTURE_FILTER_BILINEAR);
+    }
+    float dt = GameDt();
+    bool any = false;
+    for (HitSpark& h : g_hitSparks) {
+        if (!h.active) continue;
+        h.t += dt;
+        if (h.t >= h.dur) { h.active = false; continue; }
+        h.v.y -= h.grav * dt;
+        h.p = { h.p.x + h.v.x * dt, h.p.y + h.v.y * dt, h.p.z + h.v.z * dt };
+        if (h.p.y < 1.0f) { h.p.y = 1.0f; h.v.y = -h.v.y * 0.3f; h.v.x *= 0.6f; h.v.z *= 0.6f; }
+        if (h.zone == zone) any = true;
+    }
+    if (!any || dot.id == 0) return;
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
+    for (const HitSpark& h : g_hitSparks) {
+        if (!h.active || h.zone != zone) continue;
+        float k = 1.0f - h.t / h.dur;
+        DrawBillboard(cam, dot, h.p, h.size * (0.4f + 0.6f * k), Fade(h.col, fminf(1.0f, k * 1.6f)));
+    }
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
+}
+
 static void DrawSpellFX3D(GameState& s, int zone) {
     Vector3 ppos = (zone == 0)
         ? Vector3{ s.wildernessPlayerPos.x, 0.0f, s.wildernessPlayerPos.y }
@@ -16586,7 +16798,7 @@ static void EnforceDuelInvariants(GameState& s) {
                 BeginWildMonsterDeath(s, am, spot.name, spot.baseGold, spot.baseLeather);
                 s.duelStuckT = 0.0f;
             } else if (targetMissing) {
-                s.duelStuckT += GetFrameTime();
+                s.duelStuckT += GameDt();
                 if (s.duelStuckT > kDuelStuckTimeout) {
                     s.wildEngaged.reset();
                     s.wildExtraAttackers.clear();
@@ -16636,13 +16848,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         }
     }
 
-    UpdateRivalRoaming(s, GetFrameTime()); // before the nearest-search below, so rivalPos is current this frame
-    for (int bi = 0; bi < kBladeCount; bi++) UpdateBladeRoaming(s, bi, GetFrameTime()); // the Murder Inc. crew roams too
-    UpdateInnocentSpots(s, GetFrameTime());
+    UpdateRivalRoaming(s, GameDt()); // before the nearest-search below, so rivalPos is current this frame
+    for (int bi = 0; bi < kBladeCount; bi++) UpdateBladeRoaming(s, bi, GameDt()); // the Murder Inc. crew roams too
+    UpdateInnocentSpots(s, GameDt());
 
     // Phase 6 - connective tissue updates.
     {
-        float dt = GetFrameTime();
+        float dt = GameDt();
         // Murder Inc.'s camp relocates every so often - the rumor mill tracks it.
         s.rivalCampTimer -= dt;
         if (s.rivalCampTimer <= 0.0f) {
@@ -16850,7 +17062,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (!s.wildEngaged.has_value()) return;
         GameState::ActiveMonster& am = *s.wildEngaged;
         const WildernessMonsterSpot& spot = kWildernessMonsterSpots[am.spotIdx];
-        float dtF = GetFrameTime();
+        float dtF = GameDt();
 
         // Stop advancing at kWildMeleeRange (60), not kWildMeleeRange*0.6 (36) as this
         // used to say: the player-vs-monster collision floor a few lines below
@@ -16910,6 +17122,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                 s.hp -= dmg;
                 s.playerHurtT = 0.0f; // hit-flash + knockback
+                CombatShake(7.0f);
                 PlaySfx(SfxId::Hurt);
                 Journal(s, "The " + mname + " hits you for " + std::to_string(dmg) + " damage");
             } else {
@@ -16946,7 +17159,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (!s.wildEngaged.has_value()) return;
         GameState::ActiveMonster& am = *s.wildEngaged;
         EngagedMonsterStats spot = EngagedWildMonsterStats(s, am);
-        float dtF = GetFrameTime();
+        float dtF = GameDt();
 
         if (am.monsterAttackCooldown > 0) am.monsterAttackCooldown -= dtF;
         if (am.monsterSpecialCooldown > 0) am.monsterSpecialCooldown -= dtF;
@@ -17043,6 +17256,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                 s.hp -= dmg;
                 s.playerHurtT = 0.0f; // hit-flash + knockback
+                CombatShake(7.0f);
                 PlaySfx(SfxId::Hurt);
                 Journal(s, "The " + mname + " hits you for " + std::to_string(dmg) + " damage");
             } else {
@@ -17099,7 +17313,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             return;
         }
         if (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0) return; // duels stay 1v1
-        float dtF = GetFrameTime();
+        float dtF = GameDt();
         for (size_t i = 0; i < s.wildExtraAttackers.size(); ) {
             GameState::ActiveMonster& ex = s.wildExtraAttackers[i];
             const WildernessMonsterSpot& spot = kWildernessMonsterSpots[ex.spotIdx];
@@ -17151,6 +17365,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                         int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                         s.hp -= dmg;
                         s.playerHurtT = 0.0f; // hit-flash + knockback
+                        CombatShake(7.0f);
                         PlaySfx(SfxId::Hurt);
                         Journal(s, "The " + spot.name + " hits you for " + std::to_string(dmg) + " damage");
                     } else {
@@ -17417,14 +17632,14 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 
     // No movement during the death animation - the body isn't going anywhere.
     if (s.playerDeathAnimT <= 0.0f) {
-        bool moved = UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GetFrameTime(), kWildernessWorldSize);
+        bool moved = UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GameDt(), kWildernessWorldSize);
         // UO-style attack flagging (2026-09-24): when the player isn't driving,
         // steer toward the flagged target until contact auto-engages. Manual
         // input always wins - steering only fills the idle gap.
-        if (!moved) SteerTowardFlag(s, s.wildernessPlayerPos, s.playerFacing, GetFrameTime(), kWildernessWorldSize, 0);
-        if (ActivePet(s)) UpdateCompanionFollow(s, s.wildernessPlayerPos, s.playerFacing, GetFrameTime());
+        if (!moved) SteerTowardFlag(s, s.wildernessPlayerPos, s.playerFacing, GameDt(), kWildernessWorldSize, 0);
+        if (ActivePet(s)) UpdateCompanionFollow(s, s.wildernessPlayerPos, s.playerFacing, GameDt());
     }
-    UpdateLiveSpellFX(s, GetFrameTime()); // combat anim timers, projectiles, debuffs, fiend
+    UpdateLiveSpellFX(s, GameDt()); // combat anim timers, projectiles, debuffs, fiend
     for (auto& node : kWildernessGatherNodes)
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, node.pos, kNodeRadius * 0.7f);
     for (auto& spot : kWildernessCreatureSpots)
@@ -17965,7 +18180,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // UO-red banner (2026-09-24): unmissable center-screen hunt/stalk warning. Drawn
     // here - past the 2D/3D view branch - so it shows in both wilderness views.
     if (s.rivalBannerTimer > 0.0f && !s.rivalBanner.empty()) {
-        s.rivalBannerTimer -= GetFrameTime();
+        s.rivalBannerTimer -= GameDt();
         const char* btxt = s.rivalBanner.c_str();
         int bfs = 26;
         int btw = MeasureText(btxt, bfs);
@@ -18222,7 +18437,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         }
         bool inRange = nearestDist < kNodeRadius + kInteractRange;
 
-        UpdatePlayerMovement(s.bloodstainedPlayerPos, s.playerFacing, GetFrameTime());
+        UpdatePlayerMovement(s.bloodstainedPlayerPos, s.playerFacing, GameDt());
         for (int i = 0; i < 3; i++)
             ResolveCircleCollision(s.bloodstainedPlayerPos, kPlayerRadius, BloodstainedPathNodePos(i), kNodeRadius);
         s.bloodstainedPlayerPos = ClampToWorld(s.bloodstainedPlayerPos, kPlayerEdgeMargin);
@@ -18291,7 +18506,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     }
 
     const DungeonDef& dungeon = kDungeons[*s.selectedDungeon];
-    TickLeaveDungeon(s, GetFrameTime()); // UO-style travel: the 3s magery escape ticks here
+    TickLeaveDungeon(s, GameDt()); // UO-style travel: the 3s magery escape ticks here
     if (menuCollapsed) {
         // Collapsed header stack (2026-09-25) - the arena below takes nearly the
         // full screen. The MENU toggle (drawn last, above the world) re-opens
@@ -18405,7 +18620,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (!s.dungeonEngaged.has_value()) return;
         GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
         const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
-        float dtF = GetFrameTime();
+        float dtF = GameDt();
 
         float distNow = Dist(am.pos, s.dungeonPlayerPos);
         if (distNow > kWildMeleeRange) {
@@ -18456,6 +18671,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                 s.hp -= dmg;
                 s.playerHurtT = 0.0f; // hit-flash + knockback
+                CombatShake(7.0f);
                 PlaySfx(SfxId::Hurt);
                 Journal(s, "The " + mname + " hits you for " + std::to_string(dmg) + " damage");
             } else {
@@ -18489,7 +18705,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             s.dungeonExtraAttackers.clear(); // no fight (or death) - the pack melts back to ambient
             return;
         }
-        float dtF = GetFrameTime();
+        float dtF = GameDt();
         for (size_t i = 0; i < s.dungeonExtraAttackers.size(); ) {
             GameState::ActiveDungeonMonster& ex = s.dungeonExtraAttackers[i];
             const DungeonMonster& exM = ex.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, ex.monsterIdx);
@@ -18538,6 +18754,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                         int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                         s.hp -= dmg;
                         s.playerHurtT = 0.0f; // hit-flash + knockback
+                        CombatShake(7.0f);
                         PlaySfx(SfxId::Hurt);
                         Journal(s, "The " + exM.name + " hits you for " + std::to_string(dmg) + " damage");
                     } else {
@@ -18648,12 +18865,12 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     Vector2 prevDungeonPos = s.dungeonPlayerPos; // wall-slide against this if the move ends in a wall
     // No movement during the death animation - the body isn't going anywhere.
     if (s.playerDeathAnimT <= 0.0f) {
-        bool moved = UpdatePlayerMovement(s.dungeonPlayerPos, s.playerFacing, GetFrameTime(), kDungeonWorldSize);
+        bool moved = UpdatePlayerMovement(s.dungeonPlayerPos, s.playerFacing, GameDt(), kDungeonWorldSize);
         // Flag steering, same as Wilderness - the wall-slide below still applies.
-        if (!moved) SteerTowardFlag(s, s.dungeonPlayerPos, s.playerFacing, GetFrameTime(), kDungeonWorldSize, 1);
-        if (ActivePet(s)) UpdateCompanionFollow(s, s.dungeonPlayerPos, s.playerFacing, GetFrameTime());
+        if (!moved) SteerTowardFlag(s, s.dungeonPlayerPos, s.playerFacing, GameDt(), kDungeonWorldSize, 1);
+        if (ActivePet(s)) UpdateCompanionFollow(s, s.dungeonPlayerPos, s.playerFacing, GameDt());
     }
-    UpdateLiveSpellFX(s, GetFrameTime()); // combat anim timers, projectiles, debuffs, fiend
+    UpdateLiveSpellFX(s, GameDt()); // combat anim timers, projectiles, debuffs, fiend
     for (int i = 0; i < kDungeonRegularSlots; i++) {
         // The engaged one collides against its live position (below); the rest
         // wander (DungeonMonsterLivePos) and auto-engage the player on contact - same
@@ -20486,7 +20703,8 @@ static void UpdateDrawFrame() {
     float& autosaveTimer = g_autosaveTimer;
     float& resetArmedTimer = g_resetArmedTimer;
     {
-        float dt = GetFrameTime();
+        CombatFeelTick(); // hit-stop / shake timers, before anything reads GameDt()
+        float dt = GameDt();
 
         // --- Update ---
         UpdateGathering(state, dt);
@@ -20855,7 +21073,13 @@ int main() {
     // Setting an explicit, platform-independent far plane here - comfortably
     // past every 3D view's farthest zoom/sky radius - removes the discrepancy
     // for good.
-    rlSetClipPlanes(0.05, 5000.0);
+    // 2026-09-25: near plane 0.05 -> 10. Every 3D camera sits at least 150 units
+    // from its target, so nothing is ever that close, and a 0.05 near plane
+    // threw away almost all depth precision (far/near = 100000): at 1500 units
+    // a 24-bit depth step was ~2.7 world units, the root cause of the earlier
+    // long-distance z-fighting. At 10 it's ~0.01, which is what lets the
+    // contact shadows sit 1 unit above the ground without flickering.
+    rlSetClipPlanes(10.0, 5000.0);
     InitSfx(); // audio device + synthesized SFX bank (missing files stay silent)
     LoadGameAssets(); // must come after InitWindow - texture loading needs a graphics context
 

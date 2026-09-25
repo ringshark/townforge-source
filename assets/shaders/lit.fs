@@ -37,35 +37,38 @@ uniform vec2 fogRange; // x = fog starts, y = fully fogged
 
 void main()
 {
-    // Texel color fetching from texture sampler
-    vec4 texelColor = texture2D(texture0, fragTexCoord)*fragColor;
-    vec3 lightDot = vec3(0.0);
+    // Linear-space lighting (2026-09-25). Textures, vertex colors and the
+    // material tint are all authored in sRGB, so they are decoded to linear
+    // (pow 2.2) before lighting and encoded exactly once at the end. The
+    // previous version lit the raw sRGB values and then gamma-encoded them a
+    // second time, which lifted every midtone and made the whole scene look
+    // pale and washed out.
+    vec4 texelColor = texture2D(texture0, fragTexCoord)*fragColor*colDiffuse;
+    vec3 albedo = pow(texelColor.rgb, vec3(2.2));
     vec3 normal = normalize(fragNormal);
     vec3 viewD = normalize(viewPos - fragPosition);
-    vec3 specular = vec3(0.0);
-
     vec3 l = -lightDir;
-
     float NdotL = max(dot(normal, l), 0.0);
-    lightDot += lightColor.rgb*NdotL;
 
-    float specCo = 0.0;
-    if (NdotL > 0.0) specCo = pow(max(0.0, dot(viewD, reflect(-(l), normal))), 16.0); // 16 refers to shine
-    specular += specCo;
+    // Hemisphere ambient: cool sky fill from above, darker warm ground bounce
+    // from below, so faces turned away from the sun still show their form.
+    float up = normal.y*0.5 + 0.5;
+    vec3 amb = ambient.rgb*0.75*mix(vec3(0.55, 0.50, 0.45), vec3(1.05, 1.08, 1.18), up);
+    vec3 light = lightColor.rgb*0.80*NdotL + amb;
 
-    vec4 finalColor = (texelColor*((colDiffuse + vec4(specular, 1.0))*vec4(lightDot, 1.0)));
+    float spec = 0.0;
+    if (NdotL > 0.0) spec = pow(max(0.0, dot(viewD, reflect(-l, normal))), 24.0)*0.10;
 
-    // Add ambient lighting
-    finalColor += texelColor*(ambient/10.0)*colDiffuse;
+    vec3 col = albedo*light + lightColor.rgb*spec;
 
-    // Gamma correction
-    finalColor = pow(finalColor, vec4(1.0/2.2));
+    // Gamma encode (linear -> display)
+    col = pow(max(col, vec3(0.0)), vec3(1.0/2.2));
 
     // Distance fog toward the horizon color (applied in display space so the
     // far ground melts into the sky gradient)
     float fogDist = length(viewPos - fragPosition);
     float fogF = smoothstep(fogRange.x, fogRange.y, fogDist);
-    finalColor.rgb = mix(finalColor.rgb, fogColor, clamp(fogF, 0.0, 1.0));
+    col = mix(col, fogColor, clamp(fogF, 0.0, 1.0));
 
-    gl_FragColor = finalColor;
+    gl_FragColor = vec4(col, texelColor.a);
 }

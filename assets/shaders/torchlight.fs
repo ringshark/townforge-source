@@ -36,7 +36,9 @@ void main()
 {
     // Texel color fetching from texture sampler
     vec4 texelColor = texture2D(texture0, fragTexCoord)*fragColor;
-    vec3 albedo = texelColor.rgb*colDiffuse.rgb;
+    // Decode sRGB albedo to linear before lighting (2026-09-25) - it used to be
+    // lit as-is and then gamma-encoded again below, washing out every midtone.
+    vec3 albedo = pow(texelColor.rgb*colDiffuse.rgb, vec3(2.2));
     // Immediate-mode primitives (DrawSphere/DrawCapsule) don't set per-vertex
     // normals, so fragNormal can be a stale or zero vector there — fall back to
     // up instead of normalizing a zero vector into NaN.
@@ -56,11 +58,11 @@ void main()
         float diff = max(dot(normal, L), 0.0);
         float att = 1.0/(1.0 + 0.000045*d*d); // ~useful radius 400 units
         float flick = 0.82 + 0.18*sin(time*9.0 + float(i)*2.3)*sin(time*5.7 + float(i)*1.1);
-        col += albedo*warm*(0.25 + 0.75*diff)*att*flick*1.7;
+        col += albedo*warm*(0.25 + 0.75*diff)*att*flick*2.1;
     }
 
     // Gamma correction (matches the sun shader's display-space output)
-    col = pow(col, vec3(1.0/2.2));
+    col = pow(max(col, vec3(0.0)), vec3(1.0/2.2));
 
     gl_FragColor = vec4(col, texelColor.a*colDiffuse.a);
 }
