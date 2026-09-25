@@ -335,13 +335,14 @@ static const std::array<BuildingDef, 4> kCraftBuildings = {{
 
 // Static tiles that exist in the town map but have no upgrade levels.
 struct StaticTile { std::string key, name; Color color; };
-static const std::array<StaticTile, 6> kStaticTiles = {{
+static const std::array<StaticTile, 7> kStaticTiles = {{
     {"provisioner", "Provisioner", {140, 120, 80, 255}},
     {"stable",      "The Wildkeep", {90, 130, 60, 255}},
     {"healer",      "Healer",       {120, 160, 180, 255}},
     {"bank",        "The Vaultkeep",{70, 90, 120, 255}},
     {"townhall",    "Town Hall",    {184, 134, 11, 255}},
     {"house",       "Your House",   {150, 110, 70, 255}},
+    {"wildhouse",   "Your Homestead",{150, 110, 70, 255}},
 }};
 
 // ---------------------------------------------------------------------
@@ -383,6 +384,85 @@ struct HomeModuleLevel { int level, cap, cost; };
 static const std::array<HomeModuleLevel, 5> kHomeModuleLevels = {{
     {1, 30, 150}, {2, 45, 250}, {3, 60, 400}, {4, 75, 600}, {5, 85, 900},
 }};
+
+// ---------------------------------------------------------------------------
+// Custom wilderness housing (2026-09-25): the old town house building is gone
+// (see kTownNodePositions); the player now buys one of 10 fixed wilderness plots
+// and designs the house on a grid, UO-custom-house style. Layouts are encoded as
+// a row-major string of size*size chars: '.'=empty, 'F'=floor, 'W'=wall, 'D'=door.
+// Piece costs are charged at placement time (pay-as-you-build).
+static const float kHouseCellSize = 45.0f; // world units per designer grid cell
+static const int kHouseFloorCost = 5;
+static const int kHouseWallCost = 15;
+static const int kHouseDoorCost = 50;
+static const int kHouseChestCap = 60;
+struct HousePlot { Vector2 pos; int cells; int price; const char* name; };
+// Positions were hand-picked against kWildernessMonsterSpots, kWildernessDungeonEntrances,
+// the two town gates, and kWildernessGatherNodes (all >= ~250 units away except a few
+// gather nodes at >= 120, which read fine next to a house).
+static const std::array<HousePlot, 10> kHousePlots = {{
+    {{450, 600},     7, 2500, "West Woods Plot"},
+    {{1150, 420},    7, 2500, "Northfield Plot"},
+    {{1750, 1150},   9, 5000, "Eastmarch Plot"},
+    {{600, 1550},    9, 5000, "Southfen Plot"},
+    {{800, 2150},    7, 2500, "Far South Plot"},
+    {{1600, 2150},   9, 5000, "Southgate Plot"},
+    {{2150, 1200},   7, 2500, "Highridge Plot"},
+    {{2450, 2150},   9, 5000, "Duskmere Plot"},
+    {{2650, 900},    7, 2500, "Far East Plot"},
+    {{1950, 400},   12, 9000, "Kingswood Plot"},
+}};
+// Layout helpers. The layout string always has cells*cells chars for the owned plot.
+static std::string HouseEmptyLayout(int cells) { return std::string((size_t)cells * cells, '.'); }
+static bool HouseLayoutValid(const std::string& layout, int cells) {
+    if ((int)layout.size() != cells * cells) return false;
+    for (char c : layout) if (c != '.' && c != 'F' && c != 'W' && c != 'D') return false;
+    return true;
+}
+static char HouseCellAt(const std::string& layout, int cells, int cx, int cy) {
+    if (cx < 0 || cy < 0 || cx >= cells || cy >= cells) return '.';
+    size_t i = (size_t)cy * cells + cx;
+    return i < layout.size() ? layout[i] : '.';
+}
+static void HouseSetCell(std::string& layout, int cells, int cx, int cy, char c) {
+    if (cx < 0 || cy < 0 || cx >= cells || cy >= cells) return;
+    size_t i = (size_t)cy * cells + cx;
+    if (i < layout.size()) layout[i] = c;
+}
+static bool HouseHasDoor(const std::string& layout, int cells) {
+    return HouseLayoutValid(layout, cells) && layout.find('D') != std::string::npos;
+}
+// World-space center of a grid cell, given the plot's top-left origin.
+static Vector2 HouseCellCenter(const HousePlot& p, int cx, int cy) {
+    float half = p.cells * kHouseCellSize * 0.5f;
+    return { p.pos.x - half + (cx + 0.5f) * kHouseCellSize,
+             p.pos.y - half + (cy + 0.5f) * kHouseCellSize };
+}
+// World position of the (single) door cell; falls back to plot center when none.
+static Vector2 HouseDoorPos(const HousePlot& p, const std::string& layout) {
+    for (int cy = 0; cy < p.cells; cy++)
+        for (int cx = 0; cx < p.cells; cx++)
+            if (HouseCellAt(layout, p.cells, cx, cy) == 'D') return HouseCellCenter(p, cx, cy);
+    return p.pos;
+}
+static Rectangle HousePlotBounds(const HousePlot& p) {
+    float half = p.cells * kHouseCellSize * 0.5f;
+    return { p.pos.x - half, p.pos.y - half, half * 2, half * 2 };
+}
+// Interact point for a plot: the door when the owned plot has one, else plot center.
+static Vector2 HousePlotInteractPos(int ownedPlotIdx, const std::string& layout, int plotIdx) {
+    const HousePlot& p = kHousePlots[plotIdx];
+    if (plotIdx == ownedPlotIdx && HouseHasDoor(layout, p.cells))
+        return HouseDoorPos(p, layout);
+    return p.pos;
+}
+static std::string HousePlotPrompt(int ownedPlotIdx, const std::string& layout, int plotIdx) {
+    const HousePlot& p = kHousePlots[plotIdx];
+    if (plotIdx == ownedPlotIdx)
+        return HouseHasDoor(layout, p.cells) ? "Enter Homestead" : "Design House";
+    return "Buy Plot (" + std::to_string(p.price) + "g)";
+}
+
 
 // ---------------------------------------------------------------------
 // Combat / dungeons — ported from DUNGEONS, startCombat(), playerAttackRoll(),
@@ -850,6 +930,19 @@ struct GameState {
     std::string houseName;
     std::array<int, 4> houseModuleLevel = {0, 0, 0, 0}; // parallel to kHomeModuleDefs; 0 = not built
 
+    // --- Custom wilderness housing (2026-09-25) ---
+    int housePlotIdx = -1;          // index into kHousePlots; -1 = no plot owned (one house max)
+    std::string houseLayout;        // row-major layout string ('.', 'F', 'W', 'D'); see helpers above
+    std::vector<Item> houseChest;   // persistent storage chest contents
+    bool hearthBound = false;       // hearth recall bound to the owned plot
+    bool wildHouseMigrated = false; // one-time town-house retirement migration ran
+    bool interiorFromWild = false;  // ExitInterior returns to the wilderness house plot
+    bool houseDesignerOpen = false; // grid designer overlay active on the wilderness screen
+    int houseDesignerTool = 0;      // 0=floor 1=wall 2=door 3=erase
+    bool houseDemolishArmed = false;// demolish button pressed once — second press confirms
+    bool houseChestOpen = false;    // storage chest panel open inside the wilderness house
+
+
     // --- Gathering skills / auto-gather — mirrors state.lumberjacking/mining/skinning
     // and state.autoGather in the JS ---
     float lumberjacking = 0, mining = 0, skinning = 0; // trade skills, capped at 120
@@ -879,7 +972,10 @@ struct GameState {
         std::string name; int baseGold = 0, baseLeather = 0, level = 1;
         int iconIdx = -1; // wilderness monster icon (for the corpse visual), -1 = generic
     };
-    std::optional<DyingMonster> dyingMonster;
+    // Simultaneous deaths (2026-09-25): melee cleaves and AoE spells can kill
+    // several monsters in one hit, so the death pipeline is a list — each entry
+    // ticks down and resolves independently via FinishMonsterDeath.
+    std::vector<DyingMonster> dyingMonsters;
     // Visible world corpses — purely visual markers that fade; the actual lootable
     // corpse list above (skinned on the Hunt screen) is unchanged.
     struct WorldCorpse {
@@ -1147,6 +1243,12 @@ struct GameState {
         int bladeIdx = -1;
     };
     std::optional<ActiveMonster> wildEngaged;
+    // Pack attackers (2026-09-25, multi-enemy combat): normal monsters that joined
+    // the fight after the primary engagement — same-faction monsters within
+    // kPackAggroRadius of a damaged packmate. They chase and melee the player
+    // alongside the primary (capped by kMaxMeleeAttackers); transient like
+    // wildEngaged, not saved.
+    std::vector<ActiveMonster> wildExtraAttackers;
 
     // --- Live dungeon combat (2026-09-22 — porting the Wilderness pattern above to all
     // 5 dungeons, per the "Live combat for Wilderness + all 5 dungeons" plan). Same
@@ -1170,6 +1272,8 @@ struct GameState {
         float debuffT = 0.0f;        // seconds remaining on debuffKind
     };
     std::optional<ActiveDungeonMonster> dungeonEngaged;
+    // Dungeon pack attackers (2026-09-25) — same pattern as wildExtraAttackers.
+    std::vector<ActiveDungeonMonster> dungeonExtraAttackers;
 
     // UO-style attack flagging + world-space combat FX state (2026-09-24). All of
     // this is visual or steering state — no damage numbers, economy, notoriety, or
@@ -3784,10 +3888,12 @@ static const int kDungeonRegularSlots = 8; // regular spawn points per dungeon (
 // after the wilderness tables they depend on (kWildernessMonsterSpots, gates, MaxMana).
 static void BeginPlayerDeath(GameState& s);
 static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& am,
-                                  const std::string& name, int baseGold, int baseLeather);
+                                  const std::string& name, int baseGold, int baseLeather,
+                                  bool clearEngagement = true);
 static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeonMonster& am,
                                      int dungeonIdx, bool wasBoss, const std::string& name,
-                                     int level, int baseGold, int baseLeather);
+                                     int level, int baseGold, int baseLeather,
+                                     bool clearEngagement = true);
 static void UpdateDeathAndRespawn(GameState& s, float dt);
 static void SpawnPanelKillCorpse(GameState& s, const std::string& name);
 
@@ -4521,6 +4627,7 @@ static void EndWildMonsterLoss(GameState& s, const std::string& name) {
     LiveMaybeGainMagicResist(s);
     s.logLine = "You were defeated by the " + name + " — you retreat, battered.";
     s.wildEngaged.reset();
+    s.wildExtraAttackers.clear(); // the pack scatters
     ApplyShaken(s);
     if (!TryTriggerAmbush(s, "dungeon")) TryTriggerInnocentEncounter(s, "dungeon");
     BeginPlayerDeath(s);
@@ -4541,6 +4648,7 @@ static void EndWildMonsterMurdererLoss(GameState& s, const std::string& name) {
     s.logLine = name + " strips you of " + std::to_string(goldLost) + " gold and " +
                  std::to_string(itemsLost) + " item" + (itemsLost == 1 ? "" : "s") + " before vanishing into the wilds.";
     s.wildEngaged.reset();
+    s.wildExtraAttackers.clear(); // the pack scatters
     ApplyShaken(s);
     if (!TryTriggerAmbush(s, "dungeon")) TryTriggerInnocentEncounter(s, "dungeon");
     BeginPlayerDeath(s);
@@ -4558,6 +4666,7 @@ static void EndDungeonMonsterLoss(GameState& s, const std::string& name) {
         s.deathsByDungeon[std::clamp(*s.selectedDungeon, 0, 4)]++; // feeds "restless dungeon" rumors
     s.logLine = "You were defeated by the " + name + " — you retreat, battered.";
     s.dungeonEngaged.reset();
+    s.dungeonExtraAttackers.clear(); // the pack scatters
     ApplyShaken(s);
     if (!TryTriggerAmbush(s, "dungeon")) TryTriggerInnocentEncounter(s, "dungeon");
     BeginPlayerDeath(s);
@@ -5263,6 +5372,14 @@ static void SaveGame(const GameState& s) {
     out << "bandages=" << s.bandages << "\n";
     out << "houseTierIdx=" << s.houseTierIdx << "\nhouseHue=" << s.houseHue << "\nhouseName=" << s.houseName << "\n";
     out << "houseModuleLevel=" << s.houseModuleLevel[0] << "," << s.houseModuleLevel[1] << "," << s.houseModuleLevel[2] << "," << s.houseModuleLevel[3] << "\n";
+    // Custom wilderness housing (2026-09-25) — new keys; old saves simply lack them.
+    out << "housePlotIdx=" << s.housePlotIdx << "\n";
+    out << "houseLayout=" << s.houseLayout << "\n";
+    out << "hearthBound=" << (s.hearthBound ? 1 : 0) << "\n";
+    out << "wildHouseMigrated=" << (s.wildHouseMigrated ? 1 : 0) << "\n";
+    out << "houseChest.count=" << s.houseChest.size() << "\n";
+    for (size_t i = 0; i < s.houseChest.size(); i++)
+        out << "houseChest." << i << "=" << ItemToLine(s.houseChest[i]) << "\n";
     out << "buildingLevel=" << s.buildingLevel[0] << "," << s.buildingLevel[1] << "," << s.buildingLevel[2] << "," << s.buildingLevel[3] << "\n";
     out << "buildingSkill=" << s.buildingSkill[0] << "," << s.buildingSkill[1] << "," << s.buildingSkill[2] << "," << s.buildingSkill[3] << "\n";
     out << "dungeonXP=" << s.dungeonXP[0] << "," << s.dungeonXP[1] << "," << s.dungeonXP[2] << "," << s.dungeonXP[3] << "," << s.dungeonXP[4] << "\n";
@@ -5404,6 +5521,13 @@ static bool LoadGame(GameState& s) {
         else if (key == "houseHue") s.houseHue = std::atoi(val.c_str());
         else if (key == "houseName") s.houseName = val;
         else if (key == "houseModuleLevel") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 4; i++) s.houseModuleLevel[i] = std::atoi(p[i].c_str()); }
+        // Custom wilderness housing (2026-09-25) — missing keys = pre-housing save.
+        else if (key == "housePlotIdx") s.housePlotIdx = std::atoi(val.c_str());
+        else if (key == "houseLayout") s.houseLayout = val;
+        else if (key == "hearthBound") s.hearthBound = std::atoi(val.c_str()) != 0;
+        else if (key == "wildHouseMigrated") s.wildHouseMigrated = std::atoi(val.c_str()) != 0;
+        else if (key == "houseChest.count") { s.houseChest.clear(); s.houseChest.reserve(std::atoi(val.c_str())); }
+        else if (key.rfind("houseChest.", 0) == 0) { if (auto it = ItemFromLine(val)) s.houseChest.push_back(*it); }
         else if (key == "gold") s.gold = std::atoi(val.c_str());
         else if (key == "wood") s.wood = std::atoi(val.c_str());
         else if (key == "ore") s.ore = std::atoi(val.c_str());
@@ -5522,6 +5646,28 @@ static bool LoadGame(GameState& s) {
             s.innocentReqState[i] = 0;
             s.innocentReqCooldown[i] = kInnocentRequestCooldown;
         }
+
+    // Custom housing migration (2026-09-25): the town house building is retired.
+    // Tier, hue, name, and workshop wings carry over untouched (same fields); the
+    // player just claims a wilderness plot now. Runs once per save.
+    if (!s.wildHouseMigrated) {
+        s.wildHouseMigrated = true;
+        if (s.houseTierIdx > 0)
+            s.logLine = "Your town house has been retired. Workshop wings and tier carried over — claim a wilderness plot to build your homestead.";
+    }
+    // Validate loaded housing state against the static plot table; transient
+    // designer/chest UI flags never survive a reload.
+    if (s.housePlotIdx < -1 || s.housePlotIdx >= (int)kHousePlots.size()) {
+        s.housePlotIdx = -1;
+        s.houseLayout.clear();
+    }
+    if (s.housePlotIdx >= 0 && !HouseLayoutValid(s.houseLayout, kHousePlots[s.housePlotIdx].cells))
+        s.houseLayout = HouseEmptyLayout(kHousePlots[s.housePlotIdx].cells);
+    if ((int)s.houseChest.size() > kHouseChestCap) s.houseChest.resize(kHouseChestCap);
+    s.houseDesignerOpen = false;
+    s.houseChestOpen = false;
+    s.houseDemolishArmed = false;
+    s.interiorFromWild = false;
 
     if (lastActiveEpoch > 0) {
         long long elapsed = (long long)std::time(nullptr) - lastActiveEpoch;
@@ -5947,11 +6093,12 @@ struct TownNodePos { std::string key; Vector2 pos; };
 // House sits 100 units past Stable on the middle row, the same offset the Wilderness
 // Gate uses 100 units past Bank on the middle column — same "just outside the grid"
 // spacing, different edge, so it doesn't crowd Stable or break the 3x3 layout.
-static const std::array<TownNodePos, 10> kTownNodePositions = {{
+// (2026-09-25: the town house building was retired in favor of custom wilderness
+// housing — the node is gone, but this comment stays to explain the grid history.)
+static const std::array<TownNodePos, 9> kTownNodePositions = {{
     {"smith", {200, 200}}, {"carpenter", {500, 200}}, {"tailor", {800, 200}},
     {"alchemy", {200, 500}}, {"townhall", {500, 500}}, {"stable", {800, 500}},
     {"healer", {200, 800}}, {"bank", {500, 800}}, {"provisioner", {800, 800}},
-    {"house", {900, 500}},
 }};
 // The town's central plaza — sized to hold only Townhall's grid slot, so every other
 // building (all 300 units out on the grid) is clearly outside it and gets a road.
@@ -8823,6 +8970,12 @@ static const float kTown3DBuildingHalf = 55.0f; // 110-unit footprint, ~kNodeRad
 
 // True when the point hits a HUD control that must win over orbit/pick input.
 // Rects mirror the ones drawn later in DrawTownScreen's HUD section.
+static bool g_touchSeen = false; // latched on first touch input — desktop never sees the TARGET button
+static Rectangle TargetFrameRect() { return { 20.0f, 208.0f, 230.0f, 58.0f }; }
+static Rectangle TargetButtonRect() {
+    return { kViewport.x + kViewport.width - 150.0f, kViewport.y + kViewport.height - 160.0f, 130.0f, 60.0f };
+}
+
 static bool Town3DPointInUI(Vector2 m, const GameState& s, int screenW) {
     if (CheckCollisionPointRec(m, { 20, 120, 130, 30 })) return true;  // Gather Wood
     if (CheckCollisionPointRec(m, { 160, 120, 120, 30 })) return true;  // Gather Ore
@@ -8831,6 +8984,7 @@ static bool Town3DPointInUI(Vector2 m, const GameState& s, int screenW) {
     if (CheckCollisionPointRec(m, { 528, 120, 96, 30 })) return true;   // camera mode button
     if (CheckCollisionPointRec(m, { kViewport.x + kViewport.width - 150.0f,
                                     kViewport.y + kViewport.height - 90.0f, 130.0f, 60.0f })) return true; // tap-to-interact
+    if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return true; // TARGET button
     if (CheckCollisionPointRec(m, kJoystickZone)) return true;
     if (s.selectedTile.has_value() &&
         CheckCollisionPointRec(m, { 20, 500, (float)(screenW - 40), 220 })) return true; // detail panel
@@ -10047,8 +10201,26 @@ static void PlayerCombatPhases3D(const GameState& s, float* atk, float* cast);
 static float MonsterCombatPhase3D(float monsterAttackT);
 static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m);
 static void Dungeon3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m);
+static bool Wild3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
+                               float assistPx, GameState::FlagTarget* out);
+static bool Dungeon3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
+                                  float assistPx, int di, GameState::FlagTarget* out);
 static void DrawFlagMarker3D(const GameState& s, int zone);
 static void DrawSpellFX3D(GameState& s, int zone);
+// Target switching (2026-09-25) — defined with the flag helpers, called from the
+// click/tap handlers above their definitions.
+static void CycleFlagTarget(GameState& s);
+static void TransferWildPrimary(GameState& s, int newSpotIdx);
+static void TransferDungeonPrimary(GameState& s, int dungeonIdx, int newMonsterIdx, bool newIsBoss);
+// Pack/death lookups (2026-09-25) — defined with the death system, used by the
+// 3D draw functions above their definitions.
+static const GameState::ActiveMonster* FindWildExtra(const GameState& s, int spotIdx);
+static const GameState::ActiveDungeonMonster* FindDungeonExtra(const GameState& s, int monsterIdx, bool isBoss);
+static const GameState::DyingMonster* FindDyingWildSpot(const GameState& s, int spotIdx);
+static const GameState::DyingMonster* FindDyingRival(const GameState& s);
+static const GameState::DyingMonster* FindDyingBlade(const GameState& s, int bladeIdx);
+static const GameState::DyingMonster* FindDyingDungeonSlot(const GameState& s, int dungeonIdx,
+                                                           int monsterIdx, bool isBoss);
 
 static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DCam* cull) {
     Wild3DLoadModels();
@@ -10092,6 +10264,38 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         Wild3DDrawGate(kWildernessTown2GatePos.x, kWildernessTown2GatePos.y,
                        Color{ 150, 148, 142, 255 }, Color{ 118, 116, 110, 255 });
 
+    // Custom housing (2026-09-25) — for-sale signs on unowned plots; floor slab +
+    // wall/door boxes on owned ones. DrawCube rides the active sun/shadow shader
+    // like the gate/prop boxes above. No roof — open dollhouse view, same as 2D.
+    for (size_t pi = 0; pi < kHousePlots.size(); pi++) {
+        const HousePlot& hp = kHousePlots[pi];
+        float pr = hp.cells * kHouseCellSize * 0.6f;
+        if (!vis(hp.pos.x, hp.pos.y, pr)) continue;
+        bool owned = (int)pi == s.housePlotIdx;
+        if (!owned) {
+            if (!shadowPass) {
+                DrawCube({ hp.pos.x, 25, hp.pos.y }, 8, 50, 8, Color{ 110, 80, 50, 255 });
+                DrawCube({ hp.pos.x, 62, hp.pos.y }, 76, 26, 6, Color{ 150, 115, 70, 255 });
+            }
+            continue;
+        }
+        int cells = hp.cells;
+        if (!HouseLayoutValid(s.houseLayout, cells)) continue;
+        for (int cy = 0; cy < cells; cy++) {
+            for (int cx = 0; cx < cells; cx++) {
+                char c = HouseCellAt(s.houseLayout, cells, cx, cy);
+                if (c == '.') continue;
+                Vector2 cc = HouseCellCenter(hp, cx, cy);
+                float cs = kHouseCellSize;
+                DrawCube({ cc.x, 1.5f, cc.y }, cs, 3, cs, Color{ 150, 110, 70, 255 }); // floor slab
+                if (c == 'W')
+                    DrawCube({ cc.x, 38, cc.y }, cs, 70, cs, Color{ 96, 70, 45, 255 }); // wall
+                else if (c == 'D' && !shadowPass)
+                    DrawCube({ cc.x, 30, cc.y }, cs * 0.9f, 54, cs * 0.9f, Color{ 200, 170, 90, 255 }); // door
+            }
+        }
+    }
+
     bool wasEngaged = s.wildEngaged.has_value();
     // Phase 3 procedural creatures (kit shader matches the sun/shadow pipeline).
     T3CKitUseSunShader();
@@ -10108,25 +10312,31 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                     Town3DHash01(sp.pos.x, sp.pos.y) * 6.2832f,
                     look.scale, look.coat, ca, kitDist(sp.pos.x, sp.pos.y), shadowPass);
     }
-    // Monsters at their live positions (the engaged one at its fight position).
-    bool wildDying = s.dyingMonster.has_value() && s.dyingMonster->zone == 0;
+    // Monsters at their live positions (the engaged one at its fight position,
+    // pack attackers at their chase positions).
+    bool wildDying = false;
+    for (const auto& d : s.dyingMonsters) if (d.zone == 0) { wildDying = true; break; }
     for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
         bool eng = wasEngaged && s.wildEngaged->spotIdx == (int)i;
         // Empty slots (waiting to respawn) draw nothing — except a slot mid-death-
         // animation, which draws the shrinking body instead.
-        bool isDying = wildDying && !s.dyingMonster->isRival && s.dyingMonster->spotIdx == (int)i;
-        if (!eng && !isDying && s.wildSpotRespawn[i] > 0.0f) continue;
-        Vector2 mp = eng ? s.wildEngaged->pos : (isDying ? s.dyingMonster->pos : WildernessMonsterLivePos((int)i, s.worldTime));
+        const GameState::DyingMonster* dying = wildDying ? FindDyingWildSpot(s, (int)i) : nullptr;
+        bool isDying = dying != nullptr;
+        const GameState::ActiveMonster* extra = (!eng && !isDying) ? FindWildExtra(s, (int)i) : nullptr;
+        if (!eng && !isDying && !extra && s.wildSpotRespawn[i] > 0.0f) continue;
+        Vector2 mp = eng ? s.wildEngaged->pos : (isDying ? dying->pos : (extra ? extra->pos : WildernessMonsterLivePos((int)i, s.worldTime)));
         if (!vis(mp.x, mp.y, 70.0f)) continue;
-        float face = eng ? atan2f(s.wildernessPlayerPos.y - mp.y, s.wildernessPlayerPos.x - mp.x)
+        float face = (eng || extra) ? atan2f(s.wildernessPlayerPos.y - mp.y, s.wildernessPlayerPos.x - mp.x)
                          : Wild3DWanderFacing((int)i, mp.x, mp.y, s.worldTime);
         T3CMonLook mlook = T3CMonsterLook(kWildernessMonsterSpots[i].iconIdx);
         T3CAnim ma = T3CMakeAnim(kT3CTrackMonsterWild + (int)i, mp.x, mp.y, !shadowPass);
-        float shrink = isDying ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
+        float shrink = isDying ? std::max(0.05f, dying->timer / dying->duration) : 1.0f;
         // Combat read (2026-09-24): the engaged monster's lunge pose rides
-        // monsterAttackT; it flashes red while monsterHurtT is live.
+        // monsterAttackT; it flashes red while monsterHurtT is live. Pack
+        // attackers (2026-09-25) flash red when hit, no lunge pose.
         float mAtk = (eng && !isDying) ? MonsterCombatPhase3D(s.wildEngaged->monsterAttackT) : -1.0f;
-        bool mHurt = eng && !isDying && s.wildEngaged->monsterHurtT >= 0.0f;
+        bool mHurt = !isDying && ((eng && s.wildEngaged->monsterHurtT >= 0.0f) ||
+                                 (extra && extra->monsterHurtT >= 0.0f));
         if (mlook.humanoid) {
             T3CDrawHumanoid(g_t3cHumans[0].parts, mp.x, mp.y, face, mlook.scale * shrink,
                             mHurt ? Color{ 220, 90, 90, 255 } : mlook.shirt, mlook.pants, mlook.skin, ma, shadowPass,
@@ -10141,14 +10351,14 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     // the kill site is drawn instead of the patrolling rival (no double-draw);
     // they "retreat" (RivalFightEnded already put them back on patrol) rather
     // than leaving a corpse.
-    bool rivalDying3D = wildDying && s.dyingMonster->isRival && s.dyingMonster->bladeIdx < 0;
+    const GameState::DyingMonster* rivalDying3D = FindDyingRival(s);
     {
-        Vector2 rp = rivalDying3D ? s.dyingMonster->pos
+        Vector2 rp = rivalDying3D ? rivalDying3D->pos
                      : ((wasEngaged && s.wildEngaged->isRival) ? s.wildEngaged->pos : s.rivalPos);
         if (vis(rp.x, rp.y, 70.0f)) {
             float ryaw = atan2f(s.wildernessPlayerPos.y - rp.y, s.wildernessPlayerPos.x - rp.x);
             T3CAnim ra = T3CMakeAnim(kT3CTrackRival, rp.x, rp.y, !shadowPass);
-            float rscale = rivalDying3D ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
+            float rscale = rivalDying3D ? std::max(0.05f, rivalDying3D->timer / rivalDying3D->duration) : 1.0f;
             // Combat read (2026-09-24): engaged Rival lunges/flashes with its timers.
             bool rEng = wasEngaged && s.wildEngaged->isRival && !rivalDying3D;
             float rAtk = rEng ? MonsterCombatPhase3D(s.wildEngaged->monsterAttackT) : -1.0f;
@@ -10165,13 +10375,13 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         // While a blade's death animation plays, the fading body at the kill site
         // is drawn instead of the patrolling blade (no double-draw) — same
         // retreat-not-death treatment as the champion above.
-        bool bladeDying3D = wildDying && s.dyingMonster->isRival && s.dyingMonster->bladeIdx == bi;
-        Vector2 bp = bladeDying3D ? s.dyingMonster->pos
+        const GameState::DyingMonster* bladeDying3D = FindDyingBlade(s, bi);
+        Vector2 bp = bladeDying3D ? bladeDying3D->pos
                      : ((wasEngaged && s.wildEngaged->bladeIdx == bi) ? s.wildEngaged->pos : s.blades[bi].pos);
         if (vis(bp.x, bp.y, 70.0f)) {
             float byaw = atan2f(s.wildernessPlayerPos.y - bp.y, s.wildernessPlayerPos.x - bp.x);
             T3CAnim ba = T3CMakeAnim(kT3CTrackBladeWild + bi, bp.x, bp.y, !shadowPass);
-            float bscale = (bladeDying3D ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f) * 0.95f;
+            float bscale = (bladeDying3D ? std::max(0.05f, bladeDying3D->timer / bladeDying3D->duration) : 1.0f) * 0.95f;
             // Combat read (2026-09-24): engaged blade lunges/flashes with its timers.
             bool bEng = wasEngaged && s.wildEngaged->bladeIdx == bi && !bladeDying3D;
             float bAtk = bEng ? MonsterCombatPhase3D(s.wildEngaged->monsterAttackT) : -1.0f;
@@ -10377,6 +10587,9 @@ static Wild3DNearest Wild3DNearestInfo(const GameState& s) {
     }
     for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances)
         consider(e.pos, "Enter " + kDungeons[e.dungeonIdx].name);
+    for (size_t pi = 0; pi < kHousePlots.size(); pi++)
+        consider(HousePlotInteractPos(s.housePlotIdx, s.houseLayout, (int)pi),
+                 HousePlotPrompt(s.housePlotIdx, s.houseLayout, (int)pi));
     consider(kWildernessReturnGatePos, "Return to Town");
     consider(kWildernessTown2GatePos, std::string("Enter ") + kTown2Name);
     if (wasEngaged) { r.engaged = true; r.pos = s.wildEngaged->pos; }
@@ -10391,6 +10604,7 @@ static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
     if (CheckCollisionPointRec(m, { 528, 120, 96, 30 })) return true; // camera mode button
     if (CheckCollisionPointRec(m, { kViewport.x + kViewport.width - 150.0f,
                                     kViewport.y + kViewport.height - 90.0f, 130.0f, 60.0f })) return true; // tap-to-interact
+    if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return true; // TARGET button
     if (CheckCollisionPointRec(m, kJoystickZone)) return true;
     if (s.wildEngaged.has_value()) {
         if (CheckCollisionPointRec(m, { 20, 110, 330, 60 })) return true; // HP/mana strip
@@ -10495,6 +10709,15 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
         label3D(kWildernessTown2GatePos.x, 110, kWildernessTown2GatePos.y, kTown2Name);
         for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances)
             label3D(e.pos.x, 110, e.pos.y, kDungeons[e.dungeonIdx].name);
+        for (size_t pi = 0; pi < kHousePlots.size(); pi++) {
+            const HousePlot& hp = kHousePlots[pi];
+            if ((int)pi == s.housePlotIdx) {
+                std::string hn = s.houseName.empty() ? "Homestead" : s.houseName;
+                label3D(hp.pos.x, 130, hp.pos.y, hn);
+            } else {
+                label3D(hp.pos.x, 110, hp.pos.y, "Plot for Sale — " + std::to_string(hp.price) + "g");
+            }
+        }
         if (inRange && !nearest.engaged)
             label3D(nearest.pos.x, 80, nearest.pos.y, nearest.label);
     }
@@ -10874,6 +11097,7 @@ static bool Dung3DPointInUI(Vector2 m, const GameState& s) {
     if (CheckCollisionPointRec(m, { 452, 116, 68, 30 })) return true; // the 2D/3D toggle button
     if (CheckCollisionPointRec(m, { 528, 116, 96, 30 })) return true; // the camera mode button
     if (CheckCollisionPointRec(m, { 20, 110, 330, 60 })) return true; // HP strip
+    if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return true; // TARGET button
     if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return true; // quick items
     if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return true; // spell hotbar
     return false;
@@ -10956,31 +11180,35 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         bool engaged = s.dungeonEngaged.has_value();
         const DungeonDef& dungeon = kDungeons[di];
         bool bossUnlocked = s.dungeonXP[di] >= dungeon.bossUnlockXp;
-        bool dyingHere = s.dyingMonster.has_value() && s.dyingMonster->zone == 1 &&
-                         s.dyingMonster->dungeonIdx == di;
+        bool dyingHere = false;
+        for (const auto& d : s.dyingMonsters)
+            if (d.zone == 1 && d.dungeonIdx == di) { dyingHere = true; break; }
         for (int i = 0; i < kDungeonRegularSlots; i++) {
             // The engaged slot is drawn separately below at its live position —
             // same convention as the 2D view.
             if (engaged && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
             // Empty slots (waiting to respawn) show nothing — except the slot whose
-            // monster is mid-death-animation, which draws the fall below.
-            bool isDying = dyingHere && !s.dyingMonster->isBoss && s.dyingMonster->monsterIdx == i;
-            if (!isDying && s.dungeonSpawnRespawn[di][i] > 0.0f) continue;
-            Vector2 mp = isDying ? s.dyingMonster->pos : DungeonMonsterLivePos(di, i, s.worldTime);
+            // monster is mid-death-animation, which draws the fall below. Pack
+            // attackers draw at their chase positions.
+            const GameState::DyingMonster* dying = dyingHere ? FindDyingDungeonSlot(s, di, i, false) : nullptr;
+            bool isDying = dying != nullptr;
+            const GameState::ActiveDungeonMonster* extra = !isDying ? FindDungeonExtra(s, i, false) : nullptr;
+            if (!isDying && !extra && s.dungeonSpawnRespawn[di][i] > 0.0f) continue;
+            Vector2 mp = isDying ? dying->pos : (extra ? extra->pos : DungeonMonsterLivePos(di, i, s.worldTime));
             Vector2 f = WanderFacing(i, s.worldTime);
-            float shrink = isDying ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
+            float shrink = isDying ? std::max(0.05f, dying->timer / dying->duration) : 1.0f;
             Dungeon3DDrawMonster(di, i, kT3CTrackMonsterDungeon + i, mp.x, mp.y, atan2f(f.y, f.x),
                                  Dungeon3DMonsterColor(di, false), shrink);
         }
         if (!(engaged && s.dungeonEngaged->isBoss)) {
-            bool bossDying = dyingHere && s.dyingMonster->isBoss;
+            const GameState::DyingMonster* bossDying = dyingHere ? FindDyingDungeonSlot(s, di, kDungeonBossSlot, true) : nullptr;
             if (!bossDying && s.dungeonSpawnRespawn[di][kDungeonBossSlot] > 0.0f) {
                 // boss slot empty — nothing to draw
             } else {
-                Vector2 bp = bossDying ? s.dyingMonster->pos : DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime);
+                Vector2 bp = bossDying ? bossDying->pos : DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime);
                 Vector2 f = WanderFacing(kDungeonBossSlot, s.worldTime);
                 Color bc = bossUnlocked ? Dungeon3DMonsterColor(di, true) : Color{ 110, 110, 120, 255 };
-                float shrink = bossDying ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
+                float shrink = bossDying ? std::max(0.05f, bossDying->timer / bossDying->duration) : 1.0f;
                 Dungeon3DDrawMonster(di, kDungeonBossSlot, kT3CTrackMonsterDungeon + kDungeonBossSlot, bp.x, bp.y, atan2f(f.y, f.x),
                                      bc, (bossUnlocked ? 1.0f : 0.9f) * shrink);
             }
@@ -11153,7 +11381,6 @@ static void DrawBuildingDetailPanel(GameState& s, int screenW) {
             if (key == "bank" || key == "townhall") link = AmenityLink{ "Manage the Vaultkeep", Screen::Bank };
             else if (key == "stable") link = AmenityLink{ "Visit the Wildkeep", Screen::Pets };
             else if (key == "healer") link = AmenityLink{ "Rest & bandage up", Screen::Character };
-            else if (key == "house") link = AmenityLink{ "Go inside", Screen::House };
             else if (key == "provisioner") link = AmenityLink{ "Browse the wares", Screen::Provisioner };
             if (link) {
                 if (Button({ 36, (float)(panelY + 56), 220, 34 }, link->label, true)) {
@@ -11315,6 +11542,18 @@ static const InteriorPropDef kInteriorPropsHouse[] = {
     { "house", "Shelf_1.obj", "Shelf", 480, 150, 0, 1, 0, 46, 32, "", Color{139,105,72,255}, 46, 32 },
     { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
 };
+// Wilderness homestead interior (2026-09-25): the custom-house interior. Same room
+// shape as the old town house, but the bed is gone (no resting mechanic) and a
+// storage chest takes its place. Workshop wing corners are appended dynamically
+// for "wildhouse" just like "house" (see InteriorPropsFor).
+static const InteriorPropDef kInteriorPropsWildHouse[] = {
+    { "house", "Table_RoundSmall.obj", "Table", 330, 350, 0, 1, 0, 46, 46, "", Color{139,105,72,255}, 46, 46 },
+    { "house", "Chair_1.obj", "Chair", 265, 350, 90, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
+    { "house", "Chair_1.obj", "Chair", 395, 350, 270, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
+    { "house", "Shelf_1.obj", "Shelf", 480, 150, 0, 1, 0, 46, 32, "", Color{139,105,72,255}, 46, 32 },
+    { "house", "Shelf_1.obj", "Chest", 140, 200, 0, 1, 0, 46, 32, "chest", Color{120,90,55,255}, 46, 32 },
+    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+};
 
 struct InteriorRoomDef {
     const char* key;
@@ -11335,6 +11574,7 @@ static const InteriorRoomDef kInteriorRooms[] = {
     { "bank", kInteriorPropsBank, (int)(sizeof(kInteriorPropsBank) / sizeof(kInteriorPropsBank[0])), Color{140,128,110,255}, Color{96,88,74,255} },
     { "provisioner", kInteriorPropsProvisioner, (int)(sizeof(kInteriorPropsProvisioner) / sizeof(kInteriorPropsProvisioner[0])), Color{146,116,80,255}, Color{104,84,60,255} },
     { "house", kInteriorPropsHouse, (int)(sizeof(kInteriorPropsHouse) / sizeof(kInteriorPropsHouse[0])), Color{158,126,88,255}, Color{116,92,70,255} },
+    { "wildhouse", kInteriorPropsWildHouse, (int)(sizeof(kInteriorPropsWildHouse) / sizeof(kInteriorPropsWildHouse[0])), Color{158,126,88,255}, Color{116,92,70,255} },
 };
 
 static const InteriorRoomDef* InteriorRoomFor(const std::string& key) {
@@ -11368,7 +11608,7 @@ static std::vector<InteriorPropDef> InteriorPropsFor(GameState& s, const std::st
     if (!room) return out;
     out.reserve(room->propCount + 4);
     for (int i = 0; i < room->propCount; i++) out.push_back(room->props[i]);
-    if (key == "house") {
+    if (key == "house" || key == "wildhouse") {
         for (int i = 0; i < 4; i++) {
             if (s.houseModuleLevel[i] <= 0) continue;
             s_houseModuleLabels[i] = kHomeModuleDefs[i].label + " (Tier " + std::to_string(s.houseModuleLevel[i]) + ")";
@@ -11384,11 +11624,13 @@ static void EnterInterior(GameState& s, const std::string& key) {
     if (!InteriorRoomFor(key)) return; // unknown key: stay outside
     s.interiorKey = key;
     s.screen = Screen::Interior;
-    s.interior3DView = s.town3DView; // entering from the 3D town stays 3D (view state only)
+    s.interiorFromWild = (key == "wildhouse");
+    s.interior3DView = s.interiorFromWild ? s.wild3DView : s.town3DView;
     s.interiorPlayerPos = { kInteriorRoomW * 0.5f, kInteriorRoomH - 140.0f };
     s.playerFacing = { 0, -1 };
     s.selectedTile.reset();
     s.interiorGreeted = false;
+    s.houseChestOpen = false;
     s.logLine = "You step inside " + TileNameFor(key) + ".";
     PlaySfx(SfxId::Door);
 }
@@ -11396,6 +11638,17 @@ static void EnterInterior(GameState& s, const std::string& key) {
 static void ExitInterior(GameState& s) {
     std::string key = s.interiorKey;
     s.interiorKey.clear();
+    if (s.interiorFromWild && s.housePlotIdx >= 0 && s.housePlotIdx < (int)kHousePlots.size()) {
+        // Leaving the wilderness homestead: back to the wilderness, just south of the door.
+        s.screen = Screen::Wilderness;
+        s.wild3DView = s.interior3DView; // keep whatever view was used inside
+        Vector2 door = HouseDoorPos(kHousePlots[s.housePlotIdx], s.houseLayout);
+        s.wildernessPlayerPos = { door.x, door.y + kHouseCellSize };
+        s.interiorFromWild = false;
+        PlaySfx(SfxId::Door);
+        return;
+    }
+    s.interiorFromWild = false;
     s.screen = Screen::Town;
     s.town3DView = s.interior3DView; // keep whatever view was used inside
     s.selectedTile.reset();
@@ -11602,12 +11855,66 @@ static bool InteriorDoInteract(GameState& s, const InteriorPropDef* nearest, boo
     std::string a = nearest->action;
     if (a == "exit") { ExitInterior(s); return true; }
     if (a == "panel") { s.selectedTile = s.interiorKey; return false; }
+    if (a == "chest") { s.houseChestOpen = true; PlaySfx(SfxId::Click); return false; }
     return false;
+}
+
+// Storage chest panel — opens from the Chest prop inside the wilderness homestead.
+// Two columns: backpack items with Store buttons, chest items with Take buttons.
+static void DrawHouseChestPanel(GameState& s, int screenW, int screenH) {
+    DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, 0.5f));
+    float w = 500, h = 480;
+    float x = (screenW - w) / 2, y = (screenH - h) / 2;
+    Rectangle bg = { x, y, w, h };
+    DrawRectangleRounded(bg, 0.04f, 8, kColorPanelBg);
+    DrawRectangleRoundedLines(bg, 0.04f, 8, kColorHeading);
+    DrawUIText("Storage Chest", (int)x + 16, (int)y + 12, 16, kColorHeading);
+    std::string counts = "Chest " + std::to_string(s.houseChest.size()) + "/" + std::to_string(kHouseChestCap) +
+                         "   Backpack " + std::to_string(s.backpack.size()) + "/" + std::to_string(BackpackCap(s));
+    DrawUIText(counts.c_str(), (int)x + 16, (int)y + 36, 13, kColorText);
+    if (Button({ x + w - 76, y + 8, 64, 28 }, "Close", true)) { s.houseChestOpen = false; return; }
+    if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_X)) { s.houseChestOpen = false; return; }
+
+    const int rows = 11;
+    float listY = y + 62, rowH = 34;
+    // Backpack column (store into chest)
+    DrawUIText("Backpack", (int)x + 16, (int)listY - 18, 14, kColorHeading);
+    for (int i = 0; i < rows && i < (int)s.backpack.size(); i++) {
+        float ry = listY + i * rowH;
+        DrawUIText(s.backpack[i].name.c_str(), (int)x + 16, (int)ry + 8, 13, kColorText);
+        if (Button({ x + 176, ry + 2, 60, 26 }, "Store", (int)s.houseChest.size() < kHouseChestCap)) {
+            s.houseChest.push_back(s.backpack[i]);
+            s.backpack.erase(s.backpack.begin() + i);
+            PlaySfx(SfxId::Click);
+            break;
+        }
+    }
+    if ((int)s.backpack.size() > rows)
+        DrawUIText(("+" + std::to_string(s.backpack.size() - rows) + " more").c_str(), (int)x + 16, (int)(listY + rows * rowH), 12, kColorText);
+    // Chest column (take back)
+    DrawUIText("Chest", (int)x + 262, (int)listY - 18, 14, kColorHeading);
+    for (int i = 0; i < rows && i < (int)s.houseChest.size(); i++) {
+        float ry = listY + i * rowH;
+        DrawUIText(s.houseChest[i].name.c_str(), (int)x + 262, (int)ry + 8, 13, kColorText);
+        if (Button({ x + 422, ry + 2, 60, 26 }, "Take", (int)s.backpack.size() < BackpackCap(s))) {
+            s.backpack.push_back(s.houseChest[i]);
+            s.houseChest.erase(s.houseChest.begin() + i);
+            PlaySfx(SfxId::Click);
+            break;
+        }
+    }
+    if ((int)s.houseChest.size() > rows)
+        DrawUIText(("+" + std::to_string(s.houseChest.size() - rows) + " more").c_str(), (int)x + 262, (int)(listY + rows * rowH), 12, kColorText);
 }
 
 static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
     const InteriorRoomDef* room = InteriorRoomFor(s.interiorKey);
-    if (!room) { s.interiorKey.clear(); s.screen = Screen::Town; return; } // safety net
+    if (!room) { // safety net
+        s.interiorKey.clear();
+        s.screen = s.interiorFromWild ? Screen::Wilderness : Screen::Town;
+        s.interiorFromWild = false;
+        return;
+    }
     std::vector<InteriorPropDef> props = InteriorPropsFor(s, s.interiorKey);
     InteriorNPCDef npcDef; const InteriorNPCDef* npc = nullptr;
     if (InteriorNPCFor(s.interiorKey, npcDef)) npc = &npcDef;
@@ -11677,6 +11984,9 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
         if (Button({ greetBg.x + greetBg.width - 64, greetBg.y + greetBg.height - 38, 44, 26 }, "X", true))
             s.interiorGreeted = false;
     }
+
+    // Storage chest panel (wilderness homestead only).
+    if (s.houseChestOpen && s.interiorKey == "wildhouse") DrawHouseChestPanel(s, screenW, screenH);
 }
 
 
@@ -11898,11 +12208,6 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         Color bodyTint = realTex ? WHITE : Color{ 150, 170, 185, 255 };
         if (int idx = FindCraftBuildingIndex(node.key); idx >= 0)
             sub = "Lv " + std::to_string(s.buildingLevel[idx]);
-        else if (node.key == "house") {
-            sub = kHouseTiers[s.houseTierIdx].name;
-            if (s.selectedTown == 0 && s.houseHue >= 0 && s.houseHue < (int)kHouseHues.size())
-                bodyTint = kHouseHues[s.houseHue].color;
-        }
         DrawBuildingNode(screenPos, TileColorFor(node.key), TileNameFor(node.key), near, sub,
                            FindBuildingTexture(node.key), DoorAnimForBuilding(node.key),
                            realTex, bodyTint, kTownVisualScale);
@@ -12111,7 +12416,9 @@ static void BeginPlayerDeath(GameState& s) {
     s.combat.reset();
     s.wildEngaged.reset();
     s.dungeonEngaged.reset();
-    s.dyingMonster.reset();
+    s.wildExtraAttackers.clear();   // the pack scatters when you fall
+    s.dungeonExtraAttackers.clear();
+    s.dyingMonsters.clear();
     CancelEscort(s, "flees as you fall — the escort is broken."); // a ghost can't be escorting anyone
     // Combat FX state dies with the player (2026-09-24): the flag, in-flight
     // spells, the vigor aura, and the fiend don't survive death.
@@ -12163,13 +12470,216 @@ static void ResurrectPlayer(GameState& s) {
     s.logLine = std::string("You wake in ") + (saltmere ? kTown2Name : "Town") + ", whole once more.";
 }
 
-// Starts a monster's death animation. The fight is over NOW (engagement cleared,
-// spot immediately on respawn cooldown so nothing else can engage it); the old
-// win body (corpse, rewards, ambush chaining) runs in FinishMonsterDeath when the
-// animation completes.
+// Multi-enemy combat tuning (2026-09-25).
+static const float kPackAggroRadius = 280.0f; // ~6 tiles at 48u — damaging a
+    // monster angers live same-faction monsters within this radius of the victim
+static const int kMaxMeleeAttackers = 4;      // concurrent melee attackers max (primary + extras)
+static const float kClickAssistBasePx = 40.0f; // tap-assist radius at 1080p height, scaled linearly
+static const float kSpellAoeEmberBurst = 150.0f;  // Ember Burst splash radius
+static const float kSpellAoeDetonation = 220.0f;  // Detonation splash radius
+
+// Radius-spell lookup (2026-09-25): Ember Burst and Detonation explode on
+// impact, damaging every enemy inside their radius. Returns 0 for
+// single-target spells.
+static float SpellAoeRadius(const Spell& spell) {
+    if (spell.name == "Ember Burst") return kSpellAoeEmberBurst;
+    if (spell.name == "Detonation") return kSpellAoeDetonation;
+    return 0.0f;
+}
+
+// Pack-attacker lookup by home spot/slot, or null.
+static const GameState::ActiveMonster* FindWildExtra(const GameState& s, int spotIdx) {
+    for (const auto& ex : s.wildExtraAttackers) if (ex.spotIdx == spotIdx) return &ex;
+    return nullptr;
+}
+static const GameState::ActiveDungeonMonster* FindDungeonExtra(const GameState& s, int monsterIdx, bool isBoss) {
+    for (const auto& ex : s.dungeonExtraAttackers)
+        if (ex.isBoss == isBoss && (isBoss || ex.monsterIdx == monsterIdx)) return &ex;
+    return nullptr;
+}
+
+// Death-animation lookup for the draw loops — one entry per simultaneous death.
+static const GameState::DyingMonster* FindDyingWildSpot(const GameState& s, int spotIdx) {
+    for (const auto& d : s.dyingMonsters)
+        if (d.zone == 0 && !d.isRival && d.spotIdx == spotIdx) return &d;
+    return nullptr;
+}
+static const GameState::DyingMonster* FindDyingRival(const GameState& s) {
+    for (const auto& d : s.dyingMonsters)
+        if (d.zone == 0 && d.isRival && d.bladeIdx < 0) return &d;
+    return nullptr;
+}
+static const GameState::DyingMonster* FindDyingBlade(const GameState& s, int bladeIdx) {
+    for (const auto& d : s.dyingMonsters)
+        if (d.zone == 0 && d.isRival && d.bladeIdx == bladeIdx) return &d;
+    return nullptr;
+}
+static const GameState::DyingMonster* FindDyingDungeonSlot(const GameState& s, int dungeonIdx,
+                                                           int monsterIdx, bool isBoss) {
+    for (const auto& d : s.dyingMonsters)
+        if (d.zone == 1 && d.dungeonIdx == dungeonIdx && d.isBoss == isBoss &&
+            (isBoss || d.monsterIdx == monsterIdx)) return &d;
+    return nullptr;
+}
+
+// Killing the current target promotes the oldest remaining pack member to
+// primary (2026-09-25, item 3: the kill auto-selects the nearest remaining
+// enemy). With no pack left, the flag swings to the nearest other live monster
+// inside fight range so the player keeps moving; otherwise it clears.
+static void PromoteWildExtraOrAutoFlag(GameState& s) {
+    if (!s.wildExtraAttackers.empty()) {
+        // Nearest remaining attacker becomes the new primary (2026-09-25).
+        size_t bestI = 0; float bestD = 1e9f;
+        for (size_t i = 0; i < s.wildExtraAttackers.size(); i++) {
+            float d = Dist(s.wildernessPlayerPos, s.wildExtraAttackers[i].pos);
+            if (d < bestD) { bestD = d; bestI = i; }
+        }
+        s.wildEngaged = s.wildExtraAttackers[bestI];
+        s.wildExtraAttackers.erase(s.wildExtraAttackers.begin() + bestI);
+        GameState::FlagTarget f; f.zone = 0; f.spotIdx = s.wildEngaged->spotIdx;
+        s.flagTarget = f;
+        s.logLine = "You turn on the " + kWildernessMonsterSpots[s.wildEngaged->spotIdx].name + "!";
+        return;
+    }
+    int best = -1; float bestD = kWildDisengageRange;
+    for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
+        if (s.wildSpotRespawn[i] > 0.0f) continue; // includes the just-killed spot
+        float d = Dist(s.wildernessPlayerPos, WildernessMonsterLivePos((int)i, s.worldTime));
+        if (d < bestD) { bestD = d; best = (int)i; }
+    }
+    if (best >= 0) {
+        GameState::FlagTarget f; f.zone = 0; f.spotIdx = best;
+        s.flagTarget = f;
+        s.logLine = "Target: " + kWildernessMonsterSpots[best].name + " — closing in!";
+    } else {
+        s.flagTarget.reset();
+    }
+}
+
+static void PromoteDungeonExtraOrAutoFlag(GameState& s, int dungeonIdx) {
+    const DungeonDef& dungeon = kDungeons[dungeonIdx];
+    if (!s.dungeonExtraAttackers.empty()) {
+        // Nearest remaining attacker becomes the new primary (2026-09-25).
+        size_t bestI = 0; float bestD = 1e9f;
+        for (size_t i = 0; i < s.dungeonExtraAttackers.size(); i++) {
+            float d = Dist(s.dungeonPlayerPos, s.dungeonExtraAttackers[i].pos);
+            if (d < bestD) { bestD = d; bestI = i; }
+        }
+        s.dungeonEngaged = s.dungeonExtraAttackers[bestI];
+        s.dungeonExtraAttackers.erase(s.dungeonExtraAttackers.begin() + bestI);
+        GameState::FlagTarget f; f.zone = 1;
+        f.monsterIdx = s.dungeonEngaged->isBoss ? kDungeonBossSlot : s.dungeonEngaged->monsterIdx;
+        f.isBoss = s.dungeonEngaged->isBoss;
+        s.flagTarget = f;
+        const DungeonMonster& m = s.dungeonEngaged->isBoss ? dungeon.boss
+            : DungeonSlotMonster(dungeon, s.dungeonEngaged->monsterIdx);
+        s.logLine = "You turn on the " + m.name + "!";
+        return;
+    }
+    int best = -1; bool bestBoss = false; float bestD = kWildDisengageRange;
+    for (int i = 0; i < kDungeonRegularSlots; i++) {
+        if (s.dungeonSpawnRespawn[dungeonIdx][i] > 0.0f) continue;
+        float d = Dist(s.dungeonPlayerPos, DungeonMonsterLivePos(dungeonIdx, i, s.worldTime));
+        if (d < bestD) { bestD = d; best = i; bestBoss = false; }
+    }
+    if (s.dungeonXP[dungeonIdx] >= dungeon.bossUnlockXp &&
+        s.dungeonSpawnRespawn[dungeonIdx][kDungeonBossSlot] <= 0.0f) {
+        float d = Dist(s.dungeonPlayerPos, DungeonMonsterLivePos(dungeonIdx, kDungeonBossSlot, s.worldTime));
+        if (d < bestD) { bestD = d; best = kDungeonBossSlot; bestBoss = true; }
+    }
+    if (best >= 0) {
+        GameState::FlagTarget f; f.zone = 1; f.monsterIdx = best; f.isBoss = bestBoss;
+        s.flagTarget = f;
+        const DungeonMonster& m = bestBoss ? dungeon.boss : DungeonSlotMonster(dungeon, best);
+        s.logLine = "Target: " + m.name + " — closing in!";
+    } else {
+        s.flagTarget.reset();
+    }
+}
+
+// Swing-arc test for melee cleave (2026-09-25): an enemy counts as cleaved when
+// it's in front of the player (the side the player is currently facing), so the
+// swing reads as a frontal arc rather than a 360-degree spin.
+static bool InSwingArc(Vector2 playerPos, Vector2 playerFacing, Vector2 enemyPos) {
+    Vector2 to = { enemyPos.x - playerPos.x, enemyPos.y - playerPos.y };
+    float len = std::sqrt(to.x * to.x + to.y * to.y);
+    if (len < 0.0001f) return true;
+    float flen = std::sqrt(playerFacing.x * playerFacing.x + playerFacing.y * playerFacing.y);
+    if (flen < 0.0001f) return true; // never moved — generous
+    return (to.x * playerFacing.x + to.y * playerFacing.y) / (len * flen) >= 0.0f;
+}
+
+// Pack aggro (2026-09-25): when the player damages a normal monster, live
+// same-faction monsters within kPackAggroRadius of the victim join the fight as
+// extra attackers. Rival/blade duels never trigger this (1v1 stays 1v1), and the
+// dungeon boss never joins as a pack member — it only fights when engaged.
+static void WildPackAggro(GameState& s, int damagedSpotIdx, Vector2 center) {
+    if (damagedSpotIdx < 0 || damagedSpotIdx >= (int)kWildernessMonsterSpots.size()) return;
+    if (!s.wildEngaged.has_value() || s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0) return;
+    const std::string& faction = kWildernessMonsterSpots[damagedSpotIdx].name;
+    int joined = 0;
+    for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
+        if ((int)i == damagedSpotIdx) continue;
+        if (s.wildSpotRespawn[i] > 0.0f) continue;
+        if (s.wildEngaged->spotIdx == (int)i) continue;
+        if (FindWildExtra(s, (int)i) != nullptr) continue;
+        if (kWildernessMonsterSpots[i].name != faction) continue;
+        if (Dist(WildernessMonsterLivePos((int)i, s.worldTime), center) > kPackAggroRadius) continue;
+        GameState::ActiveMonster ex;
+        ex.spotIdx = (int)i;
+        ex.isRival = false;
+        ex.bladeIdx = -1;
+        ex.pos = WildernessMonsterLivePos((int)i, s.worldTime);
+        ex.spawnPos = kWildernessMonsterSpots[i].pos;
+        ex.maxHp = std::max(1.0f, kWildernessMonsterSpots[i].level * 3.0f);
+        ex.hp = ex.maxHp;
+        s.wildExtraAttackers.push_back(ex);
+        joined++;
+    }
+    if (joined > 0) s.logLine = "More " + faction + "s join the fight!";
+}
+
+static void DungeonPackAggro(GameState& s, int dungeonIdx, int damagedMonsterIdx, bool damagedIsBoss,
+                            Vector2 center) {
+    if (!s.dungeonEngaged.has_value()) return;
+    if (damagedIsBoss) return; // the boss has no pack — it fights alone
+    const DungeonDef& dungeon = kDungeons[dungeonIdx];
+    const std::string& faction = DungeonSlotMonster(dungeon, damagedMonsterIdx).name;
+    int joined = 0;
+    for (int i = 0; i < kDungeonRegularSlots; i++) {
+        if (i == damagedMonsterIdx) continue;
+        if (s.dungeonSpawnRespawn[dungeonIdx][i] > 0.0f) continue;
+        if (!s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
+        if (FindDungeonExtra(s, i, false) != nullptr) continue;
+        if (DungeonSlotMonster(dungeon, i).name != faction) continue;
+        if (Dist(DungeonMonsterLivePos(dungeonIdx, i, s.worldTime), center) > kPackAggroRadius) continue;
+        GameState::ActiveDungeonMonster ex;
+        ex.monsterIdx = i;
+        ex.isBoss = false;
+        ex.pos = DungeonMonsterLivePos(dungeonIdx, i, s.worldTime);
+        ex.spawnPos = DungeonMonsterNodePos(dungeonIdx, i);
+        ex.maxHp = std::max(1.0f, DungeonSlotMonster(dungeon, i).level * 3.0f);
+        ex.hp = ex.maxHp;
+        s.dungeonExtraAttackers.push_back(ex);
+        joined++;
+    }
+    if (joined > 0) s.logLine = "More " + faction + "s join the fight!";
+}
+
+// Starts a monster's death animation. The victim's spot goes on respawn cooldown
+// immediately so nothing else can engage it; the old win body (corpse, rewards,
+// ambush chaining) runs in FinishMonsterDeath when the animation completes.
+// clearEngagement=true (the default) is for the PRIMARY's death: the engagement
+// is dropped and the pack promotes/auto-flags per above. Pack-member deaths pass
+// false — the fight goes on. NOTE: am may alias *s.wildEngaged — callers must not
+// touch their am reference after this call when clearEngagement is true.
 static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& am,
-                                  const std::string& name, int baseGold, int baseLeather) {
+                                  const std::string& name, int baseGold, int baseLeather,
+                                  bool clearEngagement) {
     PlaySfx(SfxId::MonsterDie);
+    // Capture identity BEFORE s.wildEngaged.reset() below — callers pass *s.wildEngaged
+    // by reference, so `am` dangles the moment the optional resets (2026-09-25).
+    bool wasDuel = am.isRival || am.bladeIdx >= 0;
     GameState::DyingMonster dm;
     dm.zone = 0;
     dm.pos = am.pos;
@@ -12181,9 +12691,17 @@ static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& 
     dm.iconIdx = (am.spotIdx >= 0 && am.spotIdx < (int)kWildernessMonsterSpots.size())
         ? kWildernessMonsterSpots[am.spotIdx].iconIdx : -1;
     if (am.spotIdx >= 0) s.wildSpotRespawn[am.spotIdx] = RollWildRespawn();
-    s.dyingMonster = dm;
-    s.wildEngaged.reset();
-    s.flagTarget.reset(); // the target's dead — drop the marker
+    s.dyingMonsters.push_back(dm);
+    if (clearEngagement) {
+        s.wildEngaged.reset();
+        if (wasDuel) {
+            // Duels stay 1v1 — the old behavior: flag clears, no pack, no auto-flag.
+            s.wildExtraAttackers.clear();
+            s.flagTarget.reset();
+        } else {
+            PromoteWildExtraOrAutoFlag(s);
+        }
+    }
     // In-flight bolts die with the fight, but impact bursts play out (2026-09-24):
     // erasing them here would cut the very hit that killed the monster.
     for (auto& p : s.spellProjectiles) if (p.zone == 0) p.active = false;
@@ -12191,7 +12709,8 @@ static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& 
 
 static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeonMonster& am,
                                      int dungeonIdx, bool wasBoss, const std::string& name,
-                                     int level, int baseGold, int baseLeather) {
+                                     int level, int baseGold, int baseLeather,
+                                     bool clearEngagement) {
     PlaySfx(SfxId::MonsterDie);
     GameState::DyingMonster dm;
     dm.zone = 1;
@@ -12202,21 +12721,57 @@ static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeo
     dm.isBoss = wasBoss;
     dm.name = name; dm.level = level; dm.baseGold = baseGold; dm.baseLeather = baseLeather;
     s.dungeonSpawnRespawn[dungeonIdx][dm.monsterIdx] = RollDungeonRespawn(wasBoss);
-    s.dyingMonster = dm;
-    s.dungeonEngaged.reset();
-    s.flagTarget.reset(); // the target's dead — drop the marker
+    s.dyingMonsters.push_back(dm);
+    if (clearEngagement) {
+        s.dungeonEngaged.reset();
+        PromoteDungeonExtraOrAutoFlag(s, dungeonIdx);
+    }
     // In-flight bolts die with the fight, but impact bursts play out (2026-09-24):
     // erasing them here would cut the very hit that killed the monster.
     for (auto& p : s.spellProjectiles) if (p.zone == 1) p.active = false;
 }
 
+// Pack-member death (2026-09-25, multi-enemy combat): queues a death animation,
+// respawn cooldown, and per-victim rewards for an extra attacker WITHOUT
+// touching the primary engagement — the fight continues with whoever's left.
+// The primary's in-flight spell bolts stay live for the same reason.
+static void BeginWildExtraDeath(GameState& s, const GameState::ActiveMonster& ex) {
+    PlaySfx(SfxId::MonsterDie);
+    const WildernessMonsterSpot& spot = kWildernessMonsterSpots[ex.spotIdx];
+    GameState::DyingMonster dm;
+    dm.zone = 0;
+    dm.pos = ex.pos;
+    dm.timer = dm.duration = kMonsterDeathAnimTime;
+    dm.spotIdx = ex.spotIdx;
+    dm.isRival = false;
+    dm.bladeIdx = -1;
+    dm.name = spot.name; dm.baseGold = spot.baseGold; dm.baseLeather = spot.baseLeather;
+    dm.iconIdx = spot.iconIdx;
+    s.wildSpotRespawn[ex.spotIdx] = RollWildRespawn();
+    s.dyingMonsters.push_back(dm);
+}
+
+static void BeginDungeonExtraDeath(GameState& s, int dungeonIdx, const GameState::ActiveDungeonMonster& ex) {
+    PlaySfx(SfxId::MonsterDie);
+    const DungeonDef& dungeon = kDungeons[dungeonIdx];
+    const DungeonMonster& m = ex.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, ex.monsterIdx);
+    GameState::DyingMonster dm;
+    dm.zone = 1;
+    dm.pos = ex.pos;
+    dm.timer = dm.duration = kMonsterDeathAnimTime;
+    dm.dungeonIdx = dungeonIdx;
+    dm.monsterIdx = ex.isBoss ? kDungeonBossSlot : ex.monsterIdx;
+    dm.isBoss = ex.isBoss;
+    dm.name = m.name; dm.level = m.level; dm.baseGold = m.baseGold; dm.baseLeather = m.baseLeather;
+    s.dungeonSpawnRespawn[dungeonIdx][dm.monsterIdx] = RollDungeonRespawn(ex.isBoss);
+    s.dyingMonsters.push_back(dm);
+}
+
 // The deferred half of the old EndWildMonsterWin/EndDungeonMonsterWin bodies —
 // runs when the death animation completes: corpse (visual + lootable), rewards,
 // Shaken relief, ambush/innocent chaining. Economy behavior is unchanged, only
-// delayed by the animation.
-static void FinishMonsterDeath(GameState& s) {
-    GameState::DyingMonster dm = *s.dyingMonster; // copy — handlers below touch state
-    s.dyingMonster.reset();
+// delayed by the animation. One call per kill — simultaneous kills each resolve.
+static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
     float corpseDur = (dm.isRival || dm.bladeIdx >= 0) ? kRivalCorpseFadeTime : kCorpseFadeTime;
     s.worldCorpses.push_back({ dm.pos, corpseDur, corpseDur, dm.zone, dm.iconIdx, dm.name });
     int goldFound = std::max(1, dm.baseGold + (std::rand() % 3) - 1);
@@ -12251,9 +12806,18 @@ static void UpdateDeathAndRespawn(GameState& s, float dt) {
         s.ghostTimer -= dt;
         if (s.ghostTimer <= 0.0f) ResurrectPlayer(s);
     }
-    if (s.dyingMonster.has_value()) {
-        s.dyingMonster->timer -= dt;
-        if (s.dyingMonster->timer <= 0.0f) FinishMonsterDeath(s);
+    if (!s.dyingMonsters.empty()) {
+        for (auto& d : s.dyingMonsters) d.timer -= dt;
+        // Resolve each finished death independently — cleaves and AoE can stack kills.
+        for (size_t i = 0; i < s.dyingMonsters.size(); ) {
+            if (s.dyingMonsters[i].timer <= 0.0f) {
+                GameState::DyingMonster dm = s.dyingMonsters[i]; // copy — finish touches state
+                s.dyingMonsters.erase(s.dyingMonsters.begin() + i);
+                FinishMonsterDeath(s, dm);
+            } else {
+                i++;
+            }
+        }
     }
     for (float& t : s.wildSpotRespawn) if (t > 0.0f) t -= dt;
     for (auto& d : s.dungeonSpawnRespawn) for (float& t : d) if (t > 0.0f) t -= dt;
@@ -12427,6 +12991,43 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
             am.monsterHurtT = 0.0f;
             PlaySfx(SfxId::Hit);
             s.logLine = spell.name + " hits the " + mname + " for " + std::to_string(dmg) + " damage" + trainNote;
+            // Capture before the death block below can reset wildEngaged (2026-09-25).
+            Vector2 impactCenter = am.pos;
+            bool impactWasDuel = am.isRival || am.bladeIdx >= 0;
+            int impactSpot = am.spotIdx;
+            // Radius spells (2026-09-25, multi-enemy combat): the blast goes off
+            // BEFORE the primary's death is processed, so even a lethal direct
+            // hit still catches every valid enemy inside the radius — the pack
+            // is pulled from the impact first, then each victim inside takes its
+            // own damage roll from the same formulas, and deaths queue
+            // independently. The cast's single success roll already passed; the
+            // blast itself doesn't miss individuals. Duels stay 1v1.
+            float aoeR = SpellAoeRadius(spell);
+            bool packPulled = false;
+            if (aoeR > 0.0f && !impactWasDuel) {
+                WildPackAggro(s, impactSpot, impactCenter); // lethal or not, the blast pulls the pack in
+                packPulled = true;
+                int blastCount = 0;
+                for (size_t ei = 0; ei < s.wildExtraAttackers.size(); ) {
+                    GameState::ActiveMonster& ex = s.wildExtraAttackers[ei];
+                    if (Dist(ex.pos, impactCenter) > aoeR) { ei++; continue; }
+                    int exDmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
+                    ex.hp -= exDmg;
+                    ex.monsterHurtT = 0.0f;
+                    blastCount++;
+                    if (ex.hp <= 0) {
+                        BeginWildExtraDeath(s, ex);
+                        s.wildExtraAttackers.erase(s.wildExtraAttackers.begin() + ei);
+                        continue; // erased — don't advance ei
+                    }
+                    ei++;
+                }
+                if (blastCount > 0)
+                    s.logLine = spell.name + " erupts — " + std::to_string(blastCount) +
+                                (blastCount == 1 ? " foe" : " foes") + " caught in the blast!" + trainNote;
+            }
+            if (am.hp > 0 && !impactWasDuel && !packPulled)
+                WildPackAggro(s, am.spotIdx, am.pos); // damaging a normal monster pulls its pack in
             if (am.hp <= 0) {
                 // Death handling mirrors tryCastSpellAtEngagedMonster's kill branch
                 // verbatim (spell kills don't trigger the melee murderer-loss path).
@@ -12461,6 +13062,42 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
             am.monsterHurtT = 0.0f;
             PlaySfx(SfxId::Hit);
             s.logLine = spell.name + " hits the " + mname + " for " + std::to_string(dmg) + " damage" + trainNote;
+            // Capture before the death block below can reset dungeonEngaged (2026-09-25).
+            Vector2 impactCenter = am.pos;
+            bool impactWasBoss = am.isBoss;
+            int impactSlot = am.monsterIdx;
+            // Radius spells (2026-09-25, multi-enemy combat): the blast goes off
+            // BEFORE the primary's death is processed, so even a lethal direct
+            // hit still catches every valid enemy inside the radius — the pack
+            // is pulled from the impact first, then each victim inside takes its
+            // own damage roll from the same formulas, and deaths queue
+            // independently. The boss has no pack — it fights alone.
+            float aoeR = SpellAoeRadius(spell);
+            bool packPulled = false;
+            if (aoeR > 0.0f && !impactWasBoss) {
+                DungeonPackAggro(s, *s.selectedDungeon, impactSlot, false, impactCenter);
+                packPulled = true;
+                int blastCount = 0;
+                for (size_t ei = 0; ei < s.dungeonExtraAttackers.size(); ) {
+                    GameState::ActiveDungeonMonster& ex = s.dungeonExtraAttackers[ei];
+                    if (Dist(ex.pos, impactCenter) > aoeR) { ei++; continue; }
+                    int exDmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
+                    ex.hp -= exDmg;
+                    ex.monsterHurtT = 0.0f;
+                    blastCount++;
+                    if (ex.hp <= 0) {
+                        BeginDungeonExtraDeath(s, *s.selectedDungeon, ex);
+                        s.dungeonExtraAttackers.erase(s.dungeonExtraAttackers.begin() + ei);
+                        continue; // erased — don't advance ei
+                    }
+                    ei++;
+                }
+                if (blastCount > 0)
+                    s.logLine = spell.name + " erupts — " + std::to_string(blastCount) +
+                                (blastCount == 1 ? " foe" : " foes") + " caught in the blast!" + trainNote;
+            }
+            if (am.hp > 0 && !impactWasBoss && !packPulled)
+                DungeonPackAggro(s, *s.selectedDungeon, am.monsterIdx, false, am.pos);
             if (am.hp <= 0) {
                 int mgold = m.baseGold, mleather = m.baseLeather;
                 BeginDungeonMonsterDeath(s, am, *s.selectedDungeon, am.isBoss, mname, level, mgold, mleather);
@@ -12552,6 +13189,8 @@ static void FiendStrikeLive(GameState& s, int zone) {
         SpawnSpellImpact(s, 0, am.pos, 14, 0.55f);
         PlaySfx(SfxId::Hit);
         s.logLine = "Your fiend lashes the " + mname + " for " + std::to_string(dmg) + " damage!";
+        if (am.hp > 0 && !am.isRival && am.bladeIdx < 0)
+            WildPackAggro(s, am.spotIdx, am.pos); // the fiend's damage pulls the pack in too (2026-09-25)
         if (am.hp <= 0) {
             int mgold = spot.baseGold, mleather = spot.baseLeather;
             if (am.isRival) {
@@ -12579,6 +13218,8 @@ static void FiendStrikeLive(GameState& s, int zone) {
         SpawnSpellImpact(s, 1, am.pos, 14, 0.55f);
         PlaySfx(SfxId::Hit);
         s.logLine = "Your fiend lashes the " + m.name + " for " + std::to_string(dmg) + " damage!";
+        if (am.hp > 0 && !am.isBoss)
+            DungeonPackAggro(s, *s.selectedDungeon, am.monsterIdx, false, am.pos); // the fiend's damage pulls the pack in too (2026-09-25)
         if (am.hp <= 0) {
             int mgold = m.baseGold, mleather = m.baseLeather;
             BeginDungeonMonsterDeath(s, am, *s.selectedDungeon, am.isBoss, m.name, m.level, mgold, mleather);
@@ -12756,9 +13397,9 @@ static void SteerTowardFlag(GameState& s, Vector2& playerPos, Vector2& playerFac
 
 // Click-to-flag shared bits: nearest candidate within a screen-space radius.
 static bool Wild2DFlagCandidate(const GameState& s, Vector2 camera, Vector2 m,
-                                GameState::FlagTarget* out, float* outDist) {
+                                GameState::FlagTarget* out, float* outDist, float assistPx) {
     bool found = false;
-    float best = 52.0f;
+    float best = assistPx;
     GameState::FlagTarget bestF;
     auto consider = [&](Vector2 worldPos, GameState::FlagTarget f) {
         Vector2 sp = WorldToScreen(worldPos, camera);
@@ -12770,8 +13411,9 @@ static bool Wild2DFlagCandidate(const GameState& s, Vector2 camera, Vector2 m,
         if (s.wildSpotRespawn[i] > 0.0f) continue;
         if (s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0 &&
             s.wildEngaged->spotIdx == i) continue; // already fighting it — nothing to flag
+        const GameState::ActiveMonster* ex = FindWildExtra(s, i);
         GameState::FlagTarget f; f.zone = 0; f.spotIdx = i;
-        consider(WildernessMonsterLivePos(i, s.worldTime), f);
+        consider(ex ? ex->pos : WildernessMonsterLivePos(i, s.worldTime), f);
     }
     { GameState::FlagTarget f; f.zone = 0; f.isRival = true; consider(s.rivalPos, f); }
     for (int bi = 0; bi < kBladeCount; bi++) {
@@ -12790,26 +13432,45 @@ static void Wild2DClickFlag(GameState& s, Vector2 camera, int screenW, int scree
     if (m.y < 200) return; // top HUD strip
     if (CheckCollisionPointRec(m, kJoystickZone)) return;
     if (m.x > screenW - 170 && m.y > screenH - 170) return; // interact button
+    if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return; // TARGET button (shared HUD handles it)
     if (s.wildEngaged.has_value()) {
         if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return; // quick items
         if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return; // spell hotbar
     }
+    // Tapping the target frame cycles targets (2026-09-25).
+    if ((s.flagTarget.has_value() || s.wildEngaged.has_value()) &&
+        CheckCollisionPointRec(m, TargetFrameRect())) {
+        CycleFlagTarget(s);
+        return;
+    }
+    // Tap-assist (2026-09-25): 40px at 1080p height, scaled with resolution.
+    float assistPx = std::max(32.0f, kClickAssistBasePx * ((float)screenH / 1080.0f));
+    bool duelLocked = s.wildEngaged.has_value() &&
+                      (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0);
+    bool fightingNormal = s.wildEngaged.has_value() && !duelLocked;
     GameState::FlagTarget f; float fd = 0.0f;
-    if (Wild2DFlagCandidate(s, camera, m, &f, &fd)) {
-        s.flagTarget = f;
-        s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+    if (!duelLocked && Wild2DFlagCandidate(s, camera, m, &f, &fd, assistPx)) {
+        if (fightingNormal && !f.isRival && f.bladeIdx < 0 && f.spotIdx != s.wildEngaged->spotIdx) {
+            // Mid-fight tap on another pack member: switch the primary to it.
+            TransferWildPrimary(s, f.spotIdx);
+        } else if (fightingNormal && (f.isRival || f.bladeIdx >= 0)) {
+            s.logLine = "You're already in a fight — finish it first!";
+        } else {
+            s.flagTarget = f;
+            s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+        }
     } else if (s.flagTarget.has_value()) {
         s.flagTarget.reset(); // clicked empty ground: stand down
     }
 }
 
 static bool Dungeon2DFlagCandidate(const GameState& s, Vector2 camera, Vector2 m,
-                                   GameState::FlagTarget* out) {
+                                   GameState::FlagTarget* out, float assistPx) {
     if (!s.selectedDungeon.has_value()) return false;
     int di = *s.selectedDungeon;
     const DungeonDef& dungeon = kDungeons[di];
     bool found = false;
-    float best = 52.0f;
+    float best = assistPx;
     GameState::FlagTarget bestF;
     auto consider = [&](Vector2 worldPos, GameState::FlagTarget f) {
         Vector2 sp = WorldToScreen(worldPos, camera);
@@ -12818,15 +13479,19 @@ static bool Dungeon2DFlagCandidate(const GameState& s, Vector2 camera, Vector2 m
     };
     for (int i = 0; i < kDungeonRegularSlots; i++) {
         if (s.dungeonSpawnRespawn[di][i] > 0.0f) continue;
-        if (s.dungeonEngaged.has_value() && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
+        // Boss fights are 1v1 (like Rival/blade duels): no tapping away mid-fight (2026-09-25).
+        if (s.dungeonEngaged.has_value() &&
+            (s.dungeonEngaged->isBoss || s.dungeonEngaged->monsterIdx == i)) continue;
+        const GameState::ActiveDungeonMonster* ex = FindDungeonExtra(s, i, false);
         GameState::FlagTarget f; f.zone = 1; f.monsterIdx = i;
-        consider(DungeonMonsterLivePos(di, i, s.worldTime), f);
+        consider(ex ? ex->pos : DungeonMonsterLivePos(di, i, s.worldTime), f);
     }
     if (s.dungeonXP[di] >= dungeon.bossUnlockXp && s.dungeonSpawnRespawn[di][kDungeonBossSlot] <= 0.0f) {
         bool fightingBoss = s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss;
         if (!fightingBoss) {
+            const GameState::ActiveDungeonMonster* ex = FindDungeonExtra(s, kDungeonBossSlot, true);
             GameState::FlagTarget f; f.zone = 1; f.monsterIdx = kDungeonBossSlot; f.isBoss = true;
-            consider(DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime), f);
+            consider(ex ? ex->pos : DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime), f);
         }
     }
     if (found) *out = bestF;
@@ -12841,14 +13506,28 @@ static void Dungeon2DClickFlag(GameState& s, Vector2 camera, int screenW, int sc
     if (m.y < 200) return; // top HUD strip + dungeon sub-tabs
     if (CheckCollisionPointRec(m, kJoystickZone)) return;
     if (m.x > screenW - 170 && m.y > screenH - 170) return; // interact button
+    if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return; // TARGET button (shared HUD handles it)
     if (s.dungeonEngaged.has_value()) {
         if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return; // quick items
         if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return; // spell hotbar
     }
+    // Tapping the target frame cycles targets (2026-09-25).
+    if ((s.flagTarget.has_value() || s.dungeonEngaged.has_value()) &&
+        CheckCollisionPointRec(m, TargetFrameRect())) {
+        CycleFlagTarget(s);
+        return;
+    }
+    // Tap-assist (2026-09-25): 40px at 1080p height, scaled with resolution.
+    float assistPx = std::max(32.0f, kClickAssistBasePx * ((float)screenH / 1080.0f));
     GameState::FlagTarget f;
-    if (Dungeon2DFlagCandidate(s, camera, m, &f)) {
-        s.flagTarget = f;
-        s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+    if (Dungeon2DFlagCandidate(s, camera, m, &f, assistPx)) {
+        if (s.dungeonEngaged.has_value()) {
+            // Mid-fight tap on another pack member: switch the primary to it.
+            TransferDungeonPrimary(s, *s.selectedDungeon, f.monsterIdx, f.isBoss);
+        } else {
+            s.flagTarget = f;
+            s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+        }
     } else if (s.flagTarget.has_value()) {
         s.flagTarget.reset();
     }
@@ -12856,62 +13535,208 @@ static void Dungeon2DClickFlag(GameState& s, Vector2 camera, int screenW, int sc
 
 // Dedicated flag key (2026-09-24): G flags the nearest fightable monster, so a
 // keyboard player can flag without clicking. Same candidates as the click.
-static void FlagNearestEnemy(GameState& s) {
-    if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
-    if (s.screen != Screen::Wilderness && s.screen != Screen::Hunt) return;
-    if (s.wildEngaged.has_value() || s.dungeonEngaged.has_value()) {
-        s.logLine = "Already fighting — no need to flag.";
+// Target switching (2026-09-25): G cycles through fightable enemies by distance,
+// nearest first, wrapping around. While fighting a normal monster, cycling
+// transfers the primary engagement to the next target (the old primary keeps
+// fighting as a pack member); rival/blade duels stay locked 1v1.
+static void TransferWildPrimary(GameState& s, int newSpotIdx) {
+    if (!s.wildEngaged.has_value() || s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0) return;
+    if (s.wildEngaged->spotIdx == newSpotIdx) return;
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
+    GameState::ActiveMonster oldPrimary = *s.wildEngaged;
+    GameState::ActiveMonster newPrimary;
+    bool fromExtra = false;
+    for (size_t i = 0; i < s.wildExtraAttackers.size(); i++) {
+        if (s.wildExtraAttackers[i].spotIdx == newSpotIdx) {
+            newPrimary = s.wildExtraAttackers[i];
+            s.wildExtraAttackers.erase(s.wildExtraAttackers.begin() + i);
+            fromExtra = true;
+            break;
+        }
+    }
+    if (!fromExtra) {
+        if (newSpotIdx < 0 || newSpotIdx >= (int)kWildernessMonsterSpots.size()) return;
+        if (s.wildSpotRespawn[newSpotIdx] > 0.0f) return; // died mid-cycle
+        const WildernessMonsterSpot& spot = kWildernessMonsterSpots[newSpotIdx];
+        newPrimary.spotIdx = newSpotIdx;
+        newPrimary.isRival = false;
+        newPrimary.bladeIdx = -1;
+        newPrimary.pos = WildernessMonsterLivePos(newSpotIdx, s.worldTime);
+        newPrimary.spawnPos = spot.pos;
+        newPrimary.maxHp = std::max(1.0f, spot.level * 3.0f);
+        newPrimary.hp = newPrimary.maxHp;
+    }
+    s.wildExtraAttackers.push_back(oldPrimary); // the old target keeps fighting
+    s.wildEngaged = newPrimary;
+    GameState::FlagTarget f; f.zone = 0; f.spotIdx = newSpotIdx;
+    s.flagTarget = f;
+    s.logLine = "You turn on the " + kWildernessMonsterSpots[newSpotIdx].name + "!";
+}
+
+static void TransferDungeonPrimary(GameState& s, int dungeonIdx, int newMonsterIdx, bool newIsBoss) {
+    if (!s.dungeonEngaged.has_value()) return;
+    const DungeonDef& dungeon = kDungeons[dungeonIdx];
+    const GameState::ActiveDungeonMonster& cur = *s.dungeonEngaged;
+    if (!cur.isBoss && !newIsBoss && cur.monsterIdx == newMonsterIdx) return;
+    if (cur.isBoss && newIsBoss) return;
+    // Safety net: the boss never demotes to a pack extra — boss fights stay 1v1 (2026-09-25).
+    if (cur.isBoss && !newIsBoss) {
+        s.logLine = "You're locked in — finish the boss first!";
         return;
     }
-    Vector2 ppos = (s.screen == Screen::Wilderness) ? s.wildernessPlayerPos : s.dungeonPlayerPos;
-    bool found = false;
-    float best = 1e9f;
-    GameState::FlagTarget bestF;
-    auto consider = [&](Vector2 wp, GameState::FlagTarget f) {
-        float d = Dist(ppos, wp);
-        if (d < best) { best = d; bestF = f; found = true; }
-    };
-    if (s.screen == Screen::Wilderness) {
-        for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
-            if (s.wildSpotRespawn[i] > 0.0f) continue;
-            GameState::FlagTarget f; f.zone = 0; f.spotIdx = (int)i;
-            consider(WildernessMonsterLivePos((int)i, s.worldTime), f);
-        }
-        { GameState::FlagTarget f; f.zone = 0; f.isRival = true; consider(s.rivalPos, f); }
-        for (int bi = 0; bi < kBladeCount; bi++) {
-            GameState::FlagTarget f; f.zone = 0; f.bladeIdx = bi;
-            consider(s.blades[bi].pos, f);
-        }
-    } else if (s.selectedDungeon.has_value()) {
-        int di = *s.selectedDungeon;
-        const DungeonDef& dungeon = kDungeons[di];
-        for (int i = 0; i < kDungeonRegularSlots; i++) {
-            if (s.dungeonSpawnRespawn[di][i] > 0.0f) continue;
-            GameState::FlagTarget f; f.zone = 1; f.monsterIdx = i;
-            consider(DungeonMonsterLivePos(di, i, s.worldTime), f);
-        }
-        if (s.dungeonXP[di] >= dungeon.bossUnlockXp && s.dungeonSpawnRespawn[di][kDungeonBossSlot] <= 0.0f) {
-            GameState::FlagTarget f; f.zone = 1; f.monsterIdx = kDungeonBossSlot; f.isBoss = true;
-            consider(DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime), f);
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
+    GameState::ActiveDungeonMonster oldPrimary = cur;
+    GameState::ActiveDungeonMonster newPrimary;
+    bool fromExtra = false;
+    for (size_t i = 0; i < s.dungeonExtraAttackers.size(); i++) {
+        const auto& ex = s.dungeonExtraAttackers[i];
+        if (ex.isBoss == newIsBoss && (newIsBoss || ex.monsterIdx == newMonsterIdx)) {
+            newPrimary = ex;
+            s.dungeonExtraAttackers.erase(s.dungeonExtraAttackers.begin() + i);
+            fromExtra = true;
+            break;
         }
     }
-    if (found) {
-        s.flagTarget = bestF;
-        s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+    if (!fromExtra) {
+        int slot = newIsBoss ? kDungeonBossSlot : newMonsterIdx;
+        if (s.dungeonSpawnRespawn[dungeonIdx][slot] > 0.0f) return; // died mid-cycle
+        const DungeonMonster& m = newIsBoss ? dungeon.boss : DungeonSlotMonster(dungeon, newMonsterIdx);
+        newPrimary.monsterIdx = newMonsterIdx;
+        newPrimary.isBoss = newIsBoss;
+        newPrimary.pos = DungeonMonsterLivePos(dungeonIdx, slot, s.worldTime);
+        newPrimary.spawnPos = DungeonMonsterNodePos(dungeonIdx, slot);
+        newPrimary.maxHp = std::max(1.0f, m.level * 3.0f);
+        newPrimary.hp = newPrimary.maxHp;
+    }
+    s.dungeonExtraAttackers.push_back(oldPrimary);
+    s.dungeonEngaged = newPrimary;
+    GameState::FlagTarget f; f.zone = 1; f.monsterIdx = newIsBoss ? kDungeonBossSlot : newMonsterIdx;
+    f.isBoss = newIsBoss;
+    s.flagTarget = f;
+    const DungeonMonster& m = newIsBoss ? dungeon.boss : DungeonSlotMonster(dungeon, newMonsterIdx);
+    s.logLine = "You turn on the " + m.name + "!";
+}
+
+static void CycleFlagTarget(GameState& s) {
+    if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    if (s.screen != Screen::Wilderness && s.screen != Screen::Hunt) return;
+    if (s.screen == Screen::Wilderness) {
+        if (s.wildEngaged.has_value() && (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0)) {
+            s.logLine = "You're locked in — finish this duel first!";
+            return;
+        }
+        struct Cand { int spotIdx; float d; };
+        std::vector<Cand> cs;
+        Vector2 ppos = s.wildernessPlayerPos;
+        bool engagedNormal = s.wildEngaged.has_value();
+        for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
+            if (s.wildSpotRespawn[i] > 0.0f) continue;
+            bool isPrimary = engagedNormal && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0 &&
+                             s.wildEngaged->spotIdx == (int)i;
+            const GameState::ActiveMonster* ex = FindWildExtra(s, (int)i);
+            if (engagedNormal && !isPrimary && !ex) continue; // mid-fight: only the pack is cyclable
+            Vector2 wp = isPrimary ? s.wildEngaged->pos : (ex ? ex->pos : WildernessMonsterLivePos((int)i, s.worldTime));
+            cs.push_back({ (int)i, Dist(ppos, wp) });
+        }
+        if (!engagedNormal) {
+            // Not fighting: rival and blades are flaggable as before.
+            cs.push_back({ -2, Dist(ppos, s.rivalPos) }); // -2 = rival sentinel
+            for (int bi = 0; bi < kBladeCount; bi++)
+                cs.push_back({ -3 - bi, Dist(ppos, s.blades[bi].pos) }); // -3-bi = blade sentinel
+        }
+        if (cs.empty()) { s.logLine = "No quarry in sight."; return; }
+        std::sort(cs.begin(), cs.end(), [](const Cand& a, const Cand& b) { return a.d < b.d; });
+        int cur = -1;
+        if (s.flagTarget.has_value() && s.flagTarget->zone == 0) {
+            const auto& f = *s.flagTarget;
+            int curSpot = -100;
+            if (!f.isRival && f.bladeIdx < 0) curSpot = f.spotIdx;
+            else if (f.isRival && f.bladeIdx < 0) curSpot = -2;
+            else if (f.bladeIdx >= 0) curSpot = -3 - f.bladeIdx;
+            for (size_t i = 0; i < cs.size(); i++)
+                if (cs[i].spotIdx == curSpot) { cur = (int)i; break; }
+        }
+        int next = (cur + 1) % (int)cs.size();
+        int pick = cs[next].spotIdx;
+        std::string count = " (" + std::to_string(next + 1) + "/" + std::to_string(cs.size()) + ")";
+        if (pick == -2) {
+            GameState::FlagTarget f; f.zone = 0; f.isRival = true;
+            s.flagTarget = f;
+            s.logLine = "You fix your eyes on " + RivalEpithetName(s) + count + " — closing in!";
+        } else if (pick <= -3) {
+            int bi = -3 - pick;
+            GameState::FlagTarget f; f.zone = 0; f.bladeIdx = bi;
+            s.flagTarget = f;
+            s.logLine = "You fix your eyes on Murder Inc. " + BladeName(bi) + count + " — closing in!";
+        } else if (engagedNormal) {
+            TransferWildPrimary(s, pick);
+        } else {
+            GameState::FlagTarget f; f.zone = 0; f.spotIdx = pick;
+            s.flagTarget = f;
+            s.logLine = "Target: " + kWildernessMonsterSpots[pick].name + count + " — closing in!";
+        }
+        return;
+    }
+    // --- Dungeon ---
+    if (!s.selectedDungeon.has_value()) return;
+    int di = *s.selectedDungeon;
+    const DungeonDef& dungeon = kDungeons[di];
+    bool engaged = s.dungeonEngaged.has_value();
+    if (engaged && s.dungeonEngaged->isBoss) {
+        s.logLine = "You're locked in — finish the boss first!"; // boss duels stay 1v1 (2026-09-25)
+        return;
+    }
+    struct DCand { int monsterIdx; bool isBoss; float d; };
+    std::vector<DCand> cs;
+    Vector2 ppos = s.dungeonPlayerPos;
+    for (int i = 0; i < kDungeonRegularSlots; i++) {
+        if (s.dungeonSpawnRespawn[di][i] > 0.0f) continue;
+        bool isPrimary = engaged && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i;
+        const GameState::ActiveDungeonMonster* ex = FindDungeonExtra(s, i, false);
+        if (engaged && !isPrimary && !ex) continue;
+        Vector2 wp = isPrimary ? s.dungeonEngaged->pos : (ex ? ex->pos : DungeonMonsterLivePos(di, i, s.worldTime));
+        cs.push_back({ i, false, Dist(ppos, wp) });
+    }
+    if (s.dungeonXP[di] >= dungeon.bossUnlockXp && s.dungeonSpawnRespawn[di][kDungeonBossSlot] <= 0.0f) {
+        bool isPrimary = engaged && s.dungeonEngaged->isBoss;
+        const GameState::ActiveDungeonMonster* ex = FindDungeonExtra(s, kDungeonBossSlot, true);
+        if (!engaged || isPrimary || ex) {
+            Vector2 wp = isPrimary ? s.dungeonEngaged->pos
+                : (ex ? ex->pos : DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime));
+            cs.push_back({ kDungeonBossSlot, true, Dist(ppos, wp) });
+        }
+    }
+    if (cs.empty()) { s.logLine = "No quarry in sight."; return; }
+    std::sort(cs.begin(), cs.end(), [](const DCand& a, const DCand& b) { return a.d < b.d; });
+    int cur = -1;
+    if (s.flagTarget.has_value() && s.flagTarget->zone == 1) {
+        const auto& f = *s.flagTarget;
+        for (size_t i = 0; i < cs.size(); i++)
+            if (cs[i].monsterIdx == f.monsterIdx && cs[i].isBoss == f.isBoss) { cur = (int)i; break; }
+    }
+    int next = (cur + 1) % (int)cs.size();
+    std::string count = " (" + std::to_string(next + 1) + "/" + std::to_string(cs.size()) + ")";
+    if (engaged) {
+        TransferDungeonPrimary(s, di, cs[next].monsterIdx, cs[next].isBoss);
     } else {
-        s.logLine = "No quarry in sight.";
+        GameState::FlagTarget f; f.zone = 1; f.monsterIdx = cs[next].monsterIdx; f.isBoss = cs[next].isBoss;
+        s.flagTarget = f;
+        const DungeonMonster& m = cs[next].isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, cs[next].monsterIdx);
+        s.logLine = "Target: " + m.name + count + " — closing in!";
     }
 }
 
 // 3D tap-to-flag: ray-sphere test against the same candidates the 2D click uses.
-static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
-    if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+// Two passes (2026-09-25): the tight 70u sphere first, then a generous 150u
+// assist sphere so near-miss taps still snap to the nearest fightable enemy.
+static bool Wild3DConsiderFlag(GameState& s, const Town3DCam& c, Vector2 m, float sphereR,
+                               GameState::FlagTarget* out) {
     Ray ray = Town3DMouseRay(c, m);
     bool found = false;
     float bestDist = 1e9f;
     GameState::FlagTarget bestF;
     auto consider3D = [&](Vector2 worldPos, GameState::FlagTarget f) {
-        RayCollision hit = GetRayCollisionSphere(ray, { worldPos.x, 40.0f, worldPos.y }, 70.0f);
+        RayCollision hit = GetRayCollisionSphere(ray, { worldPos.x, 40.0f, worldPos.y }, sphereR);
         if (hit.hit && hit.distance < bestDist) { bestDist = hit.distance; bestF = f; found = true; }
     };
     int n = (int)kWildernessMonsterSpots.size();
@@ -12919,51 +13744,177 @@ static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
         if (s.wildSpotRespawn[i] > 0.0f) continue;
         if (s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0 &&
             s.wildEngaged->spotIdx == i) continue;
+        const GameState::ActiveMonster* ex = FindWildExtra(s, i);
         GameState::FlagTarget f; f.zone = 0; f.spotIdx = i;
-        consider3D(WildernessMonsterLivePos(i, s.worldTime), f);
+        consider3D(ex ? ex->pos : WildernessMonsterLivePos(i, s.worldTime), f);
     }
     { GameState::FlagTarget f; f.zone = 0; f.isRival = true; consider3D(s.rivalPos, f); }
     for (int bi = 0; bi < kBladeCount; bi++) {
         GameState::FlagTarget f; f.zone = 0; f.bladeIdx = bi;
         consider3D(s.blades[bi].pos, f);
     }
+    if (found) *out = bestF;
+    return found;
+}
+
+// Screen-space tap assist for the 3D wilderness view (2026-09-25): projects
+// each candidate to screen and snaps a missed tap to the nearest fightable
+// enemy within a resolution-scaled pixel radius — the 3D counterpart of the
+// 2D click assist. Runs after the ray-sphere passes miss.
+static bool Wild3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
+                               float assistPx, GameState::FlagTarget* out) {
+    bool found = false;
+    float best = assistPx;
+    GameState::FlagTarget bestF;
+    auto considerScreen = [&](Vector2 worldPos, GameState::FlagTarget f) {
+        Vector2 sp;
+        if (!Town3DProject(c, { worldPos.x, 40.0f, worldPos.y }, &sp)) return;
+        float d = Dist(sp, m);
+        if (d < best) { best = d; bestF = f; found = true; }
+    };
+    int n = (int)kWildernessMonsterSpots.size();
+    for (int i = 0; i < n; i++) {
+        if (s.wildSpotRespawn[i] > 0.0f) continue;
+        if (s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0 &&
+            s.wildEngaged->spotIdx == i) continue;
+        const GameState::ActiveMonster* ex = FindWildExtra(s, i);
+        GameState::FlagTarget f; f.zone = 0; f.spotIdx = i;
+        considerScreen(ex ? ex->pos : WildernessMonsterLivePos(i, s.worldTime), f);
+    }
+    { GameState::FlagTarget f; f.zone = 0; f.isRival = true; considerScreen(s.rivalPos, f); }
+    for (int bi = 0; bi < kBladeCount; bi++) {
+        GameState::FlagTarget f; f.zone = 0; f.bladeIdx = bi;
+        considerScreen(s.blades[bi].pos, f);
+    }
+    if (found) *out = bestF;
+    return found;
+}
+
+static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
+    if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    // Tapping the target frame cycles targets (2026-09-25).
+    if ((s.flagTarget.has_value() || s.wildEngaged.has_value()) &&
+        CheckCollisionPointRec(m, TargetFrameRect())) {
+        CycleFlagTarget(s);
+        return;
+    }
+    bool duelLocked = s.wildEngaged.has_value() &&
+                      (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0);
+    bool fightingNormal = s.wildEngaged.has_value() && !duelLocked;
+    GameState::FlagTarget f;
+    bool found = false;
+    if (!duelLocked) {
+        // Resolution-scaled screen assist (2026-09-25): 40px at 1080p height.
+        float assistPx = std::max(32.0f, kClickAssistBasePx * (c.vh / 1080.0f));
+        found = Wild3DConsiderFlag(s, c, m, 70.0f, &f) ||
+                Wild3DConsiderFlag(s, c, m, 150.0f, &f) || // assist pass
+                Wild3DScreenAssist(s, c, m, assistPx, &f); // screen-space snap
+    }
     if (found) {
-        s.flagTarget = bestF;
-        s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+        if (fightingNormal && !f.isRival && f.bladeIdx < 0 && f.spotIdx != s.wildEngaged->spotIdx) {
+            TransferWildPrimary(s, f.spotIdx);
+        } else if (fightingNormal && (f.isRival || f.bladeIdx >= 0)) {
+            s.logLine = "You're already in a fight — finish it first!";
+        } else {
+            s.flagTarget = f;
+            s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+        }
     } else if (s.flagTarget.has_value()) {
         s.flagTarget.reset();
     }
 }
 
-static void Dungeon3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
-    if (!s.selectedDungeon.has_value()) return;
-    if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
-    int di = *s.selectedDungeon;
+static bool Dungeon3DConsiderFlag(GameState& s, const Town3DCam& c, Vector2 m, float sphereR,
+                                  int di, GameState::FlagTarget* out) {
     const DungeonDef& dungeon = kDungeons[di];
     Ray ray = Town3DMouseRay(c, m);
     bool found = false;
     float bestDist = 1e9f;
     GameState::FlagTarget bestF;
     auto consider3D = [&](Vector2 worldPos, GameState::FlagTarget f) {
-        RayCollision hit = GetRayCollisionSphere(ray, { worldPos.x, 40.0f, worldPos.y }, 70.0f);
+        RayCollision hit = GetRayCollisionSphere(ray, { worldPos.x, 40.0f, worldPos.y }, sphereR);
         if (hit.hit && hit.distance < bestDist) { bestDist = hit.distance; bestF = f; found = true; }
     };
     for (int i = 0; i < kDungeonRegularSlots; i++) {
         if (s.dungeonSpawnRespawn[di][i] > 0.0f) continue;
-        if (s.dungeonEngaged.has_value() && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
+        // Boss fights are 1v1 (like Rival/blade duels): no tapping away mid-fight (2026-09-25).
+        if (s.dungeonEngaged.has_value() &&
+            (s.dungeonEngaged->isBoss || s.dungeonEngaged->monsterIdx == i)) continue;
+        const GameState::ActiveDungeonMonster* ex = FindDungeonExtra(s, i, false);
         GameState::FlagTarget f; f.zone = 1; f.monsterIdx = i;
-        consider3D(DungeonMonsterLivePos(di, i, s.worldTime), f);
+        consider3D(ex ? ex->pos : DungeonMonsterLivePos(di, i, s.worldTime), f);
     }
     if (s.dungeonXP[di] >= dungeon.bossUnlockXp && s.dungeonSpawnRespawn[di][kDungeonBossSlot] <= 0.0f) {
         bool fightingBoss = s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss;
         if (!fightingBoss) {
+            const GameState::ActiveDungeonMonster* ex = FindDungeonExtra(s, kDungeonBossSlot, true);
             GameState::FlagTarget f; f.zone = 1; f.monsterIdx = kDungeonBossSlot; f.isBoss = true;
-            consider3D(DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime), f);
+            consider3D(ex ? ex->pos : DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime), f);
         }
     }
+    if (found) *out = bestF;
+    return found;
+}
+
+// Screen-space tap assist for the 3D dungeon view (2026-09-25): same
+// resolution-scaled snap as the wilderness version. Boss fights stay 1v1.
+static bool Dungeon3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
+                                  float assistPx, int di, GameState::FlagTarget* out) {
+    const DungeonDef& dungeon = kDungeons[di];
+    bool found = false;
+    float best = assistPx;
+    GameState::FlagTarget bestF;
+    auto considerScreen = [&](Vector2 worldPos, GameState::FlagTarget f) {
+        Vector2 sp;
+        if (!Town3DProject(c, { worldPos.x, 40.0f, worldPos.y }, &sp)) return;
+        float d = Dist(sp, m);
+        if (d < best) { best = d; bestF = f; found = true; }
+    };
+    for (int i = 0; i < kDungeonRegularSlots; i++) {
+        if (s.dungeonSpawnRespawn[di][i] > 0.0f) continue;
+        if (s.dungeonEngaged.has_value() &&
+            (s.dungeonEngaged->isBoss || s.dungeonEngaged->monsterIdx == i)) continue;
+        const GameState::ActiveDungeonMonster* ex = FindDungeonExtra(s, i, false);
+        GameState::FlagTarget f; f.zone = 1; f.monsterIdx = i;
+        considerScreen(ex ? ex->pos : DungeonMonsterLivePos(di, i, s.worldTime), f);
+    }
+    if (s.dungeonXP[di] >= dungeon.bossUnlockXp && s.dungeonSpawnRespawn[di][kDungeonBossSlot] <= 0.0f) {
+        bool fightingBoss = s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss;
+        if (!fightingBoss) {
+            const GameState::ActiveDungeonMonster* ex = FindDungeonExtra(s, kDungeonBossSlot, true);
+            GameState::FlagTarget f; f.zone = 1; f.monsterIdx = kDungeonBossSlot; f.isBoss = true;
+            considerScreen(ex ? ex->pos : DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime), f);
+        }
+    }
+    if (found) *out = bestF;
+    return found;
+}
+
+static void Dungeon3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
+    if (!s.selectedDungeon.has_value()) return;
+    if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    int di = *s.selectedDungeon;
+    // Tapping the target frame cycles targets (2026-09-25).
+    if ((s.flagTarget.has_value() || s.dungeonEngaged.has_value()) &&
+        CheckCollisionPointRec(m, TargetFrameRect())) {
+        CycleFlagTarget(s);
+        return;
+    }
+    GameState::FlagTarget f;
+    // Two passes (2026-09-25): the tight 70u sphere first, then a generous 150u
+    // assist sphere so near-miss taps still snap to the nearest fightable enemy.
+    // Final fallback: resolution-scaled screen-space snap (40px at 1080p).
+    float assistPx = std::max(32.0f, kClickAssistBasePx * (c.vh / 1080.0f));
+    bool found = Dungeon3DConsiderFlag(s, c, m, 70.0f, di, &f) ||
+                 Dungeon3DConsiderFlag(s, c, m, 150.0f, di, &f) ||
+                 Dungeon3DScreenAssist(s, c, m, assistPx, di, &f);
     if (found) {
-        s.flagTarget = bestF;
-        s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+        if (s.dungeonEngaged.has_value()) {
+            TransferDungeonPrimary(s, di, f.monsterIdx, f.isBoss);
+        } else {
+            s.flagTarget = f;
+            s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " — closing in!";
+        }
     } else if (s.flagTarget.has_value()) {
         s.flagTarget.reset();
     }
@@ -12993,13 +13944,73 @@ static void DrawFlagMarker3D(const GameState& s, int zone) {
 }
 
 // Small "Target: X" label while steering (the engaged HP bar names it in a fight).
-static void DrawFlagLabel(const GameState& s, int zone) {
-    if (!s.flagTarget.has_value() || s.flagTarget->zone != zone) return;
-    if (zone == 0 ? s.wildEngaged.has_value() : s.dungeonEngaged.has_value()) return;
-    Vector2 tgt;
-    if (!FlagTargetLivePos(s, &tgt)) return;
-    std::string label = "Target: " + FlagTargetName(s);
-    DrawUIText(label.c_str(), 20, 220, 13, Color{ 200, 60, 60, 255 });
+// Target frame (2026-09-25): persistent name + HP readout for the current
+// target (tap the frame, press G, or hit the TARGET touch button to cycle).
+// The frame shows for both the steering and engaged phases.
+struct FlagTargetInfo { std::string name; float hp; float maxHp; bool hpKnown; };
+static FlagTargetInfo GetFlagTargetInfo(const GameState& s, int zone) {
+    if (zone == 0) {
+        if (s.wildEngaged.has_value()) {
+            const auto& am = *s.wildEngaged;
+            return { FlagTargetName(s), am.hp, am.maxHp, true };
+        }
+        if (s.flagTarget.has_value() && s.flagTarget->zone == 0) {
+            const auto& f = *s.flagTarget;
+            if (!f.isRival && f.bladeIdx < 0 && f.spotIdx >= 0 && f.spotIdx < (int)kWildernessMonsterSpots.size()) {
+                const auto& spot = kWildernessMonsterSpots[f.spotIdx];
+                if (const auto* ex = FindWildExtra(s, f.spotIdx))
+                    return { spot.name, ex->hp, ex->maxHp, true };
+                float full = std::max(1.0f, spot.level * 3.0f);
+                return { spot.name, full, full, true };
+            }
+            return { FlagTargetName(s), 1.0f, 1.0f, false };
+        }
+    } else if (s.selectedDungeon.has_value()) {
+        int di = *s.selectedDungeon;
+        const DungeonDef& dungeon = kDungeons[di];
+        if (s.dungeonEngaged.has_value()) {
+            const auto& am = *s.dungeonEngaged;
+            return { FlagTargetName(s), am.hp, am.maxHp, true };
+        }
+        if (s.flagTarget.has_value() && s.flagTarget->zone == 1) {
+            const auto& f = *s.flagTarget;
+            if (!f.isBoss && (f.monsterIdx < 0 || f.monsterIdx >= kDungeonRegularSlots))
+                return { "—", 1.0f, 1.0f, false };
+            const DungeonMonster& m = f.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, f.monsterIdx);
+            if (const auto* ex = FindDungeonExtra(s, f.monsterIdx, f.isBoss))
+                return { m.name, ex->hp, ex->maxHp, true };
+            float full = std::max(1.0f, m.level * 3.0f);
+            return { m.name, full, full, true };
+        }
+    }
+    return { "—", 1.0f, 1.0f, false };
+}
+
+static void DrawTargetFrame(const GameState& s, int zone) {
+    bool show = s.flagTarget.has_value() && s.flagTarget->zone == zone;
+    if (zone == 0) show = show || s.wildEngaged.has_value();
+    else show = show || s.dungeonEngaged.has_value();
+    if (!show) return;
+    FlagTargetInfo ti = GetFlagTargetInfo(s, zone);
+    Rectangle fr = TargetFrameRect();
+    DrawRectangleRec(fr, Fade(BLACK, 0.55f));
+    DrawRectangleLinesEx(fr, 1.5f, Fade(Color{ 200, 60, 60, 255 }, 0.9f));
+    DrawUIText("TARGET", (int)fr.x + 8, (int)fr.y + 5, 11, Color{ 200, 140, 120, 255 });
+    DrawUIText(ti.name.c_str(), (int)fr.x + 8, (int)fr.y + 19, 13, kColorText);
+    Rectangle bg = { fr.x + 8, fr.y + 38, 150, 10 };
+    DrawRectangleRec(bg, Fade(BLACK, 0.45f));
+    float pct = ti.maxHp > 0.0f ? std::clamp(ti.hp / ti.maxHp, 0.0f, 1.0f) : 0.0f;
+    DrawRectangleRec({ bg.x, bg.y, bg.width * pct, bg.height }, Color{ 150, 50, 50, 255 });
+    DrawRectangleLinesEx(bg, 1.0f, Fade(RAYWHITE, 0.5f));
+    DrawUIText(ti.hpKnown ? TextFormat("%.0f / %.0f", ti.hp, ti.maxHp) : "???",
+               (int)(bg.x + bg.width + 8), (int)bg.y - 1, 12, kColorText);
+}
+
+// Thumb-friendly TARGET button: the touch equivalent of G, parked above the
+// interact button. Only visible once touch input has been seen.
+static bool DrawTargetButton() {
+    if (!g_touchSeen) return false;
+    return Button(TargetButtonRect(), "TARGET", true);
 }
 
 // --- Spell FX drawing ---
@@ -13295,7 +14306,226 @@ static float MonsterCombatPhase3D(float monsterAttackT) {
     return monsterAttackT >= 0.0f ? 1.0f - monsterAttackT / kCombatLungeTime : -1.0f;
 }
 
+// ---------------------------------------------------------------------------
+// Custom wilderness housing — interactions, designer, and rendering (2026-09-25).
+// ---------------------------------------------------------------------------
+// GameState overload (forward declaration was next to the plot table).
+static Vector2 HousePlotInteractPos(const GameState& s, int plotIdx) {
+    return HousePlotInteractPos(s.housePlotIdx, s.houseLayout, plotIdx);
+}
+
+static void TryBuyHousePlot(GameState& s, int plotIdx) {
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
+    if (s.housePlotIdx >= 0) {
+        s.logLine = "You already own a plot — one homestead per adventurer.";
+        return;
+    }
+    if (plotIdx < 0 || plotIdx >= (int)kHousePlots.size()) return;
+    const HousePlot& p = kHousePlots[plotIdx];
+    if (s.gold < p.price) {
+        s.logLine = "The " + std::string(p.name) + " costs " + std::to_string(p.price) + "g.";
+        return;
+    }
+    s.gold -= p.price;
+    s.housePlotIdx = plotIdx;
+    s.houseLayout = HouseEmptyLayout(p.cells);
+    s.hearthBound = false;
+    s.houseDemolishArmed = false;
+    PlaySfx(SfxId::Coin);
+    s.logLine = "You buy the " + std::string(p.name) + "! Press E here to design your house.";
+}
+
+static void TryEnterHomestead(GameState& s) {
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
+    EnterInterior(s, "wildhouse");
+}
+
+static int HouseDesignerToolCost(int tool) {
+    if (tool == 0) return kHouseFloorCost;
+    if (tool == 1) return kHouseWallCost;
+    if (tool == 2) return kHouseDoorCost;
+    return 0;
+}
+static const char* HouseDesignerToolName(int tool) {
+    if (tool == 0) return "Floor";
+    if (tool == 1) return "Wall";
+    if (tool == 2) return "Door";
+    return "Erase";
+}
+
+// Touch-friendly grid editor overlay. Drawn instead of the world while open.
+static void DrawHouseDesigner(GameState& s, int screenW, int screenH) {
+    if (s.housePlotIdx < 0 || s.housePlotIdx >= (int)kHousePlots.size()) {
+        s.houseDesignerOpen = false;
+        return;
+    }
+    const HousePlot& p = kHousePlots[s.housePlotIdx];
+    int cells = p.cells;
+    if (!HouseLayoutValid(s.houseLayout, cells)) s.houseLayout = HouseEmptyLayout(cells);
+
+    if (IsKeyPressed(KEY_ESCAPE)) { s.houseDesignerOpen = false; s.houseDemolishArmed = false; return; }
+    for (int t = 0; t < 4; t++)
+        if (IsKeyPressed(KEY_ONE + t)) { s.houseDesignerTool = t; PlaySfx(SfxId::Click); }
+
+    DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, 0.65f));
+    DrawUIText(("House Designer — " + std::string(p.name)).c_str(), 20, 116, 16, kColorHeading);
+    DrawUIText(("Gold: " + std::to_string(s.gold) + "g").c_str(), 20, 140, 14, kColorText);
+    DrawUIText("Tap a tile to place it. Keys 1-4 pick a tool.", 20, 162, 12, kColorText);
+    DrawUIText("Place a Door so you can walk in. One door per house —", 20, 178, 12, kColorText);
+    DrawUIText("placing a new one moves it. Erasing gives no refund.", 20, 194, 12, kColorText);
+
+    // Tool palette — horizontal row above the grid (540x900 portrait screen).
+    float bw = 118.0f, bh = 34.0f;
+    float bx = (screenW - (4 * bw + 3 * 8.0f)) / 2.0f;
+    for (int t = 0; t < 4; t++) {
+        std::string label = std::string(HouseDesignerToolName(t));
+        int cost = HouseDesignerToolCost(t);
+        if (cost > 0) label += " " + std::to_string(cost) + "g";
+        Rectangle br = { bx + t * (bw + 8.0f), 216.0f, bw, bh };
+        if (Button(br, label, true)) s.houseDesignerTool = t;
+        if (s.houseDesignerTool == t)
+            DrawRectangleRoundedLines({ br.x - 3, br.y - 3, br.width + 6, br.height + 6 }, 0.25f, 6, GOLD);
+    }
+
+    float cellPx = std::min(38.0f, 460.0f / cells);
+    float gw = cells * cellPx, gh = cells * cellPx;
+    float gx = (screenW - gw) / 2.0f;
+    float gy = 262.0f;
+
+    // Grid.
+    Vector2 m = GetMousePosition();
+    bool clicked = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    for (int cy = 0; cy < cells; cy++) {
+        for (int cx = 0; cx < cells; cx++) {
+            Rectangle r = { gx + cx * cellPx, gy + cy * cellPx, cellPx, cellPx };
+            char c = HouseCellAt(s.houseLayout, cells, cx, cy);
+            Color fill = { 40, 36, 30, 255 };
+            if (c == 'F') fill = { 150, 110, 70, 255 };
+            else if (c == 'W') fill = { 96, 70, 45, 255 };
+            else if (c == 'D') fill = { 200, 170, 90, 255 };
+            DrawRectangleRec(r, fill);
+            DrawRectangleLinesEx(r, 1.0f, Fade(BLACK, 0.5f));
+            if (CheckCollisionPointRec(m, r)) {
+                DrawRectangleLinesEx(r, 2.0f, GOLD);
+                if (clicked) {
+                    int tool = s.houseDesignerTool;
+                    if (tool == 3) { // erase — no refund (noted in the House tab)
+                        if (c != '.') { HouseSetCell(s.houseLayout, cells, cx, cy, '.'); PlaySfx(SfxId::Click); }
+                    } else if (tool == 2) { // door — exactly one; the old one becomes wall
+                        if (c != 'D') {
+                            if (s.gold < kHouseDoorCost) s.logLine = "A door costs 50g.";
+                            else {
+                                for (size_t i = 0; i < s.houseLayout.size(); i++)
+                                    if (s.houseLayout[i] == 'D') s.houseLayout[i] = 'W';
+                                HouseSetCell(s.houseLayout, cells, cx, cy, 'D');
+                                s.gold -= kHouseDoorCost;
+                                PlaySfx(SfxId::Door);
+                            }
+                        }
+                    } else {
+                        char want = (tool == 0) ? 'F' : 'W';
+                        int cost = HouseDesignerToolCost(tool);
+                        if (c == want || c == 'D') { /* no-op */ }
+                        else if (s.gold < cost) s.logLine = "Not enough gold.";
+                        else {
+                            HouseSetCell(s.houseLayout, cells, cx, cy, want);
+                            s.gold -= cost;
+                            PlaySfx(SfxId::Click);
+                        }
+                    }
+                    s.houseDemolishArmed = false;
+                }
+            }
+        }
+    }
+
+    // Done / Demolish.
+    float by = gy + gh + 14.0f;
+    float btnX = (screenW - 352.0f) / 2.0f;
+    if (Button({ btnX, by, 150.0f, 38.0f }, "Done [ESC]", true)) {
+        s.houseDesignerOpen = false;
+        s.houseDemolishArmed = false;
+        if (!HouseHasDoor(s.houseLayout, cells))
+            s.logLine = "House saved. Place a Door so you can walk inside.";
+        else
+            s.logLine = "House saved. Walk up to the door and press E to go inside.";
+    }
+    std::string demLabel = s.houseDemolishArmed ? "Tap again to confirm" : "Demolish";
+    if (Button({ btnX + 162.0f, by, 190.0f, 38.0f }, demLabel, true)) {
+        if (!s.houseDemolishArmed) {
+            s.houseDemolishArmed = true;
+            s.logLine = "Demolish clears your whole design (no refund). Tap again to confirm.";
+        } else {
+            s.houseLayout = HouseEmptyLayout(cells);
+            s.houseDemolishArmed = false;
+            PlaySfx(SfxId::Click);
+            s.logLine = "House demolished. The plot is still yours.";
+        }
+    }
+}
+
+// 2D wilderness rendering of plots and custom houses.
+static void DrawWildernessHousePlots2D(const GameState& s, Vector2 camera, bool plotIsNearest, int nearestPlot) {
+    for (size_t pi = 0; pi < kHousePlots.size(); pi++) {
+        const HousePlot& hp = kHousePlots[pi];
+        bool owned = (int)pi == s.housePlotIdx;
+        Vector2 sp = WorldToScreen(hp.pos, camera);
+        if (!owned) {
+            // For-sale sign: post + board + price label.
+            DrawRectangle((int)sp.x - 3, (int)sp.y - 34, 6, 34, Color{ 110, 80, 50, 255 });
+            DrawRectangle((int)sp.x - 34, (int)sp.y - 62, 68, 30, Color{ 150, 115, 70, 255 });
+            DrawRectangleLines((int)sp.x - 34, (int)sp.y - 62, 68, 30, Color{ 90, 65, 40, 255 });
+            std::string price = std::to_string(hp.price) + "g";
+            int tw = MeasureUIText(price.c_str(), 12);
+            DrawUIText(price.c_str(), (int)sp.x - tw / 2, (int)sp.y - 56, 12, kColorText);
+            int nw = MeasureUIText("For Sale", 12);
+            DrawUIText("For Sale", (int)sp.x - nw / 2, (int)sp.y - 84, 12, GOLD);
+            if (plotIsNearest && nearestPlot == (int)pi)
+                DrawCircleLines((int)sp.x, (int)sp.y, kNodeRadius, GOLD);
+            continue;
+        }
+        int cells = hp.cells;
+        if (!HouseLayoutValid(s.houseLayout, cells)) continue;
+        // Plot boundary (subtle).
+        Rectangle wb = HousePlotBounds(hp);
+        Vector2 s0 = WorldToScreen({ wb.x, wb.y }, camera);
+        Vector2 s1 = WorldToScreen({ wb.x + wb.width, wb.y + wb.height }, camera);
+        DrawRectangleLines((int)s0.x, (int)s0.y, (int)(s1.x - s0.x), (int)(s1.y - s0.y), Fade(GOLD, 0.35f));
+        for (int cy = 0; cy < cells; cy++) {
+            for (int cx = 0; cx < cells; cx++) {
+                char c = HouseCellAt(s.houseLayout, cells, cx, cy);
+                if (c == '.') continue;
+                Vector2 cc = HouseCellCenter(hp, cx, cy);
+                Vector2 cp = WorldToScreen(cc, camera);
+                float cs = kHouseCellSize; // 2D wilderness is 1:1 world->screen (no zoom)
+                Rectangle r = { cp.x - cs / 2, cp.y - cs / 2, cs, cs };
+                if (c == 'F') DrawRectangleRec(r, Color{ 150, 110, 70, 255 });
+                else if (c == 'W') {
+                    DrawRectangleRec(r, Color{ 150, 110, 70, 255 });
+                    DrawRectangleRec({ r.x + cs * 0.12f, r.y + cs * 0.12f, cs * 0.76f, cs * 0.76f },
+                                     Color{ 96, 70, 45, 255 });
+                } else if (c == 'D') {
+                    DrawRectangleRec(r, Color{ 150, 110, 70, 255 });
+                    DrawRectangleRec({ r.x + cs * 0.12f, r.y + cs * 0.12f, cs * 0.76f, cs * 0.76f },
+                                     Color{ 200, 170, 90, 255 });
+                }
+            }
+        }
+        if (plotIsNearest && nearestPlot == (int)pi) {
+            Vector2 dp = WorldToScreen(HousePlotInteractPos(s, (int)pi), camera);
+            DrawCircleLines((int)dp.x, (int)dp.y, kInteractRange, GOLD);
+        }
+        // House name label.
+        std::string hn = s.houseName.empty() ? "Homestead" : s.houseName;
+        int hw = MeasureUIText(hn.c_str(), 13);
+        DrawUIText(hn.c_str(), (int)sp.x - hw / 2, (int)s0.y - 22, 13, kColorHeading);
+    }
+}
+
 static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
+    // House designer overlay takes over the whole screen while open.
+    if (s.houseDesignerOpen) { DrawHouseDesigner(s, screenW, screenH); return; }
+    if (GetTouchPointCount() > 0) g_touchSeen = true; // latch: TARGET button appears on touch devices
     DrawUIText("The Wilderness — gather wood/ore or tame a creature. Watch for trouble.", 20, 112, 13, kColorAccent);
 
     UpdateRivalRoaming(s, GetFrameTime()); // before the nearest-search below, so rivalPos is current this frame
@@ -13305,7 +14535,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // --- Nearest interactable: gather nodes, creature spots, monster spots, and the
     // return gate all compete in one search, same pattern as the Wilderness Gate vs.
     // buildings in Town.
-    enum class WildNodeKind { Gather, Creature, Monster, Rival, Blade, Innocent, ReturnGate, DungeonEntrance, Town2Gate };
+    enum class WildNodeKind { Gather, Creature, Monster, Rival, Blade, Innocent, ReturnGate, DungeonEntrance, Town2Gate, HousePlot };
     WildNodeKind nearestKind = WildNodeKind::ReturnGate;
     int nearestIdx = -1;
     float nearestDist = 1e9f;
@@ -13359,6 +14589,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // the Town 1 area, same pattern as kWildernessDungeonEntrances.
         float d = Dist(s.wildernessPlayerPos, kWildernessTown2GatePos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Town2Gate; nearestIdx = -1; }
+    }
+    for (size_t pi = 0; pi < kHousePlots.size(); pi++) {
+        // Housing plots (2026-09-25) — the owned plot's interact point is its door
+        // once one is placed, so E walks you to the entrance, not the plot middle.
+        float d = Dist(s.wildernessPlayerPos, HousePlotInteractPos(s, (int)pi));
+        if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::HousePlot; nearestIdx = (int)pi; }
     }
     bool inRange = nearestDist < kNodeRadius + kInteractRange;
 
@@ -13488,6 +14724,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (Dist(am.pos, s.wildernessPlayerPos) > kWildDisengageRange) {
             s.logLine = "The " + spot.name + " loses interest.";
             s.wildEngaged.reset();
+            s.wildExtraAttackers.clear(); // the pack gives up too
             ClearFlagTarget(s); // the fight's over — drop the marker too
             return;
         }
@@ -13532,6 +14769,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             ResolvePetTurnLive(s, am.hp, level);
             if (am.hp < hpBefore) am.monsterHurtT = 0.0f; // pet hits flash the monster too (2026-09-24)
             if (am.hp <= 0) { BeginWildMonsterDeath(s, am, mname, mgold, mleather); return; }
+            else if (am.hp < hpBefore) WildPackAggro(s, am.spotIdx, am.pos); // the pet's damage pulls the pack in too (2026-09-25)
         }
     };
     // The tactical opponent's own AI (2026-09-22, "AI players" plan Part 3) — confirmed
@@ -13682,6 +14920,82 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             }
         }
     };
+    // Pack attackers (2026-09-25, multi-enemy combat): extra monsters chase and
+    // melee the player alongside the primary, with the same chase/leash rules.
+    // At most kMaxMeleeAttackers (primary + extras) swing at once — extras beyond
+    // the cap crowd around and wait for an opening.
+    auto updateWildExtraAttackers = [&]() {
+        if (s.wildExtraAttackers.empty()) return;
+        if (!s.wildEngaged.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
+            s.wildExtraAttackers.clear(); // no fight (or death) — the pack melts back to ambient
+            return;
+        }
+        if (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0) return; // duels stay 1v1
+        float dtF = GetFrameTime();
+        for (size_t i = 0; i < s.wildExtraAttackers.size(); ) {
+            GameState::ActiveMonster& ex = s.wildExtraAttackers[i];
+            const WildernessMonsterSpot& spot = kWildernessMonsterSpots[ex.spotIdx];
+            float distNow = Dist(ex.pos, s.wildernessPlayerPos);
+            if (distNow > kWildMeleeRange) {
+                Vector2 dir = { s.wildernessPlayerPos.x - ex.pos.x, s.wildernessPlayerPos.y - ex.pos.y };
+                float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+                if (len > 0.0001f) {
+                    dir.x /= len; dir.y /= len;
+                    Vector2 newPos = { ex.pos.x + dir.x * kWildMonsterChaseSpeed * dtF,
+                                       ex.pos.y + dir.y * kWildMonsterChaseSpeed * dtF };
+                    float fsx = newPos.x - ex.spawnPos.x, fsy = newPos.y - ex.spawnPos.y;
+                    float fsLen = std::sqrt(fsx * fsx + fsy * fsy);
+                    if (fsLen > kWildMonsterLeashRange) {
+                        newPos.x = ex.spawnPos.x + fsx / fsLen * kWildMonsterLeashRange;
+                        newPos.y = ex.spawnPos.y + fsy / fsLen * kWildMonsterLeashRange;
+                    }
+                    ex.pos = newPos;
+                }
+            }
+            if (Dist(ex.pos, s.wildernessPlayerPos) > kWildDisengageRange) {
+                s.wildExtraAttackers.erase(s.wildExtraAttackers.begin() + i);
+                continue; // loses interest, melts back to ambient
+            }
+            if (ex.monsterAttackCooldown > 0) ex.monsterAttackCooldown -= dtF;
+            if (ex.monsterHurtT >= 0.0f) {
+                ex.monsterHurtT += dtF;
+                if (ex.monsterHurtT > 0.30f) ex.monsterHurtT = -1.0f;
+            }
+            bool inMelee = Dist(ex.pos, s.wildernessPlayerPos) < kWildMeleeRange;
+            if (inMelee && ex.monsterAttackCooldown <= 0) {
+                // Nearest-rank selection: the primary plus the closest extras fill
+                // the kMaxMeleeAttackers slots; extras beyond the cap crowd and
+                // wait for an opening. (Counting "everyone else in melee" would
+                // park ALL extras once 5+ crowd in — 2026-09-25 fix.)
+                float myD = Dist(ex.pos, s.wildernessPlayerPos);
+                int rank = 0;
+                if (s.wildEngaged.has_value() &&
+                    Dist(s.wildEngaged->pos, s.wildernessPlayerPos) < kWildMeleeRange) rank++;
+                for (const auto& o : s.wildExtraAttackers)
+                    if (&o != &ex && Dist(o.pos, s.wildernessPlayerPos) < kWildMeleeRange &&
+                        Dist(o.pos, s.wildernessPlayerPos) < myD) rank++;
+                if (rank < kMaxMeleeAttackers) {
+                    ex.monsterAttackCooldown = kWildMonsterAttackCooldown * (ex.debuffKind == 3 ? 1.5f : 1.0f);
+                    float hitCh = MonsterHitChance(s) - (ex.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
+                    if (RandUnit() * 100.0f < hitCh) {
+                        float raw = spot.level * (0.8f + RandUnit() * 0.6f);
+                        if (ex.debuffKind == 1) raw *= 0.7f; // Sap Strength
+                        int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
+                        s.hp -= dmg;
+                        s.playerHurtT = 0.0f; // hit-flash + knockback
+                        PlaySfx(SfxId::Hurt);
+                        s.logLine = "The " + spot.name + " hits you for " + std::to_string(dmg) + " damage";
+                    } else {
+                        s.logLine = "The " + spot.name + " misses";
+                    }
+                    if (s.hp <= 0) { EndWildMonsterLoss(s, spot.name); return; }
+                }
+                // else: crowded out — waits for an opening
+            }
+            ResolveCircleCollision(ex.pos, kNodeRadius * 0.6f, s.wildernessPlayerPos, kPlayerRadius);
+            i++;
+        }
+    };
     // Action (not automatic AI) — the player's own swing, rate-limited by its own
     // cooldown. Called from both the keyboard (KEY_E) and touch (DrawInteractButton)
     // paths below, same dual-input pattern tryInteract() uses elsewhere on this screen.
@@ -13707,6 +15021,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             am.monsterHurtT = 0.0f; // hit-flash on the monster
             PlaySfx(SfxId::Hit);
             s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage";
+            bool swingWasDuel = am.isRival || am.bladeIdx >= 0; // captured before BeginWildMonsterDeath resets the optional
+            if (am.hp > 0 && !swingWasDuel)
+                WildPackAggro(s, am.spotIdx, am.pos); // damaging a normal monster pulls its pack in (2026-09-25)
             if (am.hp <= 0) {
                 if (am.isRival) {
                     bool wasMurdererTier = s.rivalHasBeatenPlayer;
@@ -13719,6 +15036,38 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 } else {
                     BeginWildMonsterDeath(s, am, mname, mgold, mleather);
                 }
+            }
+            // Cleave (2026-09-25, multi-enemy combat): a landed swing also strikes
+            // every pack attacker inside the same melee range + swing arc — each
+            // victim keeps its own hit-chance and damage roll, and deaths queue
+            // independently. Rival/blade duels never cleave (1v1 stays 1v1).
+            if (!swingWasDuel && !s.wildExtraAttackers.empty()) {
+                int cleaveCount = 0;
+                for (size_t ei = 0; ei < s.wildExtraAttackers.size(); ) {
+                    GameState::ActiveMonster& ex = s.wildExtraAttackers[ei];
+                    const WildernessMonsterSpot& exSpot = kWildernessMonsterSpots[ex.spotIdx];
+                    bool inArc = Dist(ex.pos, s.wildernessPlayerPos) < kWildMeleeRange &&
+                                 InSwingArc(s.wildernessPlayerPos, s.playerFacing, ex.pos);
+                    if (!inArc) { ei++; continue; }
+                    float exHitChance = std::clamp(50.0f + (power - exSpot.level) * 4.0f + weaponSkillBonus,
+                                                   5.0f, 95.0f);
+                    if (RandUnit() * 100.0f < exHitChance) {
+                        int exDmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
+                        if (s.vigorT > 0.0f) exDmg = std::max(1, (int)std::round(exDmg * 1.25f));
+                        ex.hp -= exDmg;
+                        ex.monsterHurtT = 0.0f;
+                        cleaveCount++;
+                        if (ex.hp <= 0) {
+                            BeginWildExtraDeath(s, ex);
+                            s.wildExtraAttackers.erase(s.wildExtraAttackers.begin() + ei);
+                            continue; // erased — don't advance ei
+                        }
+                    }
+                    ei++;
+                }
+                if (cleaveCount > 0)
+                    s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage — your swing cleaves " +
+                                std::to_string(cleaveCount) + (cleaveCount == 1 ? " foe!" : " foes!");
             }
         } else {
             s.logLine = "Your attack misses";
@@ -13766,6 +15115,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         s.hunt3DView = s.wild3DView; // entering from the 3D wilderness stays 3D (view state only)
         // Zone change — the flag and in-flight spells don't cross over.
         s.flagTarget.reset();
+        s.wildEngaged.reset();           // the wilderness fight doesn't follow you in
+        s.wildExtraAttackers.clear();    // the pack melts back to ambient (2026-09-25)
+        s.dungeonExtraAttackers.clear(); // fresh dungeon, no pack yet
         for (auto& p : s.spellProjectiles) p.active = false;
         for (auto& im : s.spellImpacts) im.active = false;
         s.fiendT = 0.0f;
@@ -13786,6 +15138,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             s.screen = Screen::Town;
             s.townPlayerPos = { 450, 830 }; // same relative spawn every town uses, just south of its own gate
             if (s.wild3DView) s.town3DView = true; // stay in 3D across the gate (view state only)
+        }
+        else if (nearestKind == WildNodeKind::HousePlot) {
+            int pi = nearestIdx;
+            if (pi == s.housePlotIdx) {
+                if (HouseHasDoor(s.houseLayout, kHousePlots[pi].cells)) TryEnterHomestead(s);
+                else { s.houseDesignerOpen = true; s.houseDemolishArmed = false; PlaySfx(SfxId::Click); }
+            } else TryBuyHousePlot(s, pi);
         }
         else {
             CancelEscort(s, "parts ways at the gate — the escort is broken.");
@@ -13817,6 +15176,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         else if (nearestKind == WildNodeKind::DungeonEntrance)
             prompt = "[E] Enter " + kDungeons[kWildernessDungeonEntrances[nearestIdx].dungeonIdx].name;
         else if (nearestKind == WildNodeKind::Town2Gate) prompt = "[E] Enter " + std::string(kTown2Name);
+        else if (nearestKind == WildNodeKind::HousePlot)
+            prompt = "[E] " + HousePlotPrompt(s.housePlotIdx, s.houseLayout, nearestIdx);
         else prompt = "[E] Return to Town";
     }
     // Ghosts and the dying get no prompts — they can't touch anything.
@@ -13842,17 +15203,31 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // on contact — bumping into one starts the fight, no E press required (walking
         // up and pressing E while in range still works too, via tryInteract).
         if (s.wildSpotRespawn[i] > 0.0f) continue; // empty — waiting to respawn
-        if (wasEngaged && s.wildEngaged->spotIdx == (int)i) continue;
+        // Live check, not wasEngaged: a projectile/fiend kill inside
+        // UpdateLiveSpellFX above can reset or promote the engagement mid-frame (2026-09-25).
+        if (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == (int)i) continue;
         Vector2 livePos = WildernessMonsterLivePos((int)i, s.worldTime);
         if (!s.wildEngaged.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
             Dist(s.wildernessPlayerPos, livePos) < kPlayerRadius + kNodeRadius * 0.7f)
             tryEngageWildMonster((int)i);
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, livePos, kNodeRadius * 0.7f);
     }
-    if (wasEngaged)
+    // Live check, not wasEngaged — see the comment in the monster loop above (2026-09-25).
+    if (s.wildEngaged.has_value())
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, s.wildEngaged->pos, kNodeRadius * 0.6f);
     for (auto& entrance : kWildernessDungeonEntrances)
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, entrance.pos, kNodeRadius * 0.8f);
+    // Custom house walls block movement (2026-09-25) — floors and the door are walkable.
+    if (s.housePlotIdx >= 0 && s.housePlotIdx < (int)kHousePlots.size()) {
+        const HousePlot& hp = kHousePlots[s.housePlotIdx];
+        if (HouseLayoutValid(s.houseLayout, hp.cells)) {
+            for (int cy = 0; cy < hp.cells; cy++)
+                for (int cx = 0; cx < hp.cells; cx++)
+                    if (HouseCellAt(s.houseLayout, hp.cells, cx, cy) == 'W')
+                        ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius,
+                                               HouseCellCenter(hp, cx, cy), kHouseCellSize * 0.45f);
+        }
+    }
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessReturnGatePos, kNodeRadius);
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown2GatePos, kNodeRadius);
     s.wildernessPlayerPos = ClampToWorld(s.wildernessPlayerPos, kPlayerEdgeMargin, kWildernessWorldSize);
@@ -13865,6 +15240,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         updateTacticalOpponentAI();
     else
         updateEngagedMonsterAI();
+    updateWildExtraAttackers(); // pack members chase/crowd/attack alongside the primary
     // Auto-continuous melee: fires on its own cooldown every frame once engaged and in
     // range, no button press needed — mirrors updateEngagedMonsterAI's unconditional
     // per-frame check for the monster's own attack. trySwingAtEngagedMonster already
@@ -13875,9 +15251,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     } else if (inRange && IsKeyPressed(KEY_E)) {
         tryInteract();
     }
-    // Dedicated attack-flag key (2026-09-24): G flags the nearest fightable
-    // monster; the player auto-approaches and the fight starts on contact.
-    if (IsKeyPressed(KEY_G)) FlagNearestEnemy(s);
+    // Target-switch key (2026-09-25): G cycles fightable enemies by distance
+    // (nearest first, wraps); mid-fight it transfers the primary engagement.
+    if (IsKeyPressed(KEY_G)) CycleFlagTarget(s);
 
     // 3D wilderness view (2026-09-24, Phase 1): when wild3DView is on, the whole
     // 2D world block below is skipped and DrawWilderness3DWorld renders the 3D
@@ -13907,6 +15283,11 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             screenPos.y < kViewport.y - 30 || screenPos.y > kViewport.y + kViewport.height + 30) continue;
         DrawIconCentered(*icon, screenPos, 34.0f, WHITE);
     }
+
+    // Housing plots (2026-09-25) — for-sale signs on unowned plots, custom houses
+    // on owned ones. Drawn after foliage so houses layer on top of it.
+    DrawWildernessHousePlots2D(s, camera,
+        inRange && nearestKind == WildNodeKind::HousePlot, nearestIdx);
 
     int oreSeen = 0;
     for (size_t i = 0; i < kWildernessGatherNodes.size(); i++) {
@@ -13944,7 +15325,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             DrawWorldNode(screenPos, kNodeRadius * 0.8f, Color{ 96, 72, 54, 255 }, creature.name, near, sub);
         }
     }
-    bool wildDying2D = s.dyingMonster.has_value() && s.dyingMonster->zone == 0;
+    bool wildDying2D = false;
+    for (const auto& d : s.dyingMonsters) if (d.zone == 0) { wildDying2D = true; break; }
     for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
         // The engaged slot is drawn separately below, at its live position with an HP
         // bar, instead of here at its idle spawn spot. Checks s.wildEngaged fresh
@@ -13953,22 +15335,26 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // then, and dereferencing an emptied optional is undefined behavior.
         if (s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->spotIdx == (int)i) continue;
         // Empty slots (waiting to respawn) draw nothing — except a slot mid-death-
-        // animation, which draws the fading body instead.
-        bool isDying = wildDying2D && !s.dyingMonster->isRival && s.dyingMonster->spotIdx == (int)i;
-        if (!isDying && s.wildSpotRespawn[i] > 0.0f) continue;
+        // animation, which draws the fading body instead. Pack attackers draw at
+        // their chase positions with a red flash while hurt.
+        const GameState::DyingMonster* dying = wildDying2D ? FindDyingWildSpot(s, (int)i) : nullptr;
+        bool isDying = dying != nullptr;
+        const GameState::ActiveMonster* extra = !isDying ? FindWildExtra(s, (int)i) : nullptr;
+        if (!isDying && !extra && s.wildSpotRespawn[i] > 0.0f) continue;
         const WildernessMonsterSpot& spot = kWildernessMonsterSpots[i];
         const DirSpriteSheet& sheet = g_assets.wildMonsterTex[spot.iconIdx];
         bool near = nearestKind == WildNodeKind::Monster && nearestIdx == (int)i && inRange;
         std::string sub = TextFormat("lvl %d - %.0f%%", spot.level, WinChancePreview(s, spot.level));
-        Vector2 screenPos = WorldToScreen(isDying ? s.dyingMonster->pos : WildernessMonsterLivePos((int)i, s.worldTime), camera);
+        Vector2 screenPos = WorldToScreen(isDying ? dying->pos : (extra ? extra->pos : WildernessMonsterLivePos((int)i, s.worldTime)), camera);
+        Color hurtTint = (extra && extra->monsterHurtT >= 0.0f) ? Color{ 255, 130, 130, 255 } : WHITE;
         if (sheet.ok) {
             Rectangle src = ActorSrcRect(sheet, { 0, 1 }, ActorAnim::Idle, s.worldTime);
             if (isDying) {
-                float fade = std::max(0.0f, s.dyingMonster->timer / s.dyingMonster->duration);
+                float fade = std::max(0.0f, dying->timer / dying->duration);
                 DrawDyingWorldNode(screenPos, kNodeRadius * 0.7f, &sheet.tex, Fade(WHITE, fade), &src,
                                    1.0f + 0.25f * (1.0f - fade));
             } else {
-                DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, near, sub, &sheet.tex, WHITE, &src);
+                DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, near, sub, &sheet.tex, hurtTint, &src);
             }
         } else {
             if (!isDying) DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, near, sub);
@@ -14019,12 +15405,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // While their death animation plays, the fading body at the kill site is
         // drawn instead of the patrolling rival (no double-draw) — they retreat
         // rather than die, see RivalFightEnded.
-        bool rivalDying2D = wildDying2D && s.dyingMonster->isRival && s.dyingMonster->bladeIdx < 0;
+        const GameState::DyingMonster* rivalDying2D = FindDyingRival(s);
         {
             const DirSpriteSheet& sheet = g_assets.rivalAdventurerSheet;
-            Vector2 screenPos = WorldToScreen(rivalDying2D ? s.dyingMonster->pos : s.rivalPos, camera);
+            Vector2 screenPos = WorldToScreen(rivalDying2D ? rivalDying2D->pos : s.rivalPos, camera);
             if (rivalDying2D) {
-                float fade = std::max(0.0f, s.dyingMonster->timer / s.dyingMonster->duration);
+                float fade = std::max(0.0f, rivalDying2D->timer / rivalDying2D->duration);
                 if (sheet.ok) {
                     Vector2 dir = { s.wildernessPlayerPos.x - s.rivalPos.x, s.wildernessPlayerPos.y - s.rivalPos.y };
                     float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
@@ -14060,9 +15446,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // While a blade's death animation plays, the fading body at the kill site
         // is drawn instead of the patrolling blade (no double-draw) — same
         // retreat-not-death treatment as the champion.
-        bool bladeDying2D = wildDying2D && s.dyingMonster->isRival && s.dyingMonster->bladeIdx == bi;
+        const GameState::DyingMonster* bladeDying2D = FindDyingBlade(s, bi);
         const auto& b = s.blades[bi];
-        Vector2 bScreenPos = WorldToScreen(bladeDying2D ? s.dyingMonster->pos : b.pos, camera);
+        Vector2 bScreenPos = WorldToScreen(bladeDying2D ? bladeDying2D->pos : b.pos, camera);
         bool bNear = nearestKind == WildNodeKind::Blade && nearestIdx == bi && inRange;
         std::string bSub = b.activity == GameState::RivalActivity::Hunting ? "Hunting..."
             : b.activity == GameState::RivalActivity::Stalking ? "Stalking..." : "Patrolling";
@@ -14075,7 +15461,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             Vector2 bFacing = bLen > 0.001f ? Vector2{ bDir.x / bLen, bDir.y / bLen } : Vector2{ 0, 1 };
             Rectangle bSrc = ActorSrcRect(bSheet, bFacing, ActorAnim::Walk, s.worldTime);
             if (bladeDying2D) {
-                float fade = std::max(0.0f, s.dyingMonster->timer / s.dyingMonster->duration);
+                float fade = std::max(0.0f, bladeDying2D->timer / bladeDying2D->duration);
                 DrawDyingWorldNode(bScreenPos, kNodeRadius * 0.7f, &bSheet.tex, Fade(WHITE, fade), &bSrc,
                                    1.0f + 0.25f * (1.0f - fade));
             } else {
@@ -14156,12 +15542,14 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // aura, vigor aura, summoned fiend — drawn in world space inside the scissor.
     Wild2DClickFlag(s, camera, screenW, screenH); // tap a monster to flag it
     DrawFlagMarker2D(s, camera, 0);
-    DrawFlagLabel(s, 0);
     DrawSpellFX2D(s, camera, 0);
     EndScissorMode();
     } // end else: 2D world view (3D renders via DrawWilderness3DWorld above)
     DrawVirtualJoystick();
-    if (wasEngaged) {
+    DrawTargetFrame(s, 0); // shared by the 2D and 3D views (tap it to cycle targets)
+    if (DrawTargetButton()) CycleFlagTarget(s); // thumb-friendly G for touch
+    // Live check, not wasEngaged: the fight may have ended mid-frame (2026-09-25).
+    if (s.wildEngaged.has_value()) {
         // Melee is fully automatic now (see the trySwingAtEngagedMonster call site
         // above) — no interact button needed here anymore for it.
         // Drawn after EndScissorMode (not before), same reason Town's gather HUD strip
@@ -14180,7 +15568,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // "[E] Gather/Tame/Fight/Enter" prompts, silently covering it whenever nothing was
     // engaged — Mark caught this by trying to gather. Configuration now lives on the
     // Magic screen instead, which has real free space (see DrawMagicScreen).
-    if (wasEngaged) {
+    // Live check, not wasEngaged: the fight may have ended mid-frame (2026-09-25).
+    if (s.wildEngaged.has_value()) {
         float cd = s.wildEngaged->playerSpellCooldown;
         int tapped = DrawCombatHotbarRow(s, true, cd);
         if (tapped >= 0) {
@@ -14241,6 +15630,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 // ---------------------------------------------------------------------
 
 static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
+    if (GetTouchPointCount() > 0) g_touchSeen = true; // latch: TARGET button appears on touch devices
     // HP bar (always visible on this screen, like the Character tab's HP bar)
     DrawUIText(TextFormat("HP: %d / %d", s.hp, s.maxHp), 20, 116, 16, kColorText);
     Rectangle hpBg = { 20, 138, 200, 12 };
@@ -14608,6 +15998,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             s.wild3DView = s.hunt3DView; // leaving in 3D returns to the 3D wilderness (view state only)
             // Zone change — the flag and in-flight spells don't cross over.
             s.flagTarget.reset();
+            s.dungeonEngaged.reset();      // the fight doesn't follow you out
+            s.dungeonExtraAttackers.clear(); // the pack melts back to ambient (2026-09-25)
             for (auto& p : s.spellProjectiles) p.active = false;
             for (auto& im : s.spellImpacts) im.active = false;
             s.fiendT = 0.0f;
@@ -14644,6 +16036,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (Dist(am.pos, s.dungeonPlayerPos) > kWildDisengageRange) {
             s.logLine = m.name + " loses interest.";
             s.dungeonEngaged.reset();
+            s.dungeonExtraAttackers.clear(); // the pack gives up too
             ClearFlagTarget(s); // the fight's over — drop the marker too
             return;
         }
@@ -14669,8 +16062,6 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                 s.playerHurtT = 0.0f; // hit-flash + knockback
                 PlaySfx(SfxId::Hurt);
                 s.logLine = "The " + mname + " hits you for " + std::to_string(dmg) + " damage";
-                s.hp -= dmg;
-                s.logLine = "The " + mname + " hits you for " + std::to_string(dmg) + " damage";
             } else {
                 s.logLine = "The " + mname + " misses";
             }
@@ -14688,6 +16079,80 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             ResolvePetTurnLive(s, am.hp, level);
             if (am.hp < hpBefore) am.monsterHurtT = 0.0f; // pet hits flash the monster too (2026-09-24)
             if (am.hp <= 0) { BeginDungeonMonsterDeath(s, am, dungeonIdx, wasBoss, mname, level, mgold, mleather); return; }
+            else if (am.hp < hpBefore && !wasBoss)
+                DungeonPackAggro(s, dungeonIdx, am.monsterIdx, false, am.pos); // the pet's damage pulls the pack in too (2026-09-25)
+        }
+    };
+
+    // Pack attackers, dungeon version (2026-09-25, multi-enemy combat): same
+    // chase/leash/crowd rules as the wilderness pack. The boss never fights as
+    // a pack member — extras only exist alongside a normal-monster primary.
+    auto updateDungeonExtraAttackers = [&]() {
+        if (s.dungeonExtraAttackers.empty()) return;
+        if (!s.dungeonEngaged.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
+            s.dungeonExtraAttackers.clear(); // no fight (or death) — the pack melts back to ambient
+            return;
+        }
+        float dtF = GetFrameTime();
+        for (size_t i = 0; i < s.dungeonExtraAttackers.size(); ) {
+            GameState::ActiveDungeonMonster& ex = s.dungeonExtraAttackers[i];
+            const DungeonMonster& exM = ex.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, ex.monsterIdx);
+            float distNow = Dist(ex.pos, s.dungeonPlayerPos);
+            if (distNow > kWildMeleeRange) {
+                Vector2 dir = { s.dungeonPlayerPos.x - ex.pos.x, s.dungeonPlayerPos.y - ex.pos.y };
+                float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+                if (len > 0.0001f) {
+                    dir.x /= len; dir.y /= len;
+                    Vector2 newPos = { ex.pos.x + dir.x * kWildMonsterChaseSpeed * dtF,
+                                       ex.pos.y + dir.y * kWildMonsterChaseSpeed * dtF };
+                    float fsx = newPos.x - ex.spawnPos.x, fsy = newPos.y - ex.spawnPos.y;
+                    float fsLen = std::sqrt(fsx * fsx + fsy * fsy);
+                    if (fsLen > kWildMonsterLeashRange) {
+                        newPos.x = ex.spawnPos.x + fsx / fsLen * kWildMonsterLeashRange;
+                        newPos.y = ex.spawnPos.y + fsy / fsLen * kWildMonsterLeashRange;
+                    }
+                    ex.pos = newPos;
+                }
+            }
+            if (Dist(ex.pos, s.dungeonPlayerPos) > kWildDisengageRange) {
+                s.dungeonExtraAttackers.erase(s.dungeonExtraAttackers.begin() + i);
+                continue; // loses interest, melts back to ambient
+            }
+            if (ex.monsterAttackCooldown > 0) ex.monsterAttackCooldown -= dtF;
+            if (ex.monsterHurtT >= 0.0f) {
+                ex.monsterHurtT += dtF;
+                if (ex.monsterHurtT > 0.30f) ex.monsterHurtT = -1.0f;
+            }
+            bool inMelee = Dist(ex.pos, s.dungeonPlayerPos) < kWildMeleeRange;
+            if (inMelee && ex.monsterAttackCooldown <= 0) {
+                // Nearest-rank selection, same as the wilderness version (2026-09-25).
+                float myD = Dist(ex.pos, s.dungeonPlayerPos);
+                int rank = 0;
+                if (s.dungeonEngaged.has_value() &&
+                    Dist(s.dungeonEngaged->pos, s.dungeonPlayerPos) < kWildMeleeRange) rank++;
+                for (const auto& o : s.dungeonExtraAttackers)
+                    if (&o != &ex && Dist(o.pos, s.dungeonPlayerPos) < kWildMeleeRange &&
+                        Dist(o.pos, s.dungeonPlayerPos) < myD) rank++;
+                if (rank < kMaxMeleeAttackers) {
+                    ex.monsterAttackCooldown = kWildMonsterAttackCooldown * (ex.debuffKind == 3 ? 1.5f : 1.0f);
+                    float hitCh = MonsterHitChance(s) - (ex.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
+                    if (RandUnit() * 100.0f < hitCh) {
+                        float raw = exM.level * (0.8f + RandUnit() * 0.6f);
+                        if (ex.debuffKind == 1) raw *= 0.7f; // Sap Strength
+                        int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
+                        s.hp -= dmg;
+                        s.playerHurtT = 0.0f; // hit-flash + knockback
+                        PlaySfx(SfxId::Hurt);
+                        s.logLine = "The " + exM.name + " hits you for " + std::to_string(dmg) + " damage";
+                    } else {
+                        s.logLine = "The " + exM.name + " misses";
+                    }
+                    if (s.hp <= 0) { EndDungeonMonsterLoss(s, exM.name); return; }
+                }
+                // else: crowded out — waits for an opening
+            }
+            ResolveCircleCollision(ex.pos, kNodeRadius * 0.7f, s.dungeonPlayerPos, kPlayerRadius);
+            i++;
         }
     };
 
@@ -14712,7 +16177,41 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             am.monsterHurtT = 0.0f; // hit-flash on the monster
             PlaySfx(SfxId::Hit);
             s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage";
+            if (am.hp > 0 && !wasBoss)
+                DungeonPackAggro(s, dungeonIdx, am.monsterIdx, false, am.pos); // damaging a normal monster pulls its pack in (2026-09-25)
             if (am.hp <= 0) BeginDungeonMonsterDeath(s, am, dungeonIdx, wasBoss, mname, level, mgold, mleather);
+            // Cleave (2026-09-25, multi-enemy combat): a landed swing also strikes
+            // every pack attacker inside the same melee range + swing arc — each
+            // victim keeps its own hit-chance and damage roll, and deaths queue
+            // independently. The boss fights alone, so it never cleaves.
+            if (!wasBoss && !s.dungeonExtraAttackers.empty()) {
+                int cleaveCount = 0;
+                for (size_t ei = 0; ei < s.dungeonExtraAttackers.size(); ) {
+                    GameState::ActiveDungeonMonster& ex = s.dungeonExtraAttackers[ei];
+                    const DungeonMonster& exM = ex.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, ex.monsterIdx);
+                    bool inArc = Dist(ex.pos, s.dungeonPlayerPos) < kWildMeleeRange &&
+                                 InSwingArc(s.dungeonPlayerPos, s.playerFacing, ex.pos);
+                    if (!inArc) { ei++; continue; }
+                    float exHitChance = std::clamp(50.0f + (power - exM.level) * 4.0f + weaponSkillBonus,
+                                                   5.0f, 95.0f);
+                    if (RandUnit() * 100.0f < exHitChance) {
+                        int exDmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
+                        if (s.vigorT > 0.0f) exDmg = std::max(1, (int)std::round(exDmg * 1.25f));
+                        ex.hp -= exDmg;
+                        ex.monsterHurtT = 0.0f;
+                        cleaveCount++;
+                        if (ex.hp <= 0) {
+                            BeginDungeonExtraDeath(s, dungeonIdx, ex);
+                            s.dungeonExtraAttackers.erase(s.dungeonExtraAttackers.begin() + ei);
+                            continue; // erased — don't advance ei
+                        }
+                    }
+                    ei++;
+                }
+                if (cleaveCount > 0)
+                    s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage — your swing cleaves " +
+                                std::to_string(cleaveCount) + (cleaveCount == 1 ? " foe!" : " foes!");
+            }
         } else {
             s.logLine = "Your attack misses";
         }
@@ -14755,14 +16254,16 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         // bump-to-engage treatment as Wilderness. Walking up and pressing E still works
         // too, via tryDungeonInteract.
         if (s.dungeonSpawnRespawn[*s.selectedDungeon][i] > 0.0f) continue; // empty — waiting to respawn
-        if (wasDungeonEngaged && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
+        // Live check, not wasDungeonEngaged: a projectile/fiend kill inside
+        // UpdateLiveSpellFX above can reset or promote the engagement mid-frame (2026-09-25).
+        if (s.dungeonEngaged.has_value() && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
         Vector2 livePos = DungeonMonsterLivePos(*s.selectedDungeon, i, s.worldTime);
         if (!s.dungeonEngaged.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
             Dist(s.dungeonPlayerPos, livePos) < kPlayerRadius + kNodeRadius * 0.8f)
             tryEngageDungeonMonster(i, false);
         ResolveCircleCollision(s.dungeonPlayerPos, kPlayerRadius, livePos, kNodeRadius * 0.8f);
     }
-    if (!(wasDungeonEngaged && s.dungeonEngaged->isBoss) &&
+    if (!(s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss) &&
         s.dungeonSpawnRespawn[*s.selectedDungeon][kDungeonBossSlot] <= 0.0f) {
         Vector2 bossLivePos = DungeonMonsterLivePos(*s.selectedDungeon, kDungeonBossSlot, s.worldTime);
         if (bossUnlocked && !s.dungeonEngaged.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
@@ -14770,7 +16271,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             tryEngageDungeonMonster(kDungeonBossSlot, true);
         ResolveCircleCollision(s.dungeonPlayerPos, kPlayerRadius, bossLivePos, kNodeRadius); // boss, locked or not
     }
-    if (wasDungeonEngaged)
+    // Live check, not wasDungeonEngaged — see the comment in the monster loop above (2026-09-25).
+    if (s.dungeonEngaged.has_value())
         ResolveCircleCollision(s.dungeonPlayerPos, kPlayerRadius, s.dungeonEngaged->pos, kNodeRadius * 0.7f);
     ResolveCircleCollision(s.dungeonPlayerPos, kPlayerRadius, kDungeonExitPos, kNodeRadius * 0.6f);
     s.dungeonPlayerPos = ClampToWorld(s.dungeonPlayerPos, kPlayerEdgeMargin, kDungeonWorldSize);
@@ -14789,14 +16291,15 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // AI reacts to this frame's final (post-collision) player position, same ordering
     // as Wilderness. Melee is auto-continuous once engaged — no button needed.
     updateEngagedDungeonMonsterAI();
+    updateDungeonExtraAttackers(); // pack members chase/crowd/attack alongside the primary (2026-09-25)
     if (wasDungeonEngaged) {
         trySwingAtEngagedDungeonMonster();
     } else if (inRange && IsKeyPressed(KEY_E)) {
         tryDungeonInteract();
     }
-    // Dedicated attack-flag key (2026-09-24): G flags the nearest fightable
-    // monster; the player auto-approaches and the fight starts on contact.
-    if (IsKeyPressed(KEY_G)) FlagNearestEnemy(s);
+    // Target-switch key (2026-09-25): G cycles fightable enemies by distance
+    // (nearest first, wraps); mid-fight it transfers the primary engagement.
+    if (IsKeyPressed(KEY_G)) CycleFlagTarget(s);
 
     // Prompt + nearest-interactable info, shared by the 2D arena and the 3D view
     // below (computed once here since both branches need them; nothing between
@@ -14892,8 +16395,9 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // integration). WanderFacing is that motion's own analytical derivative, so this
     // costs nothing beyond what Town NPCs already do with it.
     const DirSpriteSheet* monsterSheet = MonsterFamilySheet(*s.selectedDungeon);
-    bool dyingHere2D = s.dyingMonster.has_value() && s.dyingMonster->zone == 1 &&
-                       s.dyingMonster->dungeonIdx == *s.selectedDungeon;
+    bool dyingHere2D = false;
+    for (const auto& d : s.dyingMonsters)
+        if (d.zone == 1 && d.dungeonIdx == *s.selectedDungeon) { dyingHere2D = true; break; }
     for (int i = 0; i < kDungeonRegularSlots; i++) {
         // The engaged slot is drawn separately below, at its live position with an HP
         // bar — same convention as Wilderness. Checks s.dungeonEngaged fresh (not
@@ -14901,41 +16405,45 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         // ended the fight this same frame.
         if (s.dungeonEngaged.has_value() && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
         // Empty slots show nothing while their respawn timer runs — except a slot
-        // mid-death-animation, which draws the sinking body below instead.
-        bool isDying2D = dyingHere2D && !s.dyingMonster->isBoss && s.dyingMonster->monsterIdx == i;
-        if (!isDying2D && s.dungeonSpawnRespawn[*s.selectedDungeon][i] > 0.0f) continue;
+        // mid-death-animation, which draws the sinking body below instead. Pack
+        // attackers draw at their chase positions with a red flash while hurt.
+        const GameState::DyingMonster* dying2D = dyingHere2D ? FindDyingDungeonSlot(s, *s.selectedDungeon, i, false) : nullptr;
+        bool isDying2D = dying2D != nullptr;
+        const GameState::ActiveDungeonMonster* extra2D = !isDying2D ? FindDungeonExtra(s, i, false) : nullptr;
+        if (!isDying2D && !extra2D && s.dungeonSpawnRespawn[*s.selectedDungeon][i] > 0.0f) continue;
         const DungeonMonster& m = DungeonSlotMonster(dungeon, i);
-        Vector2 screenPos = WorldToScreen(isDying2D ? s.dyingMonster->pos :
-                                          DungeonMonsterLivePos(*s.selectedDungeon, i, s.worldTime), camera);
+        Vector2 screenPos = WorldToScreen(isDying2D ? dying2D->pos :
+                                          (extra2D ? extra2D->pos : DungeonMonsterLivePos(*s.selectedDungeon, i, s.worldTime)), camera);
         bool near = !nearestIsBoss && nearestKey == std::to_string(i) && inRange;
         std::string sub = TextFormat("lvl %d - %.0f%%", m.level, WinChancePreview(s, m.level));
+        Color hurtTint2D = (extra2D && extra2D->monsterHurtT >= 0.0f) ? Color{ 255, 130, 130, 255 } : WHITE;
         Rectangle monsterSrc{};
         if (monsterSheet && monsterSheet->ok) monsterSrc = ActorSrcRect(*monsterSheet, WanderFacing(i, s.worldTime), ActorAnim::Walk, s.worldTime);
         if (isDying2D) {
-            float fade = std::max(0.0f, s.dyingMonster->timer / s.dyingMonster->duration);
+            float fade = std::max(0.0f, dying2D->timer / dying2D->duration);
             DrawDyingWorldNode(screenPos, kNodeRadius * 0.8f,
                                monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr,
                                Fade(WHITE, fade), monsterSheet && monsterSheet->ok ? &monsterSrc : nullptr,
                                1.0f + 0.25f * (1.0f - fade));
         } else {
             DrawWorldNode(screenPos, kNodeRadius * 0.8f, Color{ 122, 46, 46, 255 }, m.name, near, sub,
-                           monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr, WHITE,
+                           monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr, hurtTint2D,
                            monsterSheet && monsterSheet->ok ? &monsterSrc : nullptr);
         }
     }
     bool engagedIsBossNow = s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss;
-    bool bossDying2D = dyingHere2D && s.dyingMonster->isBoss;
+    const GameState::DyingMonster* bossDying2D = dyingHere2D ? FindDyingDungeonSlot(s, *s.selectedDungeon, kDungeonBossSlot, true) : nullptr;
     if (!engagedIsBossNow && !bossDying2D && s.dungeonSpawnRespawn[*s.selectedDungeon][kDungeonBossSlot] > 0.0f) {
         // boss slot empty — nothing to draw
     } else if (!engagedIsBossNow) {
-        Vector2 bossScreenPos = WorldToScreen(bossDying2D ? s.dyingMonster->pos :
+        Vector2 bossScreenPos = WorldToScreen(bossDying2D ? bossDying2D->pos :
                                               DungeonMonsterLivePos(*s.selectedDungeon, kDungeonBossSlot, s.worldTime), camera);
         if (bossUnlocked) {
             const Texture2D* bossTex = BossFamilyTexture(*s.selectedDungeon);
             Rectangle bossFallbackSrc{};
             if (!bossTex && monsterSheet && monsterSheet->ok) bossFallbackSrc = ActorSrcRect(*monsterSheet, WanderFacing(kDungeonBossSlot, s.worldTime), ActorAnim::Walk, s.worldTime);
             if (bossDying2D) {
-                float fade = std::max(0.0f, s.dyingMonster->timer / s.dyingMonster->duration);
+                float fade = std::max(0.0f, bossDying2D->timer / bossDying2D->duration);
                 DrawDyingWorldNode(bossScreenPos, kNodeRadius,
                                    bossTex ? bossTex : (monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr),
                                    Fade(WHITE, fade),
@@ -15022,7 +16530,6 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // aura, vigor aura, summoned fiend — drawn in world space inside the scissor.
     Dungeon2DClickFlag(s, camera, screenW, screenH); // tap a monster to flag it
     DrawFlagMarker2D(s, camera, 1);
-    DrawFlagLabel(s, 1);
     DrawSpellFX2D(s, camera, 1);
     EndScissorMode();
     } // end 2D arena branch — the touch/combat HUD below is shared with the 3D view
@@ -15031,7 +16538,10 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // items / interact button, engaged spell hotbar, hotbar picker. Runs for
     // both the 2D arena and the 3D dungeon view. ---
     DrawVirtualJoystick();
-    if (wasDungeonEngaged) {
+    DrawTargetFrame(s, 1); // shared by the 2D and 3D views (tap it to cycle targets)
+    if (DrawTargetButton()) CycleFlagTarget(s); // thumb-friendly G for touch
+    // Live check, not wasDungeonEngaged: the fight may have ended mid-frame (2026-09-25).
+    if (s.dungeonEngaged.has_value()) {
         // Melee is fully automatic now — no interact button needed here anymore for it.
         DrawLiveCombatQuickItems(s);
     } else if (inRange && !prompt.empty() && DrawInteractButton(prompt)) {
@@ -15044,7 +16554,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // prompts when not engaged). Configuration lives on the Magic screen instead.
     // s.combatHotbar is shared across both screens either way, so a slot assigned
     // there works here too.
-    if (wasDungeonEngaged) {
+    // Live check, not wasDungeonEngaged: the fight may have ended mid-frame (2026-09-25).
+    if (s.dungeonEngaged.has_value()) {
         float cd = s.dungeonEngaged->playerSpellCooldown;
         int tapped = DrawCombatHotbarRow(s, true, cd);
         if (tapped >= 0) {
@@ -15815,6 +17326,46 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     DrawUIText(TextFormat("Backpack capacity: %d (base %d + %d from house)",
                             BackpackCap(s), GameState::kBackpackCap, tier.capBonus), 20, y, 12, kColorText);
     y += 22;
+
+    // --- Homestead (2026-09-25): the town house building is retired; the tier, hue,
+    // workshop wings, and name above now apply to the wilderness homestead instead.
+    DrawUIText("Homestead:", 20, y, 13, kColorAccent);
+    y += 18;
+    if (s.housePlotIdx < 0) {
+        DrawUIText("No plot claimed. Walk the wilderness — plots with", 20, y, 12, kColorText);
+        y += 16;
+        DrawUIText("for-sale signs can be bought (one per adventurer).", 20, y, 12, kColorText);
+        y += 20;
+    } else {
+        const HousePlot& hp = kHousePlots[s.housePlotIdx];
+        DrawUIText(("Plot: " + std::string(hp.name) + " (" + std::to_string(hp.cells) + "x" +
+                    std::to_string(hp.cells) + ")").c_str(), 20, y, 12, kColorText);
+        y += 16;
+        bool hasDoor = HouseHasDoor(s.houseLayout, hp.cells);
+        DrawUIText(hasDoor ? "Status: built — press E at your door to go inside."
+                           : "Status: no house yet — press E at your plot to design it.",
+                   20, y, 12, kColorText);
+        y += 20;
+        bool ghostBlock = s.playerIsGhost || s.playerDeathAnimT > 0.0f;
+        if (!s.hearthBound) {
+            if (Button({ 20, (float)y, 150, 26 }, "Bind Hearth", !ghostBlock)) {
+                s.hearthBound = true;
+                PlaySfx(SfxId::Cast);
+                s.logLine = "Your hearth is bound to " + std::string(hp.name) + ".";
+            }
+        } else {
+            if (Button({ 20, (float)y, 170, 26 }, "Recall to Homestead", !ghostBlock)) {
+                CancelEscort(s, "parts ways at the hearth — the escort is broken.");
+                s.screen = Screen::Wilderness;
+                s.wildernessPlayerPos = HouseDoorPos(hp, s.houseLayout);
+                s.houseDesignerOpen = false;
+                PlaySfx(SfxId::Cast);
+                s.logLine = "Your hearth recalls you home.";
+            }
+        }
+        DrawUIText("Erasing tiles gives no refund.", 200, y + 6, 12, kColorText);
+        y += 32;
+    }
 
     // --- Tiers ---
     DrawUIText("Tiers:", 20, y, 13, kColorAccent);
