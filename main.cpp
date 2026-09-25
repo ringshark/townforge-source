@@ -841,8 +841,6 @@ struct GameState {
         int zone;              // 0 = wilderness, 1 = dungeon
         int iconIdx = -1;      // wilderness monster icon for the 2D sprite, -1 = generic
         std::string name;
-        int dungeonIdx = -1;   // HD-2D: dungeon corpse sprite family, -1 = generic mound
-        int monsterIdx = -1;   // HD-2D: dungeon slot (kDungeonBossSlot = boss)
     };
     std::vector<WorldCorpse> worldCorpses;
     std::array<float, kWildMonsterSpotCount> wildSpotRespawn{}; // 0 = available, else seconds until the spot refills
@@ -8312,10 +8310,7 @@ static void Town3DApplyShadowShader(Model& m) {
 // shading instead of the flat, unlit fallback that shipped while shadows
 // were off. Deliberately NOT used for Dungeon (torchlight.vs/.fs handles
 // indoor lighting on its own) or building Interiors (kept dark/moody like
-// the dungeons, by design — see DrawInterior3DWorld's own comment). Note
-// this is orthogonal to the HD-2D billboard system below: billboards draw
-// unlit by design (HD2DBeginUnlit/EndUnlit), so this shader only ever
-// touches the 3D terrain/building/prop models, never living entities.
+// the dungeons, by design — see DrawInterior3DWorld's own comment).
 struct Town3DLit {
     bool ready = false, tried = false;
     Shader shader{};
@@ -8920,201 +8915,10 @@ static void Town3DDrawFoliageOne(const TownFoliage& f, float x, float z) {
     }
 }
 
-// Forward: the combat lunge curve is defined with the 2D combat code below,
-// but the HD-2D billboards need it up here.
-static float CombatLungeCurve(float t);
-
-// ---------------------------------------------------------------------
-// HD-2D billboard actors (2026-09-24): a 3D diorama world with 2D souls.
-// Every living entity in the 3D views — player, town NPCs, wilderness
-// creatures and monsters, the Rival, Murder Inc. blades, innocents, the
-// escort, pets, dungeon monsters and bosses, interior shopkeepers, ghosts
-// and corpses — renders as a camera-facing billboard cut from the SAME
-// sprite sheets the 2D views draw. Buildings, terrain, trees, props,
-// dungeon walls and interior furniture stay 3D. The old procedural
-// creature/humanoid kit (T3C-KIT, below) is retired for living things.
-//
-// Billboards are unlit: each living-entity block is bracketed with
-// HD2DBeginUnlit/HD2DEndUnlit so sprites and blob shadows draw under the
-// default shader while the rest of the scene keeps its sun/torch shader.
-// A cheap manual fog match keeps distant sprites consistent with the
-// fogged 3D world. Billboards never draw in the shadow pass — the soft
-// blob shadow is their only shadow.
-// ---------------------------------------------------------------------
-static const float kHD2DHumanH = 62.0f; // world-unit sprite height, calibrated to the retired humanoid kit at scale 1.0
-static const float kHD2DQuadH = 46.0f;  // world-unit sprite height, calibrated to the retired quadruped kit at scale 1.0
-static const Color kHD2DHurtTint = { 255, 130, 130, 255 }; // hit flash, matches the 2D views
-static const Color kHD2DCorpseTint = { 90, 85, 80, 255 };  // drained-corpse tint, matches the 2D views
-
-// --- soft blob shadows ------------------------------------------------
-static Texture2D s_hd2dShadowTex{};
-static Mesh s_hd2dShadowMesh{};
-static Material s_hd2dShadowMat{};
-static bool s_hd2dShadowInit = false;
-static void HD2DShadowEnsure() {
-    if (s_hd2dShadowInit) return;
-    s_hd2dShadowInit = true;
-    Image img = GenImageGradientRadial(64, 64, 0.08f, Color{ 0, 0, 0, 255 }, Color{ 0, 0, 0, 0 });
-    s_hd2dShadowTex = LoadTextureFromImage(img);
-    UnloadImage(img);
-    s_hd2dShadowMesh = GenMeshPlane(2.0f, 2.0f, 1, 1);
-    s_hd2dShadowMat = LoadMaterialDefault();
-    s_hd2dShadowMat.maps[MATERIAL_MAP_DIFFUSE].texture = s_hd2dShadowTex;
-}
-// Flat radial blob at ground level. Draw only under the default shader.
-static void HD2DDrawShadow(float x, float z, float radius, float alpha) {
-    if (radius <= 0.0f || alpha <= 0.0f) return;
-    HD2DShadowEnsure();
-    s_hd2dShadowMat.maps[MATERIAL_MAP_DIFFUSE].color = Fade(WHITE, alpha);
-    // translate(x, 1.5, z) * scale(radius, 1, radius), built by hand (no raymath.h here)
-    Matrix m{};
-    m.m0 = radius; m.m5 = 1.0f; m.m10 = radius;
-    m.m12 = x; m.m13 = 1.5f; m.m14 = z; m.m15 = 1.0f;
-    DrawMesh(s_hd2dShadowMesh, s_hd2dShadowMat, m);
-}
-
-// --- unlit bracketing ---------------------------------------------------
-// Sprites + blob shadows draw under the default shader; the caller passes
-// the scene shader it had bound so it can be restored after.
-static void HD2DBeginUnlit() { rlEnableShader(rlGetShaderIdDefault()); }
-static void HD2DEndUnlit(unsigned int sceneShader) { rlEnableShader(sceneShader); }
-
-// Slight warm grade so unlit sprites sit in torch light (dungeons,
-// interiors at night) instead of looking flat-lit.
-static Color HD2DWarmTorch(Color c) {
-    return { (unsigned char)((float)c.r * 0.96f), (unsigned char)((float)c.g * 0.85f),
-             (unsigned char)((float)c.b * 0.71f), c.a };
-}
-
-// --- atmosphere: warm grade + vignette (2D overlay) -----------------------
-static Texture2D s_hd2dVignetteTex{};
-static bool s_hd2dVignetteInit = false;
-static void HD2DVignetteEnsure() {
-    if (s_hd2dVignetteInit) return;
-    s_hd2dVignetteInit = true;
-    // 256x256 radial: transparent center, dark warm edges.
-    Image img = GenImageGradientRadial(256, 256, 0.45f, Color{ 0, 0, 0, 0 }, Color{ 26, 12, 6, 255 });
-    s_hd2dVignetteTex = LoadTextureFromImage(img);
-    UnloadImage(img);
-}
-// Warm grade + soft vignette over a 3D view: one flat warm wash plus one
-// stretched radial texture. Call right after EndMode3D, before the 2D
-// overlay labels/HUD so the UI stays crisp.
-static void HD2DGradeOverlay(int screenW, int screenH, bool warm) {
-    HD2DVignetteEnsure();
-    if (warm) DrawRectangle(0, 0, screenW, screenH, Color{ 255, 176, 118, 13 });
-    DrawTexturePro(s_hd2dVignetteTex,
-                   { 0.0f, 0.0f, (float)s_hd2dVignetteTex.width, (float)s_hd2dVignetteTex.height },
-                   { 0.0f, 0.0f, (float)screenW, (float)screenH },
-                   { 0.0f, 0.0f }, 0.0f, Color{ 255, 255, 255, 110 });
-}
-
-// --- atmosphere: drifting dust motes / embers (3D, unlit) -----------------
-static Texture2D s_hd2dMoteTex{};
-static bool s_hd2dMoteInit = false;
-static void HD2DMoteEnsure() {
-    if (s_hd2dMoteInit) return;
-    s_hd2dMoteInit = true;
-    Image img = GenImageGradientRadial(32, 32, 0.25f, Color{ 255, 255, 255, 255 }, Color{ 255, 255, 255, 0 });
-    s_hd2dMoteTex = LoadTextureFromImage(img);
-    UnloadImage(img);
-}
-// A handful of soft dots drifting in a box around the camera target — dust
-// in daylight, embers in the dungeon. Call inside BeginMode3D while the
-// default shader is active; ~36 billboards, trivially cheap.
-static void HD2DDrawMotes(Vector3 camPos, Vector3 camTarget, float worldTime,
-                          int count, float span, float baseY, float height, Color tint) {
-    HD2DMoteEnsure();
-    Camera3D cam = { camPos, camTarget, { 0.0f, 1.0f, 0.0f }, 60.0f, CAMERA_PERSPECTIVE };
-    for (int i = 0; i < count; i++) {
-        float fi = (float)i;
-        float h1 = Town3DHash01(fi * 12.9f, 78.2f);
-        float h2 = Town3DHash01(fi * 39.7f, 11.4f);
-        float h3 = Town3DHash01(fi * 74.3f, 45.9f);
-        float ox = fmodf(h1 * span + worldTime * (5.0f + 4.0f * h2), span) - span * 0.5f;
-        float oz = fmodf(h2 * span + worldTime * (4.0f + 3.0f * h3), span) - span * 0.5f;
-        float oy = baseY + h3 * height + sinf(worldTime * 0.8f + fi * 1.7f) * 10.0f;
-        float tw = 0.55f + 0.45f * sinf(worldTime * 1.3f + fi * 2.9f);
-        float sz = 5.0f + 5.0f * h2;
-        Color c = tint;
-        c.a = (unsigned char)((float)tint.a * tw);
-        DrawBillboard(cam, s_hd2dMoteTex, { camTarget.x + ox, oy, camTarget.z + oz }, sz, c);
-    }
-}
-
-// --- the billboard itself ------------------------------------------------
-// One living entity. Provide either a directional sheet (preferred) or a
-// single static texture.
-struct HD2DActorOpts {
-    const DirSpriteSheet* sheet = nullptr;
-    Texture2D tex{};
-    bool texOk = false;
-    Vector2 facing = { 0.0f, 1.0f }; // world-space facing: x = world x, y = world z
-    ActorAnim anim = ActorAnim::Idle;
-    float heightWorld = kHD2DHumanH; // sprite height in world units
-    Color tint = WHITE;
-    float alphaMul = 1.0f; // extra fade (dying shrink-fade, ghost)
-    float squashY = 1.0f;  // corpse flatten
-    float lungeDx = 0.0f, lungeDz = 0.0f; // attack hop toward the target
-    float bobY = 0.0f; // hover offset (ghost drift)
-    float shadowRadius = 20.0f; // 0 disables the blob shadow
-    bool applyFog = true; // match the sun shader's distance fog (town/wilderness)
-};
-
-static void HD2DDrawActor(Vector3 camPos, Vector3 camTarget, float x, float z,
-                          const HD2DActorOpts& o, float worldTime) {
-    const Texture2D* texp = nullptr;
-    Rectangle src{ 0.0f, 0.0f, 0.0f, 0.0f };
-    float frameAspect = 1.0f;
-    if (o.sheet && o.sheet->ok) {
-        // Camera-relative facing: the sprite's "Down" row faces the camera,
-        // so remap the world facing into (screen-right, toward-camera) —
-        // the same convention the 2D views use.
-        Vector2 cf = { camTarget.x - camPos.x, camTarget.z - camPos.z };
-        float cl = sqrtf(cf.x * cf.x + cf.y * cf.y);
-        if (cl > 1e-6f) { cf.x /= cl; cf.y /= cl; }
-        float towardCam = -(o.facing.x * cf.x + o.facing.y * cf.y);
-        float toRight = o.facing.x * (-cf.y) + o.facing.y * cf.x;
-        src = ActorSrcRect(*o.sheet, { toRight, towardCam }, o.anim, worldTime);
-        texp = &o.sheet->tex;
-        frameAspect = (float)o.sheet->frameW / (float)(o.sheet->frameH > 0 ? o.sheet->frameH : 1);
-    } else if (o.texOk) {
-        texp = &o.tex;
-        src = { 0.0f, 0.0f, (float)o.tex.width, (float)o.tex.height };
-        frameAspect = (float)o.tex.width / (float)(o.tex.height > 0 ? o.tex.height : 1);
-    } else {
-        return;
-    }
-
-    float h = o.heightWorld * o.squashY;
-    float w = h * frameAspect;
-
-    Color tint = o.tint;
-    if (o.alphaMul < 1.0f) tint.a = (unsigned char)((float)tint.a * o.alphaMul);
-    if (o.applyFog) {
-        // Match the sun shader's subtle distance fog (900 -> 2600) so far
-        // sprites haze out like the 3D world around them.
-        float dx = x - camPos.x, dz = z - camPos.z;
-        float f = std::clamp((sqrtf(dx * dx + dz * dz) - 900.0f) / 1700.0f, 0.0f, 1.0f);
-        if (f > 0.0f) {
-            tint.r = (unsigned char)((float)tint.r + ((float)kT3DSkyHorizon.r - (float)tint.r) * f);
-            tint.g = (unsigned char)((float)tint.g + ((float)kT3DSkyHorizon.g - (float)tint.g) * f);
-            tint.b = (unsigned char)((float)tint.b + ((float)kT3DSkyHorizon.b - (float)tint.b) * f);
-        }
-    }
-
-    HD2DDrawShadow(x + o.lungeDx, z + o.lungeDz, o.shadowRadius * o.alphaMul, 0.32f * o.alphaMul);
-
-    float px = x + o.lungeDx, pz = z + o.lungeDz;
-    // fovY is unused by DrawBillboardRec (only position/target/up matter).
-    Camera3D cam = { camPos, camTarget, { 0.0f, 1.0f, 0.0f }, 60.0f, CAMERA_PERSPECTIVE };
-    DrawBillboardRec(cam, *texp, src, { px, h * 0.5f + o.bobY, pz }, { w, h }, tint);
-}
-
 // The 3D town's drawable contents, shared by the shadow pass (depth from the
 // sun's POV) and the main pass (lit + shadowed). The sky is NOT included — it
 // is drawn only in the main pass, unlit, before the shadow shader is enabled.
-static void Town3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DCam* cull) {
+static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     (void)shadowPass;
     Town3DLoadModels();
     Town3DEnsureGround(s);
@@ -9260,39 +9064,27 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         Town3DDrawPiece(M.fenceExt,    { xE, 0, 502.5f }, 90.0f);
     }
 
-    // Player + wandering townsfolk — HD-2D billboards: the same sprite
-    // sheets the 2D town draws, camera-facing, with soft blob shadows.
-    // (No shadow-pass draw: billboards don't cast into the shadowmap.)
-    if (!shadowPass && cull) {
-        unsigned int sceneShader = g_t3dLit.ready ? g_t3dLit.shader.id : rlGetShaderIdDefault();
-        HD2DBeginUnlit();
-        {
-            bool moving = AnyMoveKeyDown() || VirtualJoystickIsMoving();
-            HD2DActorOpts o;
-            o.sheet = &g_assets.heroSheet;
-            o.facing = s.playerFacing;
-            o.anim = moving ? ActorAnim::Walk : ActorAnim::Idle;
-            o.heightWorld = kHD2DHumanH;
-            o.shadowRadius = 20.0f;
-            HD2DDrawActor(cull->pos, cull->target, s.townPlayerPos.x, s.townPlayerPos.y, o, s.worldTime);
-        }
-        const auto& activeNPCs = (s.selectedTown == 0) ? kTownNPCs : kTown2NPCs;
-        const auto& npcSheets = (s.selectedTown == 0) ? g_assets.townNPCSheets : g_assets.saltmereNPCSheets;
-        for (int i = 0; i < (int)activeNPCs.size(); i++) {
-            Vector2 np = TownNPCLivePos(i, s.worldTime, s.selectedTown);
-            Vector2 na = TownNPCLivePos(i, s.worldTime + 0.6f, s.selectedTown);
-            float ndx = na.x - np.x, ndz = na.y - np.y;
-            bool npcMoving = (ndx * ndx + ndz * ndz >= 0.04f);
-            float nyaw = npcMoving ? atan2f(ndz, ndx) : Town3DHash01(np.x, np.y) * 6.2832f;
-            HD2DActorOpts o;
-            o.sheet = &npcSheets[i];
-            o.facing = { cosf(nyaw), sinf(nyaw) };
-            o.anim = npcMoving ? ActorAnim::Walk : ActorAnim::Idle;
-            o.heightWorld = kHD2DHumanH * 0.97f;
-            o.shadowRadius = 19.0f;
-            HD2DDrawActor(cull->pos, cull->target, np.x, np.y, o, s.worldTime);
-        }
-        HD2DEndUnlit(sceneShader);
+    // Player + wandering townsfolk (Phase 3: procedural humanoids from the
+    // creature kit — walk swing tied to movement speed, idle bob + head turns).
+    T3CKitUseSunShader();
+    {
+        float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
+        T3CAnim pa = T3CMakeAnim(kT3CTrackPlayerTown, s.townPlayerPos.x, s.townPlayerPos.y, !shadowPass);
+        T3CDrawHumanoid(g_t3cHumans[0].parts, s.townPlayerPos.x, s.townPlayerPos.y, pyaw, 1.0f,
+                        Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
+                        Color{ 240, 210, 180, 255 }, pa, shadowPass);
+    }
+    const auto& activeNPCs = (s.selectedTown == 0) ? kTownNPCs : kTown2NPCs;
+    for (int i = 0; i < (int)activeNPCs.size(); i++) {
+        Vector2 np = TownNPCLivePos(i, s.worldTime, s.selectedTown);
+        Vector2 na = TownNPCLivePos(i, s.worldTime + 0.6f, s.selectedTown);
+        float ndx = na.x - np.x, ndz = na.y - np.y;
+        float nyaw = (ndx * ndx + ndz * ndz < 0.04f)
+                     ? Town3DHash01(np.x, np.y) * 6.2832f : atan2f(ndz, ndx);
+        T3CAnim na2 = T3CMakeAnim(kT3CTrackNPCTown + i, np.x, np.y, !shadowPass);
+        T3CDrawHumanoid(g_t3cHumans[0].parts, np.x, np.y, nyaw, 0.97f,
+                        kT3CNPCShirts[i % 6], Color{ 70, 62, 55, 255 },
+                        Color{ 235, 205, 175, 255 }, na2, shadowPass);
     }
 }
 
@@ -9317,7 +9109,7 @@ static void Town3DShadowPass(GameState& s) {
     ClearBackground(WHITE); // depth cleared; no color attachment on this FBO
     BeginMode3D(g_t3dLightCam);
     g_t3dLightVP = T3DMatMul(rlGetMatrixModelview(), rlGetMatrixProjection());
-    Town3DDrawSceneContents(s, true, nullptr);
+    Town3DDrawSceneContents(s, true);
     EndMode3D();
     EndTextureMode();
 }
@@ -9502,11 +9294,8 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     Town3DEnsureLit();
     if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
     T3DGrassFrameUpdate(c.pos); // sway clock for the grass shader
-    Town3DDrawSceneContents(s, false, &c);
+    Town3DDrawSceneContents(s, false);
     T3DGrassDrawTown(); // main pass only — never in the shadow pass
-    // HD-2D atmosphere: dust motes drifting in the sunlight (the default
-    // shader is active here — HD2DEndUnlit restored it after the actors above).
-    HD2DDrawMotes(c.pos, c.target, s.worldTime, 36, 900.0f, 30.0f, 170.0f, Color{ 255, 240, 210, 40 });
     // Ambience (smoke + birds): unlit, one batched draw call, main pass only.
     Town3DUpdateAmbience(GetFrameTime());
     Town3DDrawAmbience(c);
@@ -9532,7 +9321,6 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
         }
     }
     EndMode3D();
-    HD2DGradeOverlay(screenW, screenH, true);
 
     // --- 2D overlay: building labels projected from 3D, interaction prompt, hints ---
     // Labels fade and shrink as the camera pulls back (tuning constants below),
@@ -10246,25 +10034,20 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                        Color{ 150, 148, 142, 255 }, Color{ 118, 116, 110, 255 });
 
     bool wasEngaged = s.wildEngaged.has_value();
-    // HD-2D living things: camera-facing billboards cut from the 2D sprite
-    // sheets, drawn unlit with soft blob shadows. Skipped entirely in the
-    // shadow pass — billboards don't cast into the shadowmap.
-    if (!shadowPass && cull) {
-        unsigned int wildSceneShader = g_t3dLit.ready ? g_t3dLit.shader.id : rlGetShaderIdDefault();
-        HD2DBeginUnlit();
+    // Phase 3 procedural creatures (kit shader matches the sun/shadow pipeline).
+    T3CKitUseSunShader();
+    auto kitDist = [&](float x, float z) {
+        return (cull && !shadowPass) ? hypotf(cull->pos.x - x, cull->pos.z - z) : 0.0f;
+    };
     // Tameable creatures at their exact 2D spawn spots.
     for (size_t i = 0; i < kWildernessCreatureSpots.size(); i++) {
         const WildernessCreatureSpot& sp = kWildernessCreatureSpots[i];
         if (!vis(sp.pos.x, sp.pos.y, 70.0f)) continue;
         T3CQuadLook look = T3CCreatureLook(sp.creatureIdx);
-        float cyaw = Town3DHash01(sp.pos.x, sp.pos.y) * 6.2832f;
-        HD2DActorOpts o;
-        o.sheet = &g_assets.wildCreatureTex[sp.creatureIdx];
-        o.facing = { cosf(cyaw), sinf(cyaw) };
-        o.anim = ActorAnim::Idle;
-        o.heightWorld = kHD2DQuadH * look.scale;
-        o.shadowRadius = 15.0f * look.scale;
-        HD2DDrawActor(cull->pos, cull->target, sp.pos.x, sp.pos.y, o, s.worldTime);
+        T3CAnim ca = T3CMakeAnim(kT3CTrackCreatureWild + (int)i, sp.pos.x, sp.pos.y, !shadowPass);
+        T3CDrawQuad(g_t3cQuads[look.specIdx].parts, sp.pos.x, sp.pos.y,
+                    Town3DHash01(sp.pos.x, sp.pos.y) * 6.2832f,
+                    look.scale, look.coat, ca, kitDist(sp.pos.x, sp.pos.y), shadowPass);
     }
     // Monsters at their live positions (the engaged one at its fight position).
     bool wildDying = s.dyingMonster.has_value() && s.dyingMonster->zone == 0;
@@ -10279,25 +10062,21 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         float face = eng ? atan2f(s.wildernessPlayerPos.y - mp.y, s.wildernessPlayerPos.x - mp.x)
                          : Wild3DWanderFacing((int)i, mp.x, mp.y, s.worldTime);
         T3CMonLook mlook = T3CMonsterLook(kWildernessMonsterSpots[i].iconIdx);
+        T3CAnim ma = T3CMakeAnim(kT3CTrackMonsterWild + (int)i, mp.x, mp.y, !shadowPass);
         float shrink = isDying ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
-        // Combat read (2026-09-24): the engaged monster's lunge rides
+        // Combat read (2026-09-24): the engaged monster's lunge pose rides
         // monsterAttackT; it flashes red while monsterHurtT is live.
         float mAtk = (eng && !isDying) ? MonsterCombatPhase3D(s.wildEngaged->monsterAttackT) : -1.0f;
         bool mHurt = eng && !isDying && s.wildEngaged->monsterHurtT >= 0.0f;
-        HD2DActorOpts o;
-        o.sheet = &g_assets.wildMonsterTex[kWildernessMonsterSpots[i].iconIdx];
-        o.facing = { cosf(face), sinf(face) };
-        o.anim = (mAtk >= 0.0f) ? ActorAnim::Attack : ActorAnim::Idle;
-        o.heightWorld = (mlook.humanoid ? kHD2DHumanH : kHD2DQuadH) * mlook.scale * shrink;
-        o.tint = mHurt ? kHD2DHurtTint : WHITE;
-        o.alphaMul = shrink;
-        if (mAtk >= 0.0f) {
-            float lunge = CombatLungeCurve(mAtk);
-            o.lungeDx = o.facing.x * lunge;
-            o.lungeDz = o.facing.y * lunge;
+        if (mlook.humanoid) {
+            T3CDrawHumanoid(g_t3cHumans[0].parts, mp.x, mp.y, face, mlook.scale * shrink,
+                            mHurt ? Color{ 220, 90, 90, 255 } : mlook.shirt, mlook.pants, mlook.skin, ma, shadowPass,
+                            mAtk, -1.0f);
+        } else {
+            T3CDrawQuad(g_t3cQuads[mlook.specIdx].parts, mp.x, mp.y, face,
+                        mlook.scale * shrink, mHurt ? Color{ 220, 90, 90, 255 } : mlook.coat, ma, kitDist(mp.x, mp.y), shadowPass,
+                        mAtk);
         }
-        o.shadowRadius = 15.0f * mlook.scale * shrink;
-        HD2DDrawActor(cull->pos, cull->target, mp.x, mp.y, o, s.worldTime);
     }
     // The Rival Adventurer — while their death animation plays, the fading body at
     // the kill site is drawn instead of the patrolling rival (no double-draw);
@@ -10308,32 +10087,21 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         Vector2 rp = rivalDying3D ? s.dyingMonster->pos
                      : ((wasEngaged && s.wildEngaged->isRival) ? s.wildEngaged->pos : s.rivalPos);
         if (vis(rp.x, rp.y, 70.0f)) {
-            Vector2 toP = { s.wildernessPlayerPos.x - rp.x, s.wildernessPlayerPos.y - rp.y };
-            float pd = sqrtf(toP.x * toP.x + toP.y * toP.y);
-            Vector2 rface = (pd > 0.001f) ? Vector2{ toP.x / pd, toP.y / pd } : Vector2{ 0.0f, 1.0f };
-            float rshrink = rivalDying3D ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
+            float ryaw = atan2f(s.wildernessPlayerPos.y - rp.y, s.wildernessPlayerPos.x - rp.x);
+            T3CAnim ra = T3CMakeAnim(kT3CTrackRival, rp.x, rp.y, !shadowPass);
+            float rscale = rivalDying3D ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
             // Combat read (2026-09-24): engaged Rival lunges/flashes with its timers.
             bool rEng = wasEngaged && s.wildEngaged->isRival && !rivalDying3D;
             float rAtk = rEng ? MonsterCombatPhase3D(s.wildEngaged->monsterAttackT) : -1.0f;
-            HD2DActorOpts o;
-            o.sheet = &g_assets.rivalAdventurerSheet;
-            o.facing = rface;
-            o.anim = (rAtk >= 0.0f) ? ActorAnim::Attack : (rEng ? ActorAnim::Idle : ActorAnim::Walk);
-            o.heightWorld = kHD2DHumanH * rshrink;
-            o.tint = (rEng && s.wildEngaged->monsterHurtT >= 0.0f) ? kHD2DHurtTint : WHITE;
-            o.alphaMul = rshrink;
-            if (rAtk >= 0.0f) {
-                float lunge = CombatLungeCurve(rAtk);
-                o.lungeDx = rface.x * lunge;
-                o.lungeDz = rface.y * lunge;
-            }
-            o.shadowRadius = 20.0f * rshrink;
-            HD2DDrawActor(cull->pos, cull->target, rp.x, rp.y, o, s.worldTime);
+            T3CDrawHumanoid(g_t3cHumans[0].parts, rp.x, rp.y, ryaw, rscale,
+                            (rEng && s.wildEngaged->monsterHurtT >= 0.0f) ? Color{ 220, 90, 90, 255 } : Color{ 150, 60, 55, 255 },
+                            Color{ 60, 50, 55, 255 },
+                            Color{ 235, 200, 170, 255 }, ra, shadowPass, rAtk, -1.0f);
         }
     }
-    // Murder Inc. blades — the same real sprite as the champion, dark-tinted,
-    // slightly smaller, so the crew reads as the crew and the champion stays
-    // the champion.
+    // Murder Inc. blades — the same humanoid kit as the champion, but in dark
+    // dried-blood guild colors and slightly smaller, so the crew reads as the
+    // crew and the champion stays the champion.
     for (int bi = 0; bi < kBladeCount; bi++) {
         // While a blade's death animation plays, the fading body at the kill site
         // is drawn instead of the patrolling blade (no double-draw) — same
@@ -10342,142 +10110,89 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         Vector2 bp = bladeDying3D ? s.dyingMonster->pos
                      : ((wasEngaged && s.wildEngaged->bladeIdx == bi) ? s.wildEngaged->pos : s.blades[bi].pos);
         if (vis(bp.x, bp.y, 70.0f)) {
-            Vector2 toP = { s.wildernessPlayerPos.x - bp.x, s.wildernessPlayerPos.y - bp.y };
-            float pd = sqrtf(toP.x * toP.x + toP.y * toP.y);
-            Vector2 bface = (pd > 0.001f) ? Vector2{ toP.x / pd, toP.y / pd } : Vector2{ 0.0f, 1.0f };
-            float bshrink = bladeDying3D ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
+            float byaw = atan2f(s.wildernessPlayerPos.y - bp.y, s.wildernessPlayerPos.x - bp.x);
+            T3CAnim ba = T3CMakeAnim(kT3CTrackBladeWild + bi, bp.x, bp.y, !shadowPass);
+            float bscale = (bladeDying3D ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f) * 0.95f;
             // Combat read (2026-09-24): engaged blade lunges/flashes with its timers.
             bool bEng = wasEngaged && s.wildEngaged->bladeIdx == bi && !bladeDying3D;
             float bAtk = bEng ? MonsterCombatPhase3D(s.wildEngaged->monsterAttackT) : -1.0f;
-            HD2DActorOpts o;
-            o.sheet = &g_assets.rivalAdventurerSheet;
-            o.facing = bface;
-            o.anim = (bAtk >= 0.0f) ? ActorAnim::Attack : (bEng ? ActorAnim::Idle : ActorAnim::Walk);
-            o.heightWorld = kHD2DHumanH * 0.95f * bshrink;
-            o.tint = (bEng && s.wildEngaged->monsterHurtT >= 0.0f) ? kHD2DHurtTint : Color{ 160, 130, 135, 255 };
-            o.alphaMul = bshrink;
-            if (bAtk >= 0.0f) {
-                float lunge = CombatLungeCurve(bAtk);
-                o.lungeDx = bface.x * lunge;
-                o.lungeDz = bface.y * lunge;
-            }
-            o.shadowRadius = 19.0f * bshrink;
-            HD2DDrawActor(cull->pos, cull->target, bp.x, bp.y, o, s.worldTime);
+            T3CDrawHumanoid(g_t3cHumans[0].parts, bp.x, bp.y, byaw, bscale,
+                            (bEng && s.wildEngaged->monsterHurtT >= 0.0f) ? Color{ 220, 90, 90, 255 } : Color{ 70, 25, 30, 255 },
+                            Color{ 35, 30, 35, 255 },
+                            Color{ 220, 190, 165, 255 }, ba, shadowPass, bAtk, -1.0f);
         }
     }
-    // Roaming innocents (only the ones currently present) — their real
-    // portrait sprites from assets/innocents, so Tam/Liora/Silas/Garran read
-    // as distinct people.
+    // Roaming innocents (only the ones currently present) — fixed per-identity
+    // tints from kInnocentDefs so Tam/Liora/Silas/Garran read as distinct people.
     for (size_t i = 0; i < kWildernessInnocentSpots.size(); i++) {
         if (!s.innocentSpots[i].present) continue;
         Vector2 ip = WildernessInnocentLivePos((int)i, s.worldTime);
         if (!vis(ip.x, ip.y, 70.0f)) continue;
         Vector2 ia = WildernessInnocentLivePos((int)i, s.worldTime + 0.6f);
         float idx2 = ia.x - ip.x, idz = ia.y - ip.y;
-        bool iMoving = (idx2 * idx2 + idz * idz >= 0.04f);
-        float iyaw = iMoving ? atan2f(idz, idx2) : Town3DHash01(ip.x, ip.y) * 6.2832f;
-        int ident = std::clamp(s.innocentSpots[i].identity, 0, 3);
-        HD2DActorOpts o;
-        o.tex = g_assets.innocentTex[ident];
-        o.texOk = g_assets.innocentTexOk[ident];
-        o.facing = { cosf(iyaw), sinf(iyaw) };
-        o.heightWorld = kHD2DHumanH * 0.95f;
-        o.shadowRadius = 18.0f;
-        HD2DDrawActor(cull->pos, cull->target, ip.x, ip.y, o, s.worldTime);
+        float iyaw = (idx2 * idx2 + idz * idz < 0.04f)
+                     ? Town3DHash01(ip.x, ip.y) * 6.2832f : atan2f(idz, idx2);
+        T3CAnim ia2 = T3CMakeAnim(kT3CTrackInnocentWild + (int)i, ip.x, ip.y, !shadowPass);
+        const InnocentDef& idef = kInnocentDefs[std::clamp(s.innocentSpots[i].identity, 0, 3)];
+        T3CDrawHumanoid(g_t3cHumans[0].parts, ip.x, ip.y, iyaw, 0.95f,
+                        idef.shirt, idef.pants, idef.skin, ia2, shadowPass);
     }
     // An innocent you're escorting walks beside you in the 3D world too.
     if (s.escortInnocent >= 0) {
         Vector2 ep = s.escortPos;
         if (vis(ep.x, ep.y, 70.0f)) {
-            Vector2 toP = { s.wildernessPlayerPos.x - ep.x, s.wildernessPlayerPos.y - ep.y };
-            float pd = sqrtf(toP.x * toP.x + toP.y * toP.y);
-            int ident = std::clamp(s.escortInnocent, 0, 3);
-            HD2DActorOpts o;
-            o.tex = g_assets.innocentTex[ident];
-            o.texOk = g_assets.innocentTexOk[ident];
-            o.facing = (pd > 0.001f) ? Vector2{ toP.x / pd, toP.y / pd } : Vector2{ 0.0f, 1.0f };
-            o.heightWorld = kHD2DHumanH * 0.95f;
-            o.shadowRadius = 18.0f;
-            HD2DDrawActor(cull->pos, cull->target, ep.x, ep.y, o, s.worldTime);
+            float eyaw = atan2f(s.wildernessPlayerPos.y - ep.y, s.wildernessPlayerPos.x - ep.x);
+            T3CAnim ea = T3CMakeAnim(kT3CTrackInnocentWild + 10, ep.x, ep.y, !shadowPass);
+            const InnocentDef& edef = kInnocentDefs[std::clamp(s.escortInnocent, 0, 3)];
+            T3CDrawHumanoid(g_t3cHumans[0].parts, ep.x, ep.y, eyaw, 0.95f,
+                            edef.shirt, edef.pants, edef.skin, ea, shadowPass);
         }
     }
-    // Fallen monsters linger where they died — the slain monster's own sprite,
-    // dark and flattened, fading with the corpse timer (a dark mound for kills
-    // with no known sprite, as before). Purely visual; the lootable corpse
-    // list is separate.
+    // Fallen monsters linger where they died — dark flattened mounds that fade
+    // with the corpse timer. Purely visual; the lootable corpse list is separate.
     for (const GameState::WorldCorpse& c : s.worldCorpses) {
         if (c.zone != 0) continue;
         if (!vis(c.pos.x, c.pos.y, 70.0f)) continue;
         float cfade = std::clamp(c.timer / c.duration, 0.0f, 1.0f);
-        const DirSpriteSheet* csheet = (c.iconIdx >= 0 && c.iconIdx < 5 &&
-                                        g_assets.wildMonsterTex[c.iconIdx].ok)
-                                       ? &g_assets.wildMonsterTex[c.iconIdx] : nullptr;
-        if (csheet) {
-            T3CMonLook clook = T3CMonsterLook(c.iconIdx);
-            HD2DActorOpts o;
-            o.sheet = csheet;
-            o.facing = { 0.0f, 1.0f };
-            o.anim = ActorAnim::Idle;
-            o.heightWorld = (clook.humanoid ? kHD2DHumanH : kHD2DQuadH) * clook.scale;
-            o.tint = kHD2DCorpseTint;
-            o.alphaMul = 0.75f * cfade;
-            o.squashY = 0.5f;
-            o.shadowRadius = 12.0f * clook.scale;
-            HD2DDrawActor(cull->pos, cull->target, c.pos.x, c.pos.y, o, s.worldTime);
-        } else {
-            Color mound = Fade(Color{ 55, 45, 42, 255 }, 0.85f * cfade);
-            DrawSphereEx({ c.pos.x, 6.0f, c.pos.y }, 16.0f, 8, 6, mound);
-        }
+        Color mound = Fade(Color{ 55, 45, 42, 255 }, 0.85f * cfade);
+        DrawSphereEx({ c.pos.x, 6.0f, c.pos.y }, 16.0f, 8, 6, mound);
     }
     // AI companion.
     if (Pet* ap = ActivePet(s)) {
         if (vis(s.companionPos.x, s.companionPos.y, 70.0f)) {
             Vector2 d = { s.wildernessPlayerPos.x - s.companionPos.x,
                           s.wildernessPlayerPos.y - s.companionPos.y };
-            float dd = sqrtf(d.x * d.x + d.y * d.y);
+            float face = (d.x * d.x + d.y * d.y > 1.0f) ? atan2f(d.y, d.x) : 0.0f;
             T3CQuadLook plook = T3CPetLook(ap->role);
-            HD2DActorOpts o;
-            o.sheet = &WildCreatureSheetForRole(ap->role);
-            o.facing = (dd > 0.001f) ? Vector2{ d.x / dd, d.y / dd } : Vector2{ 0.0f, 1.0f };
-            o.anim = (dd > 40.0f) ? ActorAnim::Walk : ActorAnim::Idle;
-            o.heightWorld = kHD2DQuadH * plook.scale;
-            o.shadowRadius = 13.0f * plook.scale;
-            HD2DDrawActor(cull->pos, cull->target, s.companionPos.x, s.companionPos.y, o, s.worldTime);
+            T3CAnim pa2 = T3CMakeAnim(kT3CTrackCompanion, s.companionPos.x, s.companionPos.y, !shadowPass);
+            T3CDrawQuad(g_t3cQuads[plook.specIdx].parts, s.companionPos.x, s.companionPos.y,
+                        face, plook.scale, plook.coat, pa2,
+                        kitDist(s.companionPos.x, s.companionPos.y), shadowPass);
         }
     }
-    // Player — shrinks and fades during the death animation,
-    // ghostly-translucent while a ghost.
+    // Player, same humanoid kit as the town 3D view — shrinks during the death
+    // animation, ghostly-translucent while a ghost.
     {
-        float px = s.wildernessPlayerPos.x, pz = s.wildernessPlayerPos.y;
+        float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
+        T3CAnim pa3 = T3CMakeAnim(kT3CTrackPlayerWild, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y, !shadowPass);
         if (s.playerDeathAnimT > 0.0f) {
             float pshrink = std::max(0.05f, s.playerDeathAnimT / kPlayerDeathAnimTime);
-            HD2DActorOpts o;
-            o.sheet = &g_assets.heroSheet;
-            o.facing = s.playerFacing;
-            o.anim = ActorAnim::Idle;
-            o.heightWorld = kHD2DHumanH * pshrink;
-            o.alphaMul = pshrink;
-            o.shadowRadius = 20.0f * pshrink;
-            HD2DDrawActor(cull->pos, cull->target, px, pz, o, s.worldTime);
+            T3CDrawHumanoid(g_t3cHumans[0].parts, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y,
+                            pyaw, pshrink, Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
+                            Color{ 240, 210, 180, 255 }, pa3, shadowPass);
         } else if (s.playerIsGhost) {
-            HD2DActorOpts o;
-            o.sheet = &g_assets.heroSheet;
-            o.facing = s.playerFacing;
-            o.anim = ActorAnim::Idle;
-            o.heightWorld = kHD2DHumanH;
-            o.tint = Color{ 170, 205, 255, 255 };
-            o.alphaMul = 0.45f;
-            o.bobY = 4.0f * sinf(s.worldTime * 3.0f);
-            o.shadowRadius = 0.0f; // ghosts cast no shadow
-            HD2DDrawActor(cull->pos, cull->target, px, pz, o, s.worldTime);
+            Color g = Fade(Color{ 170, 205, 255, 255 }, 0.45f);
+            T3CDrawHumanoid(g_t3cHumans[0].parts, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y,
+                            pyaw, 1.0f, g, g, Fade(Color{ 220, 235, 255, 255 }, 0.45f), pa3, shadowPass);
         } else {
             // Combat read (2026-09-24): swing/cast poses ride the engaged
             // monster's timers; the player flashes red and reels on playerHurtT.
             float pAtk = -1.0f, pCast = -1.0f;
             PlayerCombatPhases3D(s, &pAtk, &pCast);
-            Color ptint = WHITE;
+            Color shirt = Color{ 70, 130, 220, 255 };
+            float px = s.wildernessPlayerPos.x, pz = s.wildernessPlayerPos.y;
             if (s.playerHurtT >= 0.0f) {
-                ptint = kHD2DHurtTint;
+                shirt = Color{ 220, 90, 90, 255 };
                 if (s.wildEngaged.has_value()) {
                     Vector2 away = { s.wildernessPlayerPos.x - s.wildEngaged->pos.x,
                                      s.wildernessPlayerPos.y - s.wildEngaged->pos.y };
@@ -10488,20 +10203,10 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                     }
                 }
             }
-            bool moving = AnyMoveKeyDown() || VirtualJoystickIsMoving();
-            HD2DActorOpts o;
-            o.sheet = &g_assets.heroSheet;
-            o.facing = s.playerFacing;
-            o.anim = (pCast >= 0.0f) ? ActorAnim::Cast
-                     : (pAtk >= 0.0f) ? ActorAnim::Attack
-                     : moving ? ActorAnim::Walk : ActorAnim::Idle;
-            o.heightWorld = kHD2DHumanH;
-            o.tint = ptint;
-            o.shadowRadius = 20.0f;
-            HD2DDrawActor(cull->pos, cull->target, px, pz, o, s.worldTime);
+            T3CDrawHumanoid(g_t3cHumans[0].parts, px, pz,
+                            pyaw, 1.0f, shirt, Color{ 50, 55, 70, 255 },
+                            Color{ 240, 210, 180, 255 }, pa3, shadowPass, pAtk, pCast);
         }
-    }
-        HD2DEndUnlit(wildSceneShader);
     }
 }
 
@@ -10692,9 +10397,6 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
     T3DGrassFrameUpdate(c.pos); // sway clock for the grass shader
     Wild3DDrawSceneContents(s, false, &c);
-    // HD-2D atmosphere: dust motes on the wind (the default shader is active
-    // here — HD2DEndUnlit restored it after the actors above).
-    HD2DDrawMotes(c.pos, c.target, s.worldTime, 36, 1100.0f, 30.0f, 190.0f, Color{ 255, 240, 210, 40 });
     Wild3DDrawAmbience(c); // birds, unlit, one batched draw call, main pass only
     // Combat FX (2026-09-24): flag marker, spell projectiles/impacts, heal +
     // vigor auras, summoned fiend — world-space, so they sit in the scene.
@@ -10713,7 +10415,6 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
                                  Fade(Color{ 255, 196, 110, 255 }, pulse));
     }
     EndMode3D();
-    HD2DGradeOverlay(screenW, screenH, true);
 
     // --- 2D overlay: gate/entrance labels (distance-faded like the town's) ---
     {
@@ -11048,68 +10749,51 @@ static Color Dungeon3DMonsterColor(int dungeonIdx, bool boss) {
     return boss ? ColorBrightness(c, 0.3f) : c;
 }
 
-// HD-2D dungeon monster: a billboard cut from the dungeon's own sprite sheet
-// (regulars) or the boss's static art (boss slot), with the same combat
-// reads the kit had — lunge on attackT, red flash while hurt, shrink-fade
-// while dying. `fadeMul` carries the death-animation shrink for both height
-// and alpha.
-static void Dungeon3DDrawMonster(Vector3 camPos, Vector3 camTarget, const GameState& s,
-                                 int dungeonIdx, int monsterIdx,
-                                 float x, float z, Vector2 facing, Color tint, float sizeMul,
-                                 float attackT = -1.0f, bool hurt = false, float fadeMul = 1.0f) {
+// Phase 3 procedural dungeon monster: per-dungeon body plan from the creature
+// kit (humanoid for orcs/goblins/wraiths/skeletons, quadruped for beasts),
+// with diagonal-pair trot, idle bob and head turns. `tint` is the per-dungeon
+// palette color (boss brightened by the caller).
+static void Dungeon3DDrawMonster(int dungeonIdx, int monsterIdx, int trackId, float x, float z,
+                                 float yawRad, Color tint, float sizeMul,
+                                 float attackT = -1.0f, bool hurt = false) {
     T3CDunLook look = T3CDungeonMonsterLook(dungeonIdx, monsterIdx);
+    T3CAnim a = T3CMakeAnim(trackId, x, z);
     float sm = sizeMul * look.scale;
-    HD2DActorOpts o;
-    if (monsterIdx == kDungeonBossSlot && g_assets.bossFamilyOk[dungeonIdx]) {
-        o.tex = g_assets.bossFamily[dungeonIdx];
-        o.texOk = true;
+    // Combat read (2026-09-24): lunge pose on attackT, red flash while hurt.
+    Color c = hurt ? Color{ 220, 90, 90, 255 } : tint;
+    if (look.serpent) {
+        T3CDrawSerpent(g_t3cQuads[10].parts, x, z, yawRad, sm, c, a, false, attackT);
+    } else if (look.humanoid) {
+        T3CDrawHumanoid(g_t3cHumans[look.humanIdx].parts, x, z, yawRad, sm, c,
+                        ColorBrightness(tint, -0.45f), Color{ 200, 170, 140, 255 }, a, false,
+                        attackT, -1.0f);
     } else {
-        o.sheet = &g_assets.monsterFamily[dungeonIdx];
+        T3CDrawQuad(g_t3cQuads[look.specIdx].parts, x, z, yawRad, sm, c, a, 0.0f, false, attackT);
     }
-    o.facing = facing;
-    o.anim = (attackT >= 0.0f) ? ActorAnim::Attack : ActorAnim::Idle;
-    o.heightWorld = (look.humanoid ? kHD2DHumanH : kHD2DQuadH) * sm;
-    o.tint = HD2DWarmTorch(hurt ? kHD2DHurtTint : tint);
-    o.alphaMul = fadeMul;
-    o.applyFog = false;
-    if (attackT >= 0.0f) {
-        float lunge = CombatLungeCurve(attackT);
-        o.lungeDx = facing.x * lunge;
-        o.lungeDz = facing.y * lunge;
-    }
-    o.shadowRadius = 16.0f * sm * fadeMul;
-    HD2DDrawActor(camPos, camTarget, x, z, o, s.worldTime);
 }
 
-// HD-2D dungeon player: hero sprite billboard with the same combat reads as
-// the wilderness player — attack/cast poses, red hurt flash + knockback,
-// shrink-fade on death, translucent drifting ghost.
-static void Dungeon3DDrawPlayer(Vector3 camPos, Vector3 camTarget, const GameState& s) {
+static void Dungeon3DDrawPlayer(const GameState& s) {
     float x = s.dungeonPlayerPos.x, z = s.dungeonPlayerPos.y;
-    float px = x, pz = z;
-    HD2DActorOpts o;
-    o.sheet = &g_assets.heroSheet;
-    o.facing = s.playerFacing;
-    o.anim = ActorAnim::Idle;
-    o.heightWorld = kHD2DHumanH;
-    o.applyFog = false;
-    o.shadowRadius = 20.0f;
+    float yaw = atan2f(s.playerFacing.y, s.playerFacing.x);
+    T3CAnim a = T3CMakeAnim(kT3CTrackPlayerDungeon, x, z);
     if (s.playerDeathAnimT > 0.0f) {
         float pshrink = std::max(0.05f, s.playerDeathAnimT / kPlayerDeathAnimTime);
-        o.heightWorld *= pshrink;
-        o.alphaMul = pshrink;
-        o.shadowRadius *= pshrink;
+        T3CDrawHumanoid(g_t3cHumans[0].parts, x, z, yaw, pshrink,
+                        Color{ 100, 130, 185, 255 }, Color{ 55, 60, 75, 255 },
+                        Color{ 225, 200, 165, 255 }, a, false);
     } else if (s.playerIsGhost) {
-        o.tint = Color{ 170, 205, 255, 255 };
-        o.alphaMul = 0.45f;
-        o.bobY = 4.0f * sinf(s.worldTime * 3.0f);
-        o.shadowRadius = 0.0f; // ghosts cast no shadow
+        Color g = Fade(Color{ 170, 205, 255, 255 }, 0.45f);
+        T3CDrawHumanoid(g_t3cHumans[0].parts, x, z, yaw, 1.0f,
+                        g, g, Fade(Color{ 220, 235, 255, 255 }, 0.45f), a, false);
     } else {
+        // Combat read (2026-09-24): swing/cast poses ride the engaged monster's
+        // timers; the player flashes red and reels on playerHurtT.
         float pAtk = -1.0f, pCast = -1.0f;
         PlayerCombatPhases3D(s, &pAtk, &pCast);
-        Color ptint = WHITE;
+        Color shirt = Color{ 100, 130, 185, 255 };
+        float px = x, pz = z;
         if (s.playerHurtT >= 0.0f) {
-            ptint = kHD2DHurtTint;
+            shirt = Color{ 220, 90, 90, 255 };
             if (s.dungeonEngaged.has_value()) {
                 Vector2 away = { s.dungeonPlayerPos.x - s.dungeonEngaged->pos.x,
                                  s.dungeonPlayerPos.y - s.dungeonEngaged->pos.y };
@@ -11120,13 +10804,10 @@ static void Dungeon3DDrawPlayer(Vector3 camPos, Vector3 camTarget, const GameSta
                 }
             }
         }
-        bool moving = AnyMoveKeyDown() || VirtualJoystickIsMoving();
-        o.anim = (pCast >= 0.0f) ? ActorAnim::Cast
-                 : (pAtk >= 0.0f) ? ActorAnim::Attack
-                 : moving ? ActorAnim::Walk : ActorAnim::Idle;
-        o.tint = HD2DWarmTorch(ptint);
+        T3CDrawHumanoid(g_t3cHumans[0].parts, px, pz, yaw, 1.0f,
+                        shirt, Color{ 55, 60, 75, 255 },
+                        Color{ 225, 200, 165, 255 }, a, false, pAtk, pCast);
     }
-    HD2DDrawActor(camPos, camTarget, px, pz, o, s.worldTime);
 }
 
 static bool Dung3DPointInUI(Vector2 m, const GameState& s) {
@@ -11209,11 +10890,9 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
     }
     DrawModel(g_dung3dGround.model, { 900, 0, 900 }, 1.0f, WHITE);
     if (g_dung3dWalls.loaded) DrawModel(g_dung3dWalls.model, { 0, 0, 0 }, 1.0f, WHITE);
-    // HD-2D living things: camera-facing billboards drawn unlit with soft
-    // blob shadows. The torch shader stays on the geometry; sprites get a
-    // slight warm grade so they sit in the torch light.
-    unsigned int dungSceneShader = torchOn ? g_dung3dTorch.shader.id : T3CKitDefaultShader().id;
-    HD2DBeginUnlit();
+    // Phase 3 creatures use the same torch shader as the dungeon geometry
+    // (falling back to the default shader when torch lighting is off).
+    T3CKitUseShader(torchOn ? g_dung3dTorch.shader : T3CKitDefaultShader());
     {
         bool engaged = s.dungeonEngaged.has_value();
         const DungeonDef& dungeon = kDungeons[di];
@@ -11231,9 +10910,8 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
             Vector2 mp = isDying ? s.dyingMonster->pos : DungeonMonsterLivePos(di, i, s.worldTime);
             Vector2 f = WanderFacing(i, s.worldTime);
             float shrink = isDying ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
-            Dungeon3DDrawMonster(cam3d.position, cam3d.target, s, di, i, mp.x, mp.y, f,
-                                 Dungeon3DMonsterColor(di, false), shrink,
-                                 -1.0f, false, shrink);
+            Dungeon3DDrawMonster(di, i, kT3CTrackMonsterDungeon + i, mp.x, mp.y, atan2f(f.y, f.x),
+                                 Dungeon3DMonsterColor(di, false), shrink);
         }
         if (!(engaged && s.dungeonEngaged->isBoss)) {
             bool bossDying = dyingHere && s.dyingMonster->isBoss;
@@ -11244,9 +10922,8 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
                 Vector2 f = WanderFacing(kDungeonBossSlot, s.worldTime);
                 Color bc = bossUnlocked ? Dungeon3DMonsterColor(di, true) : Color{ 110, 110, 120, 255 };
                 float shrink = bossDying ? std::max(0.05f, s.dyingMonster->timer / s.dyingMonster->duration) : 1.0f;
-                float bunlockShrink = (bossUnlocked ? 1.0f : 0.9f) * shrink;
-                Dungeon3DDrawMonster(cam3d.position, cam3d.target, s, di, kDungeonBossSlot, bp.x, bp.y, f,
-                                     bc, bunlockShrink, -1.0f, false, shrink);
+                Dungeon3DDrawMonster(di, kDungeonBossSlot, kT3CTrackMonsterDungeon + kDungeonBossSlot, bp.x, bp.y, atan2f(f.y, f.x),
+                                     bc, (bossUnlocked ? 1.0f : 0.9f) * shrink);
             }
         }
         if (engaged) {
@@ -11255,62 +10932,31 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
             float len = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
             Vector2 facing = len > 0.001f ? Vector2{ toPlayer.x / len, toPlayer.y / len } : Vector2{ 0, 1 };
             int midx = am.isBoss ? kDungeonBossSlot : am.monsterIdx;
-            Dungeon3DDrawMonster(cam3d.position, cam3d.target, s, di, midx, am.pos.x, am.pos.y,
-                                 facing,
+            Dungeon3DDrawMonster(di, midx, kT3CTrackMonsterDungeon + kDungeonBossSlot + 1, am.pos.x, am.pos.y,
+                                 atan2f(facing.y, facing.x),
                                  Dungeon3DMonsterColor(di, am.isBoss), 1.0f,
-                                 MonsterCombatPhase3D(am.monsterAttackT), am.monsterHurtT >= 0.0f, 1.0f);
+                                 MonsterCombatPhase3D(am.monsterAttackT), am.monsterHurtT >= 0.0f);
         }
-    Dungeon3DDrawPlayer(cam3d.position, cam3d.target, s);
-    // Fallen monsters linger where they died — the slain monster's own sprite
-    // (or the boss's art), dark and flattened, fading with the corpse timer;
-    // a dark mound for kills with no known sprite, as before. Purely visual;
-    // the lootable corpse list is separate.
+    }
+    Dungeon3DDrawPlayer(s);
+    // Fallen monsters linger where they died — dark flattened mounds that fade
+    // with the corpse timer. Purely visual; the lootable corpse list is separate.
     for (const GameState::WorldCorpse& c : s.worldCorpses) {
         if (c.zone != 1) continue;
         float cfade = std::clamp(c.timer / c.duration, 0.0f, 1.0f);
-        bool cIsBoss = (c.monsterIdx == kDungeonBossSlot);
-        bool cKnown = (c.dungeonIdx >= 0 && c.dungeonIdx < 5 &&
-                       (cIsBoss ? g_assets.bossFamilyOk[c.dungeonIdx]
-                                : g_assets.monsterFamily[c.dungeonIdx].ok));
-        if (cKnown) {
-            T3CDunLook clook = T3CDungeonMonsterLook(c.dungeonIdx, c.monsterIdx);
-            HD2DActorOpts o;
-            if (cIsBoss) { o.tex = g_assets.bossFamily[c.dungeonIdx]; o.texOk = true; }
-            else o.sheet = &g_assets.monsterFamily[c.dungeonIdx];
-            o.facing = { 0.0f, 1.0f };
-            o.anim = ActorAnim::Idle;
-            o.heightWorld = (clook.humanoid ? kHD2DHumanH : kHD2DQuadH) * clook.scale;
-            o.tint = HD2DWarmTorch(kHD2DCorpseTint);
-            o.alphaMul = 0.75f * cfade;
-            o.squashY = 0.5f;
-            o.applyFog = false;
-            o.shadowRadius = 12.0f * clook.scale;
-            HD2DDrawActor(cam3d.position, cam3d.target, c.pos.x, c.pos.y, o, s.worldTime);
-        } else {
-            Color mound = Fade(Color{ 55, 45, 42, 255 }, 0.85f * cfade);
-            DrawSphereEx({ c.pos.x, 6.0f, c.pos.y }, 16.0f, 8, 6, mound);
-        }
+        Color mound = Fade(Color{ 55, 45, 42, 255 }, 0.85f * cfade);
+        DrawSphereEx({ c.pos.x, 6.0f, c.pos.y }, 16.0f, 8, 6, mound);
     }
     if (ActivePet(s)) {
         Vector2 d = { s.dungeonPlayerPos.x - s.companionPos.x,
                       s.dungeonPlayerPos.y - s.companionPos.y };
-        float dd = sqrtf(d.x * d.x + d.y * d.y);
+        float face = (d.x * d.x + d.y * d.y > 1.0f) ? atan2f(d.y, d.x) : 0.0f;
         T3CQuadLook plook = T3CPetLook(ActivePet(s)->role);
-        HD2DActorOpts o;
-        o.sheet = &WildCreatureSheetForRole(ActivePet(s)->role);
-        o.facing = (dd > 0.001f) ? Vector2{ d.x / dd, d.y / dd } : Vector2{ 0.0f, 1.0f };
-        o.anim = (dd > 40.0f) ? ActorAnim::Walk : ActorAnim::Idle;
-        o.heightWorld = kHD2DQuadH * plook.scale;
-        o.tint = HD2DWarmTorch(WHITE);
-        o.applyFog = false;
-        o.shadowRadius = 13.0f * plook.scale;
-        HD2DDrawActor(cam3d.position, cam3d.target, s.companionPos.x, s.companionPos.y, o, s.worldTime);
-    }
-        HD2DEndUnlit(dungSceneShader);
+        T3CAnim pa = T3CMakeAnim(kT3CTrackCompanion, s.companionPos.x, s.companionPos.y);
+        T3CDrawQuad(g_t3cQuads[plook.specIdx].parts, s.companionPos.x, s.companionPos.y,
+                    face, plook.scale, plook.coat, pa, 0.0f, false);
     }
     if (torchOn) rlEnableShader(rlGetShaderIdDefault());
-    // HD-2D atmosphere: embers/sparks drifting in the torchlight.
-    HD2DDrawMotes(cam3d.position, cam3d.target, s.worldTime, 26, 700.0f, 20.0f, 150.0f, Color{ 255, 190, 120, 46 });
     // --- Unlit dressing: torch poles + flames, exit portal, rings ---
     if (torchOn) {
         for (int i = 0; i < torchCount; i++) {
@@ -11341,7 +10987,6 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
     DrawFlagMarker3D(s, 1);
     DrawSpellFX3D(s, 1);
     EndMode3D();
-    HD2DGradeOverlay(screenW, screenH, false);
 
     // --- 2D overlay: labels (distance-faded), engaged HP bar, prompt ---
     {
@@ -11873,39 +11518,20 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
 
     for (auto& p : props) Interior3DDrawProp(p);
 
-    // HD-2D: shopkeeper + player as billboards; furniture stays 3D.
-    HD2DBeginUnlit();
-    if (npc) { // static shopkeeper — real NPC art (Cobb's own sheet; Young
-               // Petra's for Mira the Provisioner, the closest real match)
-        int sheetIdx = (s.interiorKey == "stable") ? 4 : 1;
-        HD2DActorOpts o;
-        o.sheet = &g_assets.townNPCSheets[sheetIdx];
-        o.facing = { 1.0f, 0.0f };
-        o.anim = ActorAnim::Idle;
-        o.heightWorld = kHD2DHumanH * 0.95f;
-        o.tint = HD2DWarmTorch(WHITE);
-        o.applyFog = false;
-        o.shadowRadius = 18.0f;
-        HD2DDrawActor(cam3d.position, cam3d.target, npc->x - hw, npc->y - hh, o, s.worldTime);
+    if (npc) { // static shopkeeper
+        T3CAnim na = T3CMakeAnim(kT3CTrackNPCInterior, npc->x, npc->y, true);
+        T3CDrawHumanoid(g_t3cHumans[0].parts, npc->x - hw, npc->y - hh, 0.0f, 0.95f,
+                        Color{ 150, 110, 80, 255 }, Color{ 90, 70, 55, 255 },
+                        Color{ 215, 175, 135, 255 }, na, false);
     }
     { // player
-        bool moving = AnyMoveKeyDown() || VirtualJoystickIsMoving();
-        HD2DActorOpts o;
-        o.sheet = &g_assets.heroSheet;
-        o.facing = s.playerFacing;
-        o.anim = moving ? ActorAnim::Walk : ActorAnim::Idle;
-        o.heightWorld = kHD2DHumanH;
-        o.tint = HD2DWarmTorch(WHITE);
-        o.applyFog = false;
-        o.shadowRadius = 20.0f;
-        HD2DDrawActor(cam3d.position, cam3d.target,
-                      s.interiorPlayerPos.x - hw, s.interiorPlayerPos.y - hh, o, s.worldTime);
+        float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
+        T3CAnim pa = T3CMakeAnim(kT3CTrackPlayerInterior, s.interiorPlayerPos.x, s.interiorPlayerPos.y, true);
+        T3CDrawHumanoid(g_t3cHumans[0].parts, s.interiorPlayerPos.x - hw, s.interiorPlayerPos.y - hh,
+                        pyaw, 1.0f, Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
+                        Color{ 240, 210, 180, 255 }, pa, false);
     }
-    HD2DEndUnlit(rlGetShaderIdDefault());
-    // HD-2D atmosphere: dust in the lamplight.
-    HD2DDrawMotes(cam3d.position, cam3d.target, s.worldTime, 14, 420.0f, 20.0f, 90.0f, Color{ 255, 220, 170, 36 });
     EndMode3D();
-    HD2DGradeOverlay(screenW, screenH, true);
 }
 
 // Runs one E/tap interaction. Returns true when it left the interior.
@@ -12528,8 +12154,7 @@ static void FinishMonsterDeath(GameState& s) {
     GameState::DyingMonster dm = *s.dyingMonster; // copy — handlers below touch state
     s.dyingMonster.reset();
     float corpseDur = (dm.isRival || dm.bladeIdx >= 0) ? kRivalCorpseFadeTime : kCorpseFadeTime;
-    s.worldCorpses.push_back({ dm.pos, corpseDur, corpseDur, dm.zone, dm.iconIdx, dm.name,
-                               dm.dungeonIdx, dm.monsterIdx });
+    s.worldCorpses.push_back({ dm.pos, corpseDur, corpseDur, dm.zone, dm.iconIdx, dm.name });
     int goldFound = std::max(1, dm.baseGold + (std::rand() % 3) - 1);
     s.corpses.push_back({ dm.name, dm.baseLeather, goldFound });
     std::string msg = "Defeated the " + dm.name + "! Corpse left behind with leather and " +
