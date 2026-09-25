@@ -145,6 +145,7 @@
 #include <optional>
 #include <algorithm>
 #include <vector>
+#include <deque>
 #include <map>
 #include <cstdlib>
 #include <ctime>
@@ -914,7 +915,7 @@ struct UpgradeInProgress {
 // Wilderness is deliberately not in the Tab-cycle order and has no tab-bar button —
 // it's reached by walking to a gate at the edge of Town, not by clicking a tab, so
 // it's excluded wherever the other 8 screens are enumerated for that UI.
-enum class Screen { Character, Town, Hunt, Craft, Magic, Pets, Bank, House, Skills, Wilderness, Provisioner, FurTrader, MinersGuild, Interior, Refuge }; // Phase 6: Refuge = outlaw black market
+enum class Screen { Character, Town, Hunt, Craft, Magic, Pets, Bank, House, Skills, Wilderness, Provisioner, FurTrader, MinersGuild, Interior, Refuge, Guide }; // Phase 6: Refuge = outlaw black market; Guide = newbie walkthrough (2026-09-25)
 
 struct Corpse {
     std::string monsterName;
@@ -1009,6 +1010,19 @@ struct GameState {
     int selectedTown = 0;
 
     std::string logLine = "Welcome to Town Forge.";
+
+    // Event journal (2026-09-25, UO-style): timestamped combat/event history.
+    // Bounded to the last 100 lines; transient (not saved), minimal cost.
+    struct JournalLine { std::string text; float t = 0.0f; }; // t = worldTime at log
+    std::deque<JournalLine> journal;
+    float journalScroll = 0.0f; // px scrolled up from the newest line
+    bool journalOpen = false;   // collapsed by default; LOG button / L key toggles
+
+    // Newbie guide (2026-09-25): first-launch walkthrough overlay + Guide tab.
+    bool guideSeen = false;       // persisted: the walkthrough already showed
+    bool guideOpen = false;       // transient: overlay currently showing
+    int guidePage = 0;            // transient: current walkthrough page
+    bool guideNoShowAgain = true; // transient: overlay checkbox, default checked
 
     // --- Combat/dungeon state (see the section above for what's simplified) ---
     Screen screen = Screen::Character; // matches the HTML's default/first tab
@@ -1304,6 +1318,11 @@ struct GameState {
     // empty slot. Real player configuration (unlike the transient UI-tab fields below),
     // so it's saved/loaded like any other persistent field.
     std::array<int, 5> combatHotbar = {-1, -1, -1, -1, -1};
+    // Deny-flash timers per hotbar slot (2026-09-25, combat feel): when a tap/key
+    // on a slot can't fire (cooldown, no mana/reagents), the slot flashes red and
+    // a floater explains why — a swallowed tap must never feel like "one cast".
+    // Purely visual, transient, not saved.
+    float hotbarDenyT[5] = {};
 
     struct GrayEncounter { std::string name; int level, baseGold, tierIdx; bool canSteal = false; int previewGold = 0; };
     std::optional<GrayEncounter> grayEncounter;
@@ -1341,15 +1360,19 @@ struct GameState {
         float hp, maxHp;
         float monsterAttackCooldown = 0.0f; // counts down; monster can swing when <= 0
         float playerAttackCooldown = 0.0f;  // counts down; player can swing when <= 0
-        // Separate from playerAttackCooldown so melee and magic don't share one clock —
-        // a flat cast time (kWildSpellCastCooldown), not DEX-scaled like the sword swing.
-        float playerSpellCooldown = 0.0f;
+        // Separate from playerAttackCooldown so melee and magic don't share one clock.
+        // Per-spell recharge (2026-09-25, combat feel): each spell cools down on its
+        // own kSpellCooldown clock so different spells chain; castLockT is the short
+        // global lock (one cast animation) that keeps casts from machine-gunning.
+        // Not DEX-scaled like the sword swing.
+        float spellCooldowns[kSpells.size()] = {};
+        float castLockT = 0.0f;
         // Purely visual, not gameplay — see kSwingEffectDuration. Ticks down independently
         // of playerAttackCooldown (which can be much longer/shorter depending on DEX) so
         // the flash duration stays consistent regardless of swing speed.
         float swingEffectTimer = 0.0f;
         // Same idea as swingEffectTimer but for spellcasting (2026-09-23, once the hero
-        // sheet got a real Cast pose) — set alongside playerSpellCooldown, drives
+        // sheet got a real Cast pose) — set alongside the per-spell cooldowns, drives
         // DrawPlayer's ActorAnim::Cast selection while live.
         float castEffectTimer = 0.0f;
         // Used only by the one tactical opponent — harmless unused defaults for every
@@ -1400,7 +1423,8 @@ struct GameState {
         float hp, maxHp;
         float monsterAttackCooldown = 0.0f;
         float playerAttackCooldown = 0.0f;
-        float playerSpellCooldown = 0.0f;
+        float spellCooldowns[kSpells.size()] = {};
+        float castLockT = 0.0f;
         float swingEffectTimer = 0.0f;
         float castEffectTimer = 0.0f;
         float monsterAttackT = -1.0f; // >=0: seconds since this fight's last monster attack started
@@ -1455,6 +1479,19 @@ struct GameState {
         float sizeMul = 1.0f;
     };
     SpellImpact spellImpacts[8];
+    // Floating combat text (2026-09-25, combat feel): damage numbers / MISS
+    // floaters over struck enemies. Purely visual — spawned wherever the player's
+    // melee or spells deal (or fail to deal) damage. Transient, not saved.
+    struct FloatText {
+        bool active = false;
+        int zone = 0; // 0 wilderness, 1 dungeon
+        Vector2 pos = { 0, 0 }; // world position at spawn
+        float t = 0.0f;
+        float dur = 0.9f;
+        std::string text;
+        Color color = WHITE;
+    };
+    FloatText floatTexts[16];
     float playerHurtT = -1.0f; // >=0: seconds since the player was last hit (flash + knockback)
     float healGlowT = -1.0f;   // >=0: seconds since a self-targeted spell visual fired
     int healGlowKind = 0;      // 0 mending, 1 vigor, 2 summoning
@@ -3770,12 +3807,18 @@ static const int kStatCapTotal = 260;
 // relative pacing — gathering's 0.10 vs. combat/craft's 0.06 vs. taming's 0.08 — stays
 // intact; a single tunable knob if this number needs revisiting again.
 static const float kStatGainRateMultiplier = 3.0f;
+static void Journal(GameState& s, const std::string& text); // defined with the float-text helpers below
+
 static bool MaybeGainStat(GameState& s, int GameState::*statField, float chance) {
     if (s.*statField >= kStatCapIndividual) return false;
     if (s.str + s.dex + s.intStat >= kStatCapTotal) return false;
     if (RandUnit() >= chance * kStatGainRateMultiplier) return false;
     s.*statField += 1;
     if (statField == &GameState::str) { s.maxHp += 1; s.hp += 1; }
+    // Stat gains are the game's "level-ups" — announce them in the journal.
+    const char* statName = (statField == &GameState::str) ? "Strength" :
+                           (statField == &GameState::dex) ? "Dexterity" : "Intelligence";
+    Journal(s, std::string("Your ") + statName + " increases! (" + std::to_string(s.*statField) + ")");
     return true;
 }
 
@@ -4003,9 +4046,9 @@ static void ResolvePetTurnLive(GameState& s, float& targetHp, int targetLevel) {
                 float evalMult = (pet->evalInt * 3.0f / 100.0f) + 1.0f;
                 int dmg = std::max(1, (int)std::round(best->baseDamage * evalMult * (0.85f + RandUnit() * 0.3f)));
                 targetHp -= dmg;
-                s.logLine = pet->name + " casts " + best->name + " for " + std::to_string(dmg) + " damage";
+                Journal(s, pet->name + " casts " + best->name + " for " + std::to_string(dmg) + " damage");
             } else {
-                s.logLine = pet->name + "'s spell fizzles";
+                Journal(s, pet->name + "'s spell fizzles");
             }
             GainSkillCapped(pet->magery, RollGatherSkillGain(pet->magery), 100.0f);
             GainSkillCapped(pet->evalInt, RollGatherSkillGain(pet->evalInt), 100.0f);
@@ -4019,9 +4062,9 @@ static void ResolvePetTurnLive(GameState& s, float& targetHp, int targetLevel) {
     if (RandUnit() * 100.0f < petHitChance) {
         int dmg = std::max(1, (int)std::round(petPower * (0.85f + RandUnit() * 0.3f)));
         targetHp -= dmg;
-        s.logLine = pet->name + " bites for " + std::to_string(dmg) + " damage";
+        Journal(s, pet->name + " bites for " + std::to_string(dmg) + " damage");
     } else {
-        s.logLine = pet->name + " misses";
+        Journal(s, pet->name + " misses");
     }
     GainSkillCapped(pet->wrestling, RollGatherSkillGain(pet->wrestling), 100.0f);
     GainSkillCapped(pet->tactics, RollGatherSkillGain(pet->tactics), 100.0f);
@@ -5428,7 +5471,7 @@ static void CastHealSpell(GameState& s, int spellIdx) {
 // read out on the map). Cooldown/affordability are checked by the caller (the hotbar
 // row), same division of responsibility as tryCastSpellAtEngagedMonster's call sites.
 // (CastLiveUtilitySpell moved down to the world-combat FX section, next to the
-// other live-cast routers — it needs kCastEffectDuration/kWildSpellCastCooldown.)
+// other live-cast routers — it needs kCastEffectDuration/kSpellCooldown.)
 
 // Risk-free practice outside combat — mirrors startCast()/tickCast(): spends mana
 // (not reagents) purely to train Magery/Eval Int/Meditation, no combat effect.
@@ -5904,6 +5947,7 @@ static void SaveGame(const GameState& s) {
 
     out << "combatHotbar=";
     for (size_t i = 0; i < s.combatHotbar.size(); i++) out << s.combatHotbar[i] << (i + 1 < s.combatHotbar.size() ? "," : "\n");
+    out << "guideSeen=" << (s.guideSeen ? 1 : 0) << "\n"; // newbie walkthrough already shown (2026-09-25)
 
     WriteEquipSlot(out, "equipped.leftHand", s.equipped.leftHand);
     WriteEquipSlot(out, "equipped.rightHand", s.equipped.rightHand);
@@ -6096,6 +6140,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "bloodstainedLoop") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 3; i++) s.bloodstainedLoop[i] = std::atoi(p[i].c_str()); }
         else if (key == "bloodstainedBossDefeated") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 3; i++) s.bloodstainedBossDefeated[i] = std::atoi(p[i].c_str()) != 0; }
         else if (key == "combatHotbar") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < s.combatHotbar.size(); i++) s.combatHotbar[i] = std::atoi(p[i].c_str()); }
+        else if (key == "guideSeen") { s.guideSeen = (val == "1"); }
         else if (key == "equipped.leftHand") ReadEquipSlot(val, s.equipped.leftHand);
         else if (key == "equipped.rightHand") ReadEquipSlot(val, s.equipped.rightHand);
         else if (key == "equipped.helmet") ReadEquipSlot(val, s.equipped.helmet);
@@ -6482,8 +6527,8 @@ static void SkinCorpse(GameState& s, int corpseIdx) {
     float gain = GainSkillCapped(s.skinning, RollGatherSkillGain(s.skinning), 100.0f);
     std::string gainNote = gain > 0 ? " (Skinning +" + std::to_string(gain).substr(0, 4) + ")" : "";
     if (MaybeGainStat(s, &GameState::dex, 0.06f)) gainNote += " (DEX +1)";
-    s.logLine = "Skinned the " + c.monsterName + " corpse for " + std::to_string(yieldGained) +
-                (isIceWolf ? " furs" : " leather") + " and " + std::to_string(c.gold) + " gold." + gainNote;
+    Journal(s, "Skinned the " + c.monsterName + " corpse for " + std::to_string(yieldGained) +
+               (isIceWolf ? " furs" : " leather") + " and " + std::to_string(c.gold) + " gold." + gainNote);
 }
 
 // ---------------------------------------------------------------------
@@ -7084,9 +7129,14 @@ static const float kRivalHuntCheckMin = 30.0f, kRivalHuntCheckMax = 90.0f; // ho
 // isn't already the thing you're fighting (updateTacticalOpponentAI owns movement then).
 static const float kWildPlayerAttackCooldown = 0.8f;
 static const float kWildMonsterAttackCooldown = 1.3f;
-// Flat (not DEX-scaled) cast time for Wilderness spellcasting — magic's rhythm is
-// independent of swing speed, same reasoning as PlayerSwingCooldown existing at all.
-static const float kWildSpellCastCooldown = 1.2f;
+// Per-spell recharge for live spellcasting (2026-09-25, combat feel) — each spell
+// runs its own 1.2s clock instead of one global lockout, so different spells chain
+// (Spark Dart then Ember Burst both go off) while each spell keeps its old pacing.
+// A short global cast lock (one cast animation) sits underneath so casts can't
+// machine-gun; mana costs are untouched. Magic's rhythm stays independent of
+// swing speed, same reasoning as PlayerSwingCooldown existing at all.
+static const float kSpellCooldown = 1.2f;
+static const float kCastLockTime = 0.35f;
 // How long the hero sprite holds its Attack animation after a swing. Originally a
 // DrawRing arc, then (2026-09-22) a procedural rotation of the walk-cycle sprite since
 // no dedicated attack-animation art existed for the knight sprite at the time; as of
@@ -7095,8 +7145,8 @@ static const float kWildSpellCastCooldown = 1.2f;
 // fake rotation effect.
 static const float kSwingEffectDuration = 0.18f;
 // Same idea as kSwingEffectDuration but for spellcasting, gating ActorAnim::Cast —
-// longer than the swing window since a cast already has its own flat cooldown
-// (kWildSpellCastCooldown) to read against, unlike the DEX-scaled swing timer.
+// longer than the swing window since each cast already has its own per-spell
+// cooldown (kSpellCooldown) to read against, unlike the DEX-scaled swing timer.
 static const float kCastEffectDuration = 0.35f;
 // DEX-based swing speed (Mark's own design, not from the JS prototype — see the
 // STR/DEX/INT growth entry near MaybeGainStat/kStatCapTotal above; the JS never gave
@@ -7818,11 +7868,21 @@ static float ScrollDelta(Rectangle area) {
 // which slot was just tapped, or -1. The caller decides what a tap means: outside
 // combat it opens the assignment picker, in combat it casts — see the call sites in
 // DrawWildernessScreen/DrawHuntScreen.
-static int DrawCombatHotbarRow(const GameState& s, bool inCombat, float spellCooldownRemaining,
-                                  float x = 175.0f, float y = kViewport.y + kViewport.height - 90.0f) {
+//
+// Denied taps (2026-09-25): in combat, taps on slots that can't currently fire
+// (cooldown/cast-lock, unaffordable) are ALSO reported — Button with enabled=false
+// would swallow them silently, which felt like "I can only cast once". The caller
+// flashes the slot (hotbarDenyT) and explains via floater, so every tap answers.
+// Empty slots stay silent: "+" already says there's nothing there.
+static const float kHotbarDenyTime = 0.45f;
+static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* spellCds, float castLockT,
+                               float x = 175.0f, float y = kViewport.y + kViewport.height - 90.0f) {
     int tapped = -1;
+    Vector2 mouse = GetMousePosition();
+    bool pressEdge = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     for (int i = 0; i < (int)s.combatHotbar.size(); i++) {
         Rectangle r = { x + (float)i * 68.0f, y, 62.0f, 60.0f };
+        Rectangle big = { r.x - 1.5f, r.y - 1.5f, r.width + 3.0f, r.height + 3.0f }; // matches Button's outset
         int spellIdx = s.combatHotbar[i];
         std::string label = "+";
         bool enabled = true;
@@ -7831,12 +7891,20 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, float spellCoo
             label = sp.name;
             if (inCombat) {
                 bool affordable = s.mana >= sp.manaCost && s.reagents >= kLiveCombatReagentCost;
-                enabled = affordable && spellCooldownRemaining <= 0;
+                // Per-spell recharge (2026-09-25): only THIS spell's clock and the
+                // brief global cast lock gate the button — other spells stay live.
+                bool ready = spellCds != nullptr && castLockT <= 0.0f && spellCds[spellIdx] <= 0.0f;
+                enabled = affordable && ready;
             }
         } else if (inCombat) {
             enabled = false; // empty slot, nothing to cast
         }
         if (Button(r, label, enabled)) tapped = i;
+        else if (inCombat && !enabled && pressEdge && CheckCollisionPointRec(mouse, big)) tapped = i;
+        if (inCombat && i < 5 && s.hotbarDenyT[i] > 0.0f) {
+            float f = std::clamp(s.hotbarDenyT[i] / kHotbarDenyTime, 0.0f, 1.0f);
+            DrawRectangleRounded(big, 0.25f, 6, Fade(Color{ 200, 40, 40, 255 }, 0.55f * f));
+        }
     }
     return tapped;
 }
@@ -7844,7 +7912,7 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, float spellCoo
 // Full-width overlay listing every known spell (offense + heal/cure) to assign to the
 // open slot, plus a Clear/Cancel option — opened by tapping any hotbar slot while not
 // engaged in a fight (see the DrawCombatHotbarRow call sites).
-static void DrawHotbarPicker(GameState& s, int screenW, int screenH) {
+static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppressPress) {
     if (!s.hotbarPickerSlot.has_value()) return;
     int slot = *s.hotbarPickerSlot;
     Rectangle overlay = { 20, 140, (float)screenW - 40, (float)screenH - 260 };
@@ -7852,7 +7920,9 @@ static void DrawHotbarPicker(GameState& s, int screenW, int screenH) {
     DrawRectangleRoundedLines(overlay, 0.05f, 6, Fade(BLACK, 0.5f));
     DrawUIText("Assign a spell to this slot:", (int)overlay.x + 12, (int)overlay.y + 10, 14, kColorHeading);
     float y = overlay.y + 36;
-    if (Button({ overlay.x + 12, y, overlay.width - 24, 26 }, "Clear slot", true)) {
+    // suppressPress: the tap that opened the picker is still "pressed" this frame —
+    // ignore it here so it can't instantly fire a picker button under the finger.
+    if (!suppressPress && Button({ overlay.x + 12, y, overlay.width - 24, 26 }, "Clear slot", true)) {
         s.combatHotbar[slot] = -1;
         s.hotbarPickerSlot.reset();
         return;
@@ -7870,14 +7940,14 @@ static void DrawHotbarPicker(GameState& s, int screenW, int screenH) {
         if (y + 26 > listBottom) break; // no scrolling for now — a long known-spell list just truncates
         const Spell& sp = kSpells[idx];
         std::string tag = sp.type == SpellType::Offensive ? "[Attack] " : "[Heal] ";
-        if (Button({ overlay.x + 12, y, overlay.width - 24, 24 }, tag + sp.name, true)) {
+        if (!suppressPress && Button({ overlay.x + 12, y, overlay.width - 24, 24 }, tag + sp.name, true)) {
             s.combatHotbar[slot] = idx;
             s.hotbarPickerSlot.reset();
             return;
         }
         y += 28;
     }
-    if (Button({ overlay.x + 12, overlay.y + overlay.height - 34, overlay.width - 24, 26 }, "Cancel", true))
+    if (!suppressPress && Button({ overlay.x + 12, overlay.y + overlay.height - 34, overlay.width - 24, 26 }, "Cancel", true))
         s.hotbarPickerSlot.reset();
 }
 
@@ -11185,6 +11255,8 @@ static bool Dungeon3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
                                   float assistPx, int di, GameState::FlagTarget* out);
 static void DrawFlagMarker3D(const GameState& s, int zone);
 static void DrawSpellFX3D(GameState& s, int zone);
+static Color CombatHitTint(float hurtT, Color base, Color tail);
+static void DrawFloatTexts3D(GameState& s, const Town3DCam& c, int zone, int screenW, int screenH);
 // Target switching (2026-09-25) — defined with the flag helpers, called from the
 // click/tap handlers above their definitions.
 static void CycleFlagTarget(GameState& s);
@@ -11359,18 +11431,21 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         T3CAnim ma = T3CMakeAnim(kT3CTrackMonsterWild + (int)i, mp.x, mp.y, !shadowPass);
         float shrink = isDying ? std::max(0.05f, dying->timer / dying->duration) : 1.0f;
         // Combat read (2026-09-24): the engaged monster's lunge pose rides
-        // monsterAttackT; it flashes red while monsterHurtT is live. Pack
-        // attackers (2026-09-25) flash red when hit, no lunge pose.
+        // monsterAttackT; it flashes white-hot then red while monsterHurtT is live.
+        // Pack attackers (2026-09-25) flash the same way when hit, no lunge pose.
         float mAtk = (eng && !isDying) ? MonsterCombatPhase3D(s.wildEngaged->monsterAttackT) : -1.0f;
-        bool mHurt = !isDying && ((eng && s.wildEngaged->monsterHurtT >= 0.0f) ||
-                                 (extra && extra->monsterHurtT >= 0.0f));
+        float mHurtT = -1.0f;
+        if (!isDying) {
+            if (eng) mHurtT = s.wildEngaged->monsterHurtT;
+            else if (extra) mHurtT = extra->monsterHurtT;
+        }
         if (mlook.humanoid) {
             T3CDrawHumanoid(g_t3cHumans[0].parts, mp.x, mp.y, face, mlook.scale * shrink,
-                            mHurt ? Color{ 220, 90, 90, 255 } : mlook.shirt, mlook.pants, mlook.skin, ma, shadowPass,
+                            CombatHitTint(mHurtT, mlook.shirt, Color{ 220, 90, 90, 255 }), mlook.pants, mlook.skin, ma, shadowPass,
                             mAtk, -1.0f);
         } else {
             T3CDrawQuad(g_t3cQuads[mlook.specIdx].parts, mp.x, mp.y, face,
-                        mlook.scale * shrink, mHurt ? Color{ 220, 90, 90, 255 } : mlook.coat, ma, kitDist(mp.x, mp.y), shadowPass,
+                        mlook.scale * shrink, CombatHitTint(mHurtT, mlook.coat, Color{ 220, 90, 90, 255 }), ma, kitDist(mp.x, mp.y), shadowPass,
                         mAtk);
         }
     }
@@ -11390,7 +11465,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             bool rEng = wasEngaged && s.wildEngaged->isRival && !rivalDying3D;
             float rAtk = rEng ? MonsterCombatPhase3D(s.wildEngaged->monsterAttackT) : -1.0f;
             T3CDrawHumanoid(g_t3cHumans[3].parts, rp.x, rp.y, ryaw, rscale,
-                            (rEng && s.wildEngaged->monsterHurtT >= 0.0f) ? Color{ 220, 90, 90, 255 } : Color{ 150, 60, 55, 255 },
+                            CombatHitTint(rEng ? s.wildEngaged->monsterHurtT : -1.0f, Color{ 150, 60, 55, 255 }, Color{ 220, 90, 90, 255 }),
                             Color{ 60, 50, 55, 255 },
                             Color{ 235, 200, 170, 255 }, ra, shadowPass, rAtk, -1.0f);
         }
@@ -11413,7 +11488,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             bool bEng = wasEngaged && s.wildEngaged->bladeIdx == bi && !bladeDying3D;
             float bAtk = bEng ? MonsterCombatPhase3D(s.wildEngaged->monsterAttackT) : -1.0f;
             T3CDrawHumanoid(g_t3cHumans[3].parts, bp.x, bp.y, byaw, bscale,
-                            (bEng && s.wildEngaged->monsterHurtT >= 0.0f) ? Color{ 220, 90, 90, 255 } : Color{ 70, 25, 30, 255 },
+                            CombatHitTint(bEng ? s.wildEngaged->monsterHurtT : -1.0f, Color{ 70, 25, 30, 255 }, Color{ 220, 90, 90, 255 }),
                             Color{ 35, 30, 35, 255 },
                             Color{ 220, 190, 165, 255 }, ba, shadowPass, bAtk, -1.0f);
         }
@@ -11630,6 +11705,8 @@ static Wild3DNearest Wild3DNearestInfo(const GameState& s) {
 // UI rects the orbit input must ignore (mirrors Town3DPointInUI for the
 // wilderness HUD: the 3D/2D toggle, tap-to-interact, the virtual joystick,
 // and the live-combat UI while engaged).
+static Rectangle JournalPanelRect();      // defined with the journal UI below
+static Rectangle JournalWildButtonRect(); // defined with the journal UI below
 static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
     if (CheckCollisionPointRec(m, { 452, 120, 68, 30 })) return true; // 3D/2D toggle
     if (CheckCollisionPointRec(m, { 528, 120, 96, 30 })) return true; // camera mode button
@@ -11639,6 +11716,8 @@ static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
     if (s.minimapOpen && CheckCollisionPointRec(m, MinimapRect())) return true; // minimap (tap closes it)
     if (!s.minimapOpen && CheckCollisionPointRec(m, MinimapToggleRect())) return true; // MAP button
     if (CheckCollisionPointRec(m, kJoystickZone)) return true;
+    if (CheckCollisionPointRec(m, JournalWildButtonRect())) return true; // LOG button
+    if (s.journalOpen && CheckCollisionPointRec(m, JournalPanelRect())) return true; // journal panel
     if (s.wildEngaged.has_value()) {
         if (CheckCollisionPointRec(m, { 20, 110, 330, 60 })) return true; // HP/mana strip
         if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return true; // quick items
@@ -11764,6 +11843,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
         DrawRectangle(sx - 6, sy - 3, w + 12, 22, Fade(BLACK, 0.55f));
         DrawUIText(prompt.c_str(), sx, sy, 14, WHITE);
     }
+    DrawFloatTexts3D(s, c, 0, screenW, screenH); // combat feel: damage numbers / MISS
     DrawUIText("3D view: drag to orbit, wheel to zoom. [V] toggles 2D.", 20, 196, 12,
                Color{ 90, 74, 52, 255 });
     // Phase 0: HUD region label (3D view) — same top-center pill as the 2D view,
@@ -12084,12 +12164,13 @@ static Color Dungeon3DMonsterColor(int dungeonIdx, bool boss) {
 // palette color (boss brightened by the caller).
 static void Dungeon3DDrawMonster(int dungeonIdx, int monsterIdx, int trackId, float x, float z,
                                  float yawRad, Color tint, float sizeMul,
-                                 float attackT = -1.0f, bool hurt = false) {
+                                 float attackT = -1.0f, float hurtT = -1.0f) {
     T3CDunLook look = T3CDungeonMonsterLook(dungeonIdx, monsterIdx);
     T3CAnim a = T3CMakeAnim(trackId, x, z);
     float sm = sizeMul * look.scale;
-    // Combat read (2026-09-24): lunge pose on attackT, red flash while hurt.
-    Color c = hurt ? Color{ 220, 90, 90, 255 } : tint;
+    // Combat read (2026-09-24): lunge pose on attackT, white-hot then red flash
+    // while hurtT is live (2026-09-25).
+    Color c = CombatHitTint(hurtT, tint, Color{ 220, 90, 90, 255 });
     if (look.serpent) {
         T3CDrawSerpent(g_t3cQuads[10].parts, x, z, yawRad, sm, c, a, false, attackT);
     } else if (look.humanoid) {
@@ -12139,6 +12220,7 @@ static void Dungeon3DDrawPlayer(const GameState& s) {
     }
 }
 
+static Rectangle JournalHuntButtonRect(); // defined with the journal UI below
 static bool Dung3DPointInUI(Vector2 m, const GameState& s) {
     if (CheckCollisionPointRec(m, { 20, 56, 104, 40 })) return true; // in-dungeon MENU toggle
     if (s.dungeonMenuOpen && s.selectedDungeon.has_value() &&
@@ -12149,6 +12231,9 @@ static bool Dung3DPointInUI(Vector2 m, const GameState& s) {
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return true; // TARGET button
     if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return true; // quick items
     if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return true; // spell hotbar
+    if ((!s.selectedDungeon.has_value() || s.dungeonMenuOpen) &&
+        CheckCollisionPointRec(m, JournalHuntButtonRect())) return true; // LOG button
+    if (s.journalOpen && CheckCollisionPointRec(m, JournalPanelRect())) return true; // journal panel
     return false;
 }
 
@@ -12271,7 +12356,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
             Dungeon3DDrawMonster(di, midx, kT3CTrackMonsterDungeon + kDungeonBossSlot + 1, am.pos.x, am.pos.y,
                                  atan2f(facing.y, facing.x),
                                  Dungeon3DMonsterColor(di, am.isBoss), 1.0f,
-                                 MonsterCombatPhase3D(am.monsterAttackT), am.monsterHurtT >= 0.0f);
+                                 MonsterCombatPhase3D(am.monsterAttackT), am.monsterHurtT);
         }
     }
     Dungeon3DDrawPlayer(s);
@@ -12363,6 +12448,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         DrawRectangle(sx - 6, sy - 3, w + 12, 22, Fade(BLACK, 0.55f));
         DrawUIText(prompt.c_str(), sx, sy, 14, WHITE);
     }
+    DrawFloatTexts3D(s, c, 1, screenW, screenH); // combat feel: damage numbers / MISS
     DrawUIText(TextFormat("%s — 3D view: drag to orbit, wheel to zoom. [V] toggles 2D.",
                           kDungeons[di].name.c_str()),
                20, 196, 12, Color{ 200, 180, 150, 255 });
@@ -13797,7 +13883,7 @@ static void ShrineResurrect(GameState& s, const ShrineDef& shrine) {
     s.ghostTimer = 0.0f;
     s.ghostZone = 0;
     s.ghostDungeonIdx = -1;
-    s.logLine = std::string("The Shrine of ") + shrine.name + " calls you back from the veil. You rise, whole, where you stand.";
+    Journal(s, std::string("The Shrine of ") + shrine.name + " calls you back from the veil. You rise, whole, where you stand.");
     PlaySfx(SfxId::Heal);
 }
 
@@ -14118,7 +14204,7 @@ static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
             msg += " " + dungeon.boss.name + " is now available!";
     }
     LiveMaybeGainMagicResist(s);
-    s.logLine = msg;
+    Journal(s, msg); // kills resolve into the event journal
     PlaySfx(SfxId::Victory); // the deferred win resolves here — fight won
     DecrementShaken(s); // JS: every win eases Shaken by one fight
     AddWeeklyProgress(s, kGoalDefeat, 1);
@@ -14263,6 +14349,7 @@ static SpellFX SpellFXFor(int spellIdx) {
         case -10: return { Color{150,255,170,255}, 0, 1200, Color{150,255,170,255}, 60 }; // mending burst
         case -11: return { Color{255,220,130,255}, 0, 1200, Color{255,220,130,255}, 60 }; // vigor burst
         case -12: return { Color{255,140,70,255},  0, 1200, Color{255,120,50,255},  80 }; // summoning burst
+        case -4:  return { Color{255,255,255,255},  0,    0, Color{255,236,170,255},  40 }; // melee hit burst
         default: return { Color{255,255,255,255},  9, 1200, Color{255,255,255,255}, 44 };
     }
 }
@@ -14304,6 +14391,44 @@ static void SpawnSpellImpact(GameState& s, int zone, Vector2 pos, int spellIdx, 
     }
 }
 
+// Floating damage number / MISS floater (2026-09-25, combat feel). Steals the
+// oldest slot when all 16 are live — combat never has that many concurrent hits.
+static void SpawnFloatText(GameState& s, int zone, Vector2 pos, const std::string& text, Color color) {
+    GameState::FloatText* slot = nullptr;
+    for (auto& ft : s.floatTexts) if (!ft.active) { slot = &ft; break; }
+    if (!slot) {
+        slot = &s.floatTexts[0];
+        for (auto& ft : s.floatTexts) if (ft.t > slot->t) slot = &ft;
+    }
+    slot->active = true;
+    slot->zone = zone;
+    slot->pos = pos;
+    slot->t = 0.0f;
+    slot->dur = 0.9f;
+    slot->text = text;
+    slot->color = color;
+}
+static const Color kFloatDmgColor = { 255, 226, 140, 255 }; // player's damage numbers
+static const Color kFloatMissColor = { 175, 175, 175, 255 }; // MISS / fizzle floaters
+static const Color kFloatDenyColor = { 255, 130, 130, 255 }; // failed-cast feedback floaters
+
+// Event journal (2026-09-25, UO-style): timestamped combat/event history.
+// Journal() records the line (bounded to the last 100) AND mirrors it to the
+// bottom logLine display, so call sites just call Journal(s, text).
+static void Journal(GameState& s, const std::string& text) {
+    s.journal.push_back({ text, s.worldTime });
+    while (s.journal.size() > 100) s.journal.pop_front();
+    s.logLine = text;
+}
+
+// Hit-flash staging (2026-09-25, combat feel): white-hot for the first ~150ms so
+// the moment of contact reads instantly, then the site's usual red tint for the
+// tail of the existing 0.30s flash. hurtT < 0 means "not flashing" -> base color.
+static Color CombatHitTint(float hurtT, Color base, Color tail) {
+    if (hurtT < 0.0f) return base;
+    return hurtT < 0.15f ? Color{ 255, 255, 255, 255 } : tail;
+}
+
 // --- Mechanical resolution on projectile arrival ---
 // These are the bodies that used to run instantly inside the cast lambdas —
 // moved here verbatim so the only change is the visible flight time.
@@ -14321,6 +14446,7 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
             am.hp -= dmg;
             am.monsterHurtT = 0.0f;
             PlaySfx(SfxId::Hit);
+            SpawnFloatText(s, 0, am.pos, std::to_string(dmg), kFloatDmgColor);
             s.logLine = spell.name + " hits the " + mname + " for " + std::to_string(dmg) + " damage" + trainNote;
             // Capture before the death block below can reset wildEngaged (2026-09-25).
             Vector2 impactCenter = am.pos;
@@ -14345,6 +14471,7 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
                     int exDmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
                     ex.hp -= exDmg;
                     ex.monsterHurtT = 0.0f;
+                    SpawnFloatText(s, 0, ex.pos, std::to_string(exDmg), kFloatDmgColor);
                     blastCount++;
                     if (ex.hp <= 0) {
                         BeginWildExtraDeath(s, ex);
@@ -14375,8 +14502,11 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
                     BeginWildMonsterDeath(s, am, mname, mgold, mleather);
                 }
             }
+            Journal(s, s.logLine); // spell hits / blasts go to the event journal
         } else {
             s.logLine = spell.name + " fizzles!" + trainNote;
+            SpawnFloatText(s, 0, am.pos, "MISS", kFloatMissColor);
+            Journal(s, s.logLine);
         }
     } else {
         if (!s.dungeonEngaged.has_value() || !s.selectedDungeon.has_value()) return;
@@ -14392,6 +14522,7 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
             am.hp -= dmg;
             am.monsterHurtT = 0.0f;
             PlaySfx(SfxId::Hit);
+            SpawnFloatText(s, 1, am.pos, std::to_string(dmg), kFloatDmgColor);
             s.logLine = spell.name + " hits the " + mname + " for " + std::to_string(dmg) + " damage" + trainNote;
             // Capture before the death block below can reset dungeonEngaged (2026-09-25).
             Vector2 impactCenter = am.pos;
@@ -14415,6 +14546,7 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
                     int exDmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
                     ex.hp -= exDmg;
                     ex.monsterHurtT = 0.0f;
+                    SpawnFloatText(s, 1, ex.pos, std::to_string(exDmg), kFloatDmgColor);
                     blastCount++;
                     if (ex.hp <= 0) {
                         BeginDungeonExtraDeath(s, *s.selectedDungeon, ex);
@@ -14433,8 +14565,11 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
                 int mgold = m.baseGold, mleather = m.baseLeather;
                 BeginDungeonMonsterDeath(s, am, *s.selectedDungeon, am.isBoss, mname, level, mgold, mleather);
             }
+            Journal(s, s.logLine); // spell hits / blasts go to the event journal
         } else {
             s.logLine = spell.name + " fizzles!" + trainNote;
+            SpawnFloatText(s, 1, am.pos, "MISS", kFloatMissColor);
+            Journal(s, s.logLine);
         }
     }
 }
@@ -14645,6 +14780,11 @@ static void UpdateLiveSpellFX(GameState& s, float dt) {
         if (!im.active) continue;
         im.t += dt;
         if (im.t >= im.dur) im.active = false;
+    }
+    for (auto& ft : s.floatTexts) {
+        if (!ft.active) continue;
+        ft.t += dt;
+        if (ft.t >= ft.dur) ft.active = false;
     }
 }
 
@@ -15453,6 +15593,22 @@ static void DrawSpellFX2D(GameState& s, Vector2 camera, int zone) {
         DrawCircleV(sp, r, Fade(fx.impact, 0.55f * (1.0f - f)));
         DrawCircleV(sp, r * 0.55f, Fade(Color{ 255, 255, 255, 255 }, 0.5f * (1.0f - f)));
     }
+    for (auto& ft : s.floatTexts) { // floating damage numbers / MISS (2026-09-25)
+        if (!ft.active || ft.zone != zone) continue;
+        float f = std::clamp(ft.t / ft.dur, 0.0f, 1.0f);
+        Vector2 sp = WorldToScreen(ft.pos, camera);
+        sp.y -= 26.0f + ft.t * 54.0f; // rise as it fades
+        int fsz = 17;
+        int w = MeasureUIText(ft.text.c_str(), fsz);
+        int sx = (int)(sp.x - w / 2), sy = (int)sp.y;
+        float a = 1.0f - f * f;
+        Color oc = Fade(BLACK, 0.75f * a);
+        DrawUIText(ft.text.c_str(), sx - 1, sy, fsz, oc);
+        DrawUIText(ft.text.c_str(), sx + 1, sy, fsz, oc);
+        DrawUIText(ft.text.c_str(), sx, sy - 1, fsz, oc);
+        DrawUIText(ft.text.c_str(), sx, sy + 1, fsz, oc);
+        DrawUIText(ft.text.c_str(), sx, sy, fsz, Fade(ft.color, a));
+    }
     if (s.fiendT > 0.0f && s.fiendZone == zone) DrawFiend2D(s, camera);
     if (s.healGlowT >= 0.0f) {
         Color gc = s.healGlowKind == 0 ? Color{ 150, 255, 170, 255 } :
@@ -15558,13 +15714,46 @@ static void DrawSpellFX3D(GameState& s, int zone) {
     }
 }
 
+// Floating damage numbers / MISS for the 3D views (2026-09-25, combat feel) —
+// drawn in the 2D overlay pass after EndMode3D via the hand-rolled projection
+// (same approach as the 3D labels), rising in world units as they fade.
+static void DrawFloatTexts3D(GameState& s, const Town3DCam& c, int zone, int screenW, int screenH) {
+    for (auto& ft : s.floatTexts) {
+        if (!ft.active || ft.zone != zone) continue;
+        float f = std::clamp(ft.t / ft.dur, 0.0f, 1.0f);
+        Vector3 wp = { ft.pos.x, 95.0f + ft.t * 70.0f, ft.pos.y };
+        Vector2 sp;
+        if (!Town3DProject(c, wp, &sp)) continue;
+        if (sp.x < -40 || sp.x > screenW + 40 || sp.y < -20 || sp.y > screenH + 40) continue;
+        int fsz = 16;
+        int w = MeasureUIText(ft.text.c_str(), fsz);
+        int sx = (int)(sp.x - w / 2), sy = (int)sp.y;
+        float a = 1.0f - f * f;
+        Color oc = Fade(BLACK, 0.75f * a);
+        DrawUIText(ft.text.c_str(), sx - 1, sy, fsz, oc);
+        DrawUIText(ft.text.c_str(), sx + 1, sy, fsz, oc);
+        DrawUIText(ft.text.c_str(), sx, sy - 1, fsz, oc);
+        DrawUIText(ft.text.c_str(), sx, sy + 1, fsz, oc);
+        DrawUIText(ft.text.c_str(), sx, sy, fsz, Fade(ft.color, a));
+    }
+}
+
 // Debuff casting in live combat (2026-09-24): routes through the projectile
 // system; the wisp applies the debuff on arrival. Cooldown/mana/reagent rules
 // match offensive live casts.
 static void CastLiveDebuffSpell(GameState& s, int spellIdx, int zone) {
+    if (spellIdx < 0 || spellIdx >= (int)kSpells.size()) return;
     const Spell& spell = kSpells[spellIdx];
     bool engaged = (zone == 0) ? s.wildEngaged.has_value() : s.dungeonEngaged.has_value();
     if (!engaged) { s.logLine = "No target for " + spell.name + "."; return; }
+    // Per-spell cooldown + cast lock, same as the offensive live casts.
+    if (zone == 0) {
+        const auto& am = *s.wildEngaged;
+        if (am.castLockT > 0 || am.spellCooldowns[spellIdx] > 0) return;
+    } else {
+        const auto& am = *s.dungeonEngaged;
+        if (am.castLockT > 0 || am.spellCooldowns[spellIdx] > 0) return;
+    }
     if (s.mana < spell.manaCost || s.reagents < kLiveCombatReagentCost) {
         s.logLine = "Not enough mana or reagents for " + spell.name + ".";
         return;
@@ -15577,12 +15766,14 @@ static void CastLiveDebuffSpell(GameState& s, int spellIdx, int zone) {
     if (zone == 0) {
         auto& am = *s.wildEngaged;
         am.castEffectTimer = kCastEffectDuration;
-        am.playerSpellCooldown = kWildSpellCastCooldown;
+        am.spellCooldowns[spellIdx] = kSpellCooldown;
+        am.castLockT = kCastLockTime;
         SpawnSpellProjectile(s, 0, s.wildernessPlayerPos, am.pos, spellIdx, true, note);
     } else {
         auto& am = *s.dungeonEngaged;
         am.castEffectTimer = kCastEffectDuration;
-        am.playerSpellCooldown = kWildSpellCastCooldown;
+        am.spellCooldowns[spellIdx] = kSpellCooldown;
+        am.castLockT = kCastLockTime;
         SpawnSpellProjectile(s, 1, s.dungeonPlayerPos, am.pos, spellIdx, true, note);
     }
 }
@@ -15593,14 +15784,24 @@ static void CastLiveDebuffSpell(GameState& s, int spellIdx, int zone) {
 // Debuff/Buff/Summon data would have fallen through into the heal path. Now
 // every type routes somewhere real:
 //   Utility (Mending Word, Greater Mending): heal, as before, plus a cast pose,
-//     the shared spell cooldown, and a visible green-gold burst.
+//     per-spell cooldowns, and a visible green-gold burst.
 //   Debuff (Sap Strength, Cloud Mind, Fumbling Curse): a wisp flies to the
 //     enemy and applies the debuff for 20s — see ResolvePlayerDebuffImpact.
 //   Buff (Blessing of Vigor): +25% melee/spell damage for 30s, gold aura.
 //   Summon (Summon Fiend): a small demon follows the player for 25s, lashing
 //     the engaged enemy every 2s — see FiendStrikeLive.
 static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
+    if (spellIdx < 0 || spellIdx >= (int)kSpells.size()) return;
     const Spell& spell = kSpells[spellIdx];
+    // Per-spell cooldown + cast lock, same as the offensive live casts — without
+    // this a tap during another spell's lock would eat mana for a queued cast.
+    if (zone == 0 && s.wildEngaged.has_value()) {
+        const auto& am = *s.wildEngaged;
+        if (am.castLockT > 0 || am.spellCooldowns[spellIdx] > 0) return;
+    } else if (zone == 1 && s.dungeonEngaged.has_value()) {
+        const auto& am = *s.dungeonEngaged;
+        if (am.castLockT > 0 || am.spellCooldowns[spellIdx] > 0) return;
+    }
     if (s.mana < spell.manaCost || s.reagents < kLiveCombatReagentCost) {
         s.logLine = "Not enough mana or reagents for " + spell.name + ".";
         return;
@@ -15615,10 +15816,12 @@ static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
     auto setCastPose = [&]() {
         if (zone == 0 && s.wildEngaged.has_value()) {
             s.wildEngaged->castEffectTimer = kCastEffectDuration;
-            s.wildEngaged->playerSpellCooldown = kWildSpellCastCooldown;
+            s.wildEngaged->spellCooldowns[spellIdx] = kSpellCooldown;
+            s.wildEngaged->castLockT = kCastLockTime;
         } else if (zone == 1 && s.dungeonEngaged.has_value()) {
             s.dungeonEngaged->castEffectTimer = kCastEffectDuration;
-            s.dungeonEngaged->playerSpellCooldown = kWildSpellCastCooldown;
+            s.dungeonEngaged->spellCooldowns[spellIdx] = kSpellCooldown;
+            s.dungeonEngaged->castLockT = kCastLockTime;
         }
     };
     if (spell.type == SpellType::Buff) {
@@ -15662,6 +15865,199 @@ static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
     } else {
         s.logLine = spell.name + " fizzles!" + note;
     }
+}
+
+// ---------------------------------------------------------------------
+// Event journal UI (2026-09-25, UO-style): the LOG button toggles a
+// collapsible panel listing the last 100 journal lines, newest at the
+// bottom, timestamped [MM:SS]. Collapsed by default; in dungeons it hides
+// behind the same MENU collapse as the rest of the HUD. Fixed 540-space
+// layout like the rest of the HUD.
+// ---------------------------------------------------------------------
+static Rectangle JournalPanelRect() { return { 180, 160, 340, 290 }; }
+static Rectangle JournalWildButtonRect() { return { 372, 120, 68, 30 }; }
+static Rectangle JournalHuntButtonRect() { return { 132, 56, 88, 40 }; }
+
+static std::string JournalTimestamp(float t) {
+    int total = (int)t;
+    return TextFormat("[%02d:%02d] ", total / 60, total % 60);
+}
+
+// Greedy word wrap for one journal line at 12px.
+static std::vector<std::string> WrapJournalText(const std::string& text, float maxW) {
+    std::vector<std::string> rows;
+    std::string cur;
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t j = text.find(' ', i);
+        std::string word = (j == std::string::npos) ? text.substr(i) : text.substr(i, j - i);
+        std::string trial = cur.empty() ? word : cur + " " + word;
+        if (!cur.empty() && MeasureUIText(trial.c_str(), 12) > maxW) {
+            rows.push_back(cur);
+            cur = word;
+        } else {
+            cur = trial;
+        }
+        i = (j == std::string::npos) ? text.size() : j + 1;
+    }
+    if (!cur.empty()) rows.push_back(cur);
+    if (rows.empty()) rows.push_back("");
+    return rows;
+}
+
+static float g_journalDragY = -1.0f; // active drag-scroll anchor, -1 = none
+
+static void DrawJournalPanel(GameState& s) {
+    Rectangle panel = JournalPanelRect();
+    Vector2 mouse = GetMousePosition();
+    DrawRectangleRounded(panel, 0.08f, 8, Fade(kColorPageBg, 0.97f));
+    DrawRectangleRoundedLines(panel, 0.08f, 8, Fade(BLACK, 0.45f));
+    DrawUIText("Journal", (int)panel.x + 12, (int)panel.y + 10, 15, kColorAccent);
+    if (Button({ panel.x + panel.width - 52, panel.y + 6, 44, 26 }, "X", true)) {
+        s.journalOpen = false;
+        return;
+    }
+
+    float lineH = 17.0f;
+    float listTop = panel.y + 38.0f, listBottom = panel.y + panel.height - 10.0f;
+    float listH = listBottom - listTop;
+
+    // Build wrapped display rows (timestamp on the first row of each entry).
+    std::vector<std::string> rows;
+    rows.reserve(s.journal.size() + 8);
+    float wrapW = panel.width - 76.0f; // room for the [MM:SS] prefix
+    for (size_t ei = 0; ei < s.journal.size(); ei++) {
+        const auto& jl = s.journal[ei];
+        std::vector<std::string> w = WrapJournalText(jl.text, wrapW);
+        rows.push_back(JournalTimestamp(jl.t) + w[0]);
+        for (size_t k = 1; k < w.size(); k++) rows.push_back("           " + w[k]);
+    }
+
+    float maxScroll = std::max(0.0f, (float)rows.size() * lineH - listH);
+    // Wheel + drag scroll, only while the pointer is over the panel.
+    if (CheckCollisionPointRec(mouse, panel)) {
+        float wheel = GetMouseWheelMove();
+        if (wheel != 0.0f) s.journalScroll = std::clamp(s.journalScroll - wheel * 34.0f, 0.0f, maxScroll);
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) g_journalDragY = mouse.y;
+    }
+    if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && g_journalDragY >= 0.0f) {
+        s.journalScroll = std::clamp(s.journalScroll + (g_journalDragY - mouse.y), 0.0f, maxScroll);
+        g_journalDragY = mouse.y;
+    } else if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        g_journalDragY = -1.0f;
+    }
+    s.journalScroll = std::clamp(s.journalScroll, 0.0f, maxScroll);
+
+    BeginScissorMode((int)panel.x, (int)listTop, (int)panel.width, (int)listH);
+    float y = listBottom - (float)rows.size() * lineH + s.journalScroll;
+    for (size_t i = 0; i < rows.size(); i++) {
+        if (y + lineH >= listTop && y <= listBottom)
+            DrawUIText(rows[i].c_str(), (int)panel.x + 10, (int)y, 12, kColorText);
+        y += lineH;
+    }
+    EndScissorMode();
+    if (maxScroll > 0.0f) {
+        float th = std::max(20.0f, listH * listH / ((float)rows.size() * lineH));
+        float ty = listTop + (listH - th) * (s.journalScroll / maxScroll);
+        DrawRectangleRounded({ panel.x + panel.width - 8, ty, 5, th }, 0.5f, 4, Fade(BLACK, 0.35f));
+    }
+}
+
+// Shared LOG button + L key + panel for the wilderness and dungeon screens.
+// `visible` false (in-dungeon MENU collapsed) forces the panel shut.
+static void DrawJournalUI(GameState& s, Rectangle buttonRect, bool visible) {
+    if (!visible) { s.journalOpen = false; return; }
+    bool toggle = IsKeyPressed(KEY_L) || Button(buttonRect, "LOG", true);
+    if (toggle) {
+        s.journalOpen = !s.journalOpen;
+        if (s.journalOpen) s.journalScroll = 0.0f; // open at the newest line
+    }
+    if (s.journalOpen) DrawJournalPanel(s);
+}
+
+// ---------------------------------------------------------------------
+// Newbie guide (2026-09-25): first-launch walkthrough overlay + Guide tab.
+// One concept per page, short plain lines; the overlay and the tab share
+// the same pages so the tab reopens exactly what the walkthrough showed.
+// ---------------------------------------------------------------------
+static const int kGuidePageCount = 5;
+static const char* kGuideTitles[5] = {
+    "1. Move around",
+    "2. Fight & switch targets",
+    "3. Spells & the hotbar",
+    "4. Your journal",
+    "5. Skills, bank & house",
+};
+static const char* kGuideBodies[5] = {
+    "Drag the left stick to walk.\nOn desktop, WASD or arrow keys\nwork too.\n\nWalk up to glowing trees, rocks,\nand water to gather. Walk into\na dungeon entrance to go inside.",
+    "Tap the sword button (or SPACE)\nto swing at your target.\n\nSwitch targets with the G key,\nthe TARGET button, or by\ntapping another monster.",
+    "Open the Magic tab, tap a hotbar\nslot, then pick a spell for it.\n\nCasting costs mana + 1 reagent.\nBuy reagents at the Provisioner.\n\nIn a fight, tap a slot — or\npress 1-5 — to cast.",
+    "The LOG button (L key) opens\nyour journal.\n\nEvery hit, spell, kill, and\nloot is written there with\nthe time. Open it anytime\nto see what happened.",
+    "Chop, mine, and fish to train\nskills — every skill caps\nat 100.\n\nThe bank keeps your gold and\nitems safe. Buy a house plot\nfor storage and a hearth\nyou can recall to.",
+};
+
+// Shared page chrome: title, page dots, body lines.
+static void DrawGuidePageContent(GameState& s, float x, float y, float w) {
+    int page = std::clamp(s.guidePage, 0, kGuidePageCount - 1);
+    s.guidePage = page;
+    DrawUIText(kGuideTitles[page], (int)x, (int)y, 18, kColorAccent);
+    float dotX = x + w - kGuidePageCount * 18.0f;
+    for (int i = 0; i < kGuidePageCount; i++)
+        DrawCircle((int)(dotX + i * 18 + 6), (int)y + 9, 5,
+                   i == page ? kColorAccent : Fade(kColorText, 0.3f));
+    int ly = (int)y + 36;
+    for (const std::string& line : SplitStr(kGuideBodies[page], '\n')) {
+        if (!line.empty()) DrawUIText(line.c_str(), (int)x, ly, 14, kColorText);
+        ly += 22;
+    }
+}
+
+// First-launch overlay: dimmed world, centered card, big Next/Skip,
+// "Don't show again" checkbox persisted to the save via the 2s autosave.
+static void DrawGuideOverlay(GameState& s) {
+    DrawRectangle(0, 0, 540, 900, Fade(BLACK, 0.55f));
+    float cw = 440.0f, ch = 560.0f;
+    float cx = (540.0f - cw) / 2.0f, cy = (900.0f - ch) / 2.0f;
+    Rectangle card = { cx, cy, cw, ch };
+    DrawRectangleRounded(card, 0.04f, 10, Fade(kColorPageBg, 0.98f));
+    DrawRectangleRoundedLines(card, 0.04f, 10, Fade(BLACK, 0.5f));
+    DrawUIText("Welcome to Town Forge!", (int)(cx + 24), (int)(cy + 18), 20, kColorAccent);
+    DrawGuidePageContent(s, cx + 24, cy + 54, cw - 48);
+    int page = s.guidePage;
+    bool last = (page == kGuidePageCount - 1);
+
+    float cbY = cy + ch - 140;
+    if (Button({ cx + 24, cbY, 26, 26 }, s.guideNoShowAgain ? "X" : "", true))
+        s.guideNoShowAgain = !s.guideNoShowAgain;
+    DrawUIText("Don't show again", (int)(cx + 58), (int)cbY + 5, 14, kColorText);
+
+    float btnY = cy + ch - 96, bx = cx + 24;
+    auto dismissGuide = [&]() {
+        if (s.guideNoShowAgain) s.guideSeen = true; // the 2s autosave persists it
+        s.guideOpen = false;
+    };
+    if (Button({ bx, btnY, 118, 64 }, "Skip", true)) dismissGuide();
+    bx += 128;
+    if (page > 0) {
+        if (Button({ bx, btnY, 118, 64 }, "Back", true)) s.guidePage--;
+        bx += 128;
+    }
+    if (Button({ bx, btnY, 118, 64 }, last ? "Done" : "Next", true)) {
+        if (last) dismissGuide();
+        else s.guidePage++;
+    }
+}
+
+// Guide tab: the same pages, browsable anytime.
+static void DrawGuideScreen(GameState& s, int screenW) {
+    float cx = 30.0f, cw = (float)screenW - 60.0f, cy = 130.0f;
+    DrawGuidePageContent(s, cx, cy, cw);
+    int page = s.guidePage;
+    float btnY = 640.0f;
+    if (page > 0 && Button({ cx, btnY, 140, 56 }, "Back", true)) s.guidePage--;
+    if (page < kGuidePageCount - 1 && Button({ cx + cw - 140, btnY, 140, 56 }, "Next", true)) s.guidePage++;
+    DrawUIText("This is the same walkthrough from your first visit.", (int)cx, (int)btnY + 70, 13,
+               Fade(kColorText, 0.7f));
 }
 
 // Player combat phase for the 3D rig: 0→1 over the swing/cast, -1 when idle.
@@ -16022,7 +16418,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (quiet && !GuildThreatActive(s) &&
             Dist(s.wildernessPlayerPos, kRivalCampSpots[s.rivalCampIdx]) < 130.0f) {
             BladeStartHunt(s, std::rand() % kBladeCount, -1);
-            s.logLine = "You stumble into Murder Inc.'s camp — they've seen you!";
+            Journal(s, "You stumble into Murder Inc.'s camp — they've seen you!");
         }
     }
 
@@ -16245,7 +16641,11 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 
         if (am.monsterAttackCooldown > 0) am.monsterAttackCooldown -= dtF;
         if (am.playerAttackCooldown > 0) am.playerAttackCooldown -= dtF;
-        if (am.playerSpellCooldown > 0) am.playerSpellCooldown -= dtF;
+        if (am.castLockT > 0) am.castLockT -= dtF;
+        for (size_t sci = 0; sci < kSpells.size(); sci++)
+            if (am.spellCooldowns[sci] > 0) am.spellCooldowns[sci] -= dtF;
+        for (int ddi = 0; ddi < 5; ddi++)
+            if (s.hotbarDenyT[ddi] > 0) s.hotbarDenyT[ddi] -= dtF;
         if (am.swingEffectTimer > 0) am.swingEffectTimer -= dtF;
         if (am.castEffectTimer > 0) am.castEffectTimer -= dtF;
 
@@ -16263,9 +16663,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 s.hp -= dmg;
                 s.playerHurtT = 0.0f; // hit-flash + knockback
                 PlaySfx(SfxId::Hurt);
-                s.logLine = "The " + mname + " hits you for " + std::to_string(dmg) + " damage";
+                Journal(s, "The " + mname + " hits you for " + std::to_string(dmg) + " damage");
             } else {
-                s.logLine = "The " + mname + " misses";
+                Journal(s, "The " + mname + " misses");
             }
             if (s.hp <= 0) { EndWildMonsterLoss(s, mname); return; }
         }
@@ -16396,9 +16796,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 s.hp -= dmg;
                 s.playerHurtT = 0.0f; // hit-flash + knockback
                 PlaySfx(SfxId::Hurt);
-                s.logLine = "The " + mname + " hits you for " + std::to_string(dmg) + " damage";
+                Journal(s, "The " + mname + " hits you for " + std::to_string(dmg) + " damage");
             } else {
-                s.logLine = "The " + mname + " misses";
+                Journal(s, "The " + mname + " misses");
             }
             if (s.hp <= 0) {
                 if (am.bladeIdx >= 0) {
@@ -16504,9 +16904,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                         s.hp -= dmg;
                         s.playerHurtT = 0.0f; // hit-flash + knockback
                         PlaySfx(SfxId::Hurt);
-                        s.logLine = "The " + spot.name + " hits you for " + std::to_string(dmg) + " damage";
+                        Journal(s, "The " + spot.name + " hits you for " + std::to_string(dmg) + " damage");
                     } else {
-                        s.logLine = "The " + spot.name + " misses";
+                        Journal(s, "The " + spot.name + " misses");
                     }
                     if (s.hp <= 0) { EndWildMonsterLoss(s, spot.name); return; }
                 }
@@ -16540,6 +16940,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             am.hp -= dmg;
             am.monsterHurtT = 0.0f; // hit-flash on the monster
             PlaySfx(SfxId::Hit);
+            SpawnFloatText(s, 0, am.pos, std::to_string(dmg), kFloatDmgColor);
+            SpawnSpellImpact(s, 0, am.pos, -4, 0.8f); // melee hit burst at the contact point
             s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage";
             bool swingWasDuel = am.isRival || am.bladeIdx >= 0; // captured before BeginWildMonsterDeath resets the optional
             if (am.hp > 0 && !swingWasDuel)
@@ -16576,6 +16978,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                         if (s.vigorT > 0.0f) exDmg = std::max(1, (int)std::round(exDmg * 1.25f));
                         ex.hp -= exDmg;
                         ex.monsterHurtT = 0.0f;
+                        SpawnFloatText(s, 0, ex.pos, std::to_string(exDmg), kFloatDmgColor);
+                        SpawnSpellImpact(s, 0, ex.pos, -4, 0.6f);
                         cleaveCount++;
                         if (ex.hp <= 0) {
                             BeginWildExtraDeath(s, ex);
@@ -16589,12 +16993,15 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                     s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage — your swing cleaves " +
                                 std::to_string(cleaveCount) + (cleaveCount == 1 ? " foe!" : " foes!");
             }
+            Journal(s, s.logLine); // hits dealt go to the event journal
         } else {
             s.logLine = "Your attack misses";
+            SpawnFloatText(s, 0, am.pos, "MISS", kFloatMissColor);
+            Journal(s, s.logLine);
         }
     };
     // Magery in live Wilderness combat — ranged (no kWildMeleeRange check, unlike the
-    // sword swing above), on its own flat cooldown (kWildSpellCastCooldown) so casting
+    // sword swing above), on its own per-spell cooldown (kSpellCooldown) so casting
     // doesn't share a clock with melee. Reuses the exact same success/damage/training
     // formulas as the panel-based CastOffensiveSpell (SpellSuccessChance/SpellPowerFor/
     // ApplySpellTraining) since it's the same underlying magic system — just applied to
@@ -16603,18 +17010,21 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // equivalent in live combat — an intentional simplification, not an oversight.
     auto tryCastSpellAtEngagedMonster = [&](int spellIdx) {
         if (!s.wildEngaged.has_value()) return;
+        if (spellIdx < 0 || spellIdx >= (int)kSpells.size()) return;
         GameState::ActiveMonster& am = *s.wildEngaged;
-        if (am.playerSpellCooldown > 0) return;
+        if (am.castLockT > 0 || am.spellCooldowns[spellIdx] > 0) return;
         const Spell& spell = kSpells[spellIdx];
         if (spell.type != SpellType::Offensive) return;
         if (s.mana < spell.manaCost || s.reagents < kLiveCombatReagentCost) {
             s.logLine = "Not enough mana or reagents for " + spell.name + ".";
             return;
         }
-        am.playerSpellCooldown = kWildSpellCastCooldown;
+        am.spellCooldowns[spellIdx] = kSpellCooldown;
+        am.castLockT = kCastLockTime;
         am.castEffectTimer = kCastEffectDuration;
         s.mana -= spell.manaCost;
         s.reagents -= kLiveCombatReagentCost;
+        Journal(s, "You cast " + spell.name + ".");
         std::string note;
         ApplySpellTraining(s, spell, note);
         // The bolt flies now; the success roll, damage, and kill handling run in
@@ -16694,7 +17104,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             } else if (s.karma >= 10.0f) {
                 s.hp = s.maxHp;
                 s.shaken = 0;
-                s.logLine = std::string("The Shrine of ") + shrine.name + " bathes you in light. You are whole again.";
+                Journal(s, std::string("The Shrine of ") + shrine.name + " bathes you in light. You are whole again.");
                 PlaySfx(SfxId::Heal);
             } else {
                 s.logLine = std::string("The Shrine of ") + shrine.name + " is silent. Your heart must be lighter for it to hear you. (Needs 10 karma.)";
@@ -16987,7 +17397,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         std::string sub = TextFormat("lvl %d - %.0f%%", spot.level, WinChancePreview(s, spot.level));
         Vector2 screenPos = WorldToScreen(isDying ? dying->pos : (extra ? extra->pos : WildernessMonsterLivePos((int)i, s.worldTime)), camera);
         Color baseTint = WildMonsterTintFor(spot.iconIdx);
-        Color hurtTint = (extra && extra->monsterHurtT >= 0.0f) ? Color{ 255, 130, 130, 255 } : baseTint;
+        Color hurtTint = CombatHitTint(extra ? extra->monsterHurtT : -1.0f, baseTint, Color{ 255, 130, 130, 255 });
         if (sheet.ok) {
             Rectangle src = ActorSrcRect(sheet, { 0, 1 }, ActorAnim::Idle, s.worldTime);
             if (isDying) {
@@ -17023,7 +17433,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 screenPos.y += toP.y / tpl * lunge;
             }
         }
-        Color fxTint = (amFX.monsterHurtT >= 0.0f) ? Color{ 255, 130, 130, 255 } : engagedBaseTint;
+        Color fxTint = CombatHitTint(amFX.monsterHurtT, engagedBaseTint, Color{ 255, 130, 130, 255 });
         bool inMelee = Dist(s.wildEngaged->pos, s.wildernessPlayerPos) < kWildMeleeRange;
         if (sheet.ok) {
             // Faces the player directly rather than tracking real per-frame velocity —
@@ -17257,18 +17667,40 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // Magic screen instead, which has real free space (see DrawMagicScreen).
     // Live check, not wasEngaged: the fight may have ended mid-frame (2026-09-25).
     if (s.wildEngaged.has_value()) {
-        float cd = s.wildEngaged->playerSpellCooldown;
-        int tapped = DrawCombatHotbarRow(s, true, cd);
+        s.hotbarPickerSlot.reset(); // picker is Magic-screen UI — never carry it into a fight
+        const auto& wam = *s.wildEngaged;
+        int tapped = DrawCombatHotbarRow(s, true, wam.spellCooldowns, wam.castLockT);
+        // Keyboard hotbar (2026-09-25, combat feel): 1-5 mirror the touch slots,
+        // through the exact same cast path below.
+        if (tapped < 0) {
+            for (int ki = 0; ki < (int)s.combatHotbar.size() && ki < 9; ki++)
+                if (IsKeyPressed(KEY_ONE + ki)) { tapped = ki; break; }
+        }
         if (tapped >= 0) {
             int spellIdx = s.combatHotbar[tapped];
-            if (spellIdx >= 0) {
+            if (spellIdx >= 0 && spellIdx < (int)kSpells.size()) {
                 const Spell& sp = kSpells[spellIdx];
-                if (sp.type == SpellType::Offensive) tryCastSpellAtEngagedMonster(spellIdx);
+                // Deny feedback (2026-09-25): a tap/key on a slot that can't fire
+                // must answer AT the button — silent swallows felt like "I can
+                // only cast one spell". Red flash on the slot + floater by the
+                // player saying why, instead of nothing happening.
+                std::string deny;
+                if (wam.castLockT > 0 || wam.spellCooldowns[spellIdx] > 0) deny = "Not ready";
+                else if (s.mana < sp.manaCost) deny = "No mana!";
+                else if (s.reagents < kLiveCombatReagentCost) deny = "No reagents!";
+                if (!deny.empty()) {
+                    if (tapped < 5) s.hotbarDenyT[tapped] = kHotbarDenyTime;
+                    SpawnFloatText(s, 0, s.wildernessPlayerPos, deny, kFloatDenyColor);
+                    Journal(s, deny + " (" + sp.name + ")");
+                } else if (sp.type == SpellType::Offensive) tryCastSpellAtEngagedMonster(spellIdx);
                 else CastLiveUtilitySpell(s, spellIdx, 0);
             }
         }
     }
-    DrawHotbarPicker(s, screenW, screenH);
+    DrawHotbarPicker(s, screenW, screenH, false);
+
+    // Event journal (2026-09-25): LOG button + L key, collapsible panel.
+    DrawJournalUI(s, JournalWildButtonRect(), true);
 
     // 3D view toggle (2026-09-24, Phase 1) - same view switch as the V key below.
     if (Button({ 452, 120, 68, 30 }, s.wild3DView ? "2D [V]" : "3D [V]", true)) s.wild3DView = !s.wild3DView;
@@ -17745,7 +18177,11 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
 
         if (am.monsterAttackCooldown > 0) am.monsterAttackCooldown -= dtF;
         if (am.playerAttackCooldown > 0) am.playerAttackCooldown -= dtF;
-        if (am.playerSpellCooldown > 0) am.playerSpellCooldown -= dtF;
+        if (am.castLockT > 0) am.castLockT -= dtF;
+        for (size_t sci = 0; sci < kSpells.size(); sci++)
+            if (am.spellCooldowns[sci] > 0) am.spellCooldowns[sci] -= dtF;
+        for (int ddi = 0; ddi < 5; ddi++)
+            if (s.hotbarDenyT[ddi] > 0) s.hotbarDenyT[ddi] -= dtF;
         if (am.swingEffectTimer > 0) am.swingEffectTimer -= dtF;
         if (am.castEffectTimer > 0) am.castEffectTimer -= dtF;
 
@@ -17763,9 +18199,9 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                 s.hp -= dmg;
                 s.playerHurtT = 0.0f; // hit-flash + knockback
                 PlaySfx(SfxId::Hurt);
-                s.logLine = "The " + mname + " hits you for " + std::to_string(dmg) + " damage";
+                Journal(s, "The " + mname + " hits you for " + std::to_string(dmg) + " damage");
             } else {
-                s.logLine = "The " + mname + " misses";
+                Journal(s, "The " + mname + " misses");
             }
             if (s.hp <= 0) { EndDungeonMonsterLoss(s, mname); return; }
         }
@@ -17845,9 +18281,9 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                         s.hp -= dmg;
                         s.playerHurtT = 0.0f; // hit-flash + knockback
                         PlaySfx(SfxId::Hurt);
-                        s.logLine = "The " + exM.name + " hits you for " + std::to_string(dmg) + " damage";
+                        Journal(s, "The " + exM.name + " hits you for " + std::to_string(dmg) + " damage");
                     } else {
-                        s.logLine = "The " + exM.name + " misses";
+                        Journal(s, "The " + exM.name + " misses");
                     }
                     if (s.hp <= 0) { EndDungeonMonsterLoss(s, exM.name); return; }
                 }
@@ -17878,6 +18314,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             am.hp -= dmg;
             am.monsterHurtT = 0.0f; // hit-flash on the monster
             PlaySfx(SfxId::Hit);
+            SpawnFloatText(s, 1, am.pos, std::to_string(dmg), kFloatDmgColor);
+            SpawnSpellImpact(s, 1, am.pos, -4, 0.8f); // melee hit burst at the contact point
             s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage";
             if (am.hp > 0 && !wasBoss)
                 DungeonPackAggro(s, dungeonIdx, am.monsterIdx, false, am.pos); // damaging a normal monster pulls its pack in (2026-09-25)
@@ -17901,6 +18339,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                         if (s.vigorT > 0.0f) exDmg = std::max(1, (int)std::round(exDmg * 1.25f));
                         ex.hp -= exDmg;
                         ex.monsterHurtT = 0.0f;
+                        SpawnFloatText(s, 1, ex.pos, std::to_string(exDmg), kFloatDmgColor);
+                        SpawnSpellImpact(s, 1, ex.pos, -4, 0.6f);
                         cleaveCount++;
                         if (ex.hp <= 0) {
                             BeginDungeonExtraDeath(s, dungeonIdx, ex);
@@ -17914,25 +18354,31 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                     s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage — your swing cleaves " +
                                 std::to_string(cleaveCount) + (cleaveCount == 1 ? " foe!" : " foes!");
             }
+            Journal(s, s.logLine); // hits dealt go to the event journal
         } else {
             s.logLine = "Your attack misses";
+            SpawnFloatText(s, 1, am.pos, "MISS", kFloatMissColor);
+            Journal(s, s.logLine);
         }
     };
 
     auto tryCastSpellAtEngagedDungeonMonster = [&](int spellIdx) {
         if (!s.dungeonEngaged.has_value()) return;
+        if (spellIdx < 0 || spellIdx >= (int)kSpells.size()) return;
         GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
-        if (am.playerSpellCooldown > 0) return;
+        if (am.castLockT > 0 || am.spellCooldowns[spellIdx] > 0) return;
         const Spell& spell = kSpells[spellIdx];
         if (spell.type != SpellType::Offensive) return;
         if (s.mana < spell.manaCost || s.reagents < kLiveCombatReagentCost) {
             s.logLine = "Not enough mana or reagents for " + spell.name + ".";
             return;
         }
-        am.playerSpellCooldown = kWildSpellCastCooldown;
+        am.spellCooldowns[spellIdx] = kSpellCooldown;
+        am.castLockT = kCastLockTime;
         am.castEffectTimer = kCastEffectDuration;
         s.mana -= spell.manaCost;
         s.reagents -= kLiveCombatReagentCost;
+        Journal(s, "You cast " + spell.name + ".");
         std::string note;
         ApplySpellTraining(s, spell, note);
         // Same projectile treatment as Wilderness — resolution on arrival.
@@ -18123,7 +18569,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         bool near = !nearestIsBoss && nearestKey == std::to_string(i) && inRange;
         std::string sub = TextFormat("lvl %d - %.0f%%", m.level, WinChancePreview(s, m.level));
         Color frostTint2D = DungeonMonsterTint(*s.selectedDungeon); // Phase 3: icy tint in the Frostbound Tomb
-        Color hurtTint2D = (extra2D && extra2D->monsterHurtT >= 0.0f) ? Color{ 255, 130, 130, 255 } : frostTint2D;
+        Color hurtTint2D = CombatHitTint(extra2D ? extra2D->monsterHurtT : -1.0f, frostTint2D, Color{ 255, 130, 130, 255 });
         Rectangle monsterSrc{};
         if (monsterSheet && monsterSheet->ok) monsterSrc = ActorSrcRect(*monsterSheet, WanderFacing(i, s.worldTime), ActorAnim::Walk, s.worldTime);
         if (isDying2D) {
@@ -18202,7 +18648,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                 screenPos.y += toP.y / tpl * lunge;
             }
         }
-        Color fxTint = (am.monsterHurtT >= 0.0f) ? Color{ 255, 130, 130, 255 } : DungeonMonsterTint(*s.selectedDungeon); // Phase 3: icy tint in the Frostbound Tomb
+        Color fxTint = CombatHitTint(am.monsterHurtT, DungeonMonsterTint(*s.selectedDungeon), Color{ 255, 130, 130, 255 }); // Phase 3: icy tint in the Frostbound Tomb
         bool inMelee = Dist(am.pos, s.dungeonPlayerPos) < kWildMeleeRange;
         DrawWorldNode(screenPos, am.isBoss ? kNodeRadius : kNodeRadius * 0.8f, Color{ 122, 46, 46, 255 }, m.name, inMelee, "", tex, fxTint, srcRect);
         float hpPct = std::clamp(am.hp / am.maxHp, 0.0f, 1.0f);
@@ -18263,18 +18709,37 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // there works here too.
     // Live check, not wasDungeonEngaged: the fight may have ended mid-frame (2026-09-25).
     if (s.dungeonEngaged.has_value()) {
-        float cd = s.dungeonEngaged->playerSpellCooldown;
-        int tapped = DrawCombatHotbarRow(s, true, cd);
+        s.hotbarPickerSlot.reset(); // picker is Magic-screen UI — never carry it into a fight
+        const auto& dam = *s.dungeonEngaged;
+        int tapped = DrawCombatHotbarRow(s, true, dam.spellCooldowns, dam.castLockT);
+        // Keyboard hotbar (2026-09-25, combat feel): 1-5 mirror the touch slots,
+        // through the exact same cast path below.
+        if (tapped < 0) {
+            for (int ki = 0; ki < (int)s.combatHotbar.size() && ki < 9; ki++)
+                if (IsKeyPressed(KEY_ONE + ki)) { tapped = ki; break; }
+        }
         if (tapped >= 0) {
             int spellIdx = s.combatHotbar[tapped];
-            if (spellIdx >= 0) {
+            if (spellIdx >= 0 && spellIdx < (int)kSpells.size()) {
                 const Spell& sp = kSpells[spellIdx];
-                if (sp.type == SpellType::Offensive) tryCastSpellAtEngagedDungeonMonster(spellIdx);
+                // Deny feedback (2026-09-25): a tap/key on a slot that can't fire
+                // must answer AT the button — silent swallows felt like "I can
+                // only cast one spell". Red flash on the slot + floater by the
+                // player saying why, instead of nothing happening.
+                std::string deny;
+                if (dam.castLockT > 0 || dam.spellCooldowns[spellIdx] > 0) deny = "Not ready";
+                else if (s.mana < sp.manaCost) deny = "No mana!";
+                else if (s.reagents < kLiveCombatReagentCost) deny = "No reagents!";
+                if (!deny.empty()) {
+                    if (tapped < 5) s.hotbarDenyT[tapped] = kHotbarDenyTime;
+                    SpawnFloatText(s, 1, s.dungeonPlayerPos, deny, kFloatDenyColor);
+                    Journal(s, deny + " (" + sp.name + ")");
+                } else if (sp.type == SpellType::Offensive) tryCastSpellAtEngagedDungeonMonster(spellIdx);
                 else CastLiveUtilitySpell(s, spellIdx, 1);
             }
         }
     }
-    DrawHotbarPicker(s, screenW, screenH);
+    DrawHotbarPicker(s, screenW, screenH, false);
 
     // --- In-dungeon MENU (2026-09-25): while inside a dungeon the global tab
     // bar and resource HUD collapse behind this single toggle, so the dungeon
@@ -18309,9 +18774,14 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             by += 48;
             if (Button({ bx0, by, 152, 40 }, "House", tabsEnabled)) { s.screen = Screen::House; s.dungeonMenuOpen = false; }
             if (Button({ bx1, by, 152, 40 }, "Skills", tabsEnabled)) { s.screen = Screen::Skills; s.dungeonMenuOpen = false; }
+            by += 48;
+            if (Button({ bx0, by, 152, 40 }, "Guide", tabsEnabled)) { s.screen = Screen::Guide; s.guidePage = 0; s.dungeonMenuOpen = false; }
         }
         if (Button(menuBtn, menuOpen ? "HIDE" : "MENU", true)) s.dungeonMenuOpen = !menuOpen;
     }
+    // Event journal (2026-09-25): LOG button + L key. Collapses behind the same
+    // in-dungeon MENU behavior — no journal chrome while the HUD is collapsed.
+    DrawJournalUI(s, JournalHuntButtonRect(), !s.selectedDungeon.has_value() || s.dungeonMenuOpen);
 }
 
 // ---------------------------------------------------------------------
@@ -18819,12 +19289,28 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
     // happens on whichever live-combat screen you're actually fighting on.
     DrawUIText("Combat hotbar — tap a slot to assign a spell for live fights:", 20, y, 12, kColorAccent);
     y += 26;
+    // Fall-through guard (2026-09-25): Button fires on press-down, so the tap that
+    // opens the picker is still "pressed" when the picker draws later in this same
+    // frame — without suppression it would instantly trigger whatever picker button
+    // sits under the finger (usually a spell row), assigning the wrong spell. Skip
+    // picker press handling for exactly that frame.
+    //
+    // Modal (2026-09-25, hotbar duplication fix): while the picker is open the
+    // hotbar row underneath must not take taps at all. The picker overlay covers
+    // the row geometrically, so a tap on a spell row ALSO lands inside the hotbar
+    // slot rect beneath it — the old code re-targeted hotbarPickerSlot to that
+    // slot before assigning, spraying one spell across many slots (the "Ember
+    // Burst x4" report). With the row untappable while open, a tap can only ever
+    // assign to the slot the picker was opened for: one tap = one slot.
+    bool pickerSuppress = false;
     {
-        int tapped = DrawCombatHotbarRow(s, false, 0.0f, 20.0f, (float)y);
-        if (tapped >= 0) s.hotbarPickerSlot = tapped;
+        int tapped = -1;
+        if (!s.hotbarPickerSlot.has_value())
+            tapped = DrawCombatHotbarRow(s, false, nullptr, 0.0f, 20.0f, (float)y);
+        if (tapped >= 0) { s.hotbarPickerSlot = tapped; pickerSuppress = true; }
     }
     y += 68;
-    DrawHotbarPicker(s, screenW, screenH);
+    DrawHotbarPicker(s, screenW, screenH, pickerSuppress);
 
     DrawUIText("Spellcraft — practice trains Magery/Eval Int/Meditation, mana only:", 20, y, 12,
                kColorAccent);
@@ -19770,7 +20256,7 @@ static void UpdateDrawFrame() {
             if (IsKeyPressed(KEY_F)) FleeCombat(state);
             if (IsKeyPressed(KEY_B)) UseBandageInCombat(state);
         }
-        // --- Input: switch screens with Tab (cycles Character -> Town -> Hunt -> Craft -> Magic -> Pets -> Bank -> House -> Skills -> Character) ---
+        // --- Input: switch screens with Tab (cycles Character -> Town -> Hunt -> Craft -> Magic -> Pets -> Bank -> House -> Skills -> Guide -> Character) ---
         if (!encounterPending && IsKeyPressed(KEY_TAB)) {
             if (!(state.screen == Screen::Hunt && state.combat.has_value())) { // don't tab away mid-fight
                 Screen next = (state.screen == Screen::Character) ? Screen::Town
@@ -19780,9 +20266,11 @@ static void UpdateDrawFrame() {
                             : (state.screen == Screen::Magic) ? Screen::Pets
                             : (state.screen == Screen::Pets) ? Screen::Bank
                             : (state.screen == Screen::Bank) ? Screen::House
-                            : (state.screen == Screen::House) ? Screen::Skills : Screen::Character;
+                            : (state.screen == Screen::House) ? Screen::Skills
+                            : (state.screen == Screen::Skills) ? Screen::Guide : Screen::Character;
                 GuardZoneConfiscateIfMurderer(state, next); // JS switchTab(): Murderer tier gets bounced from Craft
                 state.screen = next;
+                if (next == Screen::Guide) state.guidePage = 0;
             }
         }
 
@@ -19856,6 +20344,7 @@ static void UpdateDrawFrame() {
         Rectangle bankTab   = { tabX, 84, 53, 26 }; tabX += 56;
         Rectangle houseTab  = { tabX, 84, 53, 26 }; tabX += 56;
         Rectangle skillsTab = { tabX, 84, 53, 26 };
+        Rectangle guideTab  = { tabX + 56, 84, 40, 26 }; // newbie walkthrough (2026-09-25)
         if (Button(charTab, "Char", tabsEnabled)) state.screen = Screen::Character;
         if (Button(townTab, ActiveTownName(state.selectedTown), tabsEnabled)) state.screen = Screen::Town;
         if (Button(craftTab, "Craft", tabsEnabled)) {
@@ -19869,6 +20358,7 @@ static void UpdateDrawFrame() {
         if (Button(bankTab, "Bank", tabsEnabled)) state.screen = Screen::Bank;
         if (Button(houseTab, "House", tabsEnabled)) state.screen = Screen::House;
         if (Button(skillsTab, "Skills", tabsEnabled)) state.screen = Screen::Skills;
+        if (Button(guideTab, "Guide", tabsEnabled)) { state.screen = Screen::Guide; state.guidePage = 0; }
         } // end if (!inDungeon): HUD + tab bar hidden inside dungeons
 
         if (state.ambush.has_value()) {
@@ -19895,6 +20385,8 @@ static void UpdateDrawFrame() {
             DrawHouseScreen(state, screenW, screenH);
         } else if (state.screen == Screen::Skills) {
             DrawSkillsScreen(state, screenW, screenH);
+        } else if (state.screen == Screen::Guide) {
+            DrawGuideScreen(state, screenW); // newbie walkthrough, reopenable anytime
         } else if (state.screen == Screen::Provisioner) {
             // No tab-bar button and not in the Tab-key cycle below — same treatment as
             // Wilderness, reached only by walking to the building (see DrawTownScreen's
@@ -19914,6 +20406,20 @@ static void UpdateDrawFrame() {
         } else {
             DrawWildernessScreen(state, screenW, screenH);
         }
+
+        // Newbie guide (2026-09-25): on a fresh save's first visit to town or
+        // the wilderness — and only then — open the walkthrough overlay. Never
+        // inside dungeons, never mid-fight; a fresh save that somehow opens
+        // mid-dungeon simply defers until town/wilderness.
+        bool guideHome = (state.screen == Screen::Town || state.screen == Screen::Wilderness);
+        bool guideBlocked = state.wildEngaged.has_value() || state.dungeonEngaged.has_value() ||
+                            state.combat.has_value() || state.ambush.has_value() ||
+                            state.playerIsGhost || state.playerDeathAnimT > 0.0f;
+        if (!state.guideSeen && !state.guideOpen && guideHome && !guideBlocked) {
+            state.guideOpen = true;
+            state.guidePage = 0;
+        }
+        if (state.guideOpen && guideHome) DrawGuideOverlay(state);
 
         // Log line (mirrors the JS log panel) — shown on all screens
         DrawUIText(state.logLine.c_str(), 20, screenH - 30, 13, Color{ 90, 74, 52, 255 });
