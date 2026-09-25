@@ -575,10 +575,10 @@ static const std::array<DungeonDef, 5> kDungeons = {{
         {"Orc Whelp", 4, 3, 3}, {"Orc Skirmisher", 9, 5, 6}, {"Orc Warbringer", 15, 8, 10},
         {"Orc Berserker", 21, 12, 16}, {"Orc Warlord", 27, 17, 24},
     }}, {"Orc Overlord", 35, 24, 80, true} },
-    { "The Sunken Crypt", "A flooded tomb where the dead do not rest", 300, {{
+    { "The Whisper Crypt", "A flooded tomb where the dead whisper and do not rest", 300, {{
         {"Bonewalker", 6, 3, 4}, {"Rotbound Corpse", 12, 5, 8}, {"Gravewretch", 18, 8, 13},
         {"Grave Warden", 25, 12, 20}, {"Crypt Sovereign", 32, 17, 30},
-    }}, {"The Hollow King", 42, 28, 110, true} },
+    }}, {"The Whisper King", 42, 28, 110, true} }, // renamed Phase 1: "The Hollow King" collided with the planned endgame dungeon The Hollow
     { "Wyrmscar Depths", "Ancestral hunting ground of the wyrm-kin", 400, {{
         {"Fen Serpent", 8, 4, 5}, {"Scalekin Raider", 15, 6, 9}, {"Emberdrake", 22, 10, 16},
         {"Skywyrm", 30, 15, 26}, {"Sovereign Wyrm", 38, 22, 42},
@@ -1437,6 +1437,8 @@ static const float kWildernessWorldSize = 3200.0f;
 // {900,1750}), well past the original 1800-unit map's edge, so reaching it is a real
 // walk. Declared here (rather than near kTown2NPCs) since DrawWildernessScreen needs it
 // and is defined well before that point in the file.
+// Phase 1: the central town's proper name — Emberhold, capital of the Whisperwood.
+static const char* kTown1Name = "Emberhold";
 static const char* kTown2Name = "Saltmere";
 static const Vector2 kWildernessTown2GatePos = { 2900, 1750 };
 // Mark asked for "everything in Town a little larger" since the camera scrolls with
@@ -3025,6 +3027,71 @@ static const std::array<TownProp, 33> kTownProps = {{
 }};
 
 // ---------------------------------------------------------------------
+// Phase 1 — Emberhold capital dressing (town 1 only).
+// Banners (kind 18) and braziers (kind 19) drawn with primitives — no new
+// art. kTownProps is shared with Saltmere, so these live in their own table,
+// drawn only when selectedTown == 0, in both the 2D and 3D town views.
+// ---------------------------------------------------------------------
+struct CapitalProp { Vector2 pos; int kind; float size; }; // 18 = banner, 19 = brazier
+static const std::array<CapitalProp, 10> kCapitalProps = {{
+    // Banners + braziers flanking the Wilderness Gate (town side, {500,900})
+    {{462, 892}, 18, 34.0f}, {{538, 892}, 18, 34.0f},
+    {{448, 948}, 19, 30.0f}, {{552, 948}, 19, 30.0f},
+    // Braziers at the four plaza corners (plaza {420,420,160,160})
+    {{435, 435}, 19, 30.0f}, {{565, 435}, 19, 30.0f},
+    {{435, 565}, 19, 30.0f}, {{565, 565}, 19, 30.0f},
+    // Banners flanking Town Hall ({500,500})
+    {{440, 500}, 18, 34.0f}, {{560, 500}, 18, 34.0f},
+}};
+
+static void DrawCapitalProp2D(int kind, Vector2 sp, float size, float t) {
+    float s = size / 32.0f;
+    if (kind == 18) { // banner: dark pole, crimson swallowtail cloth, gold emblem
+        Color wood = { 92, 66, 42, 255 }, cloth = { 150, 30, 35, 255 }, gold = { 212, 175, 90, 255 };
+        DrawRectangle((int)(sp.x - 2.0f * s), (int)(sp.y - 30.0f * s), (int)(4.0f * s), (int)(34.0f * s), wood);
+        DrawRectangle((int)(sp.x - 2.0f * s), (int)(sp.y - 32.0f * s), (int)(24.0f * s), (int)(4.0f * s), wood);
+        DrawRectangle((int)(sp.x + 1.0f * s), (int)(sp.y - 28.0f * s), (int)(8.0f * s), (int)(24.0f * s), cloth);
+        DrawRectangle((int)(sp.x + 12.0f * s), (int)(sp.y - 28.0f * s), (int)(8.0f * s), (int)(24.0f * s), cloth);
+        Vector2 c = { sp.x + 10.5f * s, sp.y - 18.0f * s };
+        float r = 3.5f * s;
+        DrawTriangle({ c.x, c.y - r }, { c.x - r, c.y }, { c.x, c.y + r }, gold);
+        DrawTriangle({ c.x, c.y - r }, { c.x + r, c.y }, { c.x, c.y + r }, gold);
+        DrawRectangle((int)(sp.x + 1.0f * s), (int)(sp.y - 6.0f * s), (int)(19.0f * s), (int)(2.0f * s), gold);
+    } else { // brazier: stone base + bowl + flickering flame + warm glow
+        Color stone = { 120, 118, 125, 255 }, dark = { 60, 58, 62, 255 };
+        Color glow = { 255, 180, 90, 255 };
+        DrawCircleV(sp, 13.0f * s, Fade(glow, 0.10f));
+        DrawCircleV(sp, 8.0f * s, Fade(glow, 0.16f));
+        DrawEllipse((int)sp.x, (int)sp.y, 9.0f * s, 3.5f * s, stone);
+        DrawRectangle((int)(sp.x - 2.5f * s), (int)(sp.y - 12.0f * s), (int)(5.0f * s), (int)(10.0f * s), stone);
+        DrawEllipse((int)sp.x, (int)(sp.y - 12.0f * s), 8.0f * s, 3.0f * s, dark);
+        float f = 1.0f + 0.22f * sinf(t * 11.0f + sp.x * 0.7f);
+        DrawTriangle({ sp.x - 4.5f * s, sp.y - 12.0f * s }, { sp.x + 4.5f * s, sp.y - 12.0f * s },
+                     { sp.x, sp.y - (12.0f + 11.0f * f) * s }, Color{ 230, 110, 30, 255 });
+        DrawTriangle({ sp.x - 2.5f * s, sp.y - 12.0f * s }, { sp.x + 2.5f * s, sp.y - 12.0f * s },
+                     { sp.x, sp.y - (12.0f + 7.0f * f) * s }, Color{ 250, 210, 90, 255 });
+    }
+}
+
+static void DrawCapitalProp3D(int kind, float x, float z, float size, float t) {
+    float s = size / 32.0f;
+    if (kind == 18) { // banner
+        Color wood = { 92, 66, 42, 255 }, cloth = { 150, 30, 35, 255 }, gold = { 212, 175, 90, 255 };
+        DrawCylinder({ x, 16.0f * s, z }, 2.0f * s, 2.0f * s, 32.0f * s, 8, wood);
+        DrawCube({ x + 10.0f * s, 30.0f * s, z }, 24.0f * s, 3.0f * s, 3.0f * s, wood);
+        DrawCube({ x + 10.0f * s, 18.0f * s, z }, 19.0f * s, 22.0f * s, 1.5f, cloth);
+        DrawCube({ x + 10.0f * s, 20.0f * s, z + 1.0f }, 6.0f * s, 6.0f * s, 1.0f, gold);
+    } else { // brazier
+        Color stone = { 120, 118, 125, 255 }, dark = { 60, 58, 62, 255 };
+        DrawCylinder({ x, 5.0f * s, z }, 7.0f * s, 9.0f * s, 10.0f * s, 10, stone);
+        DrawCylinder({ x, 11.5f * s, z }, 9.0f * s, 6.0f * s, 4.0f * s, 10, dark);
+        float f = 1.0f + 0.22f * sinf(t * 11.0f + x * 0.7f);
+        DrawCylinder({ x, (12.0f + 6.0f * f) * s, z }, 0.5f, 4.5f * s, 12.0f * f * s, 8, Color{ 230, 110, 30, 255 });
+        DrawCylinder({ x, (12.0f + 4.0f * f) * s, z }, 0.5f, 2.5f * s, 8.0f * f * s, 8, Color{ 250, 210, 90, 255 });
+    }
+}
+
+// ---------------------------------------------------------------------
 // Wandering, interactable townsfolk (2026-09-22, "AI players" plan, Part 1) — purely
 // decorative NPCs that give Town its first-ever ambient motion (previously fully
 // static — only the player ever moved). Walking up and pressing E shows a name +
@@ -4467,7 +4534,7 @@ static void GuardZoneConfiscateIfMurderer(GameState& s, Screen& targetScreen) {
     int itemsLost = (int)s.backpack.size();
     s.gold = 0;
     s.backpack.clear();
-    s.logLine = "Town guards spot you at the gate and drive you out — you flee, dropping everything you carried (" +
+    s.logLine = "Emberhold guards spot you at the gate and drive you out — you flee, dropping everything you carried (" +
                  std::to_string(goldLost) + " gold, " + std::to_string(itemsLost) + " items).";
     targetScreen = Screen::Town;
 }
@@ -5768,7 +5835,7 @@ static bool LoadGame(GameState& s) {
         s.playerIsGhost = false;
         s.playerDeathAnimT = 0.0f;
         s.ghostTimer = 0.0f;
-        s.logLine = "You wake in Town, whole once more.";
+        s.logLine = "You wake in Emberhold, whole once more.";
     }
     return true;
 }
@@ -6280,10 +6347,10 @@ static const Vector2 kWildernessReturnGatePos = { 900, 1750 };
 static const Vector2 kSaltmereGatePos = { 2900, 1650 };
 
 // Phase 0: the two towns' wilderness gates, tagged with their regions. (kTown2Name
-// is "Saltmere"; the Town 1 gate has no name constant — "Town" matches its HUD usage.)
+// is "Saltmere"; the Town 1 gate uses kTown1Name ("Emberhold") — matches its HUD usage.)
 struct TownGate { const char* townName; Vector2 wildernessPos; RegionId region; };
 static const std::array<TownGate, 2> kTownGates = {{
-    { "Town", kWildernessReturnGatePos, RegionAt(kWildernessReturnGatePos) },
+    { kTown1Name, kWildernessReturnGatePos, RegionAt(kWildernessReturnGatePos) },
     { "Saltmere", kWildernessTown2GatePos, RegionAt(kWildernessTown2GatePos) },
 }};
 
@@ -6333,7 +6400,7 @@ static void UpdateEscort(GameState& s, float dt) {
 struct WildernessMonsterSpot { Vector2 pos; std::string name; int level; int baseLeather; int baseGold; int iconIdx; RegionId region; };
 static const std::array<WildernessMonsterSpot, 12> kWildernessMonsterSpots = {{
     { {1150, 1250}, "Wild Bat", 2, 1, 2, 0, RegionAt({1150, 1250}) },
-    { {600, 1000}, "Wandering Goblin", 5, 3, 4, 1, RegionAt({600, 1000}) },
+    { {600, 1000}, "Timber Wolf", 5, 3, 4, 2, RegionAt({600, 1000}) }, // Phase 1: Whisperwood signature — was Wandering Goblin
     { {1150, 700}, "Lone Wolf", 9, 5, 7, 2, RegionAt({1150, 700}) },
     { {600, 350}, "Lesser Imp", 14, 7, 10, 3, RegionAt({600, 350}) },
     { {1300, 150}, "Highway Bandit", 20, 10, 15, 4, RegionAt({1300, 150}) },
@@ -6342,7 +6409,7 @@ static const std::array<WildernessMonsterSpot, 12> kWildernessMonsterSpots = {{
     // "all thru the wilderness") — two fill in gaps in the original zone, four cover
     // the corridor east toward Saltmere (which had zero monster spots at all before
     // this). All reuse the existing 5 monster art types; no new assets needed.
-    { {900, 1400}, "Wandering Goblin", 5, 3, 4, 1, RegionAt({900, 1400}) },   // south-central gap, original zone
+    { {900, 1400}, "Timber Wolf", 5, 3, 4, 2, RegionAt({900, 1400}) },   // Phase 1: Whisperwood signature — was Wandering Goblin; south-central gap, original zone
     { {1500, 900}, "Lesser Imp", 14, 7, 10, 3, RegionAt({1500, 900}) },        // east-central gap, original zone
     { {2000, 1650}, "Wild Bat", 2, 1, 2, 0, RegionAt({2000, 1650}) },           // corridor, near the Town 1 side
     { {2300, 1750}, "Highway Bandit", 20, 10, 15, 4, RegionAt({2300, 1750}) },  // corridor, a real "road danger"
@@ -6597,7 +6664,7 @@ struct WildernessFoliage { Vector2 pos; int variant; }; // 0=bush1,1=bush2,2=fer
                                                           // 7=chest,8=bush(new),9=rocks(new),
                                                           // 10=cactus,11=fence,12=grass,
                                                           // 13=haybale,14=plant
-static const std::array<WildernessFoliage, 30> kWildernessFoliage = {{
+static const std::array<WildernessFoliage, 42> kWildernessFoliage = {{
     { {750, 1300}, 0 }, { {1000, 1450}, 2 }, { {250, 1150}, 1 }, { {1550, 1050}, 0 },
     { {800, 800}, 2 },  { {1250, 950}, 1 },  { {450, 550}, 0 },  { {1000, 250}, 2 },
     // Dense Forest zone (NE)
@@ -6611,6 +6678,13 @@ static const std::array<WildernessFoliage, 30> kWildernessFoliage = {{
     // The new stretch toward Saltmere — a light scatter, reusing existing variants
     // (2026-09-22, "second town" plan), not an exhaustive re-decoration.
     { {2000, 1650}, 0 }, { {2350, 1850}, 1 }, { {2650, 1600}, 2 }, { {2800, 1850}, 0 },
+    // Phase 1 — Whisperwood densification: a thicker stand north-west of Emberhold's
+    // gate and a few trees south of it. Hand-checked clear of the road, gate, monster
+    // spots, gather nodes, house plots, and dungeon entrances. 3D parity is automatic
+    // (variant 3 maps to the 3D tree in Wild3DDrawFoliageOne).
+    { {700, 1180}, 3 }, { {780, 1260}, 3 }, { {660, 1300}, 0 }, { {820, 1150}, 2 },
+    { {740, 1100}, 3 }, { {860, 1320}, 1 }, { {620, 1220}, 2 }, { {880, 1200}, 3 },
+    { {700, 1900}, 3 }, { {620, 1980}, 0 }, { {1050, 1500}, 3 }, { {1120, 1600}, 2 },
 }};
 static const Texture2D* WildFoliageIcon(int variant) {
     switch (variant) {
@@ -9413,6 +9487,12 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
         }
     }
 
+    // Phase 1 — Emberhold capital dressing (town 1 only).
+    if (s.selectedTown == 0) {
+        for (const CapitalProp& p : kCapitalProps)
+            DrawCapitalProp3D(p.kind, p.pos.x, p.pos.y, p.size, s.worldTime);
+    }
+
     // Street lamps along the 3D lane network (kT3DLamps) — the 2D lamps flank
     // the old spoke layout, so the 3D view places its own here instead.
     for (const Vector2& lp : kT3DLamps) {
@@ -10763,7 +10843,7 @@ static Wild3DNearest Wild3DNearestInfo(const GameState& s) {
     for (size_t pi = 0; pi < kHousePlots.size(); pi++)
         consider(HousePlotInteractPos(s.housePlotIdx, s.houseLayout, (int)pi),
                  HousePlotPrompt(s.housePlotIdx, s.houseLayout, (int)pi));
-    consider(kWildernessReturnGatePos, "Return to Town");
+    consider(kWildernessReturnGatePos, "Return to Emberhold");
     consider(kWildernessTown2GatePos, std::string("Enter ") + kTown2Name);
     if (wasEngaged) { r.engaged = true; r.pos = s.wildEngaged->pos; }
     return r;
@@ -10880,7 +10960,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
             DrawRectangle(sx - 4, sy - 2, w + 8, fsz + 5, Fade(BLACK, 0.55f * a));
             DrawUIText(text.c_str(), sx, sy, fsz, Fade(WHITE, a));
         };
-        label3D(kWildernessReturnGatePos.x, 110, kWildernessReturnGatePos.y, "Town Gate");
+        label3D(kWildernessReturnGatePos.x, 110, kWildernessReturnGatePos.y, "Emberhold Gate");
         label3D(kWildernessTown2GatePos.x, 110, kWildernessTown2GatePos.y, kTown2Name);
         for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances)
             label3D(e.pos.x, 110, e.pos.y, kDungeons[e.dungeonIdx].name);
@@ -12378,6 +12458,16 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         DrawIconCentered(*icon, screenPos, p.size * kTownVisualScale, WHITE);
     }
 
+    // Phase 1 — Emberhold capital dressing (town 1 only).
+    if (s.selectedTown == 0) {
+        for (const CapitalProp& p : kCapitalProps) {
+            Vector2 csp = WorldToScreen(p.pos, camera);
+            if (csp.x < kViewport.x - 40 || csp.x > kViewport.x + kViewport.width + 40 ||
+                csp.y < kViewport.y - 40 || csp.y > kViewport.y + kViewport.height + 40) continue;
+            DrawCapitalProp2D(p.kind, csp, p.size * kTownVisualScale, s.worldTime);
+        }
+    }
+
     for (auto& node : kTownNodePositions) {
         Vector2 screenPos = WorldToScreen(node.pos, camera);
         bool near = (node.key == nearestKey) && inRange;
@@ -12651,7 +12741,7 @@ static void ResurrectPlayer(GameState& s) {
     s.ghostTimer = 0.0f;
     s.ghostZone = 0;
     s.ghostDungeonIdx = -1;
-    s.logLine = std::string("You wake in ") + (saltmere ? kTown2Name : "Town") + ", whole once more.";
+    s.logLine = std::string("You wake in ") + (saltmere ? kTown2Name : kTown1Name) + ", whole once more.";
 }
 
 // Multi-enemy combat tuning (2026-09-25).
@@ -13033,7 +13123,7 @@ static void DrawGhostStatus(const GameState& s) {
     if (s.playerDeathAnimT > 0.0f) {
         text = "You collapse...";
     } else if (s.ghostTimer <= kGhostReturnNotice) {
-        text = std::string("Returning to ") + (GhostResurrectSaltmere(s) ? kTown2Name : "Town") + "...";
+        text = std::string("Returning to ") + (GhostResurrectSaltmere(s) ? kTown2Name : kTown1Name) + "...";
     } else {
         text = "GHOST — " + std::to_string((int)std::ceil(s.ghostTimer)) +
                "s until resurrection. You can walk, but touch nothing.";
@@ -15415,7 +15505,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         else if (nearestKind == WildNodeKind::Town2Gate) prompt = "[E] Enter " + std::string(kTown2Name);
         else if (nearestKind == WildNodeKind::HousePlot)
             prompt = "[E] " + HousePlotPrompt(s.housePlotIdx, s.houseLayout, nearestIdx);
-        else prompt = "[E] Return to Town";
+        else prompt = "[E] Return to Emberhold";
     }
     // Ghosts and the dying get no prompts — they can't touch anything.
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) prompt.clear();
@@ -15765,7 +15855,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     {
         bool near = nearestKind == WildNodeKind::ReturnGate && inRange;
         Vector2 screenPos = WorldToScreen(kWildernessReturnGatePos, camera);
-        DrawWorldNode(screenPos, kNodeRadius * 0.8f, kColorPanelBg, "Town Gate", near);
+        DrawWorldNode(screenPos, kNodeRadius * 0.8f, kColorPanelBg, "Emberhold Gate", near);
     }
     {
         // Gate to Town 2 (2026-09-22) — same treatment as the Town 1 gate just above,
@@ -18197,7 +18287,7 @@ static void UpdateDrawFrame() {
         static const bool kHuntTabEnabled = false;
         float tabX = 20.0f;
         Rectangle charTab   = { tabX, 84, 53, 26 }; tabX += 56;
-        Rectangle townTab   = { tabX, 84, 53, 26 }; tabX += 56;
+        Rectangle townTab   = { tabX, 84, 79, 26 }; tabX += 82; // widened for "Emberhold"
         Rectangle craftTab  = { tabX, 84, 53, 26 }; tabX += 56;
         Rectangle huntTab   = { tabX, 84, 53, 26 }; if (kHuntTabEnabled) tabX += 56;
         Rectangle magicTab  = { tabX, 84, 53, 26 }; tabX += 56;
@@ -18206,7 +18296,7 @@ static void UpdateDrawFrame() {
         Rectangle houseTab  = { tabX, 84, 53, 26 }; tabX += 56;
         Rectangle skillsTab = { tabX, 84, 53, 26 };
         if (Button(charTab, "Char", tabsEnabled)) state.screen = Screen::Character;
-        if (Button(townTab, "Town", tabsEnabled)) state.screen = Screen::Town;
+        if (Button(townTab, "Emberhold", tabsEnabled)) state.screen = Screen::Town;
         if (Button(craftTab, "Craft", tabsEnabled)) {
             Screen target = Screen::Craft;
             GuardZoneConfiscateIfMurderer(state, target);
