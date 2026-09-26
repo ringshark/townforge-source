@@ -1170,14 +1170,32 @@ struct GameState {
     std::vector<DyingMonster> dyingMonsters;
     // Visible world corpses - purely visual markers that fade; the actual lootable
     // corpse list above (skinned on the Hunt screen) is unchanged.
+    // One thing lying in a corpse (2026-09-26, UO-style corpses): gold, hides
+    // (appear once you skin it), reagents, bandages, or a real item.
+    enum CorpseLootKind { kClGold = 0, kClHides, kClFurs, kClReagents, kClBandages, kClItem };
+    struct CorpseLoot { int kind = kClGold; int count = 0; std::optional<Item> item; };
     struct WorldCorpse {
         Vector2 pos;
         float timer, duration; // counts down from duration, then the marker is removed
         int zone;              // 0 = wilderness, 1 = dungeon
         int iconIdx = -1;      // wilderness monster icon for the 2D sprite, -1 = generic
         std::string name;
+        // UO-style corpses (2026-09-26): the body keeps its loot until you take it.
+        int id = 0;                       // stable handle (the open-corpse window refers to it)
+        int spotIdx = -1;                 // wilderness monster spot (for the body model), -1 none
+        int dungeonIdx = -1, monsterIdx = -1; bool isBoss = false;
+        bool isRival = false; int bladeIdx = -1;
+        float yaw = 0.0f;
+        std::vector<CorpseLoot> loot;
+        int skinYield = 0;                // hides/furs waiting under the knife; 0 = nothing to skin
+        bool furs = false, skinned = false;
+        bool Lootable() const { return !loot.empty() || (skinYield > 0 && !skinned); }
     };
     std::vector<WorldCorpse> worldCorpses;
+    int nextCorpseId = 1;
+    int openCorpseId = -1;      // the corpse window that's open, -1 none (transient)
+    float skinningT = -1.0f;    // >=0: seconds into skinning the open corpse
+    std::vector<Item> rivalStash; // PERSISTED - what the rival took off your body; it's on the rival's corpse
     std::array<float, kWildMonsterSpotCount> wildSpotRespawn{}; // 0 = available, else seconds until the spot refills
     std::array<std::array<float, kDungeonSlotCount>, kDungeons.size()> dungeonSpawnRespawn{}; // [dungeon][slot], 0 = available
 
@@ -2213,6 +2231,40 @@ static Texture2D TryLoadTexture(const std::string& path, bool& okOut) {
     return t;
 }
 
+// Item icons (2026-09-26): the source bitmaps sit on solid black and some
+// have a small picture in a big canvas. Key the black out (soft edge), crop
+// to the art, and center it on a square so every icon fills its slot.
+static Texture2D TryLoadIconKeyed(const std::string& path, bool& okOut) {
+    okOut = false;
+    Image img = LoadImage(path.c_str());
+    if (img.data == nullptr) return Texture2D{};
+    ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    Color* px = (Color*)img.data;
+    int minX = img.width, minY = img.height, maxX = -1, maxY = -1;
+    for (int y = 0; y < img.height; y++)
+        for (int x = 0; x < img.width; x++) {
+            Color& c = px[y * img.width + x];
+            int lum = std::max({ (int)c.r, (int)c.g, (int)c.b });
+            if (lum < 14) c.a = 0;
+            else if (lum < 40) c.a = (unsigned char)(c.a * (lum - 14) / 26);
+            if (c.a > 0) { minX = std::min(minX, x); maxX = std::max(maxX, x); minY = std::min(minY, y); maxY = std::max(maxY, y); }
+        }
+    if (maxX >= minX && maxY >= minY) {
+        ImageCrop(&img, { (float)minX, (float)minY, (float)(maxX - minX + 1), (float)(maxY - minY + 1) });
+        int side = std::max(img.width, img.height) + 4;
+        Image sq = GenImageColor(side, side, BLANK);
+        ImageDraw(&sq, img, { 0, 0, (float)img.width, (float)img.height },
+                  { (float)((side - img.width) / 2), (float)((side - img.height) / 2), (float)img.width, (float)img.height }, WHITE);
+        UnloadImage(img);
+        img = sq;
+    }
+    Texture2D t = LoadTextureFromImage(img);
+    UnloadImage(img);
+    okOut = t.id != 0;
+    if (okOut) SetTextureFilter(t, TEXTURE_FILTER_BILINEAR);
+    return t;
+}
+
 static SpriteSheet LoadSpriteSheet(const std::string& path, int frameWidth) {
     SpriteSheet sheet;
     sheet.tex = TryLoadTexture(path, sheet.ok);
@@ -2412,7 +2464,7 @@ static void LoadGameAssets() {
     g_assets.itemIconOk.resize(kItemIconManifest.size());
     for (size_t i = 0; i < kItemIconManifest.size(); i++) {
         bool ok = false;
-        g_assets.itemIconTex[i] = TryLoadTexture("assets/item_icons/" + kItemIconManifest[i].second, ok);
+        g_assets.itemIconTex[i] = TryLoadIconKeyed("assets/item_icons/" + kItemIconManifest[i].second, ok);
         g_assets.itemIconOk[i] = ok;
     }
 
@@ -4439,7 +4491,7 @@ static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeo
                                      int level, int baseGold, int baseLeather,
                                      bool clearEngagement = true);
 static void UpdateDeathAndRespawn(GameState& s, float dt);
-static void SpawnPanelKillCorpse(GameState& s, const std::string& name);
+static void SpawnPanelKillCorpse(GameState& s, const std::string& name, int gold = 0, int leather = 0);
 
 // JS endBloodstainedWin(): advances the ladder, pays path-specific Fame/Karma/
 // Notoriety, and on a boss kill loops the path (tougher next time) and permanently
@@ -5115,10 +5167,9 @@ static bool CheckMonsterDefeatedAndHandleWin(GameState& s) {
         return true;
     }
     int goldFound = std::max(1, c.monster.baseGold + (std::rand() % 3) - 1);
-    s.corpses.push_back({ c.monster.name, c.monster.baseLeather, goldFound });
-    SpawnPanelKillCorpse(s, c.monster.name); // visible corpse at the player's position
-    std::string msg = "Defeated the " + c.monster.name + "! Corpse left behind with leather and " +
-                        std::to_string(goldFound) + " gold to loot.";
+    SpawnPanelKillCorpse(s, c.monster.name, goldFound, c.monster.baseLeather); // body beside you, loot on it
+    std::string msg = "Defeated the " + c.monster.name + "! Its body lies beside you with " +
+                        std::to_string(goldFound) + " gold on it.";
     // dungeonIdx < 0 means this isn't one of the 4 curated dungeons (Wilderness
     // monsters use -1, same sentinel as ambushes/Bloodstained) - no dungeon XP/boss
     // ladder to update, and indexing either array below with a negative index would be
@@ -6076,6 +6127,7 @@ static void SaveGame(const GameState& s) {
     WriteEquipSlot(out, "equipped.legs", s.equipped.legs);
     WriteEquipSlot(out, "equipped.chest", s.equipped.chest);
 
+    for (size_t i = 0; i < s.rivalStash.size(); i++) out << "rivalStash." << i << "=" << ItemToLine(s.rivalStash[i]) << "\n";
     out << "backpack.count=" << s.backpack.size() << "\n";
     for (size_t i = 0; i < s.backpack.size(); i++) out << "backpack." << i << "=" << ItemToLine(s.backpack[i]) << "\n";
     out << "pets.count=" << s.pets.size() << "\n";
@@ -6170,6 +6222,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "wildHouseMigrated") s.wildHouseMigrated = std::atoi(val.c_str()) != 0;
         else if (key == "houseChest.count") { s.houseChest.clear(); s.houseChest.reserve(std::atoi(val.c_str())); }
         else if (key.rfind("houseChest.", 0) == 0) { if (auto it = ItemFromLine(val)) s.houseChest.push_back(*it); }
+        else if (key.rfind("rivalStash.", 0) == 0) { if (auto it = ItemFromLine(val)) s.rivalStash.push_back(*it); }
         else if (key == "gold") s.gold = std::atoi(val.c_str());
         else if (key == "wood") s.wood = std::atoi(val.c_str());
         else if (key == "ore") s.ore = std::atoi(val.c_str());
@@ -7215,6 +7268,7 @@ static void RivalCorpseLoot(GameState& s) {
     if (!s.backpack.empty()) {
         int idx = std::rand() % (int)s.backpack.size();
         msg += " and takes your " + s.backpack[idx].name;
+        s.rivalStash.push_back(s.backpack[idx]); // it's on the rival's body now - kill it to get it back
         s.backpack.erase(s.backpack.begin() + idx);
     }
     msg += ".";
@@ -8381,6 +8435,220 @@ static bool Button(Rectangle r, const std::string& label, bool enabled) {
     return clicked;
 }
 
+// ---- UO look kit (2026-09-26) -------------------------------------------------
+// Shared by the corpse window, the backpack, the paperdoll and the spell bar:
+// procedurally generated leather / parchment / dark-wood surfaces (tiling
+// 256px textures, made once), bronze-framed "gump" panels with corner studs,
+// and small hand-drawn icons for the stackables (coins, hides, reagents...).
+static float UOHash01(float x, float y) { float h = sinf(x * 127.1f + y * 311.7f) * 43758.5453f; return h - floorf(h); }
+enum UOSurface { kUoLeather = 0, kUoParchment, kUoDarkWood, kUoStone, kUoSurfaceCount };
+static Texture2D g_uoTex[kUoSurfaceCount];
+static bool g_uoTexReady = false;
+static void UOEnsureTextures() {
+    if (g_uoTexReady) return;
+    g_uoTexReady = true;
+    struct Pal { Color a, b; float grain; int seed; float scale; };
+    const Pal pals[kUoSurfaceCount] = {
+        { { 70, 44, 26, 255 }, { 128, 86, 50, 255 }, 18.0f, 11, 5.0f },   // leather (bag)
+        { { 176, 150, 110, 255 }, { 226, 206, 166, 255 }, 10.0f, 23, 3.0f }, // parchment (paperdoll)
+        { { 30, 24, 22, 255 }, { 70, 56, 46, 255 }, 12.0f, 37, 6.0f },     // dark wood (corpse, spell bar)
+        { { 92, 90, 92, 255 }, { 150, 146, 140, 255 }, 14.0f, 51, 4.0f },  // stone (slots)
+    };
+    const int N = 256;
+    for (int k = 0; k < kUoSurfaceCount; k++) {
+        Image noise = GenImagePerlinNoise(N, N, pals[k].seed * 97, pals[k].seed * 31, pals[k].scale);
+        Color* np = LoadImageColors(noise);
+        Image img = GenImageColor(N, N, BLANK);
+        Color* px = (Color*)img.data;
+        for (int i = 0; i < N * N; i++) {
+            float n = np[i].r / 255.0f;
+            float g = (UOHash01((float)(i % N), (float)(i / N) + k * 7.0f) - 0.5f) * pals[k].grain;
+            if (k == kUoDarkWood) n = 0.5f + 0.5f * sinf((i % N) * 0.05f + n * 6.0f) * 0.6f + (n - 0.5f) * 0.4f; // grain streaks
+            Color c = ColorLerp(pals[k].a, pals[k].b, std::clamp(n, 0.0f, 1.0f));
+            px[i] = { (unsigned char)std::clamp(c.r + g, 0.0f, 255.0f), (unsigned char)std::clamp(c.g + g, 0.0f, 255.0f),
+                      (unsigned char)std::clamp(c.b + g, 0.0f, 255.0f), 255 };
+        }
+        UnloadImageColors(np);
+        UnloadImage(noise);
+        g_uoTex[k] = LoadTextureFromImage(img);
+        UnloadImage(img);
+        SetTextureWrap(g_uoTex[k], TEXTURE_WRAP_REPEAT);
+        SetTextureFilter(g_uoTex[k], TEXTURE_FILTER_BILINEAR);
+    }
+}
+static void UOFill(Rectangle r, int surface, Color tint = WHITE) {
+    UOEnsureTextures();
+    DrawTexturePro(g_uoTex[surface], { r.x * 0.7f, r.y * 0.7f, r.width, r.height }, r, { 0, 0 }, 0.0f, tint);
+}
+static const Color kUoBronze = { 150, 112, 58, 255 }, kUoBronzeHi = { 222, 184, 110, 255 }, kUoBronzeLo = { 70, 48, 24, 255 };
+static const Color kUoGoldText = { 236, 208, 140, 255 };
+// A bronze-framed panel: drop shadow, surface fill, bevelled frame, corner studs.
+static void UODrawGump(Rectangle r, int surface, Color tint = WHITE) {
+    DrawRectangleRec({ r.x + 4, r.y + 5, r.width, r.height }, Fade(BLACK, 0.35f));
+    UOFill(r, surface, tint);
+    DrawRectangleLinesEx(r, 2.0f, Color{ 24, 16, 10, 255 });
+    DrawRectangleLinesEx({ r.x + 2, r.y + 2, r.width - 4, r.height - 4 }, 3.0f, kUoBronze);
+    DrawRectangleLinesEx({ r.x + 2, r.y + 2, r.width - 4, r.height - 4 }, 1.0f, kUoBronzeHi);
+    DrawRectangleLinesEx({ r.x + 5, r.y + 5, r.width - 10, r.height - 10 }, 1.0f, kUoBronzeLo);
+    for (Vector2 c : { Vector2{ r.x + 5, r.y + 5 }, Vector2{ r.x + r.width - 5, r.y + 5 },
+                       Vector2{ r.x + 5, r.y + r.height - 5 }, Vector2{ r.x + r.width - 5, r.y + r.height - 5 } }) {
+        DrawRectanglePro({ c.x, c.y, 11, 11 }, { 5.5f, 5.5f }, 45.0f, kUoBronzeLo);
+        DrawRectanglePro({ c.x, c.y, 8, 8 }, { 4, 4 }, 45.0f, kUoBronze);
+        DrawCircleV({ c.x - 0.8f, c.y - 0.8f }, 1.6f, kUoBronzeHi);
+    }
+}
+// Engraved title plate centered on a gump's top edge.
+static void UODrawTitle(Rectangle gump, const std::string& text, int fsz = 14) {
+    int w = MeasureUIText(text.c_str(), fsz);
+    Rectangle t = { gump.x + gump.width / 2.0f - w / 2.0f - 16, gump.y - 10, (float)w + 32, (float)fsz + 12 };
+    DrawRectangleRec(t, Color{ 40, 26, 16, 255 });
+    DrawRectangleLinesEx(t, 2.0f, kUoBronze);
+    DrawRectangleLinesEx({ t.x + 2, t.y + 2, t.width - 4, t.height - 4 }, 1.0f, kUoBronzeLo);
+    DrawUIText(text.c_str(), (int)(t.x + 16), (int)(t.y + 6), fsz, kUoGoldText);
+}
+// Recessed square slot (paperdoll slots, bag cells).
+static void UODrawSlot(Rectangle r, bool lit = false) {
+    UOFill(r, kUoStone, Color{ 120, 116, 112, 255 });
+    DrawRectangleGradientV((int)r.x, (int)r.y, (int)r.width, (int)(r.height * 0.45f), Fade(BLACK, 0.45f), Fade(BLACK, 0.0f));
+    DrawRectangleLinesEx(r, 2.0f, lit ? kUoBronzeHi : kUoBronze);
+    DrawLineEx({ r.x + 2, r.y + r.height - 2 }, { r.x + r.width - 2, r.y + r.height - 2 }, 1.0f, Fade(kUoBronzeHi, 0.6f));
+    DrawLineEx({ r.x + 2, r.y + 2 }, { r.x + r.width - 2, r.y + 2 }, 1.0f, Fade(BLACK, 0.6f));
+}
+// Close "X" button in a gump's top-right corner.
+static bool UOCloseButton(Rectangle gump) {
+    Rectangle b = { gump.x + gump.width - 30, gump.y + 8, 22, 22 };
+    Vector2 m = GetMousePosition();
+    bool hover = CheckCollisionPointRec(m, b);
+    DrawRectangleRec(b, hover ? Color{ 110, 40, 30, 255 } : Color{ 60, 30, 22, 255 });
+    DrawRectangleLinesEx(b, 1.5f, kUoBronze);
+    DrawLineEx({ b.x + 6, b.y + 6 }, { b.x + 16, b.y + 16 }, 2.5f, kUoGoldText);
+    DrawLineEx({ b.x + 16, b.y + 6 }, { b.x + 6, b.y + 16 }, 2.5f, kUoGoldText);
+    bool clicked = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(m, { b.x - 6, b.y - 6, b.width + 12, b.height + 12 });
+    if (clicked && g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(m, g_uiShield)) clicked = false;
+    if (clicked) PlaySfx(SfxId::Click);
+    return clicked;
+}
+// Bronze-and-leather action button in the gump style.
+static bool UOButton(Rectangle r, const std::string& label, bool enabled = true) {
+    Vector2 m = GetMousePosition();
+    bool hover = enabled && CheckCollisionPointRec(m, r);
+    DrawRectangleRec(r, enabled ? (hover ? Color{ 96, 62, 34, 255 } : Color{ 70, 44, 24, 255 }) : Color{ 60, 56, 52, 255 });
+    DrawRectangleGradientV((int)r.x, (int)r.y, (int)r.width, (int)(r.height / 2), Fade(WHITE, 0.10f), Fade(WHITE, 0.0f));
+    DrawRectangleLinesEx(r, 2.0f, enabled ? kUoBronze : Color{ 100, 96, 90, 255 });
+    int tw = MeasureUIText(label.c_str(), 14);
+    DrawUIText(label.c_str(), (int)(r.x + (r.width - tw) / 2), (int)(r.y + (r.height - 14) / 2), 14,
+               enabled ? kUoGoldText : Color{ 150, 146, 140, 255 });
+    bool clicked = enabled && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(m, r);
+    if (clicked && g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(m, g_uiShield)) clicked = false;
+    if (clicked) PlaySfx(SfxId::Click);
+    return clicked;
+}
+static bool UOTapped(Rectangle r) {
+    Vector2 m = GetMousePosition();
+    bool clicked = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(m, r);
+    if (clicked && g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(m, g_uiShield)) clicked = false;
+    return clicked;
+}
+// Stack count in the UO corner-number style.
+static void UODrawCount(float x, float y, int n) {
+    if (n <= 1) return;
+    std::string t = std::to_string(n);
+    int w = MeasureUIText(t.c_str(), 12);
+    for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++) if (dx || dy) DrawUIText(t.c_str(), (int)x - w + dx, (int)y + dy, 12, BLACK);
+    DrawUIText(t.c_str(), (int)x - w, (int)y, 12, Color{ 255, 244, 214, 255 });
+}
+// Hand-drawn icons for stackables, centered on (cx, cy), roughly `sz` across.
+enum UOIcon { kUoiGold = 0, kUoiHides, kUoiFurs, kUoiReagents, kUoiBandages, kUoiLogs, kUoiOre, kUoiFish, kUoiIce, kUoiLeather };
+static void UODrawIcon(int icon, float cx, float cy, float sz) {
+    float u = sz / 40.0f;
+    switch (icon) {
+        case kUoiGold: {
+            const Vector2 off[6] = { { -8, 6 }, { 6, 7 }, { -1, 1 }, { 9, -2 }, { -7, -4 }, { 1, -8 } };
+            for (const Vector2& o : off) {
+                Vector2 p = { cx + o.x * u, cy + o.y * u };
+                DrawEllipse((int)p.x, (int)(p.y + 1.5f * u), 8.5f * u, 5.5f * u, Color{ 120, 84, 18, 255 });
+                DrawEllipse((int)p.x, (int)p.y, 8.5f * u, 5.5f * u, Color{ 232, 186, 58, 255 });
+                DrawEllipse((int)p.x - (int)u, (int)p.y - (int)u, 4.0f * u, 2.2f * u, Color{ 255, 232, 150, 255 });
+            }
+            break;
+        }
+        case kUoiHides: case kUoiFurs: case kUoiLeather: {
+            Color c = icon == kUoiFurs ? Color{ 214, 206, 190, 255 } : (icon == kUoiLeather ? Color{ 128, 78, 40, 255 } : Color{ 160, 104, 58, 255 });
+            Vector2 pts[9];
+            for (int i = 0; i < 9; i++) {
+                float a = i * 6.2832f / 9.0f;
+                float r = (13.0f + ((i * 37) % 5) * 1.8f) * u;
+                pts[i] = { cx + cosf(a) * r * 1.2f, cy + sinf(a) * r * 0.8f };
+            }
+            for (int i = 0; i < 9; i++) DrawTriangle({ cx, cy }, pts[(i + 1) % 9], pts[i], c);
+            for (int i = 0; i < 9; i++) DrawLineEx(pts[i], pts[(i + 1) % 9], 1.5f, ColorBrightness(c, -0.4f));
+            if (icon == kUoiLeather) { DrawLineEx({ cx - 10 * u, cy - 3 * u }, { cx + 10 * u, cy - 3 * u }, 2.0f, ColorBrightness(c, -0.3f)); }
+            else for (int i = 0; i < 4; i++) DrawCircleV({ cx + (i - 1.5f) * 6 * u, cy + ((i % 2) ? 3 : -3) * u }, 1.8f * u, ColorBrightness(c, -0.25f));
+            break;
+        }
+        case kUoiReagents: {
+            DrawCircleV({ cx - 7 * u, cy + 3 * u }, 5.5f * u, Color{ 40, 36, 44, 255 });   // black pearl
+            DrawCircleV({ cx - 8.5f * u, cy + 1.5f * u }, 1.8f * u, Color{ 170, 170, 190, 255 });
+            DrawEllipse((int)(cx + 6 * u), (int)(cy + 4 * u), 6 * u, 5 * u, Color{ 236, 230, 212, 255 }); // garlic
+            DrawTriangle({ cx + 6 * u, cy - 5 * u }, { cx + 3 * u, cy + 1 * u }, { cx + 9 * u, cy + 1 * u }, Color{ 236, 230, 212, 255 });
+            DrawLineEx({ cx - 2 * u, cy - 10 * u }, { cx + 1 * u, cy + 6 * u }, 3.0f * u, Color{ 140, 96, 50, 255 }); // mandrake root
+            DrawLineEx({ cx + 1 * u, cy + 6 * u }, { cx - 3 * u, cy + 11 * u }, 2.0f * u, Color{ 140, 96, 50, 255 });
+            break;
+        }
+        case kUoiBandages: {
+            DrawCircleV({ cx, cy }, 11 * u, Color{ 236, 232, 222, 255 });
+            DrawCircleLines((int)cx, (int)cy, 11 * u, Color{ 170, 164, 150, 255 });
+            DrawCircleLines((int)cx, (int)cy, 7 * u, Color{ 190, 184, 170, 255 });
+            DrawCircleV({ cx, cy }, 3 * u, Color{ 200, 194, 180, 255 });
+            DrawRectangleRec({ cx + 6 * u, cy + 4 * u, 12 * u, 5 * u }, Color{ 236, 232, 222, 255 });
+            break;
+        }
+        case kUoiLogs: {
+            for (int i = 0; i < 3; i++) {
+                float y = cy + (i - 1) * 7 * u + (i == 1 ? -3 * u : 0);
+                float x = cx + (i == 1 ? 0 : (i == 0 ? -5 : 5)) * u;
+                DrawRectangleRec({ x - 14 * u, y - 3.5f * u, 26 * u, 7 * u }, Color{ 118, 78, 44, 255 });
+                DrawCircleV({ x + 12 * u, y }, 3.6f * u, Color{ 210, 170, 110, 255 });
+                DrawCircleLines((int)(x + 12 * u), (int)y, 2.0f * u, Color{ 150, 110, 60, 255 });
+            }
+            break;
+        }
+        case kUoiOre: {
+            for (int i = 0; i < 2; i++) {
+                float y = cy + (i ? 5 : -3) * u, x = cx + (i ? 3 : -3) * u;
+                Vector2 a = { x - 11 * u, y + 5 * u }, b = { x + 11 * u, y + 5 * u }, c = { x + 7 * u, y - 5 * u }, d = { x - 7 * u, y - 5 * u };
+                DrawTriangle(a, b, c, Color{ 150, 152, 160, 255 }); DrawTriangle(a, c, d, Color{ 150, 152, 160, 255 });
+                DrawTriangle(d, c, { x + 5 * u, y - 7 * u }, Color{ 200, 202, 210, 255 });
+                DrawTriangle(d, { x + 5 * u, y - 7 * u }, { x - 5 * u, y - 7 * u }, Color{ 200, 202, 210, 255 });
+            }
+            break;
+        }
+        case kUoiFish: {
+            DrawEllipse((int)cx - (int)(2 * u), (int)cy, 12 * u, 6 * u, Color{ 110, 140, 160, 255 });
+            DrawTriangle({ cx + 9 * u, cy }, { cx + 17 * u, cy + 7 * u }, { cx + 17 * u, cy - 7 * u }, Color{ 90, 120, 140, 255 });
+            DrawCircleV({ cx - 9 * u, cy - 1.5f * u }, 1.5f * u, BLACK);
+            break;
+        }
+        case kUoiIce: {
+            DrawTriangle({ cx, cy - 13 * u }, { cx - 7 * u, cy + 9 * u }, { cx + 7 * u, cy + 9 * u }, Color{ 190, 230, 250, 255 });
+            DrawTriangle({ cx - 8 * u, cy - 4 * u }, { cx - 13 * u, cy + 9 * u }, { cx - 3 * u, cy + 9 * u }, Color{ 160, 210, 240, 255 });
+            DrawTriangle({ cx + 8 * u, cy - 6 * u }, { cx + 3 * u, cy + 9 * u }, { cx + 13 * u, cy + 9 * u }, Color{ 170, 220, 245, 255 });
+            break;
+        }
+    }
+}
+// Deterministic scattered placement (UO containers strew their contents):
+// entry i of n on a jittered grid inside `area`, seeded so it doesn't dance.
+static Vector2 UOScatter(Rectangle area, int i, float cell, int seed) {
+    int cols = std::max(1, (int)(area.width / cell));
+    int col = i % cols, row = i / cols;
+    float jx = (UOHash01((float)(i * 13 + seed), 1.7f) - 0.5f) * cell * 0.28f;
+    float jy = (UOHash01((float)(i * 7 + seed), 5.3f) - 0.5f) * cell * 0.22f;
+    float padX = (area.width - cols * cell) * 0.5f;
+    return { area.x + padX + (col + 0.5f) * cell + jx, area.y + (row + 0.5f) * cell + jy };
+}
+
 // Tap-to-interact button - the touch equivalent of the [E] key, shown only while in
 // range of something interactable (mirrors the virtual joystick's bottom-left corner
 // on the opposite side of the screen). Called after the world/scissor for the same
@@ -8449,33 +8717,100 @@ static float ScrollDelta(Rectangle area) {
 static const float kHotbarDenyTime = 0.45f;
 static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* spellCds, float castLockT,
                                float x = 175.0f, float y = kViewport.y + kViewport.height - 90.0f) {
+    // Spell bar look (2026-09-26): a bronze-framed dark-wood bar of recessed
+    // slots showing each spell's icon, its key number and mana cost, a radial
+    // cooldown sweep with the seconds left, a gold rim when it's ready to fire,
+    // and a cold blue cast when you can't afford it. Tap/keys behave as before.
     int tapped = -1;
     Vector2 mouse = GetMousePosition();
     bool pressEdge = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-    for (int i = 0; i < (int)s.combatHotbar.size(); i++) {
-        Rectangle r = { x + (float)i * 68.0f, y, 62.0f, 60.0f };
-        Rectangle big = { r.x - 1.5f, r.y - 1.5f, r.width + 3.0f, r.height + 3.0f }; // matches Button's outset
+    const int n = (int)s.combatHotbar.size();
+    const float slotW = 60.0f, gap = 8.0f;
+    Rectangle bar = { x - 9.0f, y - 8.0f, n * slotW + (n - 1) * gap + 18.0f, slotW + 30.0f };
+    UODrawGump(bar, kUoDarkWood);
+    float t = (float)GetTime();
+    for (int i = 0; i < n; i++) {
+        Rectangle r = { x + (float)i * (slotW + gap), y, slotW, slotW };
+        Rectangle big = { r.x - 3.0f, r.y - 3.0f, r.width + 6.0f, r.height + 6.0f };
         int spellIdx = s.combatHotbar[i];
-        std::string label = "+";
-        bool enabled = true;
-        if (spellIdx >= 0 && spellIdx < (int)kSpells.size()) {
+        bool has = spellIdx >= 0 && spellIdx < (int)kSpells.size();
+        bool enabled = true, affordable = true, ready = true;
+        float cdFrac = 0.0f, cdLeft = 0.0f;
+        if (has) {
             const Spell& sp = kSpells[spellIdx];
-            label = sp.name;
             if (inCombat) {
-                bool affordable = s.mana >= sp.manaCost && s.reagents >= kLiveCombatReagentCost;
-                // Per-spell recharge (2026-09-25): only THIS spell's clock and the
-                // brief global cast lock gate the button - other spells stay live.
-                bool ready = spellCds != nullptr && castLockT <= 0.0f && spellCds[spellIdx] <= 0.0f;
+                affordable = s.mana >= sp.manaCost && s.reagents >= kLiveCombatReagentCost;
+                if (spellCds != nullptr) {
+                    cdLeft = std::max(spellCds[spellIdx], castLockT);
+                    cdFrac = std::max(spellCds[spellIdx] / kSpellCooldown, castLockT / kCastLockTime);
+                }
+                ready = spellCds != nullptr && castLockT <= 0.0f && spellCds[spellIdx] <= 0.0f;
                 enabled = affordable && ready;
             }
         } else if (inCombat) {
-            enabled = false; // empty slot, nothing to cast
+            enabled = false;
         }
-        if (Button(r, label, enabled)) tapped = i;
-        else if (inCombat && !enabled && pressEdge && CheckCollisionPointRec(mouse, big)) tapped = i;
+        bool hover = CheckCollisionPointRec(mouse, big);
+        bool shielded = g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(mouse, g_uiShield);
+        bool down = hover && IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !shielded;
+        // slot + icon
+        UODrawSlot(r, has && enabled && inCombat);
+        if (has) {
+            const Spell& sp = kSpells[spellIdx];
+            const Texture2D* icon = nullptr;
+            if (spellIdx < 16 && g_assets.spellIconPerSpellOk[spellIdx]) icon = &g_assets.spellIconPerSpell[spellIdx];
+            else if (sp.type == SpellType::Utility && g_assets.spellIconUtilityOk) icon = &g_assets.spellIconUtility;
+            else if (g_assets.spellIconOffensiveOk) icon = &g_assets.spellIconOffensive;
+            float inset = down ? 5.0f : 4.0f;
+            Rectangle ir = { r.x + inset, r.y + inset, r.width - inset * 2, r.height - inset * 2 };
+            Color tint = !affordable ? Color{ 110, 124, 170, 255 } : WHITE;
+            if (icon) DrawTexturePro(*icon, { 0, 0, (float)icon->width, (float)icon->height }, ir, { 0, 0 }, 0.0f, tint);
+            else DrawUIText(sp.name.substr(0, 2).c_str(), (int)ir.x + 14, (int)ir.y + 16, 18, kUoGoldText);
+            // cooldown sweep: the unready part of the dial darkened, clockwise from 12
+            if (cdFrac > 0.001f) {
+                BeginScissorMode((int)ir.x, (int)ir.y, (int)ir.width, (int)ir.height);
+                DrawCircleSector({ ir.x + ir.width / 2, ir.y + ir.height / 2 }, ir.width, -90.0f + 360.0f * (1.0f - cdFrac), 270.0f, 32,
+                                 Fade(BLACK, 0.62f));
+                EndScissorMode();
+                if (cdLeft > 0.25f) {
+                    std::string cs = TextFormat("%.1f", cdLeft);
+                    int cw = MeasureUIText(cs.c_str(), 16);
+                    DrawUIText(cs.c_str(), (int)(ir.x + ir.width / 2 - cw / 2) + 1, (int)(ir.y + ir.height / 2 - 8) + 1, 16, BLACK);
+                    DrawUIText(cs.c_str(), (int)(ir.x + ir.width / 2 - cw / 2), (int)(ir.y + ir.height / 2 - 8), 16, WHITE);
+                }
+            }
+            // ready: a soft gold rim that breathes
+            if (inCombat && enabled) {
+                float p = 0.5f + 0.5f * sinf(t * 3.0f + i);
+                DrawRectangleLinesEx(big, 2.0f, Fade(Color{ 255, 214, 110, 255 }, 0.35f + 0.35f * p));
+            }
+            // mana cost pill, bottom-right
+            std::string mc = std::to_string(sp.manaCost);
+            int mw = MeasureUIText(mc.c_str(), 10);
+            Rectangle pill = { r.x + r.width - mw - 9.0f, r.y + r.height - 14.0f, (float)mw + 8.0f, 13.0f };
+            DrawRectangleRounded(pill, 0.5f, 4, affordable ? Color{ 34, 60, 120, 230 } : Color{ 120, 30, 30, 230 });
+            DrawUIText(mc.c_str(), (int)pill.x + 4, (int)pill.y + 1, 10, Color{ 200, 220, 255, 255 });
+            // name under the slot
+            std::string nm = sp.name.size() > 10 ? sp.name.substr(0, 9) + "." : sp.name;
+            int nw = MeasureUIText(nm.c_str(), 10);
+            DrawUIText(nm.c_str(), (int)(r.x + r.width / 2 - nw / 2), (int)(r.y + r.height + 5), 10, Color{ 220, 205, 170, 255 });
+        } else {
+            DrawUIText("+", (int)(r.x + r.width / 2 - 6), (int)(r.y + r.height / 2 - 14), 26, Fade(kUoBronzeHi, inCombat ? 0.3f : 0.7f));
+        }
+        // key number badge, top-left
+        DrawCircleV({ r.x + 4, r.y + 4 }, 8.0f, Color{ 40, 26, 16, 255 });
+        DrawCircleLines((int)r.x + 4, (int)r.y + 4, 8.0f, kUoBronze);
+        DrawUIText(TextFormat("%d", i + 1), (int)r.x + 1, (int)r.y - 3, 11, kUoGoldText);
+        if (hover && !down) DrawRectangleLinesEx(r, 1.0f, Fade(WHITE, 0.35f));
+        // taps: enabled slots, and (in combat) denied slots too so the caller can explain
+        bool press = pressEdge && hover && !shielded;
+        if (press && (enabled || inCombat)) {
+            tapped = i;
+            PlaySfx(SfxId::Click);
+        }
         if (inCombat && i < 5 && s.hotbarDenyT[i] > 0.0f) {
             float f = std::clamp(s.hotbarDenyT[i] / kHotbarDenyTime, 0.0f, 1.0f);
-            DrawRectangleRounded(big, 0.25f, 6, Fade(Color{ 200, 40, 40, 255 }, 0.55f * f));
+            DrawRectangleRec(big, Fade(Color{ 200, 40, 40, 255 }, 0.5f * f));
         }
     }
     return tapped;
@@ -8487,41 +8822,52 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
 static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppressPress) {
     if (!s.hotbarPickerSlot.has_value()) return;
     int slot = *s.hotbarPickerSlot;
-    Rectangle overlay = { 20, 140, (float)screenW - 40, (float)screenH - 260 };
-    DrawRectangleRounded(overlay, 0.05f, 6, Fade(kColorPageBg, 0.97f));
-    DrawRectangleRoundedLines(overlay, 0.05f, 6, Fade(BLACK, 0.5f));
-    DrawUIText("Assign a spell to this slot:", (int)overlay.x + 12, (int)overlay.y + 10, 14, kColorHeading);
-    float y = overlay.y + 36;
+    // Spellbook-style picker (2026-09-26): a gump listing every spell you know,
+    // icon + name + cost, in the spell bar's look.
+    Rectangle overlay = { 20, 150, (float)screenW - 40, (float)screenH - 270 };
+    DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, 0.35f));
+    UODrawGump(overlay, kUoParchment);
+    UODrawTitle(overlay, TextFormat("Spell for slot %d", slot + 1));
+    if (!suppressPress && UOCloseButton(overlay)) { s.hotbarPickerSlot.reset(); return; }
+    float y = overlay.y + 26;
     // suppressPress: the tap that opened the picker is still "pressed" this frame -
     // ignore it here so it can't instantly fire a picker button under the finger.
-    if (!suppressPress && Button({ overlay.x + 12, y, overlay.width - 24, 26 }, "Clear slot", true)) {
-        s.combatHotbar[slot] = -1;
-        s.hotbarPickerSlot.reset();
-        return;
-    }
-    y += 34;
     std::vector<int> known;
     for (size_t i = 0; i < kSpells.size(); i++) {
         const Spell& sp = kSpells[i];
         if ((sp.type == SpellType::Offensive || sp.type == SpellType::Utility) && EffectiveSkill(s, &GameState::magery) >= sp.minSkill)
             known.push_back((int)i);
     }
-    float listBottom = overlay.y + overlay.height - 40;
-    if (known.empty()) DrawUIText("No spells known yet - practice on the Magic tab.", (int)overlay.x + 12, (int)y, 13, DARKGRAY);
+    float listBottom = overlay.y + overlay.height - 52;
+    if (known.empty()) DrawUIText("No spells known yet - practice below to learn some.", (int)overlay.x + 20, (int)y + 8, 13, Color{ 90, 60, 34, 255 });
+    Vector2 m = GetMousePosition();
     for (int idx : known) {
-        if (y + 26 > listBottom) break; // no scrolling for now - a long known-spell list just truncates
+        if (y + 44 > listBottom) break; // a long known-spell list just truncates
         const Spell& sp = kSpells[idx];
-        std::string tag = sp.type == SpellType::Offensive ? "[Attack] "
-                        : (idx == kRecallSpellIdx ? "[Travel] " : "[Heal] ");
-        if (!suppressPress && Button({ overlay.x + 12, y, overlay.width - 24, 24 }, tag + sp.name, true)) {
+        Rectangle row = { overlay.x + 16, y, overlay.width - 32, 42 };
+        bool hover = CheckCollisionPointRec(m, row);
+        bool current = s.combatHotbar[slot] == idx;
+        DrawRectangleRec(row, Fade(current ? Color{ 255, 214, 110, 255 } : Color{ 90, 60, 34, 255 }, hover ? 0.28f : (current ? 0.22f : 0.10f)));
+        DrawRectangleLinesEx(row, 1.0f, Fade(kUoBronze, 0.7f));
+        Rectangle ir = { row.x + 4, row.y + 4, 34, 34 };
+        if (idx < 16 && g_assets.spellIconPerSpellOk[idx])
+            DrawTexturePro(g_assets.spellIconPerSpell[idx], { 0, 0, (float)g_assets.spellIconPerSpell[idx].width, (float)g_assets.spellIconPerSpell[idx].height }, ir, { 0, 0 }, 0.0f, WHITE);
+        else DrawRectangleRec(ir, Color{ 60, 44, 30, 255 });
+        DrawRectangleLinesEx(ir, 1.5f, kUoBronze);
+        const char* tag = sp.type == SpellType::Offensive ? "Attack" : (idx == kRecallSpellIdx ? "Travel" : "Heal / Aid");
+        DrawUIText(sp.name.c_str(), (int)row.x + 48, (int)row.y + 5, 15, Color{ 70, 40, 20, 255 });
+        DrawUIText(TextFormat("%s  -  Circle %d  -  %d mana", tag, sp.circle, sp.manaCost), (int)row.x + 48, (int)row.y + 24, 11, Color{ 110, 80, 50, 255 });
+        if (!suppressPress && UOTapped(row)) {
+            PlaySfx(SfxId::Click);
             s.combatHotbar[slot] = idx;
             s.hotbarPickerSlot.reset();
             return;
         }
-        y += 28;
+        y += 48;
     }
-    if (!suppressPress && Button({ overlay.x + 12, overlay.y + overlay.height - 34, overlay.width - 24, 26 }, "Cancel", true))
-        s.hotbarPickerSlot.reset();
+    float by = overlay.y + overlay.height - 44;
+    if (!suppressPress && UOButton({ overlay.x + 16, by, 160, 30 }, "Clear slot")) { s.combatHotbar[slot] = -1; s.hotbarPickerSlot.reset(); return; }
+    if (!suppressPress && UOButton({ overlay.x + overlay.width - 176, by, 160, 30 }, "Cancel")) s.hotbarPickerSlot.reset();
 }
 
 // Persistent HP/Mana readout for live combat (2026-09-22) - Wilderness has no player
@@ -8553,18 +8899,43 @@ static void DrawLiveCombatHud(const GameState& s, float x, float y) {
 // harmless here since a live engagement and the old panel's s.combat are never both
 // active at once.
 static void DrawLiveCombatQuickItems(GameState& s) {
-    float y = kViewport.y + kViewport.height - 150.0f;
-    if (Button({ 175.0f, y, 90.0f, 40.0f }, TextFormat("Bandage (%d)", s.bandages),
-                 s.bandages > 0 && s.hp < s.maxHp)) {
+    // Belt pouch (2026-09-26): bandages and heal potions as framed slots in the
+    // spell bar's style, stack counts in the corner.
+    float y = kViewport.y + kViewport.height - 146.0f;
+    std::vector<int> potions;
+    for (size_t i = 0; i < s.potions.size() && potions.size() < 2; i++)
+        if (s.potions[i].effect == "heal") potions.push_back((int)i);
+    int n = 1 + (int)potions.size();
+    const float sz = 42.0f, gap = 8.0f;
+    Rectangle bar = { 166.0f, y - 6.0f, n * sz + (n - 1) * gap + 18.0f, sz + 12.0f };
+    UODrawGump(bar, kUoDarkWood);
+    auto slot = [&](int k, bool enabled, int count, auto drawIcon) {
+        Rectangle r = { 175.0f + k * (sz + gap), y, sz, sz };
+        UODrawSlot(r, enabled);
+        drawIcon(r);
+        if (!enabled) DrawRectangleRec(r, Fade(BLACK, 0.45f));
+        if (count > 1) UODrawCount(r.x + r.width - 2, r.y + r.height - 15, count);
+        else if (count == 1) DrawUIText("1", (int)(r.x + r.width - 9), (int)(r.y + r.height - 15), 12, Color{ 255, 244, 214, 255 });
+        return enabled && UOTapped(r);
+    };
+    if (slot(0, s.bandages > 0 && s.hp < s.maxHp, s.bandages,
+             [&](Rectangle r) { UODrawIcon(kUoiBandages, r.x + r.width / 2, r.y + r.height / 2, 36); })) {
+        PlaySfx(SfxId::Click);
         UseBandageOutOfCombat(s);
     }
-    int shown = 0;
-    for (size_t i = 0; i < s.potions.size() && shown < 2; i++) {
-        if (s.potions[i].effect != "heal") continue;
-        const PotionStack& p = s.potions[i];
-        Rectangle r = { 271.0f + (float)shown * 96.0f, y, 90.0f, 40.0f };
-        if (Button(r, TextFormat("%s x%d", p.name.c_str(), p.count), true)) DrinkPotion(s, (int)i);
-        shown++;
+    for (size_t k = 0; k < potions.size(); k++) {
+        int pi = potions[k];
+        const PotionStack& p = s.potions[(size_t)pi];
+        if (slot(1 + (int)k, true, p.count, [&](Rectangle r) {
+                float cx = r.x + r.width / 2, cy = r.y + r.height / 2 + 4;
+                DrawCircleV({ cx, cy }, 11.0f, Color{ 190, 30, 40, 255 });           // red heal draught
+                DrawCircleV({ cx - 4, cy - 4 }, 3.5f, Fade(WHITE, 0.55f));
+                DrawRectangleRec({ cx - 3.5f, cy - 19, 7, 9 }, Color{ 200, 210, 220, 200 });
+                DrawRectangleRec({ cx - 4.5f, cy - 22, 9, 4 }, Color{ 130, 90, 50, 255 }); })) {
+            PlaySfx(SfxId::Click);
+            DrinkPotion(s, pi);
+            break; // the list may have shifted
+        }
     }
 }
 
@@ -8691,6 +9062,8 @@ static float T3CHash01(float x, float y) {
     float h = sinf(x * 127.1f + y * 311.7f) * 43758.5453f;
     return h - floorf(h);
 }
+
+
 
 // Town3DApplyLitShader is defined below with the town view; the kit only
 // needs it for the per-frame sun-shader assignment on its shared models.
@@ -9806,7 +10179,7 @@ static bool DrawAnimal(int id, float x, float z, float yawRad, float scaleMul, C
     int clip = A.idle;
     float speed = 1.0f, t = p.time;
     bool loop = true;
-    if (p.deathT >= 0.0f && A.death >= 0) { clip = A.death; loop = false; t = p.deathT; }
+    if (p.deathT >= 0.0f && A.death >= 0) { clip = A.death; loop = false; t = std::min(p.deathT, 1.0f) * 0.8f; } // the clips end back on their feet: stop while it's down
     else if (p.attackT >= 0.0f && A.attack >= 0) { clip = A.attack; loop = false; t = p.attackT; }
     else if (p.hurtT >= 0.0f && p.hurtT < 0.35f && A.hit >= 0) { clip = A.hit; loop = false; t = p.hurtT / 0.35f; }
     else if (p.move > 0.55f && A.gallop >= 0) { clip = A.gallop; speed = 0.8f + 0.6f * p.move; }
@@ -10375,6 +10748,11 @@ static void HumanDrawAttached(const Model& gear, const Material* matOverride, co
         c.b = (unsigned char)(c.b * tint.b / 255); c.a = (unsigned char)(c.a * tint.a / 255);
         mat.maps[MATERIAL_MAP_DIFFUSE].color = c;
         DrawMesh(gear.meshes[i], mat, m);
+        // `maps` is shared with the source material (a Material copy shares the
+        // pointer): put the color back, or it compounds into the next part and
+        // the next body drawn (2026-09-26 fix: helms/hair/cloaks came out dark
+        // brown - tinted by the brows drawn before them).
+        mat.maps[MATERIAL_MAP_DIFFUSE].color = saved;
     }
 }
 
@@ -10736,6 +11114,7 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
     HumanSkin(H);
 
     HumanPaint(H, o);
+    for (int i = 0; i < H.model.materialCount; i++) H.model.materials[i].maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
     float sc = H.baseScale * scaleMul;
     // Blob shadow sized from the kit body (the mannequin's T-pose bounds are arm-wide).
     T3CDrawBlobShadow(g_t3cHumans[2].parts.merged, x, z, yawRad, scaleMul);
@@ -15559,6 +15938,52 @@ static void Town3DDrawSurroundings(const GameState& s, const Town3DCam& c) {
     }
 }
 
+// ---- Corpse bodies (2026-09-26) ----
+static const int kT3CTrackCorpse = 400; // + corpse id % 64: own animation state per body
+static void CorpseDrawMound(const GameState::WorldCorpse& c) {
+    T3DLiftScope lift_(c.pos.x, c.pos.y);
+    DrawCylinderEx({ c.pos.x, 0.5f, c.pos.y }, { c.pos.x, 1.5f, c.pos.y }, 22.0f, 22.0f, 12, Color{ 70, 30, 26, 200 }); // blood
+    DrawSphereEx({ c.pos.x, 5.0f, c.pos.y }, 15.0f, 8, 6, Color{ 60, 50, 46, 255 });
+}
+// Gold glint + ground ring over a body that still has something on it.
+static void CorpseDrawGlint(const GameState::WorldCorpse& c) {
+    if (!c.Lootable()) return;
+    T3DLiftScope lift_(c.pos.x, c.pos.y);
+    float t = (float)g_gameClock;
+    float pulse = 0.55f + 0.45f * sinf(t * 3.0f + c.id);
+    DrawCircle3D({ c.pos.x, 1.5f, c.pos.y }, 26.0f + 2.0f * pulse, { 1, 0, 0 }, 90.0f, Fade(Color{ 255, 210, 90, 255 }, 0.55f * pulse));
+    float y = 30.0f + 3.0f * sinf(t * 2.2f + c.id);
+    DrawSphereEx({ c.pos.x, y, c.pos.y }, 3.2f, 6, 6, Fade(Color{ 255, 226, 120, 255 }, 0.8f + 0.2f * pulse));
+}
+static void Wild3DDrawCorpse(const GameState::WorldCorpse& c, bool shadowPass) {
+    float sink = c.timer < 10.0f ? (1.0f - c.timer / 10.0f) * 26.0f : 0.0f;
+    rlPushMatrix();
+    rlTranslatef(0.0f, -sink, 0.0f);
+    int track = kT3CTrackCorpse + c.id % 64;
+    const Color dim = { 190, 180, 175, 255 };
+    HumanPose dead; dead.deathT = 1.0f;
+    bool drawn = false;
+    if (c.isRival) drawn = DrawHuman(track, c.pos.x, c.pos.y, c.yaw, 1.02f, dim, HumanOutfitRival(), dead, shadowPass);
+    else if (c.bladeIdx >= 0) drawn = DrawHuman(track, c.pos.x, c.pos.y, c.yaw, 0.95f, dim, HumanOutfitBlade(), dead, shadowPass);
+    else if (c.spotIdx >= 0 && c.spotIdx < (int)kWildernessMonsterSpots.size()) {
+        const WildernessMonsterSpot& sp = kWildernessMonsterSpots[c.spotIdx];
+        T3CMonLook ml = T3CMonsterLook(sp.iconIdx);
+        Color rc = { 0, 0, 0, 0 }; float sc = 1.0f;
+        int an = ml.humanoid ? -1 : AnimalForMonster(sp.iconIdx, &rc, &sc);
+        if (an >= 0) {
+            AnimalPose ap; ap.recolor = rc; ap.deathT = 1.0f; // lying where it fell
+            Color named = AnimalRecolorForMonsterName(sp.name);
+            if (named.a > 0) ap.recolor = named;
+            drawn = DrawAnimal(an, c.pos.x, c.pos.y, c.yaw, sc, dim, ap, shadowPass);
+        } else if (ml.humanoid) {
+            drawn = DrawHuman(track, c.pos.x, c.pos.y, c.yaw, ml.scale * 0.94f, dim,
+                              HumanOutfitForWildMonster(sp.iconIdx, sp.name, ml), dead, shadowPass);
+        }
+    }
+    if (!drawn && !shadowPass) CorpseDrawMound(c);
+    rlPopMatrix();
+    if (!shadowPass) CorpseDrawGlint(c);
+}
 static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DCam* cull) {
     Wild3DLoadModels();
     Wild3DEnsureGround();
@@ -15871,15 +16296,13 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                             edef.shirt, edef.pants, edef.skin, ea, shadowPass);
         }
     }
-    // Fallen monsters linger where they died - dark flattened mounds that fade
-    // with the corpse timer. Purely visual; the lootable corpse list is separate.
+    // Fallen monsters lie where they died (2026-09-26, UO corpses): the real
+    // body in its final death pose, sinking into the ground in its last seconds,
+    // with a gold glint while there's still loot on it.
     for (const GameState::WorldCorpse& c : s.worldCorpses) {
         if (c.zone != 0) continue;
         if (!vis(c.pos.x, c.pos.y, 70.0f)) continue;
-        float cfade = std::clamp(c.timer / c.duration, 0.0f, 1.0f);
-        Color mound = Fade(Color{ 55, 45, 42, 255 }, 0.85f * cfade);
-        T3DLiftScope lift_(c.pos.x, c.pos.y);
-        DrawSphereEx({ c.pos.x, 6.0f, c.pos.y }, 16.0f, 8, 6, mound);
+        Wild3DDrawCorpse(c, shadowPass);
     }
     // AI companion.
     if (Pet* ap = ActivePet(s)) {
@@ -16065,8 +16488,10 @@ static Wild3DNearest Wild3DNearestInfo(const GameState& s) {
 // and the live-combat UI while engaged).
 static Rectangle JournalPanelRect();      // defined with the journal UI below
 static Rectangle JournalWildButtonRect(); // defined with the journal UI below
+static bool CorpseUIPointIn(Vector2 m);
 static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
     if (ExploreMenuPointInUI(m, s)) return true; // MENU toggle + dropdown
+    if (CorpseUIPointIn(m)) return true;         // corpse window / Loot button
     if (CheckCollisionPointRec(m, { 452, 120, 68, 30 })) return true; // 3D/2D toggle
     if (CheckCollisionPointRec(m, { 528, 120, 96, 30 })) return true; // camera mode button
     if (CheckCollisionPointRec(m, { kViewport.x + kViewport.width - 150.0f,
@@ -16082,7 +16507,7 @@ static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
     if (s.wildEngaged.has_value()) {
         if (CheckCollisionPointRec(m, { 20, 110, 330, 60 })) return true; // HP/mana strip
         if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return true; // quick items
-        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return true; // spell hotbar
+        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 100 })) return true; // spell hotbar
     }
     return false;
 }
@@ -16809,6 +17234,7 @@ static void Dungeon3DDrawPlayer(const GameState& s) {
 
 static Rectangle JournalHuntButtonRect(); // defined with the journal UI below
 static bool Dung3DPointInUI(Vector2 m, const GameState& s) {
+    if (CorpseUIPointIn(m)) return true; // corpse window / Loot button
     if (CheckCollisionPointRec(m, { 20, 56, 104, 40 })) return true; // in-dungeon MENU toggle
     if (s.dungeonMenuOpen && s.selectedDungeon.has_value() &&
         CheckCollisionPointRec(m, { 12, 104, 336, 328 })) return true; // MENU dropdown panel
@@ -16818,7 +17244,7 @@ static bool Dung3DPointInUI(Vector2 m, const GameState& s) {
     if (CheckCollisionPointRec(m, { 20, 110, 330, 60 })) return true; // HP strip
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return true; // TARGET button
     if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return true; // quick items
-    if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return true; // spell hotbar
+    if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 100 })) return true; // spell hotbar
     if (CheckCollisionPointRec(m, JournalHuntButtonRect())) return true; // LOG button (always visible, incl. dungeons)
     if (s.journalOpen && CheckCollisionPointRec(m, JournalPanelRect())) return true; // journal panel
     return false;
@@ -16955,14 +17381,21 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         }
     }
     Dungeon3DDrawPlayer(s);
-    // Fallen monsters linger where they died - dark flattened mounds that fade
-    // with the corpse timer. Purely visual; the lootable corpse list is separate.
+    // Fallen monsters lie where they died (2026-09-26, UO corpses) - see Wild3DDrawCorpse.
     for (const GameState::WorldCorpse& c : s.worldCorpses) {
-        if (c.zone != 1) continue;
-        float cfade = std::clamp(c.timer / c.duration, 0.0f, 1.0f);
-        Color mound = Fade(Color{ 55, 45, 42, 255 }, 0.85f * cfade);
-        T3DLiftScope lift_(c.pos.x, c.pos.y);
-        DrawSphereEx({ c.pos.x, 6.0f, c.pos.y }, 16.0f, 8, 6, mound);
+        if (c.zone != 1 || (c.dungeonIdx >= 0 && c.dungeonIdx != di)) continue;
+        float sink = c.timer < 10.0f ? (1.0f - c.timer / 10.0f) * 26.0f : 0.0f;
+        rlPushMatrix();
+        rlTranslatef(0.0f, -sink, 0.0f);
+        int track = kT3CTrackCorpse + c.id % 64;
+        bool human = c.dungeonIdx >= 0 && c.monsterIdx >= 0 && T3CDungeonMonsterLook(c.dungeonIdx, c.monsterIdx).humanoid;
+        if (human)
+            Dungeon3DDrawMonster(c.dungeonIdx, c.monsterIdx, track, c.pos.x, c.pos.y, c.yaw,
+                                 ColorBrightness(Dungeon3DMonsterColor(c.dungeonIdx, c.isBoss), -0.2f), c.isBoss ? 1.3f : 1.0f,
+                                 -1.0f, -1.0f, 1.0f);
+        else CorpseDrawMound(c);
+        rlPopMatrix();
+        CorpseDrawGlint(c);
     }
     if (ActivePet(s)) {
         Vector2 d = { s.dungeonPlayerPos.x - s.companionPos.x,
@@ -18443,8 +18876,14 @@ static void DrawPlayerLifeState(const GameState& s, Vector2 screenPos, Vector2 f
 static void DrawWorldCorpses2D(const GameState& s, int zone, Vector2 camera) {
     for (const GameState::WorldCorpse& c : s.worldCorpses) {
         if (c.zone != zone) continue;
-        float fade = std::clamp(c.timer / c.duration, 0.0f, 1.0f);
+        if (zone == 1 && c.dungeonIdx >= 0 && s.selectedDungeon.has_value() && c.dungeonIdx != *s.selectedDungeon) continue;
+        float fade = std::clamp(c.timer / 10.0f, 0.0f, 1.0f); // solid until its last seconds
         Vector2 sp = WorldToScreen(c.pos, camera);
+        if (c.Lootable()) { // gold glint: there's still something on it
+            float pulse = 0.55f + 0.45f * sinf((float)g_gameClock * 3.0f + c.id);
+            DrawCircleLines((int)sp.x, (int)sp.y, kNodeRadius * 0.8f + 2.0f * pulse, Fade(Color{ 255, 210, 90, 255 }, 0.7f * pulse));
+            DrawPoly({ sp.x, sp.y - kNodeRadius - 6.0f - 3.0f * pulse }, 4, 5.0f, 45.0f, Fade(Color{ 255, 226, 120, 255 }, 0.9f));
+        }
         if (c.iconIdx >= 0 && c.iconIdx < kWildMonsterIconCount && WildMonsterSheetFor(c.iconIdx).ok) {
             const DirSpriteSheet& sheet = WildMonsterSheetFor(c.iconIdx);
             Rectangle src = ActorSrcRect(sheet, { 0, 1 }, ActorAnim::Idle, s.worldTime);
@@ -18786,17 +19225,54 @@ static void BeginDungeonExtraDeath(GameState& s, int dungeonIdx, const GameState
 // runs when the death animation completes: corpse (visual + lootable), rewards,
 // Shaken relief, ambush/innocent chaining. Economy behavior is unchanged, only
 // delayed by the animation. One call per kill - simultaneous kills each resolve.
+// UO-style corpses (2026-09-26): the body lies where it fell and keeps its loot -
+// gold, a few reagents or bandages from anything that carried a pack, a hide to
+// skin from anything with one, and whatever the rival stole from you. It opens
+// on its own when the fight is over and you're standing over it (UO's
+// auto-open-corpse), or tap the body / the Loot button. Bodies last a few minutes.
+static const float kCorpseLootTime = 240.0f;
+static GameState::WorldCorpse& AddWorldCorpse(GameState& s, GameState::WorldCorpse c) {
+    c.id = s.nextCorpseId++;
+    s.worldCorpses.push_back(std::move(c));
+    return s.worldCorpses.back();
+}
+static bool CorpseMonsterHumanoid(const GameState::WorldCorpse& c);
+static void MaybeAutoOpenCorpse(GameState& s, const GameState::WorldCorpse& c) {
+    if (!c.Lootable() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    bool fighting = c.zone == 0 ? (s.wildEngaged.has_value() || !s.wildExtraAttackers.empty())
+                                : (s.dungeonEngaged.has_value() || !s.dungeonExtraAttackers.empty());
+    Vector2 me = c.zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    bool here = c.zone == 0 ? s.screen == Screen::Wilderness : (s.screen == Screen::Hunt && s.selectedDungeon.has_value());
+    if (!fighting && here && Dist(me, c.pos) < 170.0f && s.openCorpseId < 0) { s.openCorpseId = c.id; s.skinningT = -1.0f; }
+}
+
 static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
     if (dm.guildKill) { // the rival's or a blade's kill: just the body, no rewards for you
-        s.worldCorpses.push_back({ dm.pos, kCorpseFadeTime * 0.5f, kCorpseFadeTime * 0.5f, dm.zone, dm.iconIdx, dm.name });
+        GameState::WorldCorpse c{ dm.pos, 60.0f, 60.0f, dm.zone, dm.iconIdx, dm.name };
+        c.spotIdx = dm.spotIdx; c.yaw = T3CHash01(dm.pos.x, dm.pos.y) * 6.2832f;
+        AddWorldCorpse(s, c);
         return;
     }
-    float corpseDur = (dm.isRival || dm.bladeIdx >= 0) ? kRivalCorpseFadeTime : kCorpseFadeTime;
-    s.worldCorpses.push_back({ dm.pos, corpseDur, corpseDur, dm.zone, dm.iconIdx, dm.name });
+    GameState::WorldCorpse c{ dm.pos, kCorpseLootTime, kCorpseLootTime, dm.zone, dm.iconIdx, dm.name };
+    c.spotIdx = dm.spotIdx; c.dungeonIdx = dm.dungeonIdx; c.monsterIdx = dm.monsterIdx; c.isBoss = dm.isBoss;
+    c.isRival = dm.isRival; c.bladeIdx = dm.bladeIdx;
+    c.yaw = T3CHash01(dm.pos.x * 0.37f, dm.pos.y) * 6.2832f;
     int goldFound = std::max(1, dm.baseGold + (std::rand() % 3) - 1);
-    s.corpses.push_back({ dm.name, dm.baseLeather, goldFound });
-    std::string msg = "Defeated the " + dm.name + "! Corpse left behind with leather and " +
-                      std::to_string(goldFound) + " gold to loot.";
+    c.loot.push_back({ GameState::kClGold, goldFound, std::nullopt });
+    bool packCarrier = dm.isRival || dm.bladeIdx >= 0 || CorpseMonsterHumanoid(c);
+    if (packCarrier ? RandUnit() < 0.55f : RandUnit() < 0.15f)
+        c.loot.push_back({ GameState::kClReagents, 1 + std::rand() % (dm.isRival || dm.isBoss ? 4 : 2), std::nullopt });
+    if (packCarrier && RandUnit() < 0.3f) c.loot.push_back({ GameState::kClBandages, 1 + std::rand() % 2, std::nullopt });
+    if (dm.isRival) { // your stolen gear rides on its body
+        for (const Item& it : s.rivalStash) c.loot.push_back({ GameState::kClItem, 1, it });
+        s.rivalStash.clear();
+    }
+    if (!packCarrier && dm.baseLeather > 0) { c.skinYield = dm.baseLeather; c.furs = dm.name == "Ice Wolf"; }
+    else if (dm.baseLeather > 0) c.loot.push_back({ GameState::kClHides, std::max(1, dm.baseLeather / 2), std::nullopt }); // a scrap of kit
+    GameState::WorldCorpse& added = AddWorldCorpse(s, c);
+    std::string msg = "Defeated the " + dm.name + "! " + std::to_string(goldFound) + " gold on the body" +
+                      (added.skinYield > 0 ? " - and a hide to skin." : ".");
+    MaybeAutoOpenCorpse(s, added);
     if (dm.zone == 1 && !dm.isBoss && dm.dungeonIdx >= 0) {
         // Dungeon XP / boss ladder - the old EndDungeonMonsterWin block.
         s.dungeonXP[dm.dungeonIdx] += dm.level;
@@ -18849,14 +19325,20 @@ static void UpdateDeathAndRespawn(GameState& s, float dt) {
 // there's no world sprite to play a fall animation on, so the corpse appears at
 // the player's position. The lootable corpse list + rewards are handled by the
 // existing panel win logic, unchanged.
-static void SpawnPanelKillCorpse(GameState& s, const std::string& name) {
+static void SpawnPanelKillCorpse(GameState& s, const std::string& name, int gold, int leather) {
     int zone = 0;
     Vector2 pos = s.wildernessPlayerPos;
     if (s.screen == Screen::Hunt && s.selectedDungeon.has_value()) {
         zone = 1;
         pos = s.dungeonPlayerPos;
     }
-    s.worldCorpses.push_back({ pos, kCorpseFadeTime, kCorpseFadeTime, zone, -1, name });
+    // Panel fights lay the body a step from you, with its loot on it (2026-09-26).
+    GameState::WorldCorpse c{ { pos.x + 40.0f, pos.y + 10.0f }, gold > 0 ? kCorpseLootTime : kCorpseFadeTime,
+                              gold > 0 ? kCorpseLootTime : kCorpseFadeTime, zone, -1, name };
+    if (zone == 1 && s.selectedDungeon.has_value()) c.dungeonIdx = *s.selectedDungeon;
+    if (gold > 0) c.loot.push_back({ GameState::kClGold, gold, std::nullopt });
+    if (leather > 0) c.skinYield = leather;
+    AddWorldCorpse(s, c);
 }
 
 // Ghost/death status banner (2026-09-24): shows while the death animation plays
@@ -19759,6 +20241,8 @@ static bool Wild2DFlagCandidate(const GameState& s, Vector2 camera, Vector2 m,
     return found;
 }
 
+static bool TryOpenCorpse2D(GameState& s, int zone, Vector2 camera, Vector2 m);
+static bool TryOpenCorpseAt(GameState& s, int zone, Ray ray, float (*groundY)(float, float));
 static void Wild2DClickFlag(GameState& s, Vector2 camera, int screenW, int screenH) {
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
     if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
@@ -19772,9 +20256,11 @@ static void Wild2DClickFlag(GameState& s, Vector2 camera, int screenW, int scree
     if (s.minimapOpen && CheckCollisionPointRec(m, MinimapRect())) return; // minimap (tap opens the full map)
     if (s.recallPickerOpen && CheckCollisionPointRec(m, RecallPickerRect())) return; // recall modal
     if (!s.minimapOpen && CheckCollisionPointRec(m, MinimapToggleRect())) return; // MAP button
+    if (CorpseUIPointIn(m)) return; // corpse window / Loot button
+    if (!s.wildEngaged.has_value() && TryOpenCorpse2D(s, 0, camera, m)) return; // tap a body to open it
     if (s.wildEngaged.has_value()) {
         if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return; // quick items
-        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return; // spell hotbar
+        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 100 })) return; // spell hotbar
     }
     // Tapping the target frame cycles targets (2026-09-25).
     if ((s.flagTarget.has_value() || s.wildEngaged.has_value()) &&
@@ -19853,9 +20339,11 @@ static void Dungeon2DClickFlag(GameState& s, Vector2 camera, int screenW, int sc
     if (m.x > screenW - 170 && m.y > screenH - 170) return; // interact button
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return; // TARGET button (shared HUD handles it)
     if (s.recallPickerOpen && CheckCollisionPointRec(m, RecallPickerRect())) return; // recall modal
+    if (CorpseUIPointIn(m)) return; // corpse window / Loot button
+    if (!s.dungeonEngaged.has_value() && TryOpenCorpse2D(s, 1, camera, m)) return; // tap a body to open it
     if (s.dungeonEngaged.has_value()) {
         if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return; // quick items
-        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 70 })) return; // spell hotbar
+        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 100 })) return; // spell hotbar
     }
     // Tapping the target frame cycles targets (2026-09-25).
     if ((s.flagTarget.has_value() || s.dungeonEngaged.has_value()) &&
@@ -20154,6 +20642,7 @@ static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
         CycleFlagTarget(s);
         return;
     }
+    if (!s.wildEngaged.has_value() && TryOpenCorpseAt(s, 0, Town3DMouseRay(c, m), WildGroundY)) return; // tap a body
     bool duelLocked = s.wildEngaged.has_value() &&
                       (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0);
     bool fightingNormal = s.wildEngaged.has_value() && !duelLocked;
@@ -20260,6 +20749,7 @@ static void Dungeon3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
         CycleFlagTarget(s);
         return;
     }
+    if (!s.dungeonEngaged.has_value() && TryOpenCorpseAt(s, 1, Town3DMouseRay(c, m), nullptr)) return; // tap a body
     GameState::FlagTarget f;
     // Two passes (2026-09-25): the tight 70u sphere first, then a generous 150u
     // assist sphere so near-miss taps still snap to the nearest fightable enemy.
@@ -20679,6 +21169,231 @@ static void DrawGuildTags3D(const GameState& s, const Town3DCam& c, int screenW,
             y -= 38.0f;
         }
         if (m.sayT > 0.0f) DrawGuildBubble({ sp.x, y }, m.say, std::min(1.0f, m.sayT / 0.5f));
+    }
+}
+
+// ---- UO-style corpse window (2026-09-26) -----------------------------------------
+// The body's contents strewn over a dark container, UO-style: tap a pile to take
+// it, Loot All to sweep it, Skin to work the hide (it appears in the container
+// when you're done). Opens on its own after a fight, from tapping the body, from
+// the Loot button, or with F. Closes when you walk away or a fight starts.
+static const Color kFloatLootColor = { 255, 214, 90, 255 };
+static const float kSkinTime = 1.2f;
+static Rectangle g_corpseUIRect = { 0, 0, 0, 0 }; // what the corpse UI covered last frame (tap shield)
+static bool g_corpseUIOn = false;
+static bool CorpseMonsterHumanoid(const GameState::WorldCorpse& c) {
+    if (c.isRival || c.bladeIdx >= 0) return true;
+    if (c.zone == 0 && c.spotIdx >= 0 && c.spotIdx < (int)kWildernessMonsterSpots.size())
+        return T3CMonsterLook(kWildernessMonsterSpots[c.spotIdx].iconIdx).humanoid;
+    if (c.zone == 1 && c.dungeonIdx >= 0 && c.monsterIdx >= 0)
+        return T3CDungeonMonsterLook(c.dungeonIdx, c.monsterIdx).humanoid;
+    return false;
+}
+static bool CorpseHere(const GameState& s, const GameState::WorldCorpse& c, int zone) {
+    if (c.zone != zone) return false;
+    if (zone == 1) return s.selectedDungeon.has_value() && (c.dungeonIdx < 0 || c.dungeonIdx == *s.selectedDungeon);
+    return true;
+}
+static GameState::WorldCorpse* FindCorpse(GameState& s, int id) {
+    for (auto& c : s.worldCorpses) if (c.id == id) return &c;
+    return nullptr;
+}
+static std::string CorpseTitle(const GameState::WorldCorpse& c) {
+    if (c.isRival || c.bladeIdx >= 0) return "Corpse of " + c.name;
+    return "A " + c.name + " corpse";
+}
+static int CorpseLootIcon(int kind) {
+    switch (kind) {
+        case GameState::kClGold: return kUoiGold;
+        case GameState::kClHides: return kUoiHides;
+        case GameState::kClFurs: return kUoiFurs;
+        case GameState::kClReagents: return kUoiReagents;
+        default: return kUoiBandages;
+    }
+}
+static std::string CorpseLootName(const GameState::CorpseLoot& l) {
+    switch (l.kind) {
+        case GameState::kClGold: return std::to_string(l.count) + " gold";
+        case GameState::kClHides: return std::to_string(l.count) + " hides";
+        case GameState::kClFurs: return std::to_string(l.count) + " furs";
+        case GameState::kClReagents: return std::to_string(l.count) + " reagents";
+        case GameState::kClBandages: return std::to_string(l.count) + " bandages";
+        default: return l.item.has_value() ? l.item->name : "an item";
+    }
+}
+// Move one pile into your pack. False if it didn't fit (full backpack).
+static bool TakeCorpseLoot(GameState& s, GameState::WorldCorpse& c, size_t i, bool quiet = false) {
+    if (i >= c.loot.size()) return false;
+    GameState::CorpseLoot l = c.loot[i];
+    switch (l.kind) {
+        case GameState::kClGold: s.gold += l.count; break;
+        case GameState::kClHides: s.leather += l.count; break;
+        case GameState::kClFurs: s.furs += l.count; break;
+        case GameState::kClReagents: s.reagents += l.count; break;
+        case GameState::kClBandages: s.bandages += l.count; break;
+        default:
+            if (!l.item.has_value()) break;
+            if ((int)s.backpack.size() >= BackpackCap(s)) { s.logLine = "Your backpack is full."; return false; }
+            s.backpack.push_back(*l.item);
+            break;
+    }
+    c.loot.erase(c.loot.begin() + (long)i);
+    Vector2 me = c.zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    if (!quiet) {
+        SpawnFloatText(s, c.zone, me, "+" + CorpseLootName(l), kFloatLootColor);
+        Journal(s, "You take " + CorpseLootName(l) + " from the " + c.name + ".");
+        PlaySfx(SfxId::Coin);
+    }
+    return true;
+}
+static void LootAllCorpse(GameState& s, GameState::WorldCorpse& c) {
+    std::string got;
+    for (size_t i = 0; i < c.loot.size();) {
+        std::string nm = CorpseLootName(c.loot[i]);
+        if (TakeCorpseLoot(s, c, i, true)) got += (got.empty() ? "" : ", ") + nm;
+        else i++;
+    }
+    if (!got.empty()) {
+        Vector2 me = c.zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+        SpawnFloatText(s, c.zone, me, "Looted!", kFloatLootColor);
+        Journal(s, "You loot the " + c.name + ": " + got + ".");
+        PlaySfx(SfxId::Coin);
+    }
+}
+static void FinishSkinning(GameState& s, GameState::WorldCorpse& c) {
+    c.skinned = true;
+    float yieldMult = 0.5f + 1.5f * (s.skinning / 100.0f); // same curve as the old SkinCorpse
+    int yield = std::max(1, (int)std::round(c.skinYield * yieldMult));
+    c.loot.push_back({ c.furs ? GameState::kClFurs : GameState::kClHides, yield, std::nullopt });
+    float gain = GainSkillCapped(s.skinning, RollGatherSkillGain(s.skinning), 100.0f);
+    std::string note = gain > 0 ? " (Skinning +" + std::to_string(gain).substr(0, 4) + ")" : "";
+    if (MaybeGainStat(s, &GameState::dex, 0.06f)) note += " (DEX +1)";
+    Journal(s, "You skin the " + c.name + ": " + std::to_string(yield) + (c.furs ? " furs." : " hides.") + note);
+    PlaySfx(SfxId::Hit);
+}
+// Nearest corpse with something on it, within reach of you.
+static GameState::WorldCorpse* NearestLootableCorpse(GameState& s, int zone, float range) {
+    Vector2 me = zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    GameState::WorldCorpse* best = nullptr;
+    float bd = range;
+    for (auto& c : s.worldCorpses) {
+        if (!CorpseHere(s, c, zone) || !c.Lootable()) continue;
+        float d = Dist(me, c.pos);
+        if (d < bd) { bd = d; best = &c; }
+    }
+    return best;
+}
+static bool CorpseUIPointIn(Vector2 m) { return g_corpseUIOn && CheckCollisionPointRec(m, g_corpseUIRect); }
+// 2D views: a tap within reach of a body's sprite opens it.
+static bool TryOpenCorpse2D(GameState& s, int zone, Vector2 camera, Vector2 m) {
+    Vector2 me = zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    for (auto& c : s.worldCorpses) {
+        if (!CorpseHere(s, c, zone) || !c.Lootable()) continue;
+        if (Dist(WorldToScreen(c.pos, camera), m) > 30.0f) continue;
+        if (Dist(me, c.pos) > 200.0f) { SpawnFloatText(s, zone, me, "Too far away", kFloatDenyColor); return true; }
+        s.openCorpseId = c.id; s.skinningT = -1.0f;
+        PlaySfx(SfxId::Click);
+        return true;
+    }
+    return false;
+}
+// Tapping a body in the 3D views: open it if you're close, else say so.
+static bool TryOpenCorpseAt(GameState& s, int zone, Ray ray, float (*groundY)(float, float)) {
+    GameState::WorldCorpse* hitC = nullptr;
+    float bestD = 1e9f;
+    for (auto& c : s.worldCorpses) {
+        if (!CorpseHere(s, c, zone) || !c.Lootable()) continue;
+        float gy = groundY ? groundY(c.pos.x, c.pos.y) : 0.0f;
+        RayCollision h = GetRayCollisionSphere(ray, { c.pos.x, 12.0f + gy, c.pos.y }, 34.0f);
+        if (h.hit && h.distance < bestD) { bestD = h.distance; hitC = &c; }
+    }
+    if (!hitC) return false;
+    Vector2 me = zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    if (Dist(me, hitC->pos) > 200.0f) {
+        SpawnFloatText(s, zone, me, "Too far away", kFloatDenyColor);
+        return true;
+    }
+    s.openCorpseId = hitC->id; s.skinningT = -1.0f;
+    PlaySfx(SfxId::Click);
+    return true;
+}
+
+// Per-frame corpse UI for the wilderness (zone 0) or a dungeon (zone 1): the
+// Loot button when you're standing by a body, the container window when open.
+static void DrawCorpseUI(GameState& s, int zone) {
+    g_corpseUIOn = false;
+    bool fighting = zone == 0 ? (s.wildEngaged.has_value() || !s.wildExtraAttackers.empty())
+                              : (s.dungeonEngaged.has_value() || !s.dungeonExtraAttackers.empty());
+    bool ghost = s.playerIsGhost || s.playerDeathAnimT > 0.0f;
+    Vector2 me = zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    GameState::WorldCorpse* c = s.openCorpseId >= 0 ? FindCorpse(s, s.openCorpseId) : nullptr;
+    if (c && (!CorpseHere(s, *c, zone) || Dist(me, c->pos) > 220.0f || fighting || ghost)) c = nullptr;
+    if (!c) { s.openCorpseId = -1; s.skinningT = -1.0f; }
+    if (!c) {
+        if (fighting || ghost || s.combat.has_value()) return;
+        GameState::WorldCorpse* n = NearestLootableCorpse(s, zone, 120.0f);
+        if (!n) return;
+        Rectangle b = { kViewport.x + kViewport.width - 150.0f, kViewport.y + kViewport.height - 160.0f, 130.0f, 56.0f };
+        g_corpseUIOn = true; g_corpseUIRect = b;
+        UODrawGump(b, kUoDarkWood);
+        UODrawIcon(n->loot.empty() ? kUoiHides : CorpseLootIcon(n->loot[0].kind), b.x + 26, b.y + 28, 30);
+        DrawUIText("Loot", (int)b.x + 50, (int)b.y + 10, 16, kUoGoldText);
+        std::string nm = n->name.size() > 13 ? n->name.substr(0, 12) + "." : n->name;
+        DrawUIText(nm.c_str(), (int)b.x + 50, (int)b.y + 30, 11, Color{ 214, 200, 170, 255 });
+        if (UOTapped(b) || IsKeyPressed(KEY_F)) { s.openCorpseId = n->id; s.skinningT = -1.0f; PlaySfx(SfxId::Click); }
+        return;
+    }
+    // --- the container window ---
+    Rectangle g = { 14, 196, 368, 280 }; // upper-left: clear of the minimap and the skill strip; the body and you stay in view below
+    g_corpseUIOn = true; g_corpseUIRect = { g.x, g.y - 12, g.width, g.height + 12 };
+    UODrawGump(g, kUoDarkWood, Color{ 200, 190, 185, 255 });
+    UODrawTitle(g, CorpseTitle(*c));
+    if (UOCloseButton(g)) { s.openCorpseId = -1; s.skinningT = -1.0f; return; }
+    Rectangle area = { g.x + 18, g.y + 26, g.width - 36, g.height - 90 };
+    DrawRectangleRec(area, Fade(BLACK, 0.35f)); // the body's dark hollow
+    DrawRectangleLinesEx(area, 1.0f, Fade(kUoBronzeLo, 0.9f));
+    int tappedIdx = -1;
+    for (size_t i = 0; i < c->loot.size(); i++) {
+        const GameState::CorpseLoot& l = c->loot[i];
+        Vector2 p = UOScatter(area, (int)i, 100.0f, c->id * 5);
+        Rectangle hit = { p.x - 40, p.y - 40, 80, 80 };
+        bool hover = CheckCollisionPointRec(GetMousePosition(), hit);
+        DrawCircleV({ p.x, p.y - 6 }, 34, Fade(hover ? kUoBronzeHi : BLACK, hover ? 0.22f : 0.25f));
+        if (l.kind == GameState::kClItem && l.item.has_value()) DrawItemIcon(*l.item, p.x - 28, p.y - 34, 56);
+        else UODrawIcon(CorpseLootIcon(l.kind), p.x, p.y - 8, 58);
+        UODrawCount(p.x + 30, p.y + 6, l.count);
+        std::string lab = l.kind == GameState::kClItem && l.item.has_value() ? l.item->name : CorpseLootName(l);
+        if (lab.size() > 14) lab = lab.substr(0, 13) + ".";
+        int lw = MeasureUIText(lab.c_str(), 12);
+        DrawUIText(lab.c_str(), (int)(p.x - lw / 2), (int)p.y + 26, 12, Color{ 226, 212, 180, 255 });
+        if (UOTapped(hit)) tappedIdx = (int)i;
+    }
+    if (tappedIdx >= 0) TakeCorpseLoot(s, *c, (size_t)tappedIdx);
+    if (c->loot.empty()) {
+        const char* msg = (c->skinYield > 0 && !c->skinned) ? "Nothing left but the hide." : "Picked clean.";
+        int w = MeasureUIText(msg, 13);
+        DrawUIText(msg, (int)(area.x + area.width / 2 - w / 2), (int)(area.y + area.height / 2 - 6), 13, Color{ 170, 160, 140, 255 });
+    }
+    // Buttons: Skin (with a progress bar while working) and Loot All.
+    float by = g.y + g.height - 52;
+    bool canSkin = c->skinYield > 0 && !c->skinned;
+    if (s.skinningT >= 0.0f) {
+        s.skinningT += GetFrameTime();
+        Rectangle bar = { g.x + 22, by + 6, (g.width - 60) / 2, 26 };
+        DrawRectangleRec(bar, Color{ 30, 22, 16, 255 });
+        DrawRectangleRec({ bar.x + 2, bar.y + 2, (bar.width - 4) * std::min(1.0f, s.skinningT / kSkinTime), bar.height - 4 }, Color{ 150, 60, 44, 255 });
+        DrawRectangleLinesEx(bar, 2.0f, kUoBronze);
+        DrawUIText("Skinning...", (int)bar.x + 36, (int)bar.y + 6, 13, kUoGoldText);
+        if (s.skinningT >= kSkinTime) { s.skinningT = -1.0f; FinishSkinning(s, *c); }
+    } else if (UOButton({ g.x + 22, by + 4, (g.width - 60) / 2, 30 }, canSkin ? "Skin (knife)" : (c->skinned ? "Skinned" : "No hide"), canSkin)) {
+        s.skinningT = 0.0f;
+        PlaySfx(SfxId::Swing);
+    }
+    if (UOButton({ g.x + g.width - 22 - (g.width - 60) / 2, by + 4, (g.width - 60) / 2, 30 }, "Loot All", !c->loot.empty())) LootAllCorpse(s, *c);
+    // An emptied body fades sooner; an emptied window closes itself.
+    if (!c->Lootable()) {
+        c->timer = std::min(c->timer, 30.0f);
+        if (s.skinningT < 0.0f) { s.openCorpseId = -1; }
     }
 }
 
@@ -22701,6 +23416,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         tryInteract();
     }
     DrawGhostStatus(s); // death animation / ghost walk banner
+    DrawCorpseUI(s, 0); // UO corpse window / Loot button (2026-09-26)
     DrawMinimap(s); // wilderness minimap (shared by the 2D and 3D views)
     // Phase 3 - snowfall while in the Frostwastes (both 2D and 3D views).
     if (RegionAt(s.wildernessPlayerPos) == RegionId::Frostwastes) DrawSnowfall(screenW, screenH, s.worldTime);
@@ -23824,6 +24540,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         tryDungeonInteract();
     }
     DrawGhostStatus(s); // death animation / ghost walk banner
+    DrawCorpseUI(s, 1); // UO corpse window / Loot button (2026-09-26)
 
     // Spell hotbar - only while actually engaged (2026-09-22 fix, same reason as
     // Wilderness: this spot overlaps the interact button used for "[E] Fight/Leave"
@@ -24428,11 +25145,11 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
     {
         int tapped = -1;
         if (!s.hotbarPickerSlot.has_value())
-            tapped = DrawCombatHotbarRow(s, false, nullptr, 0.0f, 20.0f, (float)y);
+            tapped = DrawCombatHotbarRow(s, false, nullptr, 0.0f, 30.0f, (float)y + 10.0f);
         if (tapped >= 0) { s.hotbarPickerSlot = tapped; pickerSuppress = true; }
     }
-    y += 68;
-    DrawHotbarPicker(s, screenW, screenH, pickerSuppress);
+    y += 100; // the framed spell bar (2026-09-26) is taller than the old button row
+    bool pickerOpen = s.hotbarPickerSlot.has_value(); // modal: the list below goes inert under it
 
     DrawUIText("Spellcraft - practice trains Magery/Eval Int/Meditation, mana only:", 20, y, 12,
                kColorAccent);
@@ -24460,12 +25177,13 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
         DrawUIText(line.c_str(), 50, (int)rowY + 6, 12, kColorText);
         if ((int)i == kRecallSpellIdx) {
             // UO-style travel: Recall isn't practiced - it opens the town picker.
-            if (Button({ (float)(screenW - 100), rowY, 80, 24 }, "Recall", true))
+            if (Button({ (float)(screenW - 100), rowY, 80, 24 }, "Recall", !pickerOpen))
                 s.recallPickerOpen = true;
-        } else if (Button({ (float)(screenW - 100), rowY, 80, 24 }, "Practice", s.mana >= sp.manaCost && CanPracticeSpell(s, sp)))
+        } else if (Button({ (float)(screenW - 100), rowY, 80, 24 }, "Practice", !pickerOpen && s.mana >= sp.manaCost && CanPracticeSpell(s, sp)))
             TryPracticeSpell(s, (int)i);
     }
     EndScissorMode();
+    DrawHotbarPicker(s, screenW, screenH, pickerSuppress); // drawn over the list (2026-09-26)
     // UO-style travel (2026-09-25): recall destination modal, drawn last so it
     // floats above the screen. R opens it on desktop.
     if (IsKeyPressed(KEY_R) && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f) s.recallPickerOpen = true;
@@ -25099,177 +25817,259 @@ static void DrawDottedLineH(float x1, float x2, float y, Color color) {
     for (float x = x1; x < x2; x += 6.0f) DrawRectangle((int)x, (int)y, 3, 2, color);
 }
 
+// ---- The paperdoll (2026-09-26, UO-inspired) -----------------------------------
+// Your real 3D body - the same animated model you walk the world in, wearing
+// whatever you have equipped - rendered into its own texture each frame and
+// set in a parchment "paperdoll" gump, with the gear slots down both edges
+// (tap one to inspect or take it off). Drag the body to turn it. Below it a
+// UO status strip, and your backpack as an open leather bag with everything
+// you carry strewn inside it: tap an item to inspect / equip it.
+static RenderTexture2D g_dollRT;
+static bool g_dollRTReady = false;
+static float g_dollYaw = 0.35f;
+static bool g_dollDragging = false;
+static float g_dollLastX = 0.0f;
+static int g_pdSel = -1; // 0..7 gear slot, 100+i backpack item, 200+k resource stack; -1 none
+static const Rectangle kDollGump = { 10, 122, 520, 440 };
+static const Rectangle kDollView = { 98, 134, 344, 352 };
+static const int kT3CTrackPaperdoll = 160;
+
+static void PaperdollRenderPass(const GameState& s) {
+    if (!g_dollRTReady) {
+        g_dollRT = LoadRenderTexture((int)kDollView.width * 2, (int)kDollView.height * 2);
+        SetTextureFilter(g_dollRT.texture, TEXTURE_FILTER_BILINEAR);
+        g_dollRTReady = true;
+    }
+    T3CKitUseSunShader();
+    T3DUpdateDayNight(0.0f, true); // the noon palette, like interiors
+    Camera3D cam = { { 0.0f, 44.0f, 150.0f }, { 0.0f, 32.0f, 0.0f }, { 0, 1, 0 }, 29.0f, CAMERA_PERSPECTIVE };
+    if (g_t3dLit.ready) {
+        SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &cam.position, SHADER_UNIFORM_VEC3);
+        float fr[2] = { 5000.0f, 9000.0f }; // no fog on the paperdoll
+        SetShaderValue(g_t3dLit.shader, g_t3dLit.fogRangeLoc, fr, SHADER_UNIFORM_VEC2);
+    }
+    BeginTextureMode(g_dollRT);
+    ClearBackground(BLANK);
+    BeginMode3D(cam);
+    DrawCylinder({ 0, -4.0f, 0 }, 25.0f, 28.0f, 4.0f, 40, Color{ 96, 88, 80, 255 });   // stone plinth
+    DrawCylinder({ 0, -0.2f, 0 }, 22.5f, 25.0f, 0.4f, 40, Color{ 132, 122, 108, 255 });
+    HumanPose hp; // relaxed idle
+    DrawHuman(kT3CTrackPaperdoll, 0.0f, 0.0f, 1.5708f + g_dollYaw, 1.0f, WHITE, HumanOutfitFor(s.equipped), hp, false);
+    EndMode3D();
+    EndTextureMode();
+}
+
+// Take a piece off (back into the backpack). Two-handers free both hands.
+static void UnequipToBackpack(GameState& s, std::optional<Item>& slot) {
+    if (!slot.has_value()) return;
+    if ((int)s.backpack.size() >= BackpackCap(s)) { s.logLine = "Your backpack is full."; return; }
+    Item it = *slot;
+    bool twoH = s.equipped.leftHand && s.equipped.rightHand && s.equipped.leftHand->id == s.equipped.rightHand->id;
+    if (twoH && (&slot == &s.equipped.leftHand || &slot == &s.equipped.rightHand)) {
+        s.equipped.leftHand.reset(); s.equipped.rightHand.reset();
+    } else slot.reset();
+    s.backpack.push_back(it);
+    s.logLine = "You take off the " + it.name + ".";
+    PlaySfx(SfxId::Click);
+}
+
+struct PaperdollSlot { const char* label; std::optional<Item> Equipment::*field; int glyph; };
+static const PaperdollSlot kPdSlots[8] = {
+    { "Head", &Equipment::helmet, 0 },    { "Neck", &Equipment::gorget, 1 },
+    { "Chest", &Equipment::chest, 2 },    { "Arms", &Equipment::arms, 3 },
+    { "Weapon", &Equipment::rightHand, 4 }, { "Off-hand", &Equipment::leftHand, 5 },
+    { "Hands", &Equipment::gloves, 6 },   { "Legs", &Equipment::legs, 7 },
+};
+static Rectangle PaperdollSlotRect(int i) {
+    float x = i < 4 ? kDollGump.x + 16 : kDollGump.x + kDollGump.width - 16 - 66;
+    return { x, kDollGump.y + 22 + (i % 4) * 92.0f, 66, 66 };
+}
+// Faint outline of what goes in an empty slot.
+static void PaperdollGlyph(int g, Rectangle r) {
+    Color c = Fade(Color{ 230, 220, 200, 255 }, 0.22f);
+    float cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+    switch (g) {
+        case 0: DrawCircleSector({ cx, cy + 4 }, 18, 180, 360, 16, c); DrawRectangleRec({ cx - 20, cy + 3, 40, 5 }, c); break; // helm
+        case 1: DrawRing({ cx, cy }, 11, 15, 0, 360, 24, c); break;                                           // gorget
+        case 2: DrawTriangle({ cx - 16, cy - 16 }, { cx, cy + 20 }, { cx + 16, cy - 16 }, c); DrawRectangleRec({ cx - 16, cy - 18, 32, 6 }, c); break;
+        case 3: DrawRectangleRec({ cx - 20, cy - 5, 40, 10 }, c); break;                                      // arms
+        case 4: DrawLineEx({ cx - 14, cy + 14 }, { cx + 14, cy - 14 }, 5, c); DrawLineEx({ cx - 14, cy + 2 }, { cx - 2, cy + 14 }, 4, c); break; // sword
+        case 5: DrawCircleSector({ cx, cy - 4 }, 16, 0, 180, 16, c); DrawTriangle({ cx - 16, cy - 4 }, { cx, cy + 18 }, { cx + 16, cy - 4 }, c); break; // shield
+        case 6: DrawRectangleRounded({ cx - 10, cy - 12, 20, 24 }, 0.4f, 6, c); break;                       // glove
+        default: DrawRectangleRec({ cx - 12, cy - 18, 9, 36 }, c); DrawRectangleRec({ cx + 3, cy - 18, 9, 36 }, c); break; // legs
+    }
+}
+static bool PaperdollItemFits(const Item& it, int slot) {
+    if (slot == 4 || slot == 5) return it.type == ItemType::Weapon;
+    if (it.type != ItemType::Armor) return false;
+    static const char* names[8] = { "helmet", "gorget", "chest", "arms", "", "", "gloves", "legs" };
+    return it.slot == names[slot] || (slot == 2 && it.slot.empty());
+}
+static std::string ItemStatLine(const Item& it) {
+    if (it.type == ItemType::Weapon)
+        return std::string(it.handed == "2h" ? "Two-handed" : "One-handed") + " weapon  -  Power " + std::to_string(it.power) +
+               (it.category.empty() ? "" : "  -  " + it.category);
+    return "Armor  -  Defense " + std::to_string(it.power) + (it.slot.empty() ? "" : "  -  " + it.slot);
+}
+
 static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     UpdateTextInput(s.characterName, 24);
+    Vector2 mouse = GetMousePosition();
 
-    int y = 116;
-    float overallSkill = OverallSkill(s);
-    DrawUIText(("Character  " + TitleFor(overallSkill)).c_str(), 20, y, 18, kColorHeading);
-    y += 24;
+    // ---- the paperdoll gump ----
+    const Rectangle G = kDollGump;
+    UODrawGump(G, kUoParchment);
+    // the body's alcove: a darker recess behind the figure
+    DrawRectangleGradientV((int)kDollView.x, (int)kDollView.y, (int)kDollView.width, (int)kDollView.height,
+                           Fade(Color{ 60, 44, 30, 255 }, 0.10f), Fade(Color{ 60, 44, 30, 255 }, 0.35f));
+    DrawRectangleLinesEx(kDollView, 1.0f, Fade(kUoBronzeLo, 0.5f));
+    if (g_dollRTReady)
+        DrawTexturePro(g_dollRT.texture, { 0, 0, (float)g_dollRT.texture.width, -(float)g_dollRT.texture.height },
+                       kDollView, { 0, 0 }, 0.0f, WHITE);
+    // drag the body to turn it
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, kDollView)) { g_dollDragging = true; g_dollLastX = mouse.x; }
+    if (g_dollDragging && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { g_dollYaw += (mouse.x - g_dollLastX) * 0.012f; g_dollLastX = mouse.x; }
+    else g_dollDragging = false;
+    DrawUIText("drag to turn", (int)(kDollView.x + kDollView.width - 76), (int)(kDollView.y + 6), 10, Fade(kUoBronzeLo, 0.7f));
 
-    // Name entry - this is the only text field in the whole game (no click-to-focus:
-    // typing works any time this screen is open), which wasn't obvious with no visible
-    // cursor - a blinking caret after the text makes it read as "live" the way a normal
-    // text box would, instead of looking like inert label text.
-    Rectangle nameBox = { 20, (float)y, (float)(screenW - 40), 26 };
-    DrawRectangleRec(nameBox, Fade(WHITE, 0.6f));
-    DrawRectangleRoundedLines(nameBox, 0.15f, 4, Fade(BLACK, 0.4f));
-    TapToEditText(nameBox, "Name your character", s.characterName, 24);
-    std::string nameShown = s.characterName.empty() ? "Name your character (tap to edit)" : s.characterName;
-    DrawUIText(nameShown.c_str(), (int)nameBox.x + 6, (int)nameBox.y + 6, 13,
-               s.characterName.empty() ? Fade(DARKGRAY, 0.6f) : kColorText);
-    if (std::fmod(GetTime(), 1.0) < 0.5) {
-        int caretX = (int)nameBox.x + 6 + (s.characterName.empty() ? 0 : MeasureUIText(s.characterName.c_str(), 13));
-        DrawRectangle(caretX + 1, (int)nameBox.y + 6, 2, 15, kColorText);
+    // gear slots down both edges
+    for (int i = 0; i < 8; i++) {
+        Rectangle r = PaperdollSlotRect(i);
+        const std::optional<Item>& it = s.equipped.*(kPdSlots[i].field);
+        bool sel = g_pdSel == i;
+        UODrawSlot(r, sel);
+        if (it.has_value()) DrawItemIcon(*it, r.x + 5, r.y + 5, r.width - 10);
+        else PaperdollGlyph(kPdSlots[i].glyph, r);
+        if (sel) DrawRectangleLinesEx({ r.x - 3, r.y - 3, r.width + 6, r.height + 6 }, 2.0f, Color{ 255, 214, 110, 255 });
+        int lw = MeasureUIText(kPdSlots[i].label, 11);
+        DrawUIText(kPdSlots[i].label, (int)(r.x + r.width / 2 - lw / 2), (int)(r.y + r.height + 3), 11, Color{ 90, 60, 34, 255 });
+        if (UOTapped({ r.x - 4, r.y - 4, r.width + 8, r.height + 8 })) { g_pdSel = sel ? -1 : i; PlaySfx(SfxId::Click); }
     }
-    y += 32;
 
-    // Subtitle - bumped from plain DARKGRAY to the accent color/a slightly bigger size
-    // so naming a character reads as more consequential than inert label text (2026-09-22
-    // UI polish pass; the name box itself already had a bordered card, just this line
-    // was flat).
-    DrawUIText(CharacterDisplayName(s).c_str(), 20, y, 14, kColorAccent);
-    y += 22;
-
-    if (s.shaken > 0) { DrawUIText(TextFormat("Shaken (%d)", s.shaken), 20, y, 12, Color{ 122, 46, 46, 255 }); y += 16; }
+    // name ribbon (tap to rename) under the figure, like UO's name scroll
+    Rectangle rib = { G.x + 110, G.y + G.height - 58, G.width - 220, 40 };
+    DrawRectangleRec(rib, Color{ 236, 220, 184, 255 });
+    DrawTriangle({ rib.x, rib.y }, { rib.x - 14, rib.y + rib.height / 2 }, { rib.x, rib.y + rib.height }, Color{ 206, 186, 146, 255 });
+    DrawTriangle({ rib.x + rib.width, rib.y }, { rib.x + rib.width, rib.y + rib.height }, { rib.x + rib.width + 14, rib.y + rib.height / 2 }, Color{ 206, 186, 146, 255 });
+    DrawRectangleLinesEx(rib, 1.5f, kUoBronze);
+    TapToEditText(rib, "Name your character", s.characterName, 24);
+    std::string nameLine = s.characterName.empty() ? "Tap to name your character" : CharacterDisplayName(s);
+    int nw = MeasureUIText(nameLine.c_str(), 15);
+    if (nw > rib.width - 12) { nameLine = s.characterName; nw = MeasureUIText(nameLine.c_str(), 15); }
+    DrawUIText(nameLine.c_str(), (int)(rib.x + rib.width / 2 - nw / 2), (int)rib.y + 6, 15,
+               s.characterName.empty() ? Fade(Color{ 90, 60, 34, 255 }, 0.6f) : Color{ 70, 40, 20, 255 });
+    std::string title = TitleFor(OverallSkill(s));
     NotorietyTier tier = GetNotorietyTier(s);
-    if (tier != NotorietyTier::Innocent) {
-        Color tc = tier == NotorietyTier::Murderer ? Color{ 138, 30, 30, 255 } : Color{ 160, 103, 46, 255 };
-        DrawUIText(NotorietyTierLabel(tier).c_str(), 20, y, 12, tc);
-        y += 16;
-    }
-    y += 6;
+    if (tier != NotorietyTier::Innocent) title += "  -  " + NotorietyTierLabel(tier);
+    if (s.shaken > 0) title += TextFormat("  -  Shaken (%d)", s.shaken);
+    int tw = MeasureUIText(title.c_str(), 11);
+    DrawUIText(title.c_str(), (int)(rib.x + rib.width / 2 - tw / 2), (int)rib.y + 24, 11,
+               tier == NotorietyTier::Murderer ? Color{ 150, 30, 30, 255 } : Color{ 110, 80, 50, 255 });
 
-    // Resources (2026-09-23 redesign) - Mark asked for gold/resources to be listed on
-    // this page again (they were trimmed to just Reagents in the 2026-09-22 pass, on
-    // the reasoning that Gold/Wood/Ore/Leather already show in the top bar on every
-    // screen - that reasoning still holds, this is deliberate duplication he asked for
-    // back, not a regression of that earlier decision).
-    DrawUIText(TextFormat("Gold: %d   Wood: %d   Ore: %d   Leather: %d   Fish: %d   Reagents: %d",
-                            s.gold, s.wood, s.ore, s.leather, s.fish, s.reagents), 20, y, 13, kColorAccent);
-    y += 26;
+    // ---- status strip (UO status gump) ----
+    Rectangle st = { 10, G.y + G.height + 10, 520, 52 };
+    UODrawGump(st, kUoDarkWood);
+    auto bar = [&](float x, float y, float w, float frac, Color c, const std::string& lab) {
+        DrawRectangleRec({ x, y, w, 12 }, Color{ 20, 14, 10, 255 });
+        DrawRectangleRec({ x + 1, y + 1, (w - 2) * std::clamp(frac, 0.0f, 1.0f), 10 }, c);
+        DrawRectangleLinesEx({ x, y, w, 12 }, 1.0f, kUoBronzeLo);
+        DrawUIText(lab.c_str(), (int)x, (int)y + 14, 11, Color{ 226, 212, 180, 255 });
+    };
+    bar(st.x + 14, st.y + 11, 120, (float)s.hp / std::max(1, s.maxHp), Color{ 170, 40, 36, 255 }, TextFormat("HP %d/%d", s.hp, s.maxHp));
+    bar(st.x + 146, st.y + 11, 110, s.mana / std::max(1.0f, MaxMana(s)), Color{ 50, 80, 170, 255 }, TextFormat("Mana %.0f/%.0f", s.mana, MaxMana(s)));
+    std::string st1 = TextFormat("Str %d  Dex %d  Int %d", s.str, s.dex, s.intStat);
+    std::string st2 = TextFormat("Power %d   Defense %d", CombatPower(s), TotalDefense(s));
+    DrawUIText(st1.c_str(), (int)st.x + 274, (int)st.y + 10, 12, kUoGoldText);
+    DrawUIText(st2.c_str(), (int)st.x + 274, (int)st.y + 27, 12, Color{ 226, 212, 180, 255 });
 
-    // Equipment card redesign (2026-09-23) - Mark supplied a reference layout (ornate
-    // parchment/wood-frame card, single-column icon+label+value rows, a "DERIVED STATS"
-    // footer) and asked to match its look exactly, replacing the paperdoll + 2-column
-    // equipment grid this screen used before. Colors are local to this one card on
-    // purpose - the rest of the game deliberately moved off a gold/parchment palette
-    // some time ago (see the kColorText/kColorPanelBg block's own comment on that), so
-    // this is a one-screen departure, not a reversion of that earlier decision, unless
-    // asked to spread it further.
-    {
-        const Color kWoodBorder = { 92, 58, 30, 255 };
-        const Color kWoodBorderLight = { 168, 116, 62, 255 };
-        const Color kParchmentBg = { 232, 209, 171, 255 };
-        const Color kBannerBg = { 64, 40, 22, 255 };
-        const Color kBannerText = { 232, 205, 140, 255 };
-        const Color kRivet = { 78, 78, 84, 255 };
-
-        struct EquipRow { const char* label; const std::optional<Item>* item; };
-        const std::array<EquipRow, 8> rows = {{
-            { "HELMET", &s.equipped.helmet }, { "GORGET", &s.equipped.gorget },
-            { "LEFT HAND", &s.equipped.leftHand }, { "RIGHT HAND", &s.equipped.rightHand },
-            { "GLOVES", &s.equipped.gloves }, { "CHEST", &s.equipped.chest },
-            { "ARMS", &s.equipped.arms }, { "LEGS", &s.equipped.legs },
-        }};
-        const float rowH = 42.0f;
-        const float cardX = 16.0f, cardW = (float)(screenW - 32);
-        const float cardH = 40.0f + 20.0f + rows.size() * rowH + 54.0f + 24.0f; // banner + subtitle + rows + footer + padding
-        Rectangle card = { cardX, (float)y, cardW, cardH };
-
-        // Outer wood frame + parchment fill, corner rivets.
-        DrawRectangleRounded(card, 0.06f, 8, kWoodBorder);
-        Rectangle cardInner = { card.x + 5, card.y + 5, card.width - 10, card.height - 10 };
-        DrawRectangleRounded(cardInner, 0.06f, 8, kParchmentBg);
-        for (Vector2 corner : { Vector2{card.x + 14, card.y + 14}, Vector2{card.x + card.width - 14, card.y + 14},
-                                  Vector2{card.x + 14, card.y + card.height - 14}, Vector2{card.x + card.width - 14, card.y + card.height - 14} }) {
-            DrawCircleV(corner, 5.0f, kRivet);
-            DrawCircleV({ corner.x - 1, corner.y - 1 }, 1.6f, Fade(WHITE, 0.6f));
-        }
-
-        int cy = y + 14;
-        // Embossed title banner.
-        Rectangle banner = { card.x + 30, (float)cy, card.width - 60, 34 };
-        DrawRectangleRounded(banner, 0.35f, 6, kWoodBorder);
-        Rectangle bannerInner = { banner.x + 3, banner.y + 3, banner.width - 6, banner.height - 6 };
-        DrawRectangleRounded(bannerInner, 0.35f, 6, kBannerBg);
-        const char* title = "EQUIPMENT - LOADOUT";
-        int titleW = MeasureUIText(title, 15);
-        DrawUIText(title, (int)(banner.x + banner.width / 2.0f - titleW / 2.0f), (int)banner.y + 9, 15, kBannerText);
-        cy += 34 + 10;
-
-        DrawUIText("Town Forge - Character Equipment", (int)card.x + 20, cy, 11, Fade(kWoodBorder, 0.85f));
-        cy += 10;
-        DrawDottedLineH(card.x + 20, card.x + card.width - 20, (float)cy + 10, Fade(kWoodBorder, 0.6f));
-        cy += 16;
-
-        // One row per equipment slot: icon thumbnail, then "LABEL: item name" (or
-        // "- Empty -"), a dotted rule beneath each - DrawItemIcon is the exact same
-        // per-item icon lookup the backpack list below already uses.
-        for (const EquipRow& row : rows) {
-            const std::optional<Item>& item = *row.item;
-            Rectangle iconBox = { card.x + 20, (float)cy, 34, 34 };
-            DrawRectangleRounded(iconBox, 0.2f, 4, Fade(WHITE, 0.55f));
-            DrawRectangleRoundedLines(iconBox, 0.2f, 4, kWoodBorder);
-            if (item.has_value()) DrawItemIcon(*item, iconBox.x + 3, iconBox.y + 3, 28);
-            float textX = iconBox.x + 34 + 14;
-            std::string labelPart = std::string(row.label) + ": ";
-            DrawUIText(labelPart.c_str(), (int)textX, cy + 9, 13, kColorHeading);
-            int labelW = MeasureUIText(labelPart.c_str(), 13);
-            DrawUIText(item.has_value() ? item->name.c_str() : "- Empty -", (int)(textX + labelW), cy + 9, 13,
-                        item.has_value() ? kWoodBorderLight : Fade(DARKGRAY, 0.65f));
-            cy += (int)rowH;
-            DrawDottedLineH(card.x + 20, card.x + card.width - 20, (float)cy - 8, Fade(kWoodBorder, 0.35f));
-        }
-
-        // Derived stats footer - Weapon Power and Total Defense are real, computed
-        // stats (CombatPower/TotalDefense, same formulas used everywhere else in the
-        // game); the reference layout's Load/Weight/set-bonus line was left out on
-        // purpose rather than faked - this game has no encumbrance or item-set-bonus
-        // system to report a real number for, and showing invented values that don't
-        // affect anything would be misleading, not just decorative.
-        cy += 12;
-        Rectangle footer = { card.x + 20, (float)cy, card.width - 40, 40 };
-        DrawRectangleRoundedLines(footer, 0.15f, 6, kWoodBorder);
-        // "DERIVED STATS" label straddling the top border, same badge-on-the-line look
-        // as the reference image rather than a plain heading above the box.
-        const char* footerLabel = "DERIVED STATS";
-        int footerLabelW = MeasureUIText(footerLabel, 11);
-        Rectangle footerBadge = { footer.x + footer.width / 2.0f - footerLabelW / 2.0f - 8, footer.y - 8, (float)footerLabelW + 16, 16 };
-        DrawRectangleRec(footerBadge, kParchmentBg);
-        DrawUIText(footerLabel, (int)(footer.x + footer.width / 2.0f - footerLabelW / 2.0f), (int)footer.y - 6, 11, kWoodBorder);
-        std::string statsLine = TextFormat("Weapon Power: %d   Total Defense: %d", CombatPower(s), TotalDefense(s));
-        int statsW = MeasureUIText(statsLine.c_str(), 13);
-        DrawUIText(statsLine.c_str(), (int)(footer.x + footer.width / 2.0f - statsW / 2.0f), (int)footer.y + 14, 13, kColorHeading);
-
-        y += (int)card.height + 12;
-    }
-
-    // Backpack - was previously only visible on the Craft screen (where Sell also makes
-    // sense); shown here too as a quick "what am I carrying" reference, with just Equip
-    // (this page is about the character, not the shop). Shares s.backpackScroll with the
-    // Craft screen's list - one scroll-position field, not worth a second for this.
-    DrawUIText(TextFormat("Backpack (%d/%d)", (int)s.backpack.size(), BackpackCap(s)), 20, y, 13, kColorAccent);
-    y += 18;
-    int packTop = y;
-    int packHeight = screenH - packTop - 20;
-    Rectangle packArea = { 0, (float)packTop, (float)screenW, (float)packHeight };
-    s.backpackScroll -= ScrollDelta(packArea);
-    float maxPackScroll = std::max(0.0f, (float)s.backpack.size() * 28.0f - packHeight);
-    s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, maxPackScroll);
-    BeginScissorMode(0, packTop, screenW, packHeight);
-    if (s.backpack.empty()) {
-        DrawUIText("Nothing in your backpack.", 20, packTop + 4, 12, DARKGRAY);
-    }
-    for (size_t i = 0; i < s.backpack.size(); i++) {
-        const Item& item = s.backpack[i];
-        float rowY = packTop + (float)i * 28 - s.backpackScroll;
-        if (rowY < packTop - 28 || rowY > packTop + packHeight) continue;
-        DrawItemIcon(item, 20, rowY, 20);
-        DrawUIText(item.name.c_str(), 44, (int)rowY + 4, 12, kColorText);
-        if (Button({ (float)(screenW - 90), rowY, 70, 22 }, "Equip", true)) EquipFromBackpack(s, (int)i);
+    // ---- the backpack (UO bag gump) ----
+    Rectangle bag = { 10, st.y + st.height + 18, 520, (float)screenH - (st.y + st.height + 18) - 8 };
+    UODrawGump(bag, kUoLeather);
+    // stitched seam just inside the frame
+    for (float x = bag.x + 16; x < bag.x + bag.width - 16; x += 12)
+        DrawLineEx({ x, bag.y + 12 }, { x + 6, bag.y + 12 }, 1.5f, Fade(Color{ 230, 200, 150, 255 }, 0.45f));
+    UODrawTitle(bag, TextFormat("Backpack  %d/%d", (int)s.backpack.size(), BackpackCap(s)), 13);
+    struct BagEntry { int kind; int idx; int count; int icon; const char* name; };
+    std::vector<BagEntry> entries;
+    for (size_t i = 0; i < s.backpack.size(); i++) entries.push_back({ 0, (int)i, 1, -1, nullptr });
+    const struct { int* v; int icon; const char* name; } res[] = {
+        { &s.gold, kUoiGold, "Gold" }, { &s.wood, kUoiLogs, "Logs" }, { &s.ore, kUoiOre, "Ore" },
+        { &s.leather, kUoiLeather, "Leather" }, { &s.fish, kUoiFish, "Fish" }, { &s.furs, kUoiFurs, "Furs" },
+        { &s.ice, kUoiIce, "Ice" }, { &s.reagents, kUoiReagents, "Reagents" }, { &s.bandages, kUoiBandages, "Bandages" },
+    };
+    for (int k = 0; k < (int)(sizeof(res) / sizeof(res[0])); k++)
+        if (*res[k].v > 0) entries.push_back({ 1, k, *res[k].v, res[k].icon, res[k].name });
+    Rectangle inner = { bag.x + 14, bag.y + 20, bag.width - 28, bag.height - 30 };
+    const float cell = 64.0f;
+    int cols = std::max(1, (int)(inner.width / cell));
+    int rows = ((int)entries.size() + cols - 1) / cols;
+    float contentH = rows * cell + 8;
+    s.backpackScroll -= ScrollDelta(inner);
+    s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, std::max(0.0f, contentH - inner.height));
+    // which bag items fit the selected empty slot - they glow
+    int fitSlot = (g_pdSel >= 0 && g_pdSel < 8 && !(s.equipped.*(kPdSlots[g_pdSel].field)).has_value()) ? g_pdSel : -1;
+    // The bag scrolls by dragging, so a pick is a press+release that barely moved.
+    static Vector2 bagPress = { -1, -1 };
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) bagPress = CheckCollisionPointRec(mouse, inner) ? mouse : Vector2{ -1, -1 };
+    bool bagTap = IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && bagPress.x >= 0 && Dist(bagPress, mouse) < 10.0f &&
+                  !(g_uiShieldOn && CheckCollisionPointRec(mouse, g_uiShield));
+    BeginScissorMode((int)inner.x, (int)inner.y, (int)inner.width, (int)inner.height);
+    for (size_t e = 0; e < entries.size(); e++) {
+        const BagEntry& be = entries[e];
+        Vector2 p = UOScatter(inner, (int)e, cell, 17);
+        p.y -= s.backpackScroll;
+        if (p.y < inner.y - cell || p.y > inner.y + inner.height + cell) continue;
+        int selId = be.kind == 0 ? 100 + be.idx : 200 + be.idx;
+        bool sel = g_pdSel == selId;
+        bool fits = be.kind == 0 && fitSlot >= 0 && PaperdollItemFits(s.backpack[(size_t)be.idx], fitSlot);
+        if (sel || fits) DrawCircleV(p, 30, Fade(Color{ 255, 214, 110, 255 }, sel ? 0.35f : 0.18f + 0.1f * sinf((float)GetTime() * 4)));
+        DrawEllipse((int)p.x, (int)p.y + 18, 22, 6, Fade(BLACK, 0.25f)); // resting shadow
+        if (be.kind == 0) DrawItemIcon(s.backpack[(size_t)be.idx], p.x - 24, p.y - 24, 48);
+        else { UODrawIcon(be.icon, p.x, p.y - 2, 44); UODrawCount(p.x + 28, p.y + 12, be.count); }
+        Rectangle hit = { p.x - 30, p.y - 30, 60, 60 };
+        if (bagTap && CheckCollisionPointRec(mouse, hit) && CheckCollisionPointRec(mouse, inner)) { g_pdSel = sel ? -1 : selId; PlaySfx(SfxId::Click); }
     }
     EndScissorMode();
+    if (entries.empty())
+        DrawUIText("Your backpack is empty.", (int)inner.x + 12, (int)inner.y + 12, 13, Color{ 230, 210, 170, 255 });
+
+    // ---- the inspect popup for whatever is selected ----
+    if (g_pdSel >= 0) {
+        Rectangle pop = { 60, kDollView.y + kDollView.height - 130, 420, 116 };
+        std::string head, line;
+        const Item* item = nullptr;
+        std::optional<Item>* eqSlot = nullptr;
+        if (g_pdSel < 8) {
+            eqSlot = &(s.equipped.*(kPdSlots[g_pdSel].field));
+            if (eqSlot->has_value()) { item = &**eqSlot; head = item->name; line = ItemStatLine(*item); }
+            else { head = std::string(kPdSlots[g_pdSel].label) + " - empty"; line = "Tap a glowing item in your backpack to wear it."; }
+        } else if (g_pdSel < 200) {
+            int bi = g_pdSel - 100;
+            if (bi < (int)s.backpack.size()) { item = &s.backpack[(size_t)bi]; head = item->name; line = ItemStatLine(*item); }
+            else g_pdSel = -1;
+        } else {
+            int k = g_pdSel - 200;
+            if (k < (int)(sizeof(res) / sizeof(res[0]))) { head = res[k].name; line = TextFormat("%d in your pack.", *res[k].v); }
+        }
+        if (g_pdSel >= 0) {
+            UODrawGump(pop, kUoDarkWood);
+            if (item) DrawItemIcon(*item, pop.x + 14, pop.y + 16, 50);
+            else if (g_pdSel >= 200) UODrawIcon(res[g_pdSel - 200].icon, pop.x + 40, pop.y + 40, 44);
+            DrawUIText(head.c_str(), (int)pop.x + 76, (int)pop.y + 16, 16, kUoGoldText);
+            DrawUIText(line.c_str(), (int)pop.x + 76, (int)pop.y + 40, 12, Color{ 226, 212, 180, 255 });
+            if (UOCloseButton(pop)) g_pdSel = -1;
+            else if (g_pdSel < 8 && item) {
+                if (UOButton({ pop.x + 76, pop.y + 68, 150, 32 }, "Take off")) { UnequipToBackpack(s, *eqSlot); g_pdSel = -1; }
+            } else if (g_pdSel >= 100 && g_pdSel < 200 && item) {
+                if (UOButton({ pop.x + 76, pop.y + 68, 150, 32 }, "Equip")) {
+                    EquipFromBackpack(s, g_pdSel - 100);
+                    PlaySfx(SfxId::Click);
+                    g_pdSel = -1;
+                }
+            }
+        }
+    }
+    (void)screenW;
 }
 
 // Hoisted out of main() so UpdateDrawFrame() (a plain function pointer, called every
@@ -25449,7 +26249,8 @@ static void UpdateDrawFrame() {
         // main 3D pass needs. Must run while the default framebuffer is bound,
         // before BeginTextureMode(g_zoomTarget)/BeginDrawing below. 2D screens
         // are untouched (guarded by town3DView).
-        if (state.screen == Screen::Town && state.town3DView) Town3DShadowPass(state);
+        if (state.screen == Screen::Character) PaperdollRenderPass(state); // the 3D body for the paperdoll
+        else if (state.screen == Screen::Town && state.town3DView) Town3DShadowPass(state);
         else if (state.screen == Screen::Wilderness && state.wild3DView) {
             // Frustum cull for the shadow pass (Phase 1 deferred item): reuse the
             // damped main camera - calling Wild3DGetCam twice a frame just eases
