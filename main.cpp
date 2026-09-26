@@ -8779,7 +8779,7 @@ static float T3CSpeedTrack(int id, float x, float z, bool update) {
     }
     s.x = x; s.z = z; s.init = true;
     float target = fminf(inst, 400.0f);
-    s.v += (target - s.v) * fminf(1.0f, dt * 8.0f);
+    s.v += (target - s.v) * fminf(1.0f, dt * 12.0f); // 12/s: a stop registers in ~0.2 s, so legs settle promptly
     return s.v;
 }
 
@@ -9276,6 +9276,7 @@ struct AnimalPose {
     float hurtT = -1.0f;   // seconds since hit, <0 none
     float deathT = -1.0f;  // 0..1 through dying, <0 alive
     float time = 0.0f;     // animation clock (seconds)
+    int track = -1;        // stable per-animal id: gives it its own smooth stride clock (see DrawAnimal)
 };
 // Pose + draw one animal. yawRad is the facing direction (atan2(dz, dx)),
 // the same convention as the kit. Returns false if the model isn't available.
@@ -9296,6 +9297,19 @@ static bool DrawAnimal(int id, float x, float z, float yawRad, float scaleMul, C
     const ModelAnimation& an = A.anims[clip];
     int n = std::max(1, an.keyframeCount);
     float frame = loop ? fmodf(t * 60.0f * speed, (float)n) : std::clamp(t, 0.0f, 0.999f) * (float)(n - 1);
+    if (loop && p.track >= 0) {
+        // Own stride clock (2026-09-26): clock x speed jumps the legs whenever
+        // the speed changes; advancing a 0..1 cycle by dt x speed never does.
+        struct Stride { double lastT = -1.0; float cyc = 0.0f; };
+        static std::map<int, Stride> strides;
+        Stride& sd = strides[p.track * 16 + id];
+        double now = g_gameClock;
+        float dt = (sd.lastT < 0.0) ? 0.0f : std::clamp((float)(now - sd.lastT), 0.0f, 0.1f);
+        if (sd.lastT < 0.0) sd.cyc = T3CHash01((float)p.track, 3.3f);
+        sd.lastT = now;
+        sd.cyc = fmodf(sd.cyc + dt * speed * 60.0f / (float)n, 1.0f);
+        frame = sd.cyc * (float)n;
+    }
     UpdateModelAnimation(A.model, an, frame);
     float sc = A.baseScale * scaleMul;
     T3CDrawBlobShadow(A.model, x, z, yawRad - 1.5707963f, sc); // model faces +Z; the blob helper expects +X
@@ -9749,6 +9763,12 @@ struct HumanAnimState {
     float lastAtk = -1.0f, lastCast = -1.0f, lastHurt = -1.0f;
     double atkStart = -99.0, castStart = -99.0, hurtStart = -99.0;
     int atkVariant = 0, castVariant = 0, hurtVariant = 0;
+    // Locomotion (2026-09-26): each character owns its stride clock - advanced
+    // by dt x rate, as a 0..1 cycle - so speed changes never jump the legs to
+    // a different point in the stride (frame = clock x speed did exactly that).
+    double lastT = -1.0;
+    float cycle = 0.0f, idleCycle = 0.0f;
+    bool moving = false;
 };
 static std::map<int, HumanAnimState> g_humanAnim;
 
@@ -10047,14 +10067,25 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
     } else if (hurting && H.hit >= 0) {
         clip = (st.hurtVariant % 2 && H.hitHead >= 0) ? H.hitHead : H.hit;
         phase = hurtT;
-    } else if (p.move > 0.62f && H.jog >= 0) { clip = H.jog; speed = 0.75f + 0.35f * p.move; }
-    else if (p.move > 0.06f) { clip = H.walk; speed = 0.55f + 0.9f * p.move; }
+    } else if (st.moving && H.jog >= 0 && p.move > 0.62f) { clip = H.jog; speed = 0.9f + 0.3f * p.move; }
+    else if (st.moving) { clip = H.walk; speed = 0.8f + 0.6f * p.move; }
     else if (fightStance) clip = H.guard;
-    auto frameOf = [&](int c, float ph, float sp) {
+    // Stop/start with a little hysteresis so a character easing to a halt
+    // settles into idle instead of shuffling in slow motion.
+    if (st.moving && p.move < 0.10f) st.moving = false;
+    else if (!st.moving && p.move > 0.16f) st.moving = true;
+    float dtA = (st.lastT < 0.0) ? 0.0f : std::clamp((float)(now - st.lastT), 0.0f, 0.1f);
+    st.lastT = now;
+    auto clipLen = [&](int c) { return std::max(1, H.anims[c].keyframeCount) / 60.0f; }; // seconds
+    if (clip == H.walk || clip == H.jog) st.cycle = fmodf(st.cycle + dtA * speed / clipLen(clip), 1.0f);
+    else st.idleCycle = fmodf(st.idleCycle + dtA / clipLen(clip), 1.0f);
+    auto frameOf = [&](int c, float ph) {
         int n = std::max(1, H.anims[c].keyframeCount);
-        return ph >= 0.0f ? std::clamp(ph, 0.0f, 0.999f) * (float)(n - 1) : fmodf((float)now * 60.0f * sp, (float)n);
+        if (ph >= 0.0f) return std::clamp(ph, 0.0f, 0.999f) * (float)(n - 1);
+        float cyc = (c == H.walk || c == H.jog) ? st.cycle : st.idleCycle; // walk and jog share a stride phase
+        return cyc * (float)n;
     };
-    float frame = frameOf(clip, phase, speed);
+    float frame = frameOf(clip, phase);
     if (st.clip != clip) {
         st.prevClip = st.clip;
         st.switchT = now;
@@ -13985,15 +14016,17 @@ static void TownDressFromLegacy(std::vector<TownDressItem>& out, int town) {
 
 static std::vector<TownDressItem> g_townDress;
 static int g_townDressTown = -1;
+static void TownDressEnsure(int town) {
+    TownEnvBuild(town);
+    if (g_townDressTown == town) return;
+    g_townDress.clear();
+    TownDressFromLegacy(g_townDress, town);
+    TownDressBuild(g_townEnv, g_townDress, town);
+    g_townDressTown = town;
+}
 static void Town3DDrawProps(int town, float t) {
     TownPropModelsEnsure();
-    TownEnvBuild(town);
-    if (g_townDressTown != town) {
-        g_townDress.clear();
-        TownDressFromLegacy(g_townDress, town);
-        TownDressBuild(g_townEnv, g_townDress, town);
-        g_townDressTown = town;
-    }
+    TownDressEnsure(town);
     const Wild3DDressing& D = g_wild3dDress;
     for (const TownDressItem& it : g_townDress) {
         if (it.kind < kTPCount) {
@@ -14008,9 +14041,147 @@ static void Town3DDrawProps(int town, float t) {
         } else if (it.kind == kTDHorse) {
             AnimalPose ap;
             ap.time = t + it.x * 0.01f;
+            ap.track = 900 + (int)(it.x * 0.1f);
             DrawAnimal(kAnHorse, it.x, it.z, it.rot * DEG2RAD, 1.0f, WHITE, ap, false);
         }
     }
+}
+
+// ---- Solid scenery (2026-09-26) ----
+// Trees, rocks, mountains and props block the player in the 3D views. Each
+// piece becomes a circle sized from its model's real footprint (trunks for
+// lone trees, most of the canopy for dense clusters, nearly all of a rock or
+// mountain), bucketed in a coarse grid so a frame only tests its neighbours.
+// The player is pushed out of any circle it overlaps, so it slides around
+// obstacles instead of sticking. 3D-only: the 2D views don't draw most of
+// this scenery, so they don't collide with it either.
+struct SolidCircle { float x, z, r; };
+struct SolidGrid {
+    bool built = false;
+    int key = -1;          // town index, or 100 for the wilderness
+    float cell = 80.0f;
+    int n = 0;
+    std::vector<std::vector<SolidCircle>> cells;
+};
+static SolidGrid g_townSolids, g_wildSolids;
+
+static float SolidFootprint(const Model& m, float scale, float frac) {
+    if (m.meshCount <= 0) return 0.0f;
+    BoundingBox bb = GetModelBoundingBox(m);
+    float w = fminf(bb.max.x - bb.min.x, bb.max.z - bb.min.z);
+    return 0.5f * w * scale * frac;
+}
+static void SolidGridInit(SolidGrid& G, float worldSize, int key) {
+    G = SolidGrid{};
+    G.built = true;
+    G.key = key;
+    G.n = (int)ceilf(worldSize / G.cell) + 1;
+    G.cells.assign((size_t)G.n * G.n, {});
+}
+static void SolidAdd(SolidGrid& G, float x, float z, float r) {
+    if (r < 3.0f) return;
+    int x0 = std::max(0, (int)((x - r) / G.cell)), x1 = std::min(G.n - 1, (int)((x + r) / G.cell));
+    int z0 = std::max(0, (int)((z - r) / G.cell)), z1 = std::min(G.n - 1, (int)((z + r) / G.cell));
+    for (int gz = z0; gz <= z1; gz++)
+        for (int gx = x0; gx <= x1; gx++) G.cells[(size_t)gz * G.n + gx].push_back({ x, z, r });
+}
+static void SolidResolve(const SolidGrid& G, Vector2& p, float radius) {
+    if (!G.built) return;
+    int gx = (int)(p.x / G.cell), gz = (int)(p.y / G.cell);
+    if (gx < 0 || gz < 0 || gx >= G.n || gz >= G.n) return;
+    for (int pass = 0; pass < 2; pass++) // two passes settle a squeeze between two trunks
+        for (const SolidCircle& c : G.cells[(size_t)gz * G.n + gx])
+            ResolveCircleCollision(p, radius, { c.x, c.z }, c.r);
+}
+
+static void TownSolidsBuild(int town) {
+    SolidGrid& G = g_townSolids;
+    if (G.built && G.key == town) return;
+    Town3DLoadModels();
+    TownEnvBuild(town);
+    TownDressEnsure(town);
+    TownPropModelsEnsure();
+    Wild3DBuildDressing();
+    SolidGridInit(G, kTownWorldSize, town);
+    const Town3DModels& M = g_t3dModels;
+    const Wild3DDressing& D = g_wild3dDress;
+    if (town != 2)
+        for (const TownFoliage& f : kFoliagePositions) {
+            float fx = f.pos.x, fz = f.pos.y;
+            Town3DApplyTreeFix(fx, fz);
+            SolidAdd(G, fx, fz, f.variant == 5 ? 14.0f : 11.0f);
+        }
+    for (const TownFoliage& f : kT3DExtraTrees) SolidAdd(G, f.pos.x, f.pos.y, 11.0f);
+    for (const TownGreen& g : g_townEnv.trees) {
+        bool cluster = g.kind == kWPTreesASmall || g.kind == kWPTreesAMedium || g.kind == kWPTreesALarge ||
+                       g.kind == kWPTreesBSmall || g.kind == kWPTreesBMedium || g.kind == kWPTreesBLarge;
+        SolidAdd(G, g.x, g.z, D.ok[g.kind] ? SolidFootprint(D.models[g.kind], g.scale, cluster ? 0.55f : 0.3f) : 12.0f);
+    }
+    for (const TownGreen& b : g_townEnv.bushes) SolidAdd(G, b.x, b.z, SolidFootprint(M.bush, kT3DModScale * b.scale, 0.6f));
+    for (const TownDressItem& it : g_townDress) {
+        float r = 0.0f;
+        if (it.kind < kTPCount) {
+            if (it.kind == kTPSheep || it.kind == kTPChicken) continue; // animals wander in spirit; let them be walked past
+            float frac = (it.kind == kTPLamp) ? 0.4f : 0.8f;
+            r = SolidFootprint(g_townPropModels[it.kind], it.scale, frac);
+            if (it.kind == kTPLamp) r = 5.0f;
+        } else if (it.kind >= kTDKayKit && it.kind < kTDKayKit + kWPCount) {
+            int id = it.kind - kTDKayKit;
+            if (D.ok[id]) r = SolidFootprint(D.models[id], it.scale, 0.8f);
+        } else if (it.kind == kTDChest) r = SolidFootprint(M.chest, kT3DModScale * it.scale, 0.8f);
+        else if (it.kind == kTDWagon) r = SolidFootprint(M.wagon, kT3DModScale * it.scale, 0.9f);
+        else if (it.kind == kTDHorse) r = 20.0f;
+        SolidAdd(G, it.x, it.z, r);
+    }
+    // gatehouse towers either side of the road
+    SolidAdd(G, kWildernessGatePos.x - 52.0f, kWildernessGatePos.y, 24.0f);
+    SolidAdd(G, kWildernessGatePos.x + 52.0f, kWildernessGatePos.y, 24.0f);
+}
+
+static void WildSolidsBuild() {
+    SolidGrid& G = g_wildSolids;
+    if (G.built) return;
+    Wild3DLoadModels();
+    Wild3DBuildDressing();
+    Wild3DBuildScatter();
+    SolidGridInit(G, kWildernessWorldSize, 100);
+    const Town3DModels& T = g_t3dModels;
+    const Wild3DModels& W = g_wild3dModels;
+    const Wild3DDressing& D = g_wild3dDress;
+    for (const WildDressItem& it : D.items) {
+        if (!D.ok[it.id]) continue;
+        float frac = 0.0f;
+        if (it.id >= kWPTreesASmall && it.id <= kWPTreesBLarge) frac = 0.55f;       // dense clusters
+        else if (it.id == kWPTreeA || it.id == kWPTreeB) frac = 0.3f;              // lone trees: the trunk
+        else if (it.id == kWPCutA || it.id == kWPCutB) frac = 0.4f;                // stumps
+        else if (it.id >= kWPRockA && it.id <= kWPRockE) frac = 0.75f;
+        else if (it.id >= kWPHillsATrees && it.id <= kWPMountainCGreen) frac = 0.8f; // hills and mountains
+        else if (it.id >= kWPTent && it.id <= kWPBucket) frac = 0.75f;              // camp props
+        else continue;                                                              // lilies, reeds: in water anyway
+        SolidAdd(G, it.x, it.z, SolidFootprint(D.models[it.id], it.scale, frac));
+    }
+    for (const Wild3DScatterItem& it : g_wild3dScatter) {
+        if (it.kind == 0) {
+            const Model& t = (it.variant == 0) ? T.treeOak : (it.variant == 1) ? T.treePine : T.treeFat;
+            SolidAdd(G, it.x, it.z, SolidFootprint(t, kT3DModScale * 2.1f * it.scale, 0.3f));
+        } else if (it.kind == 1) {
+            const Model& r = (it.variant == 0) ? W.rockLargeA : (it.variant == 1) ? W.rockLargeC : W.rockSmallA;
+            SolidAdd(G, it.x, it.z, SolidFootprint(r, kT3DModScale * (it.variant == 2 ? 2.2f : 3.0f) * it.scale, 0.75f));
+        } else if (it.variant == 1) {
+            SolidAdd(G, it.x, it.z, SolidFootprint(W.rockSmallB, kT3DModScale * 2.2f * it.scale, 0.75f));
+        } else if (it.variant == 2) {
+            SolidAdd(G, it.x, it.z, SolidFootprint(T.treeDefault, kT3DModScale * 1.8f * it.scale, 0.3f));
+        }
+    }
+    for (const WildernessFoliage& f : kWildernessFoliage) {
+        float vs = 0.85f + 0.35f * Town3DHash01(f.pos.y, f.pos.x + 17.0f);
+        if (f.variant == 3) SolidAdd(G, f.pos.x, f.pos.y, SolidFootprint(T.treeDetailed, kT3DModScale * 2.2f * vs, 0.3f));
+        else if (f.variant == 4) SolidAdd(G, f.pos.x, f.pos.y, SolidFootprint(W.rockLargeB, kT3DModScale * 2.6f * vs, 0.75f));
+        else if (f.variant == 9) SolidAdd(G, f.pos.x, f.pos.y, SolidFootprint(W.rockSmallB, kT3DModScale * 2.0f * vs, 0.75f));
+    }
+    // Wood gather nodes: just the trunk, so you can still walk up and chop.
+    for (const WildernessGatherNode& n : kWildernessGatherNodes)
+        if (n.resource == "wood") SolidAdd(G, n.pos.x, n.pos.y, 10.0f);
 }
 
 // Dungeon entrance: stone arch + glowing portal disc in the entrance's own color.
@@ -14149,6 +14320,7 @@ static void WildAnimalsUpdateDraw(const GameState& s, const Town3DCam* cull, boo
         AnimalPose ap;
         ap.move = std::clamp(a.speed / 200.0f * (a.speed > 60.0f ? 1.0f : 0.5f), 0.0f, 1.0f);
         ap.time = s.worldTime + idx * 0.61f;
+        ap.track = 1000 + idx;
         DrawAnimal(a.id, a.pos.x, a.pos.y, yaw, 1.0f, WHITE, ap, shadowPass);
     }
 }
@@ -14328,7 +14500,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         T3CQuadLook look = T3CCreatureLook(sp.creatureIdx);
         T3CAnim ca = T3CMakeAnim(kT3CTrackCreatureWild + (int)i, sp.pos.x, sp.pos.y, !shadowPass);
         {   // Animated model where one fits the species (2026-09-26).
-            AnimalPose ap; ap.move = ca.move; ap.time = ca.t + ca.seed * 0.37f;
+            AnimalPose ap; ap.move = ca.move; ap.time = ca.t + ca.seed * 0.37f; ap.track = kT3CTrackCreatureWild + (int)i;
             if (sp.creatureIdx == 1) ap.recolor = Color{ 128, 112, 96, 150 }; // Timber Wolf: grey-brown
             if (DrawAnimal(AnimalForCreature(sp.creatureIdx), sp.pos.x, sp.pos.y,
                            Town3DHash01(sp.pos.x, sp.pos.y) * 6.2832f, 1.0f, WHITE, ap, shadowPass)) continue;
@@ -14373,7 +14545,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             ap.recolor = anRecolor;
             Color named = AnimalRecolorForMonsterName(kWildernessMonsterSpots[i].name);
             if (named.a > 0) ap.recolor = named;
-            ap.move = ma.move; ap.time = ma.t + ma.seed * 0.37f;
+            ap.move = ma.move; ap.time = ma.t + ma.seed * 0.37f; ap.track = kT3CTrackMonsterWild + (int)i;
             ap.attackT = mAtk; ap.hurtT = mHurtT;
             if (isDying) ap.deathT = 1.0f - dying->timer / std::max(0.01f, dying->duration);
             if (DrawAnimal(anId, mp.x, mp.y, face, anScale, CombatHitTint(mHurtT, WHITE, Color{ 220, 90, 90, 255 }), ap, shadowPass))
@@ -16544,6 +16716,10 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         for (auto& node : ActiveTownNodes(s.selectedTown))
             ResolveCircleCollision(s.townPlayerPos, kPlayerRadius, node.pos, kNodeRadius);
         ResolveCircleCollision(s.townPlayerPos, kPlayerRadius, kWildernessGatePos, kNodeRadius);
+        if (s.town3DView) { // trees, props, the gatehouse towers (3D scenery only)
+            TownSolidsBuild(s.selectedTown);
+            SolidResolve(g_townSolids, s.townPlayerPos, kPlayerRadius);
+        }
         // Townsfolk have no collision - they're ambient dressing, not obstacles; walking
         // through one is fine (see kTownNPCs' own comment).
         s.townPlayerPos = ClampToWorld(s.townPlayerPos, kPlayerEdgeMargin, kTownWorldSize);
@@ -17196,74 +17372,19 @@ static const GameState::DyingMonster* FindDyingDungeonSlot(const GameState& s, i
 // enemy). With no pack left, the flag swings to the nearest other live monster
 // inside fight range so the player keeps moving; otherwise it clears.
 static void PromoteWildExtraOrAutoFlag(GameState& s) {
-    if (!s.wildExtraAttackers.empty()) {
-        // Nearest remaining attacker becomes the new primary (2026-09-25).
-        size_t bestI = 0; float bestD = 1e9f;
-        for (size_t i = 0; i < s.wildExtraAttackers.size(); i++) {
-            float d = Dist(s.wildernessPlayerPos, s.wildExtraAttackers[i].pos);
-            if (d < bestD) { bestD = d; bestI = i; }
-        }
-        s.wildEngaged = s.wildExtraAttackers[bestI];
-        s.wildExtraAttackers.erase(s.wildExtraAttackers.begin() + bestI);
-        GameState::FlagTarget f; f.zone = 0; f.spotIdx = s.wildEngaged->spotIdx;
-        s.flagTarget = f;
-        s.logLine = "You turn on the " + kWildernessMonsterSpots[s.wildEngaged->spotIdx].name + "!";
-        return;
-    }
-    int best = -1; float bestD = kWildDisengageRange;
-    for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
-        if (s.wildSpotRespawn[i] > 0.0f) continue; // includes the just-killed spot
-        float d = Dist(s.wildernessPlayerPos, WildernessMonsterLivePos((int)i, s.worldTime));
-        if (d < bestD) { bestD = d; best = (int)i; }
-    }
-    if (best >= 0) {
-        GameState::FlagTarget f; f.zone = 0; f.spotIdx = best;
-        s.flagTarget = f;
-        s.logLine = "Target: " + kWildernessMonsterSpots[best].name + " - closing in!";
-    } else {
-        s.flagTarget.reset();
-    }
+    // Tap-to-target (2026-09-26): nothing is auto-selected after a kill. Any
+    // pack members keep fighting; the player taps (or TARGET-cycles) the next
+    // one to swing at it. The name is kept for its callers.
+    s.flagTarget.reset();
+    if (!s.wildExtraAttackers.empty())
+        s.logLine = "More foes close in - tap one to fight it!";
 }
 
 static void PromoteDungeonExtraOrAutoFlag(GameState& s, int dungeonIdx) {
-    const DungeonDef& dungeon = kDungeons[dungeonIdx];
-    if (!s.dungeonExtraAttackers.empty()) {
-        // Nearest remaining attacker becomes the new primary (2026-09-25).
-        size_t bestI = 0; float bestD = 1e9f;
-        for (size_t i = 0; i < s.dungeonExtraAttackers.size(); i++) {
-            float d = Dist(s.dungeonPlayerPos, s.dungeonExtraAttackers[i].pos);
-            if (d < bestD) { bestD = d; bestI = i; }
-        }
-        s.dungeonEngaged = s.dungeonExtraAttackers[bestI];
-        s.dungeonExtraAttackers.erase(s.dungeonExtraAttackers.begin() + bestI);
-        GameState::FlagTarget f; f.zone = 1;
-        f.monsterIdx = s.dungeonEngaged->isBoss ? kDungeonBossSlot : s.dungeonEngaged->monsterIdx;
-        f.isBoss = s.dungeonEngaged->isBoss;
-        s.flagTarget = f;
-        const DungeonMonster& m = s.dungeonEngaged->isBoss ? dungeon.boss
-            : DungeonSlotMonster(dungeon, s.dungeonEngaged->monsterIdx);
-        s.logLine = "You turn on the " + m.name + "!";
-        return;
-    }
-    int best = -1; bool bestBoss = false; float bestD = kWildDisengageRange;
-    for (int i = 0; i < kDungeonRegularSlots; i++) {
-        if (s.dungeonSpawnRespawn[dungeonIdx][i] > 0.0f) continue;
-        float d = Dist(s.dungeonPlayerPos, DungeonMonsterLivePos(dungeonIdx, i, s.worldTime));
-        if (d < bestD) { bestD = d; best = i; bestBoss = false; }
-    }
-    if (s.dungeonXP[dungeonIdx] >= dungeon.bossUnlockXp &&
-        s.dungeonSpawnRespawn[dungeonIdx][kDungeonBossSlot] <= 0.0f) {
-        float d = Dist(s.dungeonPlayerPos, DungeonMonsterLivePos(dungeonIdx, kDungeonBossSlot, s.worldTime));
-        if (d < bestD) { bestD = d; best = kDungeonBossSlot; bestBoss = true; }
-    }
-    if (best >= 0) {
-        GameState::FlagTarget f; f.zone = 1; f.monsterIdx = best; f.isBoss = bestBoss;
-        s.flagTarget = f;
-        const DungeonMonster& m = bestBoss ? dungeon.boss : DungeonSlotMonster(dungeon, best);
-        s.logLine = "Target: " + m.name + " - closing in!";
-    } else {
-        s.flagTarget.reset();
-    }
+    (void)dungeonIdx; // tap-to-target (2026-09-26): see PromoteWildExtraOrAutoFlag
+    s.flagTarget.reset();
+    if (!s.dungeonExtraAttackers.empty())
+        s.logLine = "More foes close in - tap one to fight it!";
 }
 
 // Swing-arc test for melee cleave (2026-09-25): an enemy counts as cleaved when
@@ -18438,8 +18559,9 @@ static void Wild2DClickFlag(GameState& s, Vector2 camera, int screenW, int scree
     bool fightingNormal = s.wildEngaged.has_value() && !duelLocked;
     GameState::FlagTarget f; float fd = 0.0f;
     if (!duelLocked && Wild2DFlagCandidate(s, camera, m, &f, &fd, assistPx)) {
-        if (fightingNormal && !f.isRival && f.bladeIdx < 0 && f.spotIdx != s.wildEngaged->spotIdx) {
-            // Mid-fight tap on another pack member: switch the primary to it.
+        if ((fightingNormal && !f.isRival && f.bladeIdx < 0 && f.spotIdx != s.wildEngaged->spotIdx) ||
+            (!s.wildEngaged.has_value() && !f.isRival && f.bladeIdx < 0 && FindWildExtra(s, f.spotIdx))) {
+            // Tap on a pack member: fight it (switching from the current target if any).
             TransferWildPrimary(s, f.spotIdx);
         } else if (fightingNormal && (f.isRival || f.bladeIdx >= 0)) {
             s.logLine = "You're already in a fight - finish it first!";
@@ -18515,7 +18637,7 @@ static void Dungeon2DClickFlag(GameState& s, Vector2 camera, int screenW, int sc
     float assistPx = std::max(32.0f, kClickAssistBasePx * ((float)screenH / 1080.0f));
     GameState::FlagTarget f;
     if (Dungeon2DFlagCandidate(s, camera, m, &f, assistPx)) {
-        if (s.dungeonEngaged.has_value()) {
+        if (s.dungeonEngaged.has_value() || FindDungeonExtra(s, f.monsterIdx, f.isBoss)) {
             // Mid-fight tap on another pack member: switch the primary to it.
             TransferDungeonPrimary(s, *s.selectedDungeon, f.monsterIdx, f.isBoss);
         } else {
@@ -18537,10 +18659,11 @@ static void Dungeon2DClickFlag(GameState& s, Vector2 camera, int screenW, int sc
 // transfers the primary engagement to the next target (the old primary keeps
 // fighting as a pack member); rival/blade duels stay locked 1v1.
 static void TransferWildPrimary(GameState& s, int newSpotIdx) {
-    if (!s.wildEngaged.has_value() || s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0) return;
-    if (s.wildEngaged->spotIdx == newSpotIdx) return;
+    if (s.wildEngaged.has_value() && (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0)) return;
+    if (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == newSpotIdx) return;
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
-    GameState::ActiveMonster oldPrimary = *s.wildEngaged;
+    bool hadPrimary = s.wildEngaged.has_value();
+    GameState::ActiveMonster oldPrimary = hadPrimary ? *s.wildEngaged : GameState::ActiveMonster{};
     GameState::ActiveMonster newPrimary;
     bool fromExtra = false;
     for (size_t i = 0; i < s.wildExtraAttackers.size(); i++) {
@@ -18563,7 +18686,7 @@ static void TransferWildPrimary(GameState& s, int newSpotIdx) {
         newPrimary.maxHp = std::max(1.0f, spot.level * 3.0f);
         newPrimary.hp = newPrimary.maxHp;
     }
-    s.wildExtraAttackers.push_back(oldPrimary); // the old target keeps fighting
+    if (hadPrimary) s.wildExtraAttackers.push_back(oldPrimary); // the old target keeps fighting
     s.wildEngaged = newPrimary;
     GameState::FlagTarget f; f.zone = 0; f.spotIdx = newSpotIdx;
     s.flagTarget = f;
@@ -18571,18 +18694,20 @@ static void TransferWildPrimary(GameState& s, int newSpotIdx) {
 }
 
 static void TransferDungeonPrimary(GameState& s, int dungeonIdx, int newMonsterIdx, bool newIsBoss) {
-    if (!s.dungeonEngaged.has_value()) return;
     const DungeonDef& dungeon = kDungeons[dungeonIdx];
-    const GameState::ActiveDungeonMonster& cur = *s.dungeonEngaged;
-    if (!cur.isBoss && !newIsBoss && cur.monsterIdx == newMonsterIdx) return;
-    if (cur.isBoss && newIsBoss) return;
-    // Safety net: the boss never demotes to a pack extra - boss fights stay 1v1 (2026-09-25).
-    if (cur.isBoss && !newIsBoss) {
-        s.logLine = "You're locked in - finish the boss first!";
-        return;
+    bool hadPrimary = s.dungeonEngaged.has_value(); // none: a tapped pack member becomes the target (2026-09-26)
+    if (hadPrimary) {
+        const GameState::ActiveDungeonMonster& cur = *s.dungeonEngaged;
+        if (!cur.isBoss && !newIsBoss && cur.monsterIdx == newMonsterIdx) return;
+        if (cur.isBoss && newIsBoss) return;
+        // Safety net: the boss never demotes to a pack extra - boss fights stay 1v1 (2026-09-25).
+        if (cur.isBoss && !newIsBoss) {
+            s.logLine = "You're locked in - finish the boss first!";
+            return;
+        }
     }
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
-    GameState::ActiveDungeonMonster oldPrimary = cur;
+    GameState::ActiveDungeonMonster oldPrimary = hadPrimary ? *s.dungeonEngaged : GameState::ActiveDungeonMonster{};
     GameState::ActiveDungeonMonster newPrimary;
     bool fromExtra = false;
     for (size_t i = 0; i < s.dungeonExtraAttackers.size(); i++) {
@@ -18605,7 +18730,7 @@ static void TransferDungeonPrimary(GameState& s, int dungeonIdx, int newMonsterI
         newPrimary.maxHp = std::max(1.0f, m.level * 3.0f);
         newPrimary.hp = newPrimary.maxHp;
     }
-    s.dungeonExtraAttackers.push_back(oldPrimary);
+    if (hadPrimary) s.dungeonExtraAttackers.push_back(oldPrimary);
     s.dungeonEngaged = newPrimary;
     GameState::FlagTarget f; f.zone = 1; f.monsterIdx = newIsBoss ? kDungeonBossSlot : newMonsterIdx;
     f.isBoss = newIsBoss;
@@ -18625,21 +18750,25 @@ static void CycleFlagTarget(GameState& s) {
         struct Cand { int spotIdx; float d; };
         std::vector<Cand> cs;
         Vector2 ppos = s.wildernessPlayerPos;
-        bool engagedNormal = s.wildEngaged.has_value();
+        // A live pack counts as a fight even with nothing selected (tap-to-target).
+        bool engagedNormal = s.wildEngaged.has_value() || !s.wildExtraAttackers.empty();
+        const float kCycleRange = 650.0f; // roughly what's on screen - never a monster across the map
         for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
             if (s.wildSpotRespawn[i] > 0.0f) continue;
-            bool isPrimary = engagedNormal && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0 &&
+            bool isPrimary = s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0 &&
                              s.wildEngaged->spotIdx == (int)i;
             const GameState::ActiveMonster* ex = FindWildExtra(s, (int)i);
             if (engagedNormal && !isPrimary && !ex) continue; // mid-fight: only the pack is cyclable
             Vector2 wp = isPrimary ? s.wildEngaged->pos : (ex ? ex->pos : WildernessMonsterLivePos((int)i, s.worldTime));
+            if (Dist(ppos, wp) > kCycleRange) continue;
             cs.push_back({ (int)i, Dist(ppos, wp) });
         }
         if (!engagedNormal) {
-            // Not fighting: rival and blades are flaggable as before.
-            cs.push_back({ -2, Dist(ppos, s.rivalPos) }); // -2 = rival sentinel
+            // Not fighting: rival and blades are flaggable too - when they're near.
+            if (Dist(ppos, s.rivalPos) <= kCycleRange) cs.push_back({ -2, Dist(ppos, s.rivalPos) }); // -2 = rival sentinel
             for (int bi = 0; bi < kBladeCount; bi++)
-                cs.push_back({ -3 - bi, Dist(ppos, s.blades[bi].pos) }); // -3-bi = blade sentinel
+                if (Dist(ppos, s.blades[bi].pos) <= kCycleRange)
+                    cs.push_back({ -3 - bi, Dist(ppos, s.blades[bi].pos) }); // -3-bi = blade sentinel
         }
         if (cs.empty()) { s.logLine = "No quarry in sight."; return; }
         std::sort(cs.begin(), cs.end(), [](const Cand& a, const Cand& b) { return a.d < b.d; });
@@ -18678,8 +18807,8 @@ static void CycleFlagTarget(GameState& s) {
     if (!s.selectedDungeon.has_value()) return;
     int di = *s.selectedDungeon;
     const DungeonDef& dungeon = kDungeons[di];
-    bool engaged = s.dungeonEngaged.has_value();
-    if (engaged && s.dungeonEngaged->isBoss) {
+    bool engaged = s.dungeonEngaged.has_value() || !s.dungeonExtraAttackers.empty(); // a live pack is a fight (tap-to-target)
+    if (s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss) {
         s.logLine = "You're locked in - finish the boss first!"; // boss duels stay 1v1 (2026-09-25)
         return;
     }
@@ -18688,14 +18817,14 @@ static void CycleFlagTarget(GameState& s) {
     Vector2 ppos = s.dungeonPlayerPos;
     for (int i = 0; i < kDungeonRegularSlots; i++) {
         if (s.dungeonSpawnRespawn[di][i] > 0.0f) continue;
-        bool isPrimary = engaged && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i;
+        bool isPrimary = s.dungeonEngaged.has_value() && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i;
         const GameState::ActiveDungeonMonster* ex = FindDungeonExtra(s, i, false);
         if (engaged && !isPrimary && !ex) continue;
         Vector2 wp = isPrimary ? s.dungeonEngaged->pos : (ex ? ex->pos : DungeonMonsterLivePos(di, i, s.worldTime));
         cs.push_back({ i, false, Dist(ppos, wp) });
     }
     if (s.dungeonXP[di] >= dungeon.bossUnlockXp && s.dungeonSpawnRespawn[di][kDungeonBossSlot] <= 0.0f) {
-        bool isPrimary = engaged && s.dungeonEngaged->isBoss;
+        bool isPrimary = s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss;
         const GameState::ActiveDungeonMonster* ex = FindDungeonExtra(s, kDungeonBossSlot, true);
         if (!engaged || isPrimary || ex) {
             Vector2 wp = isPrimary ? s.dungeonEngaged->pos
@@ -18808,7 +18937,8 @@ static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
                 Wild3DScreenAssist(s, c, m, assistPx, &f); // screen-space snap
     }
     if (found) {
-        if (fightingNormal && !f.isRival && f.bladeIdx < 0 && f.spotIdx != s.wildEngaged->spotIdx) {
+        if ((fightingNormal && !f.isRival && f.bladeIdx < 0 && f.spotIdx != s.wildEngaged->spotIdx) ||
+            (!s.wildEngaged.has_value() && !f.isRival && f.bladeIdx < 0 && FindWildExtra(s, f.spotIdx))) {
             TransferWildPrimary(s, f.spotIdx);
         } else if (fightingNormal && (f.isRival || f.bladeIdx >= 0)) {
             s.logLine = "You're already in a fight - finish it first!";
@@ -18909,7 +19039,7 @@ static void Dungeon3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
                  Dungeon3DConsiderFlag(s, c, m, 150.0f, di, &f) ||
                  Dungeon3DScreenAssist(s, c, m, assistPx, di, &f);
     if (found) {
-        if (s.dungeonEngaged.has_value()) {
+        if (s.dungeonEngaged.has_value() || FindDungeonExtra(s, f.monsterIdx, f.isBoss)) {
             TransferDungeonPrimary(s, di, f.monsterIdx, f.isBoss);
         } else {
             s.flagTarget = f;
@@ -20202,6 +20332,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             s.wildEngaged.reset();
             s.wildExtraAttackers.clear(); // the pack gives up too
             ClearFlagTarget(s); // the fight's over - drop the marker too
+            s.disengageGraceT = kDisengageGraceSeconds; // you got away: no instant re-engage on the way out
             return;
         }
 
@@ -20331,6 +20462,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             RivalFightEnded(s, am); // persists its position/resumes roaming from here - no win/loss, so no growth nudge beyond that
             s.wildEngaged.reset();
             ClearFlagTarget(s);
+            s.disengageGraceT = kDisengageGraceSeconds; // you got away: no instant re-engage on the way out
             return;
         }
 
@@ -20414,11 +20546,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // the cap crowd around and wait for an opening.
     auto updateWildExtraAttackers = [&]() {
         if (s.wildExtraAttackers.empty()) return;
-        if (!s.wildEngaged.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
-            s.wildExtraAttackers.clear(); // no fight (or death) - the pack melts back to ambient
+        if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
+            s.wildExtraAttackers.clear(); // death - the pack melts back to ambient
             return;
         }
-        if (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0) return; // duels stay 1v1
+        // No primary is fine (tap-to-target, 2026-09-26): the pack keeps fighting
+        // until the player picks one or runs out of range.
+        if (s.wildEngaged.has_value() && (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0)) return; // duels stay 1v1
         float dtF = GameDt();
         for (size_t i = 0; i < s.wildExtraAttackers.size(); ) {
             GameState::ActiveMonster& ex = s.wildExtraAttackers[i];
@@ -20760,8 +20894,10 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // Live check, not wasEngaged: a projectile/fiend kill inside
         // UpdateLiveSpellFX above can reset or promote the engagement mid-frame (2026-09-25).
         if (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == (int)i) continue;
+        if (FindWildExtra(s, (int)i)) continue; // pack member: it's already on you (tap it to fight it)
         Vector2 livePos = WildernessMonsterLivePos((int)i, s.worldTime);
-        if (!s.wildEngaged.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
+        if (!s.wildEngaged.has_value() && s.wildExtraAttackers.empty() && // with a pack on you, you choose (tap-to-target)
+            !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
             s.disengageGraceT <= 0.0f && // manual-disengage grace (2026-09-25): don't instantly re-engage
             Dist(s.wildernessPlayerPos, livePos) < (kPlayerRadius + kNodeRadius * 0.7f) *
                 (PlayerRoadWarded(s.wildernessPlayerPos) ? 0.5f : 1.0f)) // Phase 6: road patrols halve the engage radius
@@ -20788,6 +20924,11 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown2GatePos, kNodeRadius);
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown3GatePos, kNodeRadius); // Phase 3
     s.wildernessPlayerPos = ClampToWorld(s.wildernessPlayerPos, kPlayerEdgeMargin, kWildernessWorldSize);
+    // Trees, rocks, mountains and camp props (3D view; ghosts pass through).
+    if (s.wild3DView && !s.playerIsGhost) {
+        WildSolidsBuild();
+        SolidResolve(g_wildSolids, s.wildernessPlayerPos, kPlayerRadius);
+    }
     // Terrain (2026-09-26): water and rock ridges block; slide along banks.
     // Ghosts walk where they will - never trap a ghost on its way to a shrine.
     if (!s.playerIsGhost) {
@@ -21885,8 +22026,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // a pack member - extras only exist alongside a normal-monster primary.
     auto updateDungeonExtraAttackers = [&]() {
         if (s.dungeonExtraAttackers.empty()) return;
-        if (!s.dungeonEngaged.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
-            s.dungeonExtraAttackers.clear(); // no fight (or death) - the pack melts back to ambient
+        if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
+            s.dungeonExtraAttackers.clear(); // death - the pack melts back to ambient
             return;
         }
         float dtF = GameDt();
@@ -22064,8 +22205,10 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         // Live check, not wasDungeonEngaged: a projectile/fiend kill inside
         // UpdateLiveSpellFX above can reset or promote the engagement mid-frame (2026-09-25).
         if (s.dungeonEngaged.has_value() && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
+        if (FindDungeonExtra(s, i, false)) continue; // pack member: already on you (tap it to fight it)
         Vector2 livePos = DungeonMonsterLivePos(*s.selectedDungeon, i, s.worldTime);
-        if (!s.dungeonEngaged.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
+        if (!s.dungeonEngaged.has_value() && s.dungeonExtraAttackers.empty() && // pack on you: you choose
+            !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
             s.disengageGraceT <= 0.0f && // manual-disengage grace (2026-09-25)
             Dist(s.dungeonPlayerPos, livePos) < kPlayerRadius + kNodeRadius * 0.8f)
             tryEngageDungeonMonster(i, false);
@@ -22074,7 +22217,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     if (!(s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss) &&
         s.dungeonSpawnRespawn[*s.selectedDungeon][kDungeonBossSlot] <= 0.0f) {
         Vector2 bossLivePos = DungeonMonsterLivePos(*s.selectedDungeon, kDungeonBossSlot, s.worldTime);
-        if (bossUnlocked && !s.dungeonEngaged.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
+        if (bossUnlocked && !s.dungeonEngaged.has_value() && s.dungeonExtraAttackers.empty() &&
+            !FindDungeonExtra(s, kDungeonBossSlot, true) && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
             s.disengageGraceT <= 0.0f && // manual-disengage grace (2026-09-25)
             Dist(s.dungeonPlayerPos, bossLivePos) < kPlayerRadius + kNodeRadius)
             tryEngageDungeonMonster(kDungeonBossSlot, true);
