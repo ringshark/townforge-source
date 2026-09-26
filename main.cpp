@@ -1181,6 +1181,7 @@ struct GameState {
     std::optional<UpgradeInProgress> upgrading;   // only one upgrade at a time
     std::optional<std::string> gatheringResource; // "wood" | "ore"
     float gatherSecondsRemaining = 0.0f;
+    float gatherDuration = 8.0f; // (2026-09-27) length of the gather in progress - skill gain scales with it
 
     std::optional<std::string> selectedTile; // key of selected grid tile (any tile)
     // Which kTownNPCs index is currently greeted (open name+greeting popup), if any -
@@ -4260,14 +4261,15 @@ static std::string NextAutoGatherType(const GameState& s) {
 static const float kAutoGatherMinSkill = 30.0f; // JS AUTO_GATHER_MIN_SKILL
 
 // `seconds` defaults to the JS-matched Town rate (8s per action); the Wilderness's
-// walk-up-to-a-node gather nodes pass 5s instead, rewarding active play with a faster
-// rate than Town's passive/idle HUD buttons - see the call site in DrawWildernessScreen.
+// walk-up-to-a-node gather nodes pass 3s instead (2026-09-27, was 5s), rewarding active
+// play with a faster rate than Town's passive/idle HUD buttons - see DrawWildernessScreen.
 static void TryStartGather(GameState& s, const std::string& resourceKey, float seconds = 8.0f) {
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
     if (s.gatheringResource.has_value()) { s.logLine = "Already gathering."; return; }
     if (s.ambush.has_value() || s.innocentEncounter.has_value()) { s.logLine = "Deal with what's in front of you first."; return; }
     s.gatheringResource = resourceKey;
     s.gatherSecondsRemaining = seconds;
+    s.gatherDuration = seconds;
     s.logLine = (resourceKey == "richore") ? "Mining the rich vein..." : "Gathering " + resourceKey + "..."; // Phase 4
 }
 
@@ -4293,8 +4295,9 @@ static void UpdateGathering(GameState& s, float dt) {
         const std::string type = *s.gatheringResource;
         // Phase 4: rich ore veins yield 5-8 instead of the normal 3-5.
         int gained = (type == "richore") ? (5 + (std::rand() % 4)) : (3 + (std::rand() % 3)); // JS: 3 + Math.floor(Math.random()*3)
-        // each gather is a few seconds of work; auto-gather learns at under half the pace
-        const float gatherW = s.autoGather ? 1.0f : 2.5f;
+        // Skill per gather scales with how long it took (2026-09-27), so faster gathering
+        // brings more resources per hour but not faster skill; auto-gather learns slower.
+        const float gatherW = (s.autoGather ? 1.0f : 2.5f) * std::clamp(s.gatherDuration / 4.0f, 0.5f, 2.5f);
 
         std::string gainNote;
         if (type == "wood") {
@@ -26195,7 +26198,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // may pray for resurrection. Everything else stays hands-off for ghosts.
         bool shrineForGhost = s.playerIsGhost && nearestKind == WildNodeKind::Shrine;
         if ((s.playerIsGhost && !shrineForGhost) || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
-        if (nearestKind == WildNodeKind::Gather) TryStartGather(s, kWildernessGatherNodes[nearestIdx].resource, 5.0f);
+        if (nearestKind == WildNodeKind::Gather) TryStartGather(s, kWildernessGatherNodes[nearestIdx].resource, 3.0f); // (2026-09-27) was 5s
         else if (nearestKind == WildNodeKind::Creature) TryStartTameAttempt(s, kWildernessCreatureSpots[nearestIdx].creatureIdx);
         else if (nearestKind == WildNodeKind::Monster) tryEngageWildMonster(nearestIdx);
         else if (nearestKind == WildNodeKind::Rival) tryEngageRival();
