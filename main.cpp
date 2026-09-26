@@ -1120,6 +1120,7 @@ struct GameState {
     std::vector<Item> houseChest;   // persistent storage chest contents
     bool hearthBound = false;       // hearth recall bound to the owned plot
     bool minimapOpen = true;        // wilderness minimap widget (M toggles; transient, not saved)
+    bool worldMapOpen = false;      // full-screen wilderness map (tap the minimap; transient)
     bool wildHouseMigrated = false; // one-time town-house retirement migration ran
     bool interiorFromWild = false;  // ExitInterior returns to the wilderness house plot
     bool houseDesignerOpen = false; // grid designer overlay active on the wilderness screen
@@ -9970,14 +9971,158 @@ static Rectangle TargetButtonRect() {
 // the world uses (kTownGates, kWildernessDungeonEntrances, kHousePlots,
 // kWildernessMonsterSpots, kKingsRoadWaypoints) - no duplicated coordinates.
 static Rectangle MinimapRect() {
-    return { kViewport.x + kViewport.width - 164.0f, 140.0f, 154.0f, 154.0f };
+    // 2026-09-26: below the LOG / 2D buttons (it used to overlap them).
+    return { kViewport.x + kViewport.width - 146.0f, 158.0f, 136.0f, 136.0f };
 }
 static Rectangle MinimapToggleRect() {
-    return { kViewport.x + kViewport.width - 62.0f, 140.0f, 52.0f, 30.0f };
+    return { kViewport.x + kViewport.width - 62.0f, 158.0f, 52.0f, 30.0f };
+}
+static Rectangle WorldMapRect() { return { 20.0f, 150.0f, 500.0f, 500.0f }; }
+static Rectangle WorldMapPanelRect() { return { 12.0f, 118.0f, 516.0f, 600.0f }; }
+
+// Baked map terrain (2026-09-26): one 512px texture of the whole wilderness -
+// soft region colors, forests (from the 3D dressing), roads - shared by the
+// corner minimap and the full map, so both read like a drawn map instead of
+// a black box of dots.
+static bool g_worldMapJustOpened = false; // the opening tap must not also close it
+static Texture2D g_wildMapTex{};
+static bool g_wildMapTexBuilt = false;
+static void Wild3DBuildDressing();
+static void WildMapPaintDressing(Image* img, float pxPerUnit); // defined with the dressing
+static Color WildMapGroundColor(float x, float z) {
+    const Color whisper = { 118, 156, 92, 255 }, stone = { 150, 146, 132, 255 };
+    const Color frost = { 226, 234, 242, 255 }, coast = { 206, 190, 140, 255 };
+    auto base = [&](float px, float pz) -> Color {
+        RegionId r = RegionAt({ px, pz });
+        return r == RegionId::Frostwastes ? frost : r == RegionId::Stonepeaks ? stone
+             : r == RegionId::SaltCoast ? coast : whisper;
+    };
+    // Soften region edges: average a few nearby samples.
+    int R = 0, G = 0, B = 0;
+    const float o = 70.0f;
+    const float offs[5][2] = { { 0, 0 }, { o, 0 }, { -o, 0 }, { 0, o }, { 0, -o } };
+    for (auto& d : offs) { Color c = base(x + d[0], z + d[1]); R += c.r; G += c.g; B += c.b; }
+    return { (unsigned char)(R / 5), (unsigned char)(G / 5), (unsigned char)(B / 5), 255 };
+}
+static void WildMapPaintExtras(Image* img, float pxPerUnit); // water etc. (terrain pass)
+static void WildMapEnsureTexture() {
+    if (g_wildMapTexBuilt) return;
+    g_wildMapTexBuilt = true;
+    const int N = 512;
+    const float k = (float)N / kWildernessWorldSize; // px per world unit
+    Image img = GenImageColor(N, N, BLANK);
+    Color* px = (Color*)img.data;
+    for (int y = 0; y < N; y++)
+        for (int x = 0; x < N; x++)
+            px[y * N + x] = WildMapGroundColor((x + 0.5f) / k, (y + 0.5f) / k);
+    WildMapPaintExtras(&img, k);
+    // Forest and rock dressing as darker blobs, so woods read on the map.
+    Wild3DBuildDressing();
+    WildMapPaintDressing(&img, k);
+    // Roads (same segments the 3D ground bakes).
+    Color road = { 214, 190, 136, 255 };
+    auto seg = [&](Vector2 a, Vector2 b) {
+        ImageDrawLineEx(&img, { a.x * k, a.y * k }, { b.x * k, b.y * k }, 3, road);
+    };
+    for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances) seg(kWildernessReturnGatePos, e.pos);
+    for (size_t i = 0; i + 1 < kKingsRoadWaypoints.size(); i++) seg(kKingsRoadWaypoints[i], kKingsRoadWaypoints[i + 1]);
+    g_wildMapTex = LoadTextureFromImage(img);
+    UnloadImage(img);
+    SetTextureFilter(g_wildMapTex, TEXTURE_FILTER_BILINEAR);
 }
 
+// Map icons, shared by both views. size ~ icon radius in px.
+static void MapIconTown(Vector2 p, float r) {
+    DrawRectangleV({ p.x - r, p.y - r * 0.2f }, { r * 2.0f, r * 1.2f }, Color{ 238, 214, 150, 255 });
+    DrawTriangle({ p.x - r * 1.25f, p.y - r * 0.2f }, { p.x + r * 1.25f, p.y - r * 0.2f }, { p.x, p.y - r * 1.3f },
+                 Color{ 190, 80, 60, 255 });
+    DrawRectangleLinesEx({ p.x - r, p.y - r * 0.2f, r * 2.0f, r * 1.2f }, 1.0f, Fade(BLACK, 0.6f));
+}
+static void MapIconDungeon(Vector2 p, float r, Color c) {
+    DrawCircleV(p, r + 1.5f, Fade(BLACK, 0.7f));
+    DrawCircleV(p, r, c);
+    DrawCircleV(p, r * 0.4f, Fade(BLACK, 0.55f)); // the "cave mouth"
+}
+static void MapIconPlayer(Vector2 p, Vector2 facing, float r) {
+    float ang = atan2f(facing.y, facing.x);
+    Vector2 tip = { p.x + cosf(ang) * r * 1.5f, p.y + sinf(ang) * r * 1.5f };
+    Vector2 bl = { p.x + cosf(ang + 2.4f) * r, p.y + sinf(ang + 2.4f) * r };
+    Vector2 br = { p.x + cosf(ang - 2.4f) * r, p.y + sinf(ang - 2.4f) * r };
+    DrawCircleV(p, r * 1.1f, Fade(BLACK, 0.45f));
+    DrawTriangle(tip, br, bl, Color{ 255, 255, 255, 255 });
+    DrawTriangle(tip, bl, br, Color{ 255, 255, 255, 255 }); // either winding
+    DrawCircleV(p, r * 0.45f, Color{ 70, 150, 230, 255 });
+}
+
+// Full map: the whole wilderness with names and a readable legend.
+static void DrawWorldMap(GameState& s) {
+    WildMapEnsureTexture();
+    Rectangle panel = WorldMapPanelRect(), mm = WorldMapRect();
+    if (g_worldMapJustOpened) g_worldMapJustOpened = false;
+    else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { s.worldMapOpen = false; return; } // any tap closes
+    DrawRectangleRounded(panel, 0.04f, 8, Fade(kColorPageBg, 0.97f));
+    DrawRectangleRoundedLines(panel, 0.04f, 8, Fade(BLACK, 0.5f));
+    DrawUIText("Wilderness", (int)panel.x + 12, (int)panel.y + 8, 18, kColorHeading);
+    DrawUIText("tap anywhere to close", (int)(panel.x + panel.width - 150), (int)panel.y + 12, 12, DARKGRAY);
+    DrawTexturePro(g_wildMapTex, { 0, 0, (float)g_wildMapTex.width, (float)g_wildMapTex.height }, mm, { 0, 0 }, 0.0f, WHITE);
+    const float sc = mm.width / kWildernessWorldSize;
+    auto toMap = [&](Vector2 w) -> Vector2 { return { mm.x + w.x * sc, mm.y + w.y * sc }; };
+    auto label = [&](const char* t, Vector2 p, int size, Color c) {
+        int w = MeasureUIText(t, size);
+        DrawRectangle((int)(p.x - w / 2 - 3), (int)p.y, w + 6, size + 3, Fade(BLACK, 0.45f));
+        DrawUIText(t, (int)(p.x - w / 2), (int)p.y + 1, size, c);
+    };
+    // Region names, faint and large.
+    const struct { const char* n; Vector2 p; } regions[] = {
+        { "FROSTWASTES", { 1600, 330 } }, { "WHISPERWOOD", { 1200, 1300 } },
+        { "STONEPEAKS", { 250, 2000 } }, { "SALT COAST", { 2600, 2100 } } };
+    for (auto& r : regions) {
+        Vector2 p = toMap(r.p);
+        int w = MeasureUIText(r.n, 16);
+        DrawUIText(r.n, (int)(p.x - w / 2), (int)p.y, 16, Fade(BLACK, 0.35f));
+    }
+    { Vector2 p = toMap(kFieldsOfSorrow); DrawCircleLines((int)p.x, (int)p.y, kFieldsOfSorrowRadius * sc, Fade(BLACK, 0.5f)); }
+    for (const auto& shrine : kShrines) {
+        Vector2 p = toMap(shrine.pos);
+        DrawPoly(p, 4, 4.5f, 45.0f, Color{ 250, 236, 170, 255 });
+        DrawPolyLines(p, 4, 4.5f, 45.0f, Fade(BLACK, 0.6f));
+    }
+    for (size_t i = 0; i < kHousePlots.size(); i++) {
+        Vector2 p = toMap(kHousePlots[i].pos);
+        if ((int)i == s.housePlotIdx) DrawRectangleV({ p.x - 5, p.y - 5 }, { 10, 10 }, Color{ 90, 190, 110, 255 });
+        else DrawRectangleLinesEx({ p.x - 4, p.y - 4, 8, 8 }, 1.5f, Fade(Color{ 250, 236, 170, 255 }, 0.85f));
+    }
+    for (const auto& e : kWildernessDungeonEntrances) {
+        Vector2 p = toMap(e.pos);
+        MapIconDungeon(p, 6.0f, e.color);
+        label(kDungeons[e.dungeonIdx].name.c_str(), { p.x, p.y + 8 }, 10, WHITE);
+    }
+    for (const auto& g : kTownGates) {
+        Vector2 p = toMap(g.wildernessPos);
+        MapIconTown(p, 8.0f);
+        label(g.townName, { p.x, p.y + 10 }, 12, Color{ 255, 236, 180, 255 });
+    }
+    DrawCircleV(toMap(kRivalCampSpots[s.rivalCampIdx]), 5.0f, Color{ 200, 50, 45, 255 });
+    if (s.notoriety > 1.0f || s.refugeKnown) DrawCircleV(toMap(kOutlawRefuge), 5.0f, Color{ 90, 60, 110, 255 });
+    MapIconPlayer(toMap(s.wildernessPlayerPos), s.playerFacing, 7.0f);
+    DrawRectangleLinesEx(mm, 2.0f, Fade(BLACK, 0.55f));
+    // Legend, readable size.
+    int lx = (int)mm.x, ly = (int)(mm.y + mm.height + 12);
+    Color lc = kColorText;
+    MapIconTown({ (float)lx + 8, (float)ly + 8 }, 7.0f);          DrawUIText("Town", lx + 20, ly + 2, 13, lc);
+    MapIconDungeon({ (float)lx + 88, (float)ly + 8 }, 6.0f, Color{ 150, 90, 160, 255 }); DrawUIText("Dungeon", lx + 98, ly + 2, 13, lc);
+    DrawPoly({ (float)lx + 182, (float)ly + 8 }, 4, 5.0f, 45.0f, Color{ 250, 236, 170, 255 });
+    DrawPolyLines({ (float)lx + 182, (float)ly + 8 }, 4, 5.0f, 45.0f, Fade(BLACK, 0.6f)); DrawUIText("Shrine", lx + 192, ly + 2, 13, lc);
+    DrawRectangleV({ (float)lx + 256, (float)ly + 3 }, { 10, 10 }, Color{ 90, 190, 110, 255 }); DrawUIText("Home", lx + 272, ly + 2, 13, lc);
+    DrawRectangleLinesEx({ (float)lx + 322, (float)ly + 4, 8, 8 }, 1.5f, Color{ 190, 160, 80, 255 }); DrawUIText("Plot", lx + 336, ly + 2, 13, lc);
+    DrawCircleV({ (float)lx + 392, (float)ly + 8 }, 5.0f, Color{ 200, 50, 45, 255 }); DrawUIText("Murder Inc.", lx + 402, ly + 2, 13, lc);
+}
+
+// Corner minimap (2026-09-26 rework): a zoomed window that follows the player,
+// showing only what matters nearby - terrain, roads, towns, dungeons, home and
+// you. Tap it for the full map; MAP / M hides or shows it.
 static void DrawMinimap(GameState& s) {
-    // Closed: just the small MAP button (always visible, touch or desktop).
+    if (s.worldMapOpen) return; // the full map is drawn last, from the main loop
     if (!s.minimapOpen) {
         if (Button(MinimapToggleRect(), "MAP", true)) {
             s.minimapOpen = true;
@@ -9986,91 +10131,50 @@ static void DrawMinimap(GameState& s) {
         return;
     }
     Rectangle mm = MinimapRect();
-    // Tap/click the map to close it (display-only v1 - no click-to-travel).
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), mm)) {
-        s.minimapOpen = false;
+        s.worldMapOpen = true;
+        g_worldMapJustOpened = true;
         return;
     }
-    const float sc = mm.width / kWildernessWorldSize; // world units -> minimap px
-    auto toMap = [&](Vector2 w) -> Vector2 { return { mm.x + w.x * sc, mm.y + w.y * sc }; };
-    DrawRectangleRec(mm, Fade(BLACK, 0.62f));
-    // Region washes - match the Phase 0 2D ground washes, slightly stronger so
-    // the regions read at minimap scale.
-    DrawRectangle((int)mm.x, (int)mm.y, (int)mm.width, (int)(700.0f * sc), Color{ 228, 238, 248, 110 }); // Frostwastes snow (Phase 3)
-    DrawRectangle((int)(mm.x + 1950.0f * sc), (int)(mm.y + 700.0f * sc),
-                  (int)(mm.width - 1950.0f * sc), (int)(mm.height - 700.0f * sc), Color{ 216, 196, 150, 70 });
-    DrawRectangle((int)mm.x, (int)(mm.y + 700.0f * sc),
-                  (int)(500.0f * sc), (int)(mm.height - 700.0f * sc), Color{ 150, 150, 150, 55 });
-    // Region boundary lines.
-    Color boundCol = Color{ 120, 100, 75, 160 };
-    DrawLineEx({ mm.x, mm.y + 700.0f * sc }, { mm.x + mm.width, mm.y + 700.0f * sc }, 1.0f, boundCol);
-    DrawLineEx({ mm.x + 1950.0f * sc, mm.y + 700.0f * sc }, { mm.x + 1950.0f * sc, mm.y + mm.height }, 1.0f, boundCol);
-    DrawLineEx({ mm.x + 500.0f * sc, mm.y + 700.0f * sc }, { mm.x + 500.0f * sc, mm.y + mm.height }, 1.0f, boundCol);
-    // King's Road.
-    for (size_t i = 0; i + 1 < kKingsRoadWaypoints.size(); i++)
-        DrawLineEx(toMap(kKingsRoadWaypoints[i]), toMap(kKingsRoadWaypoints[i + 1]), 2.0f, Color{ 208, 182, 126, 255 });
-    // Monster spots (faint red dots).
-    for (const auto& msp : kWildernessMonsterSpots)
-        DrawCircleV(toMap(msp.pos), 2.5f, Color{ 200, 60, 60, 140 });
-    // Dungeon entrances (their themed colors).
+    WildMapEnsureTexture();
+    const float span = 1300.0f; // world units across the window
+    const float sc = mm.width / span;
+    Vector2 c = s.wildernessPlayerPos;
+    float x0 = std::clamp(c.x - span * 0.5f, 0.0f, kWildernessWorldSize - span);
+    float z0 = std::clamp(c.y - span * 0.5f, 0.0f, kWildernessWorldSize - span);
+    float tk = (float)g_wildMapTex.width / kWildernessWorldSize;
+    DrawRectangleRounded({ mm.x - 3, mm.y - 3, mm.width + 6, mm.height + 6 }, 0.12f, 6, Fade(BLACK, 0.55f));
+    DrawTexturePro(g_wildMapTex, { x0 * tk, z0 * tk, span * tk, span * tk }, mm, { 0, 0 }, 0.0f, WHITE);
+    auto toMap = [&](Vector2 w) -> Vector2 { return { mm.x + (w.x - x0) * sc, mm.y + (w.y - z0) * sc }; };
+    auto inside = [&](Vector2 p, float pad) {
+        return p.x >= mm.x + pad && p.x <= mm.x + mm.width - pad && p.y >= mm.y + pad && p.y <= mm.y + mm.height - pad;
+    };
+    BeginScissorMode((int)mm.x, (int)mm.y, (int)mm.width, (int)mm.height);
+    if (s.housePlotIdx >= 0 && s.housePlotIdx < (int)kHousePlots.size()) {
+        Vector2 p = toMap(kHousePlots[s.housePlotIdx].pos);
+        DrawRectangleV({ p.x - 4, p.y - 4 }, { 8, 8 }, Color{ 90, 190, 110, 255 });
+    }
     for (const auto& e : kWildernessDungeonEntrances) {
         Vector2 p = toMap(e.pos);
-        DrawCircleV(p, 4.0f, e.color);
-        DrawCircleLines((int)p.x, (int)p.y, 4.0f, Fade(BLACK, 0.6f));
+        if (inside(p, -6)) MapIconDungeon(p, 4.5f, e.color);
     }
-    // Phase 6 - connective tissue landmarks.
-    for (const auto& shrine : kShrines) // virtue shrines: pale gold dots
-        DrawCircleV(toMap(shrine.pos), 3.0f, Color{ 240, 230, 180, 220 });
-    { // the Fields of Sorrow: gray ring
-        Vector2 p = toMap(kFieldsOfSorrow);
-        DrawCircleLines((int)p.x, (int)p.y, kFieldsOfSorrowRadius * sc, Color{ 140, 140, 150, 180 });
-    }
-    { // Murder Inc.'s camp: red dot
-        DrawCircleV(toMap(kRivalCampSpots[s.rivalCampIdx]), 3.5f, Color{ 200, 60, 50, 230 });
-    }
-    if (s.notoriety > 1.0f || s.refugeKnown) // the outlaw refuge: dark dot, reds only
-        DrawCircleV(toMap(kOutlawRefuge), 3.5f, Color{ 80, 60, 90, 230 });
-    // Town gates (gold squares + tiny labels).
     for (const auto& g : kTownGates) {
         Vector2 p = toMap(g.wildernessPos);
-        DrawRectangle((int)(p.x - 3), (int)(p.y - 3), 6, 6, Color{ 232, 200, 120, 255 });
-        DrawUIText(g.townName, (int)(p.x - 14), (int)(p.y + 5), 9, Color{ 232, 200, 120, 255 });
+        if (inside(p, -8)) MapIconTown(p, 6.0f);
     }
-    // Housing plots: owned = green square, for sale = yellow outline.
-    for (size_t i = 0; i < kHousePlots.size(); i++) {
-        Vector2 p = toMap(kHousePlots[i].pos);
-        if ((int)i == s.housePlotIdx)
-            DrawRectangle((int)(p.x - 3), (int)(p.y - 3), 6, 6, Color{ 110, 200, 120, 255 });
-        else
-            DrawRectangleLinesEx({ p.x - 3.0f, p.y - 3.0f, 6.0f, 6.0f }, 1.0f, Color{ 230, 210, 130, 220 });
+    // The monster you're fighting, if any: one red dot, not every spawn.
+    if (s.wildEngaged.has_value()) {
+        int si = s.wildEngaged->spotIdx;
+        if (si >= 0 && si < (int)kWildernessMonsterSpots.size())
+            DrawCircleV(toMap(s.wildEngaged->pos), 3.5f, Color{ 230, 60, 50, 255 });
     }
-    // Player arrow: gold triangle rotated to the facing direction.
-    {
-        Vector2 p = toMap(s.wildernessPlayerPos);
-        float ang = atan2f(s.playerFacing.y, s.playerFacing.x);
-        Vector2 tip = { p.x + cosf(ang) * 7.0f, p.y + sinf(ang) * 7.0f };
-        Vector2 bl = { p.x + cosf(ang + 2.5f) * 5.0f, p.y + sinf(ang + 2.5f) * 5.0f };
-        Vector2 br = { p.x + cosf(ang - 2.5f) * 5.0f, p.y + sinf(ang - 2.5f) * 5.0f };
-        DrawTriangle(tip, bl, br, Color{ 255, 240, 200, 255 });
-        DrawCircleV(p, 2.0f, Color{ 255, 240, 200, 255 });
-    }
-    DrawRectangleLinesEx(mm, 1.5f, Fade(Color{ 232, 200, 120, 255 }, 0.7f));
-    // Tiny legend under the map.
-    int lx = (int)mm.x + 2, ly = (int)(mm.y + mm.height + 5);
-    Color legCol = Color{ 210, 190, 150, 255 };
-    DrawRectangle(lx, ly, 7, 7, Color{ 232, 200, 120, 255 });
-    DrawUIText("Town", lx + 10, ly - 1, 9, legCol);
-    DrawCircle(lx + 68, ly + 3, 4, Color{ 150, 90, 160, 255 });
-    DrawUIText("Dungeon", lx + 76, ly - 1, 9, legCol);
-    DrawRectangle(lx, ly + 13, 7, 7, Color{ 110, 200, 120, 255 });
-    DrawUIText("Home", lx + 10, ly + 12, 9, legCol);
-    DrawRectangleLinesEx({ (float)lx + 65, (float)ly + 13, 7.0f, 7.0f }, 1.0f, Color{ 230, 210, 130, 255 });
-    DrawUIText("Plot", lx + 76, ly + 12, 9, legCol);
-    DrawCircle(lx + 3, ly + 29, 3, Color{ 200, 60, 60, 200 });
-    DrawUIText("Monster", lx + 10, ly + 25, 9, legCol);
-    DrawLineEx({ (float)lx + 65, (float)ly + 28 }, { (float)lx + 72, (float)ly + 28 }, 2.0f, Color{ 208, 182, 126, 255 });
-    DrawUIText("Road", lx + 76, ly + 25, 9, legCol);
-    DrawUIText("[M] toggles map", lx, ly + 38, 9, Fade(legCol, 0.75f));
+    MapIconPlayer(toMap(s.wildernessPlayerPos), s.playerFacing, 5.0f);
+    EndScissorMode();
+    DrawRectangleLinesEx(mm, 1.5f, Fade(Color{ 250, 236, 170, 255 }, 0.85f));
+    const char* rn = RegionName(RegionAt(s.wildernessPlayerPos));
+    int w = MeasureUIText(rn, 11);
+    DrawRectangle((int)(mm.x + mm.width / 2 - w / 2 - 4), (int)(mm.y + mm.height + 3), w + 8, 15, Fade(BLACK, 0.55f));
+    DrawUIText(rn, (int)(mm.x + mm.width / 2 - w / 2), (int)(mm.y + mm.height + 4), 11, Color{ 250, 236, 170, 255 });
 }
 
 // 3D exploration header (2026-09-26): the 3D town, wilderness and interior
@@ -11651,6 +11755,21 @@ static void Wild3DBuildDressing() {
     }
 }
 
+// Minimap bake helpers: forests/rocks as darker blobs, and (terrain pass) water.
+static void WildMapPaintDressing(Image* img, float pxPerUnit) {
+    for (const WildDressItem& it : g_wild3dDress.items) {
+        if (it.x < 0 || it.z < 0 || it.x > kWildernessWorldSize || it.z > kWildernessWorldSize) continue;
+        bool trees = it.id <= kWPTreeB;
+        bool rock = it.id >= kWPRockA && it.id <= kWPRockE;
+        if (!trees && !rock) continue;
+        float r = trees ? (it.id <= kWPTreesBLarge ? 26.0f : 14.0f) * it.scale / kWPScaleTrees : 10.0f;
+        Color c = trees ? Color{ 62, 104, 58, 255 } : Color{ 128, 124, 116, 255 };
+        if (it.z < 700.0f && trees) c = Color{ 150, 172, 160, 255 }; // frosted woods
+        ImageDrawCircleV(img, { it.x * pxPerUnit, it.z * pxPerUnit }, (int)fmaxf(1.0f, r * pxPerUnit), c);
+    }
+}
+static void WildMapPaintExtras(Image* img, float pxPerUnit) { (void)img; (void)pxPerUnit; }
+
 static void Wild3DDrawDressing(const Town3DCam* cull) {
     Wild3DBuildDressing();
     const Wild3DDressing& D = g_wild3dDress;
@@ -12165,7 +12284,8 @@ static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
     if (CheckCollisionPointRec(m, { kViewport.x + kViewport.width - 150.0f,
                                     kViewport.y + kViewport.height - 90.0f, 130.0f, 60.0f })) return true; // tap-to-interact
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return true; // TARGET button
-    if (s.minimapOpen && CheckCollisionPointRec(m, MinimapRect())) return true; // minimap (tap closes it)
+    if (s.worldMapOpen) return true; // full map: any tap closes it
+    if (s.minimapOpen && CheckCollisionPointRec(m, MinimapRect())) return true; // minimap (tap opens the full map)
     if (!s.minimapOpen && CheckCollisionPointRec(m, MinimapToggleRect())) return true; // MAP button
     if (CheckCollisionPointRec(m, kJoystickZone)) return true;
     if (CheckCollisionPointRec(m, JournalWildButtonRect())) return true; // LOG button
@@ -15848,7 +15968,8 @@ static void Wild2DClickFlag(GameState& s, Vector2 camera, int screenW, int scree
     if (CheckCollisionPointRec(m, kJoystickZone)) return;
     if (m.x > screenW - 170 && m.y > screenH - 170) return; // interact button
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return; // TARGET button (shared HUD handles it)
-    if (s.minimapOpen && CheckCollisionPointRec(m, MinimapRect())) return; // minimap (tap closes it)
+    if (s.worldMapOpen) return; // full map: any tap closes it
+    if (s.minimapOpen && CheckCollisionPointRec(m, MinimapRect())) return; // minimap (tap opens the full map)
     if (s.recallPickerOpen && CheckCollisionPointRec(m, RecallPickerRect())) return; // recall modal
     if (!s.minimapOpen && CheckCollisionPointRec(m, MinimapToggleRect())) return; // MAP button
     if (s.wildEngaged.has_value()) {
@@ -21307,6 +21428,7 @@ static void UpdateDrawFrame() {
         if (!encounterPending && state.screen == Screen::Wilderness) {
             if (IsKeyPressed(KEY_V)) state.wild3DView = !state.wild3DView; // 3D wilderness view toggle
             if (IsKeyPressed(KEY_M)) { // minimap toggle
+                state.worldMapOpen = false;
                 state.minimapOpen = !state.minimapOpen;
                 if (state.minimapOpen) state.journalOpen = false; // 2026-09-25 art-pass fix: avoid the panel overlap
             }
@@ -21382,10 +21504,14 @@ static void UpdateDrawFrame() {
         if (!explore3D) state.exploreMenuOpen = false;
         // Shield the MENU button (and the open dropdown) from the screen's own
         // buttons, which are drawn before it.
+        if (state.screen != Screen::Wilderness) state.worldMapOpen = false;
         g_uiShieldOn = explore3D;
         g_uiShield = state.exploreMenuOpen ? CompactMenuPanelRect(false) : kCompactMenuBtn;
-        if (state.exploreMenuOpen) g_uiShield.y = kCompactMenuBtn.y; // cover the toggle too
-        if (state.exploreMenuOpen) g_uiShield.height += CompactMenuPanelRect(false).y - kCompactMenuBtn.y;
+        if (state.worldMapOpen) { g_uiShieldOn = true; g_uiShield = { 0, 0, (float)screenW, (float)screenH }; }
+        if (state.exploreMenuOpen && !state.worldMapOpen) {
+            g_uiShield.y = kCompactMenuBtn.y; // cover the toggle too
+            g_uiShield.height += CompactMenuPanelRect(false).y - kCompactMenuBtn.y;
+        }
         if (!explore3D) {
         DrawUIText("TOWN FORGE", 20, 16, 22, kColorHeading);
         DrawUIText("Your power comes from what you build", 20, 40, 13, DARKGRAY);
@@ -21496,7 +21622,11 @@ static void UpdateDrawFrame() {
         }
         // 3D exploration MENU (2026-09-26), drawn over the world like the
         // dungeon's. Skipped on the frame a screen switch happened.
-        if (explore3D && ExploreHeaderCollapsed(state)) DrawCompactMenu(state, state.exploreMenuOpen, false);
+        if (state.screen == Screen::Wilderness && state.worldMapOpen) {
+            DrawWorldMap(state); // full map (tap the minimap): above everything, any tap closes
+        } else if (explore3D && ExploreHeaderCollapsed(state)) {
+            DrawCompactMenu(state, state.exploreMenuOpen, false);
+        }
         g_uiShieldOn = false;
 
         // Newbie guide (2026-09-25): on a fresh save's first visit to town or
