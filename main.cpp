@@ -11978,6 +11978,7 @@ static float T3DLocalTimeOfDay() {
     return (lt->tm_hour + lt->tm_min / 60.0f + lt->tm_sec / 3600.0f) / 24.0f;
 #endif
 }
+static bool g_t3dLightDirty = false; // an interior pushed its own lamplight: re-push next update
 static void T3DUpdateDayNight(float worldTime, bool indoors) {
     (void)worldTime;
     float tod = indoors ? 0.5f : T3DLocalTimeOfDay();
@@ -11986,6 +11987,7 @@ static void T3DUpdateDayNight(float worldTime, bool indoors) {
     g_t3dSkyZenith = g_t3dLightNow.zenith;
     g_t3dNight = std::clamp((0.62f - g_t3dLightNow.sunI) / 0.34f, 0.0f, 1.0f);
     static float lastPushed = -1.0f;
+    if (g_t3dLightDirty) { lastPushed = -1.0f; g_t3dLightDirty = false; }
     float sig = g_t3dLightNow.sun.x + g_t3dLightNow.amb[0] * 3.0f + g_t3dLightNow.horizon.r / 255.0f * 7.0f;
     if (fabsf(sig - lastPushed) < 1e-4f) return; // unchanged: skip the uniform uploads
     lastPushed = sig;
@@ -17603,9 +17605,6 @@ static void DrawBuildingDetailPanel(GameState& s, int screenW) {
 // link (Craft/Bank/Pets/Character/House/Provisioner) keeps working.
 // =====================================================================
 
-static const float kInteriorRoomW = 560.0f;    // room size, 2D world units
-static const float kInteriorRoomH = 760.0f;
-static const float kInteriorWallMargin = 34.0f; // player clamp from the walls
 // 2026-09-25 bugfix, re-derived (the 2026-09-24 fix of 300-900 quietly
 // regressed back to the pre-fix 150-520 at some point across drops, and
 // re-testing found 300-900 itself no longer clears the problem either -
@@ -17620,8 +17619,8 @@ static const float kInteriorWallMargin = 34.0f; // player clamp from the walls
 // first distance that reliably frames the whole room; kInt3DDistMin is set
 // there so Town3DGetCamFor's entry clamp forces any incoming distance up to
 // a safe minimum regardless of what screen the camera is coming from.
-static const float kInt3DDistMin = 1200.0f;       // 3D zoom limits for rooms
-static const float kInt3DDistMax = 2000.0f;
+static const float kInt3DDistMin = 300.0f;        // 3D zoom limits for rooms (2026-09-26: close, cutaway view)
+static const float kInt3DDistMax = 900.0f;
 static const int kInteriorCamId = 3;            // Town3DGetCamFor id (0=town 1=wild 2=dungeon)
 
 struct InteriorPropDef {
@@ -17638,135 +17637,461 @@ struct InteriorPropDef {
     float sw, sh;       // 2D shape size
 };
 
-// --- Per-building prop tables. Room is 560x760; door at (280,700), player
-// spawns at (280,620). Blockers are furniture AABBs in room coords. ---
+// ---- Room & house surfaces (2026-09-26) -------------------------------------------
+// Procedural 256px tiling textures for floors, walls and roofs - shared by the
+// shop interiors, the homestead interior and the homestead's outside. Made on
+// first use; each is a small pixel program (planks with grain and seams,
+// flagstones from a jittered cell pattern, timber framing, stone courses...).
+enum IntSurface {
+    kIsOak = 0, kIsDarkPlank, kIsFlagstone, kIsTile, kIsStraw, kIsMarble, kIsCarpet,      // floors
+    kIsTimber, kIsStoneWall, kIsLogWall, kIsPlankWall, kIsSandstone, kIsWhitewash,          // walls
+    kIsThatch, kIsSlate, kIsRedTile, kIsShingle,                                             // roofs
+    kIsCount
+};
+static Texture2D g_isTex[kIsCount];
+static bool g_isReady[kIsCount] = {};
+static unsigned SurfHash(int x, int y, int k) {
+    unsigned h = (unsigned)x * 374761393u + (unsigned)y * 668265263u + (unsigned)k * 2246822519u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return h ^ (h >> 16);
+}
+static float SurfRand(int x, int y, int k) { return (SurfHash(x, y, k) & 0xFFFF) / 65535.0f; }
+static Color SurfMul(Color c, float f) {
+    return { (unsigned char)std::clamp(c.r * f, 0.0f, 255.0f), (unsigned char)std::clamp(c.g * f, 0.0f, 255.0f),
+             (unsigned char)std::clamp(c.b * f, 0.0f, 255.0f), 255 };
+}
+static Color SurfPixel(int k, int x, int y) {
+    const int N = 256;
+    float n = SurfRand(x, y, k) - 0.5f; // fine grain
+    auto planks = [&](Color base, int ph, float spread) -> Color { // horizontal planks, staggered joints
+        int row = y / ph;
+        float tone = 0.86f + 0.24f * SurfRand(row, 7, k);
+        float grain = sinf(x * 0.07f + row * 3.1f + sinf(y * 0.45f + row) * 1.8f) * 0.07f;
+        float f = tone + grain + n * spread;
+        int yy = y % ph;
+        if (yy == 0) f *= 0.45f; else if (yy == 1) f *= 0.8f;
+        int joint = (int)(SurfRand(row, 3, k) * N);
+        if (abs(((x - joint) % 128 + 128) % 128) < 1) f *= 0.55f;
+        return SurfMul(base, f);
+    };
+    switch (k) {
+        case kIsOak: return planks({ 150, 106, 64, 255 }, 32, 0.10f);
+        case kIsDarkPlank: return planks({ 96, 64, 42, 255 }, 32, 0.10f);
+        case kIsPlankWall: { // vertical planks
+            int col = x / 32; float tone = 0.85f + 0.25f * SurfRand(col, 9, k);
+            float f = tone + sinf(y * 0.06f + col * 2.3f + sinf(x * 0.5f) * 1.4f) * 0.06f + n * 0.1f;
+            if (x % 32 == 0) f *= 0.45f;
+            return SurfMul({ 128, 92, 58, 255 }, f);
+        }
+        case kIsFlagstone: case kIsSandstone: case kIsStoneWall: case kIsMarble: {
+            bool courses = (k == kIsStoneWall || k == kIsSandstone || k == kIsMarble);
+            float mortar = 1.0f, tone;
+            if (courses) { // brick-like courses of blocks
+                int ch = (k == kIsMarble) ? 128 : (k == kIsSandstone ? 42 : 32);
+                int cw = (k == kIsMarble) ? 128 : (k == kIsSandstone ? 64 : 48);
+                int row = y / ch; int off = (row % 2) * (cw / 2);
+                int col = (x + off) / cw;
+                int lx = (x + off) % cw, ly = y % ch;
+                tone = 0.82f + 0.3f * SurfRand(col, row, k);
+                if (lx < 2 || ly < 2) mortar = (k == kIsMarble) ? 0.85f : 0.55f;
+            } else { // flagstones: nearest jittered cell point, grout on the borders
+                int cs = 64; int gx = x / cs, gy = y / cs;
+                float best = 1e9f, second = 1e9f; int bi = 0;
+                for (int dy = -1; dy <= 1; dy++)
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int cx = gx + dx, cy = gy + dy;
+                        int wx = (cx + 4) % 4, wy = (cy + 4) % 4; // wraps on the 4x4 cell tile
+                        float px = cx * cs + SurfRand(wx, wy, k + 1) * cs, py = cy * cs + SurfRand(wx, wy, k + 2) * cs;
+                        float d = sqrtf((x - px) * (x - px) + (y - py) * (y - py));
+                        if (d < best) { second = best; best = d; bi = wx + wy * 4; }
+                        else if (d < second) second = d;
+                    }
+                tone = 0.8f + 0.3f * SurfRand(bi, 1, k);
+                if (second - best < 3.0f) mortar = 0.5f;
+            }
+            Color base = k == kIsFlagstone ? Color{ 130, 124, 116, 255 } : k == kIsStoneWall ? Color{ 118, 112, 104, 255 }
+                       : k == kIsSandstone ? Color{ 196, 172, 128, 255 } : Color{ 226, 222, 214, 255 };
+            float f = tone * mortar + n * 0.12f;
+            if (k == kIsMarble && fabsf(sinf(x * 0.021f + y * 0.033f + SurfRand(x / 16, y / 16, 5) * 2.5f)) < 0.04f) f *= 0.78f; // veins
+            return SurfMul(base, f);
+        }
+        case kIsTile: { // terracotta / ochre checker
+            int tx = x / 64, ty = y / 64; bool alt = (tx + ty) % 2;
+            Color base = alt ? Color{ 178, 96, 64, 255 } : Color{ 196, 160, 104, 255 };
+            float f = 0.9f + 0.15f * SurfRand(tx, ty, k) + n * 0.1f;
+            if (x % 64 < 3 || y % 64 < 3) f = 0.45f;
+            return SurfMul(base, f);
+        }
+        case kIsStraw: {
+            float f = 0.8f + 0.25f * SurfRand(x / 3, (y + x / 2) / 12, k) + n * 0.2f;
+            return SurfMul({ 186, 152, 86, 255 }, f);
+        }
+        case kIsCarpet: { // deep red weave with a gold diamond lattice
+            int dx = abs((x % 64) - 32), dy = abs((y % 64) - 32);
+            bool line = abs(dx + dy - 24) < 2;
+            float f = 0.92f + ((x + y) % 4 == 0 ? 0.05f : 0.0f) + n * 0.06f;
+            return line ? SurfMul({ 196, 150, 70, 255 }, f) : SurfMul({ 120, 26, 32, 255 }, f);
+        }
+        case kIsTimber: { // cream plaster in dark oak framing (v: floor at the bottom row)
+            float v = 1.0f - y / (float)N;
+            bool beam = (x % 128) < 12 || v < 0.07f || fabsf(v - 0.62f) < 0.035f || v > 0.95f;
+            int bay = x / 128; float bx = (x % 128 - 12) / 116.0f;
+            if (!beam && v > 0.07f && v < 0.6f && fabsf((v - 0.07f) / 0.53f - (bay % 2 ? bx : 1.0f - bx)) < 0.045f) beam = true; // brace
+            if (beam) return SurfMul({ 76, 50, 32, 255 }, 0.9f + n * 0.2f + sinf(x * 0.3f) * 0.03f);
+            return SurfMul({ 222, 206, 170, 255 }, 0.92f + n * 0.1f + SurfRand(x / 8, y / 8, k) * 0.06f);
+        }
+        case kIsWhitewash: { // lime-washed plaster over a blue-grey wainscot
+            float v = 1.0f - y / (float)N;
+            if (v < 0.3f) { float f = 0.9f + n * 0.12f; if (x % 32 == 0) f *= 0.7f; if (fabsf(v - 0.3f) < 0.02f) f *= 0.6f; return SurfMul({ 92, 110, 128, 255 }, f); }
+            return SurfMul({ 232, 228, 216, 255 }, 0.94f + n * 0.08f + SurfRand(x / 16, y / 16, k) * 0.05f);
+        }
+        case kIsLogWall: { // stacked logs: round shading across each log, dark chinking
+            int ly = y % 32; float t = (ly - 16) / 16.0f;
+            float f = (0.7f + 0.35f * sqrtf(std::max(0.0f, 1.0f - t * t))) * (0.92f + 0.1f * SurfRand(y / 32, 4, k)) + n * 0.12f;
+            if (ly < 2) f *= 0.4f;
+            return SurfMul({ 130, 92, 58, 255 }, f);
+        }
+        case kIsThatch: { // straw layers with downward strands
+            int band = y / 40; float f = 0.8f + 0.25f * SurfRand(x / 2, band, k) + n * 0.25f;
+            if (y % 40 > 34) f *= 0.65f;
+            return SurfMul({ 176, 140, 78, 255 }, f);
+        }
+        case kIsSlate: case kIsRedTile: case kIsShingle: { // overlapping rows
+            int rh = k == kIsRedTile ? 28 : 24, rw = k == kIsRedTile ? 32 : 40;
+            int row = y / rh, off = (row % 2) * rw / 2, col = (x + off) / rw;
+            int lx = (x + off) % rw, ly = y % rh;
+            float f = 0.85f + 0.25f * SurfRand(col, row, k) + n * 0.12f;
+            if (ly > rh - 4) f *= 0.55f;           // shadow of the row above
+            if (lx < 2) f *= 0.7f;
+            if (k == kIsRedTile) f *= 0.8f + 0.25f * sinf(lx / (float)rw * 3.14159f); // round tiles
+            Color base = k == kIsSlate ? Color{ 84, 90, 104, 255 } : k == kIsRedTile ? Color{ 170, 78, 54, 255 } : Color{ 120, 84, 54, 255 };
+            return SurfMul(base, f);
+        }
+    }
+    return MAGENTA;
+}
+static const Texture2D& SurfTex(int k) {
+    k = std::clamp(k, 0, kIsCount - 1);
+    if (!g_isReady[k]) {
+        const int N = 256;
+        Image img = GenImageColor(N, N, BLANK);
+        Color* px = (Color*)img.data;
+        for (int y = 0; y < N; y++) for (int x = 0; x < N; x++) px[y * N + x] = SurfPixel(k, x, y);
+        g_isTex[k] = LoadTextureFromImage(img);
+        UnloadImage(img);
+        GenTextureMipmaps(&g_isTex[k]);
+        SetTextureFilter(g_isTex[k], TEXTURE_FILTER_TRILINEAR);
+        SetTextureWrap(g_isTex[k], TEXTURE_WRAP_REPEAT);
+        g_isReady[k] = true;
+    }
+    return g_isTex[k];
+}
+static const char* SurfName(int k) {
+    static const char* names[kIsCount] = { "Oak Planks", "Dark Planks", "Flagstone", "Terracotta Tile", "Straw", "Marble", "Red Carpet",
+                                           "Timber & Plaster", "Fieldstone", "Log", "Plank", "Sandstone", "Whitewash",
+                                           "Thatch", "Slate", "Red Tile", "Wood Shingle" };
+    return names[std::clamp(k, 0, kIsCount - 1)];
+}
+// Textured quad (immediate mode, both sides). Corners in order around the quad.
+static void SurfQuad(int k, Vector3 a, Vector3 b, Vector3 c, Vector3 d, Vector2 ta, Vector2 tb, Vector2 tc, Vector2 td, Color tint) {
+    rlSetTexture(SurfTex(k).id);
+    rlBegin(RL_QUADS);
+    rlColor4ub(tint.r, tint.g, tint.b, tint.a);
+    rlTexCoord2f(ta.x, ta.y); rlVertex3f(a.x, a.y, a.z);
+    rlTexCoord2f(tb.x, tb.y); rlVertex3f(b.x, b.y, b.z);
+    rlTexCoord2f(tc.x, tc.y); rlVertex3f(c.x, c.y, c.z);
+    rlTexCoord2f(td.x, td.y); rlVertex3f(d.x, d.y, d.z);
+    rlEnd();
+    rlSetTexture(0);
+}
+// A horizontal textured floor rectangle, UVs in world units / `tile`.
+static void SurfFloor(int k, float x0, float z0, float x1, float z1, float y, float tile, Color tint) {
+    SurfQuad(k, { x0, y, z0 }, { x0, y, z1 }, { x1, y, z1 }, { x1, y, z0 },
+             { x0 / tile, z0 / tile }, { x0 / tile, z1 / tile }, { x1 / tile, z1 / tile }, { x1 / tile, z0 / tile }, tint);
+}
+// An axis-aligned wall slab from (ax,az) to (bx,bz), thickness t, from y0 to y1,
+// textured along its length (u) and height (v, floor at the bottom).
+static void SurfWall(int k, float ax, float az, float bx, float bz, float t, float y0, float y1, float wallH, Color tint, Color capTint) {
+    bool alongX = fabsf(bx - ax) >= fabsf(bz - az);
+    float h = t * 0.5f;
+    float x0 = std::min(ax, bx), x1 = std::max(ax, bx), z0 = std::min(az, bz), z1 = std::max(az, bz);
+    if (alongX) { z0 -= h; z1 += h; } else { x0 -= h; x1 += h; }
+    float len = alongX ? (x1 - x0) : (z1 - z0);
+    float u0 = (alongX ? x0 : z0) / 128.0f, u1 = u0 + len / 128.0f;
+    float v0 = 1.0f - y0 / wallH, v1 = 1.0f - y1 / wallH;
+    Color side = SurfMul(tint, 0.82f);
+    if (alongX) {
+        SurfQuad(k, { x0, y0, z1 }, { x1, y0, z1 }, { x1, y1, z1 }, { x0, y1, z1 }, { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 }, tint);
+        SurfQuad(k, { x0, y0, z0 }, { x1, y0, z0 }, { x1, y1, z0 }, { x0, y1, z0 }, { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 }, SurfMul(tint, 0.9f));
+        float tu = t / 128.0f;
+        SurfQuad(k, { x0, y0, z0 }, { x0, y0, z1 }, { x0, y1, z1 }, { x0, y1, z0 }, { 0, v0 }, { tu, v0 }, { tu, v1 }, { 0, v1 }, side);
+        SurfQuad(k, { x1, y0, z0 }, { x1, y0, z1 }, { x1, y1, z1 }, { x1, y1, z0 }, { 0, v0 }, { tu, v0 }, { tu, v1 }, { 0, v1 }, side);
+    } else {
+        SurfQuad(k, { x1, y0, z0 }, { x1, y0, z1 }, { x1, y1, z1 }, { x1, y1, z0 }, { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 }, side);
+        SurfQuad(k, { x0, y0, z0 }, { x0, y0, z1 }, { x0, y1, z1 }, { x0, y1, z0 }, { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 }, SurfMul(side, 1.08f));
+        float tu = t / 128.0f;
+        SurfQuad(k, { x0, y0, z0 }, { x1, y0, z0 }, { x1, y1, z0 }, { x0, y1, z0 }, { 0, v0 }, { tu, v0 }, { tu, v1 }, { 0, v1 }, tint);
+        SurfQuad(k, { x0, y0, z1 }, { x1, y0, z1 }, { x1, y1, z1 }, { x0, y1, z1 }, { 0, v0 }, { tu, v0 }, { tu, v1 }, { 0, v1 }, tint);
+    }
+    // top cap in dark oak
+    rlBegin(RL_QUADS);
+    rlColor4ub(capTint.r, capTint.g, capTint.b, 255);
+    rlVertex3f(x0, y1, z0); rlVertex3f(x0, y1, z1); rlVertex3f(x1, y1, z1); rlVertex3f(x1, y1, z0);
+    rlEnd();
+}
+// Soft radial glow (candles, torches, window light) - additive billboards/pools.
+static Texture2D g_glowTex;
+static bool g_glowReady = false;
+static const Texture2D& GlowTex() {
+    if (!g_glowReady) {
+        Image img = GenImageGradientRadial(64, 64, 0.0f, WHITE, BLANK);
+        g_glowTex = LoadTextureFromImage(img);
+        UnloadImage(img);
+        SetTextureFilter(g_glowTex, TEXTURE_FILTER_BILINEAR);
+        g_glowReady = true;
+    }
+    return g_glowTex;
+}
+static void GlowPool(float x, float z, float y, float r, Color c) { // flat pool of light on a floor
+    rlSetTexture(GlowTex().id);
+    rlBegin(RL_QUADS);
+    rlColor4ub(c.r, c.g, c.b, c.a);
+    rlTexCoord2f(0, 0); rlVertex3f(x - r, y, z - r);
+    rlTexCoord2f(0, 1); rlVertex3f(x - r, y, z + r);
+    rlTexCoord2f(1, 1); rlVertex3f(x + r, y, z + r);
+    rlTexCoord2f(1, 0); rlVertex3f(x + r, y, z - r);
+    rlEnd();
+    rlSetTexture(0);
+}
 
+// --- Per-building prop tables (2026-09-26 rework). Rooms are 520x620 (room
+// coords, north wall at y=0, door gap at the middle of the south wall; the
+// player comes in at (260,520)). Models: "kk" = KayKit Dungeon Remastered,
+// "kf" = KayKit Furniture Bits (recolored medieval), anything else = the
+// Quaternius shop kit. Wall-hung pieces sit against a wall with yOff > 0 and
+// no blocker. rot: 0 faces south (into the room from the north wall), 90 faces
+// east (west wall), 270 faces west (east wall). ---
+#define IX(label, x, y) { "", "", label, x, y, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 }
+static const Color kC2dWood = { 139, 105, 72, 255 }, kC2dMetal = { 150, 150, 160, 255 }, kC2dCloth = { 170, 60, 60, 255 };
 static const InteriorPropDef kInteriorPropsSmith[] = {
-    { "smith", "Forge.gltf", "Forge", 150, 170, 0, 1, 0, 76, 56, "", Color{122,62,40,255}, 76, 56 },
-    { "smith", "Bellows.gltf", "Bellows", 235, 165, 180, 1, 0, 40, 26, "", Color{150,110,70,255}, 40, 26 },
-    { "smith", "Anvil.gltf", "Anvil", 300, 360, 20, 1, 0, 46, 30, "panel", Color{150,150,160,255}, 46, 30 },
-    { "smith", "Workbench.gltf", "Workbench", 445, 210, 90, 1, 0, 64, 36, "", Color{139,105,72,255}, 64, 36 },
-    { "smith", "WeaponStand.gltf", "Weapon Rack", 505, 130, 90, 1, 0, 42, 26, "", Color{120,90,60,255}, 42, 26 },
-    { "smith", "Barrel.gltf", "Quench Barrel", 85, 290, 0, 1, 0, 32, 32, "", Color{120,88,58,255}, 32, 32 },
-    { "smith", "Whetstone.gltf", "Whetstone", 395, 480, 0, 1, 0, 38, 30, "", Color{140,140,150,255}, 38, 30 },
-    { "smith", "Bucket_Metal.gltf", "Water Bucket", 115, 390, 0, 1, 0, 0, 0, "", Color{150,150,160,255}, 24, 24 },
-    { "smith", "Cauldron.gltf", "Crucible", 475, 340, 0, 1, 0, 38, 38, "", Color{110,70,50,255}, 38, 38 },
-    { "smith", "Peg_Rack.gltf", "Tool Rack", 505, 460, 90, 1, 0, 30, 42, "", Color{130,95,60,255}, 30, 42 },
-    { "smith", "Torch_Metal.gltf", "Torch", 60, 95, 0, 1, 55, 0, 0, "", Color{255,180,80,255}, 14, 14 },
-    { "smith", "Torch_Metal.gltf", "Torch", 500, 95, 0, 1, 55, 0, 0, "", Color{255,180,80,255}, 14, 14 },
-    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+    { "smith", "Forge.gltf", "Forge", 90, 60, 0, 1, 0, 58, 44, "", Color{122,62,40,255}, 58, 44 },
+    { "smith", "Bellows.gltf", "Bellows", 145, 72, 0, 1, 0, 19, 50, "", kC2dWood, 19, 50 },
+    { "smith", "Bucket_Metal.gltf", "Coal Bucket", 36, 120, 0, 1.2f, 0, 0, 0, "", kC2dMetal, 18, 18 },
+    { "smith", "Anvil.gltf", "Anvil", 205, 200, 0, 1.25f, 0, 46, 20, "panel", kC2dMetal, 46, 20 },
+    { "smith", "Barrel.gltf", "Quench Barrel", 140, 190, 0, 1, 0, 24, 24, "", kC2dWood, 24, 24 },
+    { "smith", "Workbench.gltf", "Workbench", 330, 26, 0, 1, 0, 69, 35, "", kC2dWood, 69, 35 },
+    { "smith", "Peg_Rack.gltf", "Tool Rack", 250, 3, 0, 1, 50, 0, 0, "", kC2dWood, 40, 8 },
+    { "kk", "sword_shield.glb", "Shield Display", 430, 5, 0, 1, 64, 0, 0, "", kC2dMetal, 50, 8 },
+    { "smith", "WeaponStand.gltf", "Weapon Rack", 478, 120, 270, 1, 0, 33, 47, "", kC2dWood, 33, 47 },
+    { "smith", "Whetstone.gltf", "Whetstone", 476, 230, 270, 1, 0, 31, 39, "", kC2dMetal, 31, 39 },
+    { "kk", "shelves.glb", "Ingot Shelf", 7, 300, 90, 1, 0, 0, 0, "", kC2dWood, 12, 52 },
+    { "kk", "table_long.glb", "Sales Counter", 300, 390, 90, 1, 0, 104, 52, "", kC2dWood, 104, 52 },
+    { "kk", "coin_stack_small.glb", "Coins", 335, 384, 0, 0.8f, 26, 0, 0, "", Color{220,180,90,255}, 14, 14 },
+    { "kk", "box_small_decorated.glb", "Strongbox", 268, 382, 0, 0.6f, 26, 0, 0, "", kC2dWood, 16, 16 },
+    { "kk", "crates_stacked.glb", "Crates", 50, 560, 0, 1, 0, 54, 58, "", kC2dWood, 54, 58 },
+    { "kk", "barrel_small_stack.glb", "Barrels", 464, 574, 0, 1, 0, 48, 26, "", kC2dWood, 48, 26 },
+    { "kk", "box_large.glb", "Ore Crate", 110, 580, 20, 0.8f, 0, 32, 32, "", kC2dWood, 32, 32 },
+    { "kk", "banner_shield_red.glb", "Guild Banner", 514, 360, 270, 1, 10, 0, 0, "", kC2dCloth, 10, 44 },
+    { "kk", "torch_mounted.glb", "Torch", 6, 450, 90, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    { "kk", "torch_mounted.glb", "Torch", 514, 470, 270, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    { "kk", "torch_mounted.glb", "Torch", 180, 6, 0, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    IX("Exit", 260, 598),
 };
-
 static const InteriorPropDef kInteriorPropsCarpenter[] = {
-    { "carpenter", "LumberPile.gltf", "Lumber Pile", 140, 180, 0, 1, 0, 64, 32, "", Color{150,112,70,255}, 64, 32 },
-    { "carpenter", "LumberPile.gltf", "Lumber Pile", 140, 280, 0, 1, 0, 64, 32, "", Color{150,112,70,255}, 64, 32 },
-    { "carpenter", "Sawhorse.gltf", "Sawhorse", 280, 300, 0, 1, 0, 46, 28, "", Color{160,125,80,255}, 46, 28 },
-    { "carpenter", "Sawhorse.gltf", "Sawhorse", 370, 300, 0, 1, 0, 46, 28, "", Color{160,125,80,255}, 46, 28 },
-    { "carpenter", "Workbench.gltf", "Workbench", 450, 190, 90, 1, 0, 64, 36, "panel", Color{139,105,72,255}, 64, 36 },
-    { "carpenter", "Peg_Rack.gltf", "Tool Rack", 510, 330, 90, 1, 0, 30, 42, "", Color{130,95,60,255}, 30, 42 },
-    { "carpenter", "Crate_Wooden.gltf", "Offcut Crate", 90, 430, 0, 1, 0, 36, 36, "", Color{150,115,70,255}, 36, 36 },
-    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+    { "carpenter", "LumberPile.gltf", "Lumber Pile", 66, 60, 0, 1.1f, 0, 58, 32, "", kC2dWood, 58, 32 },
+    { "carpenter", "LumberPile.gltf", "Lumber Pile", 66, 112, 0, 1.1f, 0, 58, 32, "", kC2dWood, 58, 32 },
+    { "carpenter", "Workbench.gltf", "Workbench", 330, 26, 0, 1, 0, 69, 35, "panel", kC2dWood, 69, 35 },
+    { "carpenter", "Peg_Rack.gltf", "Tool Rack", 230, 3, 0, 1, 50, 0, 0, "", kC2dWood, 40, 8 },
+    { "carpenter", "Sawhorse.gltf", "Sawhorse", 205, 250, 0, 1, 0, 41, 23, "", kC2dWood, 41, 23 },
+    { "carpenter", "Sawhorse.gltf", "Sawhorse", 270, 250, 0, 1, 0, 41, 23, "", kC2dWood, 41, 23 },
+    { "carpenter", "Crate_Wooden.gltf", "Offcut Crate", 470, 566, 0, 1, 0, 37, 39, "", kC2dWood, 37, 39 },
+    { "carpenter", "Crate_Wooden.gltf", "Offcut Crate", 426, 584, 25, 0.9f, 0, 34, 34, "", kC2dWood, 34, 34 },
+    { "kk", "barrel_small.glb", "Glue Pot", 60, 566, 0, 1, 0, 26, 26, "", kC2dWood, 26, 26 },
+    { "kk", "shelves.glb", "Plane Shelf", 7, 330, 90, 1, 0, 0, 0, "", kC2dWood, 12, 52 },
+    { "kf", "chair_A_wood.gltf", "Finished Chair", 440, 280, 270, 1, 0, 22, 22, "", kC2dWood, 22, 22 },
+    { "kf", "table_medium.gltf", "Finished Table", 440, 360, 0, 1, 0, 52, 52, "", kC2dWood, 52, 52 },
+    { "kf", "cabinet_small.gltf", "Display Cabinet", 486, 440, 270, 1, 0, 26, 26, "", kC2dWood, 26, 26 },
+    { "kk", "table_long.glb", "Sales Counter", 280, 410, 90, 1, 0, 104, 52, "", kC2dWood, 104, 52 },
+    { "kk", "candle_triple.glb", "Candles", 318, 402, 0, 1, 26, 0, 0, "", Color{255,220,150,255}, 10, 10 },
+    { "kk", "banner_thin_green.glb", "Guild Banner", 514, 170, 270, 1, 10, 0, 0, "", Color{60,120,70,255}, 10, 30 },
+    { "kk", "torch_mounted.glb", "Torch", 6, 470, 90, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    { "kk", "torch_mounted.glb", "Torch", 514, 520, 270, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    IX("Exit", 260, 598),
 };
-
 static const InteriorPropDef kInteriorPropsTailor[] = {
-    { "tailor", "Mannequin.gltf", "Dress Form", 280, 330, 0, 1, 0, 32, 32, "panel", Color{170,130,150,255}, 32, 32 },
-    { "tailor", "ClothBolt.gltf", "Cloth Bolts", 150, 200, 0, 1, 0, 54, 36, "", Color{180,140,160,255}, 54, 36 },
-    { "tailor", "ClothBolt.gltf", "Cloth Bolts", 430, 200, 90, 1, 0, 54, 36, "", Color{160,120,150,255}, 54, 36 },
-    { "tailor", "Shelf_Small1.obj", "Fabric Shelf", 505, 410, 90, 1, 0, 42, 32, "", Color{139,105,72,255}, 42, 32 },
-    { "tailor", "Banner_1_Cloth.gltf", "Banner", 280, 55, 0, 1, 57, 0, 0, "", Color{190,90,110,255}, 30, 16 },
-    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+    { "tailor", "Mannequin.gltf", "Dress Form", 120, 110, 20, 1.2f, 0, 20, 20, "panel", Color{170,130,150,255}, 20, 20 },
+    { "tailor", "Mannequin.gltf", "Dress Form", 186, 104, -15, 1.2f, 0, 20, 20, "", Color{170,130,150,255}, 20, 20 },
+    { "kk", "table_long_tablecloth.glb", "Cutting Table", 390, 100, 90, 1, 0, 104, 52, "", kC2dCloth, 104, 52 },
+    { "tailor", "ClothBolt.gltf", "Cloth Bolt", 364, 94, 10, 1.1f, 26, 0, 0, "", kC2dCloth, 30, 10 },
+    { "tailor", "ClothBolt.gltf", "Cloth Bolt", 412, 104, -20, 1.1f, 26, 0, 0, "", Color{80,90,150,255}, 30, 10 },
+    { "kf", "rug_oval_A.gltf", "Rug", 260, 320, 0, 1.35f, 0, 0, 0, "", kC2dCloth, 100, 66 },
+    { "kf", "armchair.gltf", "Armchair", 70, 400, 90, 0.9f, 0, 38, 42, "", Color{150,110,60,255}, 38, 42 },
+    { "kf", "cabinet_medium_decorated.gltf", "Dresser", 494, 290, 270, 1, 0, 26, 53, "", kC2dWood, 26, 53 },
+    { "kf", "shelf_B_large_decorated.gltf", "Wall Shelf", 250, 4, 0, 1, 56, 0, 0, "", kC2dWood, 52, 8 },
+    { "kk", "banner_thin_red.glb", "Banner", 6, 250, 90, 1, 10, 0, 0, "", kC2dCloth, 10, 30 },
+    { "kk", "banner_thin_green.glb", "Banner", 514, 470, 270, 1, 10, 0, 0, "", Color{60,120,70,255}, 10, 30 },
+    { "kk", "table_medium_tablecloth.glb", "Counter", 300, 430, 0, 1, 0, 52, 52, "", kC2dCloth, 52, 52 },
+    { "kk", "candle_triple.glb", "Candles", 314, 420, 0, 1, 26, 0, 0, "", Color{255,220,150,255}, 10, 10 },
+    { "kf", "book_set.gltf", "Pattern Books", 290, 436, 0, 1, 26 + 6, 0, 0, "", kC2dWood, 12, 8 },
+    { "kk", "trunk_medium_A.glb", "Trunk", 450, 570, 0, 1.3f, 0, 32, 30, "", kC2dWood, 32, 30 },
+    { "kk", "box_small.glb", "Box", 80, 572, 15, 1, 0, 26, 26, "", kC2dWood, 26, 26 },
+    IX("Exit", 260, 598),
 };
-
 static const InteriorPropDef kInteriorPropsAlchemy[] = {
-    { "alchemy", "Cauldron.gltf", "Brewing Cauldron", 280, 300, 0, 1, 0, 42, 42, "panel", Color{110,70,50,255}, 42, 42 },
-    { "alchemy", "Shelf_Small_Bottles.gltf", "Potion Shelf", 140, 150, 0, 1, 0, 54, 32, "", Color{120,90,110,255}, 54, 32 },
-    { "alchemy", "Table_RoundSmall.obj", "Work Table", 430, 200, 0, 1, 0, 46, 46, "", Color{139,105,72,255}, 46, 46 },
-    { "alchemy", "Potion_1.gltf", "Potion", 385, 290, 0, 1, 0, 0, 0, "", Color{200,80,120,255}, 16, 16 },
-    { "alchemy", "Potion_2.gltf", "Potion", 475, 290, 0, 1, 0, 0, 0, "", Color{80,160,200,255}, 16, 16 },
-    { "alchemy", "Bottle_1.gltf", "Bottle", 430, 330, 0, 1, 0, 0, 0, "", Color{140,200,160,255}, 16, 16 },
-    { "alchemy", "Torch_Metal.gltf", "Torch", 60, 95, 0, 1, 55, 0, 0, "", Color{255,180,80,255}, 14, 14 },
-    { "alchemy", "Torch_Metal.gltf", "Torch", 500, 95, 0, 1, 55, 0, 0, "", Color{255,180,80,255}, 14, 14 },
-    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+    { "alchemy", "Cauldron.gltf", "Brewing Cauldron", 260, 200, 0, 1.45f, 0, 48, 45, "panel", Color{110,70,50,255}, 48, 45 },
+    { "alchemy", "Shelf_Small_Bottles.gltf", "Potion Shelf", 110, 3, 0, 1.3f, 46, 0, 0, "", Color{120,90,110,255}, 50, 8 },
+    { "alchemy", "Shelf_Small_Bottles.gltf", "Potion Shelf", 180, 3, 0, 1.3f, 70, 0, 0, "", Color{120,90,110,255}, 50, 8 },
+    { "kk", "wall_shelves.glb", "Reagent Shelves", 404, 20, 0, 1, 0, 104, 36, "", kC2dWood, 104, 36 },
+    { "kk", "table_medium.glb", "Work Table", 420, 300, 0, 1, 0, 52, 52, "", kC2dWood, 52, 52 },
+    { "kk", "bottle_A_green.glb", "Bottle", 404, 290, 0, 1, 26, 0, 0, "", Color{90,170,110,255}, 8, 8 },
+    { "kk", "bottle_B_green.glb", "Bottle", 430, 306, 0, 1, 26, 0, 0, "", Color{90,170,110,255}, 8, 8 },
+    { "kk", "bottle_C_brown.glb", "Flask", 438, 286, 0, 0.8f, 26, 0, 0, "", Color{150,100,60,255}, 8, 8 },
+    { "kk", "candle_lit.glb", "Candle", 410, 314, 0, 1, 26, 0, 0, "", Color{255,220,150,255}, 6, 6 },
+    { "kk", "table_small_decorated_B.glb", "Side Table", 80, 300, 0, 1, 0, 26, 26, "", kC2dWood, 26, 26 },
+    { "kk", "table_small.glb", "Stand", 40, 120, 0, 1, 0, 26, 26, "", kC2dWood, 26, 26 },
+    { "kk", "candle_triple.glb", "Candles", 40, 118, 0, 1, 26, 0, 0, "", Color{255,220,150,255}, 10, 10 },
+    { "kk", "barrel_small.glb", "Barrel", 56, 560, 0, 1, 0, 26, 26, "", kC2dWood, 26, 26 },
+    { "kk", "keg.glb", "Keg", 466, 566, 270, 1, 0, 52, 47, "", kC2dWood, 52, 47 },
+    { "kf", "book_set.gltf", "Grimoires", 90, 480, 0, 1, 0, 0, 0, "", kC2dWood, 12, 8 },
+    { "kk", "banner_patternA_green.glb", "Banner", 514, 420, 270, 1, 10, 0, 0, "", Color{60,120,70,255}, 10, 40 },
+    { "kk", "torch_mounted.glb", "Torch", 6, 430, 90, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    IX("Exit", 260, 598),
 };
-
 static const InteriorPropDef kInteriorPropsBank[] = {
-    { "bank", "Table_Large.gltf", "Teller Counter", 280, 280, 0, 1, 0, 96, 46, "panel", Color{139,105,72,255}, 96, 46 },
-    { "bank", "VaultDoor.gltf", "Vault", 280, 100, 0, 1, 0, 64, 32, "", Color{120,120,130,255}, 64, 32 },
-    { "bank", "Coin_Pile.gltf", "Coin Pile", 175, 280, 0, 1, 0, 0, 0, "", Color{220,180,90,255}, 22, 22 },
-    { "bank", "Coin_Pile_2.gltf", "Coin Pile", 385, 280, 0, 1, 0, 0, 0, "", Color{220,180,90,255}, 22, 22 },
-    { "bank", "Coin.gltf", "Loose Coins", 280, 195, 0, 1, 0, 0, 0, "", Color{230,190,100,255}, 18, 18 },
-    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+    { "bank", "VaultDoor.gltf", "Vault", 260, 12, 0, 1.5f, 0, 88, 26, "", Color{120,120,130,255}, 88, 26 },
+    { "kk", "pillar_decorated.glb", "Pillar", 110, 60, 0, 1, 0, 58, 44, "", Color{200,190,170,255}, 58, 44 },
+    { "kk", "pillar_decorated.glb", "Pillar", 410, 60, 0, 1, 0, 58, 44, "", Color{200,190,170,255}, 58, 44 },
+    { "kk", "table_long_tablecloth.glb", "Teller Counter", 260, 300, 90, 1, 0, 104, 52, "panel", Color{80,90,150,255}, 104, 52 },
+    { "kk", "candle_triple.glb", "Candles", 222, 292, 0, 1, 26, 0, 0, "", Color{255,220,150,255}, 10, 10 },
+    { "kk", "coin_stack_medium.glb", "Coin Stack", 292, 296, 0, 0.6f, 26, 0, 0, "", Color{220,180,90,255}, 14, 14 },
+    { "kk", "chest.glb", "Strongbox", 60, 200, 90, 1, 0, 50, 44, "", kC2dWood, 50, 44 },
+    { "kk", "chest.glb", "Strongbox", 460, 200, 270, 1, 0, 50, 44, "", kC2dWood, 50, 44 },
+    { "kk", "coin_stack_large.glb", "Coin Hoard", 64, 276, 30, 1, 0, 38, 40, "", Color{220,180,90,255}, 38, 40 },
+    { "kf", "rug_rectangle_stripes_A.gltf", "Runner", 260, 470, 90, 1.2f, 0, 0, 0, "", kC2dCloth, 62, 94 },
+    { "kk", "banner_shield_blue.glb", "Crest", 6, 420, 90, 1, 10, 0, 0, "", Color{80,90,150,255}, 10, 44 },
+    { "kk", "banner_shield_blue.glb", "Crest", 514, 420, 270, 1, 10, 0, 0, "", Color{80,90,150,255}, 10, 44 },
+    { "kk", "torch_mounted.glb", "Torch", 6, 150, 90, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    { "kk", "torch_mounted.glb", "Torch", 514, 150, 270, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    IX("Exit", 260, 598),
 };
-
 static const InteriorPropDef kInteriorPropsStable[] = {
-    { "stable", "StallDivider.gltf", "Stall", 120, 170, 90, 1, 0, 18, 96, "", Color{130,100,65,255}, 18, 96 },
-    { "stable", "StallDivider.gltf", "Stall", 280, 170, 90, 1, 0, 18, 96, "", Color{130,100,65,255}, 18, 96 },
-    { "stable", "StallDivider.gltf", "Stall", 440, 170, 90, 1, 0, 18, 96, "", Color{130,100,65,255}, 18, 96 },
-    { "stable", "HayBale.gltf", "Hay Bale", 100, 420, 0, 1, 0, 42, 36, "", Color{200,170,90,255}, 42, 36 },
-    { "stable", "HayBale.gltf", "Hay Bale", 460, 420, 0, 1, 0, 42, 36, "", Color{200,170,90,255}, 42, 36 },
-    { "stable", "WaterTrough.gltf", "Water Trough", 280, 500, 0, 1, 0, 64, 32, "panel", Color{120,90,60,255}, 64, 32 },
-    { "stable", "Bucket_Wooden_1.gltf", "Feed Bucket", 195, 500, 0, 1, 0, 0, 0, "", Color{140,105,65,255}, 22, 22 },
-    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+    { "stable", "StallDivider.gltf", "Stall", 110, 120, 90, 1, 0, 6, 78, "", Color{130,100,65,255}, 6, 78 },
+    { "stable", "StallDivider.gltf", "Stall", 230, 120, 90, 1, 0, 6, 78, "", Color{130,100,65,255}, 6, 78 },
+    { "stable", "StallDivider.gltf", "Stall", 350, 120, 90, 1, 0, 6, 78, "", Color{130,100,65,255}, 6, 78 },
+    { "stable", "HayBale.gltf", "Hay Bale", 440, 70, 0, 1, 0, 58, 23, "", Color{200,170,90,255}, 58, 23 },
+    { "stable", "HayBale.gltf", "Hay Bale", 60, 300, 90, 1, 0, 23, 58, "", Color{200,170,90,255}, 23, 58 },
+    { "stable", "HayBale.gltf", "Hay Bale", 470, 560, 0, 1, 0, 58, 23, "", Color{200,170,90,255}, 58, 23 },
+    { "stable", "WaterTrough.gltf", "Water Trough", 260, 300, 0, 1.2f, 0, 58, 24, "panel", kC2dWood, 58, 24 },
+    { "stable", "Bucket_Wooden_1.gltf", "Feed Bucket", 318, 304, 0, 1.4f, 0, 0, 0, "", kC2dWood, 18, 18 },
+    { "kk", "barrel_large.glb", "Grain Barrel", 470, 300, 0, 1, 0, 47, 47, "", kC2dWood, 47, 47 },
+    { "kk", "crates_stacked.glb", "Tack Crates", 56, 560, 0, 1, 0, 54, 58, "", kC2dWood, 54, 58 },
+    { "kk", "torch_mounted.glb", "Lantern", 6, 420, 90, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    { "kk", "torch_mounted.glb", "Lantern", 514, 420, 270, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    IX("Exit", 260, 598),
 };
-
 static const InteriorPropDef kInteriorPropsHealer[] = {
-    { "healer", "Bed_Single.obj", "Cot", 150, 250, 90, 1, 0, 92, 46, "panel", Color{170,150,130,255}, 92, 46 },
-    { "healer", "Bed_Single.obj", "Cot", 410, 250, 90, 1, 0, 92, 46, "", Color{170,150,130,255}, 92, 46 },
-    { "healer", "Shelf_Small1.obj", "Remedy Shelf", 505, 150, 90, 1, 0, 42, 32, "", Color{139,105,72,255}, 42, 32 },
-    { "healer", "MortarPestle.gltf", "Mortar & Pestle", 280, 430, 0, 1, 0, 0, 0, "", Color{160,150,140,255}, 24, 24 },
-    { "healer", "HerbBundle.gltf", "Drying Herbs", 130, 460, 0, 1, 0, 32, 42, "", Color{120,160,90,255}, 32, 42 },
-    { "healer", "Potion_1.gltf", "Tonic", 350, 430, 0, 1, 0, 0, 0, "", Color{200,80,120,255}, 16, 16 },
-    { "healer", "SmallBottle.gltf", "Salve", 390, 430, 0, 1, 0, 0, 0, "", Color{140,200,160,255}, 16, 16 },
-    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+    { "kf", "bed_single_A.gltf", "Cot", 60, 90, 0, 1, 0, 42, 78, "panel", Color{170,150,130,255}, 42, 78 },
+    { "kf", "bed_single_A.gltf", "Cot", 130, 90, 0, 1, 0, 42, 78, "", Color{170,150,130,255}, 42, 78 },
+    { "kf", "bed_single_A.gltf", "Cot", 200, 90, 0, 1, 0, 42, 78, "", Color{170,150,130,255}, 42, 78 },
+    { "kf", "cabinet_small.gltf", "Remedy Chest", 262, 30, 0, 1, 0, 26, 26, "", kC2dWood, 26, 26 },
+    { "alchemy", "Shelf_Small_Bottles.gltf", "Tonic Shelf", 380, 3, 0, 1.3f, 50, 0, 0, "", Color{120,90,110,255}, 50, 8 },
+    { "healer", "HerbBundle.gltf", "Drying Herbs", 460, 4, 0, 1.1f, 40, 0, 0, "", Color{120,160,90,255}, 40, 8 },
+    { "kk", "table_medium.glb", "Mixing Table", 410, 280, 0, 1, 0, 52, 52, "", kC2dWood, 52, 52 },
+    { "healer", "MortarPestle.gltf", "Mortar & Pestle", 396, 272, 0, 1.3f, 26, 0, 0, "", Color{160,150,140,255}, 12, 12 },
+    { "kk", "bottle_A_labeled_brown.glb", "Salve", 422, 288, 0, 1, 26, 0, 0, "", Color{150,100,60,255}, 8, 8 },
+    { "kk", "candle_lit.glb", "Candle", 408, 300, 0, 1, 26, 0, 0, "", Color{255,220,150,255}, 6, 6 },
+    { "kf", "chair_A_wood.gltf", "Chair", 364, 282, 90, 1, 0, 22, 22, "", kC2dWood, 22, 22 },
+    { "kf", "rug_rectangle_A.gltf", "Rug", 150, 330, 0, 1, 0, 0, 0, "", kC2dCloth, 78, 52 },
+    { "kf", "cactus_medium_A.gltf", "Potted Herb", 480, 560, 0, 1.2f, 0, 22, 22, "", Color{90,150,80,255}, 22, 22 },
+    { "kk", "banner_thin_green.glb", "Banner", 6, 470, 90, 1, 10, 0, 0, "", Color{60,120,70,255}, 10, 30 },
+    IX("Exit", 260, 598),
 };
-
 static const InteriorPropDef kInteriorPropsTownhall[] = {
-    { "townhall", "Table_RoundLarge.obj", "Council Table", 280, 350, 0, 1, 0, 96, 96, "panel", Color{139,105,72,255}, 96, 96 },
-    { "townhall", "Chair_1.obj", "Chair", 180, 350, 270, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
-    { "townhall", "Chair_1.obj", "Chair", 380, 350, 90, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
-    { "townhall", "Chair_1.obj", "Chair", 280, 240, 0, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
-    { "townhall", "Chair_1.obj", "Chair", 280, 460, 180, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
-    { "townhall", "Banner_1_Cloth.gltf", "Banner", 180, 55, 0, 1, 57, 0, 0, "", Color{190,90,110,255}, 30, 16 },
-    { "townhall", "Banner_2_Cloth.gltf", "Banner", 380, 55, 0, 1, 57, 0, 0, "", Color{90,110,190,255}, 30, 16 },
-    { "townhall", "Torch_Metal.gltf", "Torch", 80, 95, 0, 1, 55, 0, 0, "", Color{255,180,80,255}, 14, 14 },
-    { "townhall", "Torch_Metal.gltf", "Torch", 480, 95, 0, 1, 55, 0, 0, "", Color{255,180,80,255}, 14, 14 },
-    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+    { "kk", "table_long_tablecloth_decorated_A.glb", "Council Table", 260, 270, 0, 1, 0, 54, 104, "panel", kC2dCloth, 54, 104 },
+    { "kk", "chair.glb", "Chair", 216, 230, 90, 1, 0, 20, 20, "", kC2dWood, 20, 20 },
+    { "kk", "chair.glb", "Chair", 216, 270, 90, 1, 0, 20, 20, "", kC2dWood, 20, 20 },
+    { "kk", "chair.glb", "Chair", 216, 310, 90, 1, 0, 20, 20, "", kC2dWood, 20, 20 },
+    { "kk", "chair.glb", "Chair", 304, 230, 270, 1, 0, 20, 20, "", kC2dWood, 20, 20 },
+    { "kk", "chair.glb", "Chair", 304, 270, 270, 1, 0, 20, 20, "", kC2dWood, 20, 20 },
+    { "kk", "chair.glb", "Chair", 304, 310, 270, 1, 0, 20, 20, "", kC2dWood, 20, 20 },
+    { "kk", "chair.glb", "High Seat", 260, 196, 0, 1.2f, 0, 24, 24, "", kC2dWood, 24, 24 },
+    { "kk", "banner_triple_red.glb", "Town Banners", 260, 6, 0, 1, 8, 0, 0, "", kC2dCloth, 96, 8 },
+    { "kk", "pillar_decorated.glb", "Pillar", 60, 90, 0, 1, 0, 58, 44, "", Color{200,190,170,255}, 58, 44 },
+    { "kk", "pillar_decorated.glb", "Pillar", 460, 90, 0, 1, 0, 58, 44, "", Color{200,190,170,255}, 58, 44 },
+    { "kk", "banner_shield_red.glb", "Crest", 6, 300, 90, 1, 10, 0, 0, "", kC2dCloth, 10, 44 },
+    { "kk", "banner_shield_red.glb", "Crest", 514, 300, 270, 1, 10, 0, 0, "", kC2dCloth, 10, 44 },
+    { "kf", "pictureframe_large_A.gltf", "Portrait", 6, 460, 90, 1.4f, 70, 0, 0, "", kC2dWood, 8, 30 },
+    { "kf", "pictureframe_large_A.gltf", "Portrait", 514, 460, 270, 1.4f, 70, 0, 0, "", kC2dWood, 8, 30 },
+    { "kf", "rug_rectangle_stripes_A.gltf", "Runner", 260, 470, 90, 1.2f, 0, 0, 0, "", kC2dCloth, 62, 94 },
+    { "kk", "torch_mounted.glb", "Torch", 6, 150, 90, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    { "kk", "torch_mounted.glb", "Torch", 514, 150, 270, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    IX("Exit", 260, 598),
 };
-
 static const InteriorPropDef kInteriorPropsProvisioner[] = {
-    { "provisioner", "Stall_Cart_Empty.gltf", "Merchant Counter", 280, 300, 0, 1, 0, 84, 52, "panel", Color{150,115,70,255}, 84, 52 },
-    { "provisioner", "Shelf_1.obj", "Goods Shelf", 120, 150, 0, 1, 0, 46, 32, "", Color{139,105,72,255}, 46, 32 },
-    { "provisioner", "Shelf_1.obj", "Goods Shelf", 440, 150, 0, 1, 0, 46, 32, "", Color{139,105,72,255}, 46, 32 },
-    { "provisioner", "Crate_Wooden.gltf", "Crate", 120, 410, 0, 1, 0, 36, 36, "", Color{150,115,70,255}, 36, 36 },
-    { "provisioner", "Crate_Wooden.gltf", "Crate", 180, 410, 0, 1, 0, 36, 36, "", Color{150,115,70,255}, 36, 36 },
-    { "provisioner", "Barrel.gltf", "Barrel", 440, 410, 0, 1, 0, 32, 32, "", Color{120,88,58,255}, 32, 32 },
-    { "provisioner", "Barrel_Apples.gltf", "Apple Barrel", 490, 460, 0, 1, 0, 32, 32, "", Color{160,90,60,255}, 32, 32 },
-    { "provisioner", "Bag.gltf", "Grain Sack", 245, 150, 0, 1, 0, 0, 0, "", Color{170,140,100,255}, 24, 24 },
-    { "provisioner", "Bag.gltf", "Grain Sack", 315, 150, 0, 1, 0, 0, 0, "", Color{170,140,100,255}, 24, 24 },
-    { "provisioner", "Pouch_Large.gltf", "Pouch", 355, 225, 0, 1, 0, 0, 0, "", Color{150,120,85,255}, 18, 18 },
-    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+    { "kk", "table_long.glb", "Merchant Counter", 260, 330, 90, 1, 0, 104, 52, "panel", kC2dWood, 104, 52 },
+    { "kk", "plate_food_A.glb", "Bread & Cheese", 226, 322, 0, 1, 26, 0, 0, "", Color{220,180,120,255}, 12, 12 },
+    { "kk", "bottle_A_brown.glb", "Cider", 290, 326, 0, 1, 26, 0, 0, "", Color{150,100,60,255}, 8, 8 },
+    { "kk", "candle_triple.glb", "Candles", 300, 316, 0, 1, 26, 0, 0, "", Color{255,220,150,255}, 10, 10 },
+    { "kk", "shelves.glb", "Goods Shelf", 130, 6, 0, 1, 0, 0, 0, "", kC2dWood, 52, 12 },
+    { "kk", "shelves.glb", "Goods Shelf", 390, 6, 0, 1, 0, 0, 0, "", kC2dWood, 52, 12 },
+    { "kk", "barrel_small_stack.glb", "Barrels", 130, 34, 0, 1, 0, 48, 26, "", kC2dWood, 48, 26 },
+    { "provisioner", "Barrel_Apples.gltf", "Apple Barrel", 56, 190, 0, 1.2f, 0, 28, 28, "", Color{160,90,60,255}, 28, 28 },
+    { "provisioner", "Barrel_Apples.gltf", "Apple Barrel", 56, 232, 0, 1.2f, 0, 28, 28, "", Color{160,90,60,255}, 28, 28 },
+    { "kk", "barrel_large.glb", "Flour Barrel", 470, 190, 0, 1, 0, 47, 47, "", kC2dWood, 47, 47 },
+    { "kk", "keg.glb", "Ale Keg", 470, 270, 270, 1, 0, 52, 47, "", kC2dWood, 52, 47 },
+    { "kk", "crates_stacked.glb", "Crates", 56, 560, 0, 1, 0, 54, 58, "", kC2dWood, 54, 58 },
+    { "kk", "box_stacked.glb", "Boxes", 462, 556, 0, 0.6f, 0, 54, 56, "", kC2dWood, 54, 56 },
+    { "provisioner", "Bag.gltf", "Grain Sack", 140, 566, 0, 1.3f, 0, 0, 0, "", Color{170,140,100,255}, 20, 20 },
+    { "provisioner", "Bag.gltf", "Grain Sack", 172, 580, 40, 1.3f, 0, 0, 0, "", Color{170,140,100,255}, 20, 20 },
+    { "kk", "trunk_large_A.glb", "Trunk", 380, 572, 0, 1, 0, 39, 34, "", kC2dWood, 39, 34 },
+    { "kk", "torch_mounted.glb", "Torch", 6, 420, 90, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    { "kk", "torch_mounted.glb", "Torch", 514, 420, 270, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    IX("Exit", 260, 598),
 };
-
 static const InteriorPropDef kInteriorPropsHouse[] = {
-    { "house", "Bed_Single.obj", "Bed", 140, 200, 90, 1, 0, 92, 46, "panel", Color{170,150,130,255}, 92, 46 },
-    { "house", "Table_RoundSmall.obj", "Table", 330, 350, 0, 1, 0, 46, 46, "", Color{139,105,72,255}, 46, 46 },
-    { "house", "Chair_1.obj", "Chair", 265, 350, 90, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
-    { "house", "Chair_1.obj", "Chair", 395, 350, 270, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
-    { "house", "Shelf_1.obj", "Shelf", 480, 150, 0, 1, 0, 46, 32, "", Color{139,105,72,255}, 46, 32 },
-    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+    { "kf", "bed_double_A.gltf", "Bed", 90, 70, 0, 1, 0, 81, 78, "panel", Color{170,60,60,255}, 81, 78 },
+    { "kf", "table_medium.gltf", "Table", 330, 300, 0, 1, 0, 52, 52, "", kC2dWood, 52, 52 },
+    { "kf", "chair_A_wood.gltf", "Chair", 290, 300, 90, 1, 0, 22, 22, "", kC2dWood, 22, 22 },
+    { "kf", "chair_A_wood.gltf", "Chair", 370, 300, 270, 1, 0, 22, 22, "", kC2dWood, 22, 22 },
+    { "kf", "shelf_B_large_decorated.gltf", "Shelf", 400, 4, 0, 1, 56, 0, 0, "", kC2dWood, 52, 8 },
+    { "kf", "rug_oval_A.gltf", "Rug", 200, 300, 0, 1.2f, 0, 0, 0, "", kC2dCloth, 90, 60 },
+    IX("Exit", 260, 598),
 };
-// Wilderness homestead interior (2026-09-25): the custom-house interior. Same room
-// shape as the old town house, but the bed is gone (no resting mechanic) and a
-// storage chest takes its place. Workshop wing corners are appended dynamically
-// for "wildhouse" just like "house" (see InteriorPropsFor).
+// Wilderness homestead: built from your own layout and decor (see HouseInterior*).
 static const InteriorPropDef kInteriorPropsWildHouse[] = {
-    { "house", "Table_RoundSmall.obj", "Table", 330, 350, 0, 1, 0, 46, 46, "", Color{139,105,72,255}, 46, 46 },
-    { "house", "Chair_1.obj", "Chair", 265, 350, 90, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
-    { "house", "Chair_1.obj", "Chair", 395, 350, 270, 1, 0, 26, 26, "", Color{120,95,65,255}, 26, 26 },
-    { "house", "Shelf_1.obj", "Shelf", 480, 150, 0, 1, 0, 46, 32, "", Color{139,105,72,255}, 46, 32 },
-    { "house", "Shelf_1.obj", "Chest", 140, 200, 0, 1, 0, 46, 32, "chest", Color{120,90,55,255}, 46, 32 },
-    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
+    IX("Exit", 260, 598),
 };
+// Phase 3 - the Fur Trader's lodge.
+static const InteriorPropDef kInteriorPropsFurTrader[] = {
+    { "tailor", "Mannequin.gltf", "Pelt Frame", 260, 150, 0, 1.3f, 0, 22, 22, "panel", Color{200,190,180,255}, 22, 22 },
+    { "kf", "rug_oval_A.gltf", "Bear Pelt", 130, 300, 30, 1.2f, 0, 0, 0, "", Color{140,110,80,255}, 90, 60 },
+    { "kf", "rug_oval_A.gltf", "Wolf Pelt", 400, 330, -20, 1.0f, 0, 0, 0, "", Color{150,140,130,255}, 78, 52 },
+    { "kk", "trunk_large_A.glb", "Fur Trunk", 70, 90, 0, 1, 0, 39, 34, "", kC2dWood, 39, 34 },
+    { "kk", "trunk_large_A.glb", "Fur Trunk", 450, 90, 0, 1, 0, 39, 34, "", kC2dWood, 39, 34 },
+    { "tailor", "ClothBolt.gltf", "Fur Bolt", 420, 22, 0, 1.1f, 0, 0, 0, "", Color{190,180,170,255}, 30, 10 },
+    { "kk", "table_long.glb", "Counter", 260, 420, 90, 1, 0, 104, 52, "", kC2dWood, 104, 52 },
+    { "kk", "candle_triple.glb", "Candles", 290, 412, 0, 1, 26, 0, 0, "", Color{255,220,150,255}, 10, 10 },
+    { "kk", "barrel_small.glb", "Barrel", 60, 560, 0, 1, 0, 26, 26, "", kC2dWood, 26, 26 },
+    { "kk", "banner_thin_green.glb", "Banner", 6, 250, 90, 1, 10, 0, 0, "", Color{60,120,70,255}, 10, 30 },
+    { "kk", "torch_mounted.glb", "Torch", 514, 250, 270, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    IX("Exit", 260, 598),
+};
+// Phase 4 - the Miners' Guild assay office.
+static const InteriorPropDef kInteriorPropsMinersGuild[] = {
+    { "smith", "Workbench.gltf", "Assay Table", 260, 30, 0, 1, 0, 69, 35, "panel", Color{139,110,75,255}, 69, 35 },
+    { "smith", "Anvil.gltf", "Guild Anvil", 140, 220, 20, 1.2f, 0, 44, 20, "", kC2dMetal, 44, 20 },
+    { "kk", "barrel_large.glb", "Ore Barrel", 460, 200, 0, 1, 0, 47, 47, "", kC2dWood, 47, 47 },
+    { "kk", "barrel_large.glb", "Ore Barrel", 470, 270, 0, 1, 0, 47, 47, "", kC2dWood, 47, 47 },
+    { "kk", "crates_stacked.glb", "Crates", 56, 560, 0, 1, 0, 54, 58, "", kC2dWood, 54, 58 },
+    { "kk", "pillar_decorated.glb", "Pillar", 70, 90, 0, 1, 0, 58, 44, "", Color{200,190,170,255}, 58, 44 },
+    { "smith", "WeaponStand.gltf", "Pick Rack", 478, 460, 270, 1, 0, 33, 47, "", kC2dWood, 33, 47 },
+    { "kk", "table_long.glb", "Counter", 260, 400, 90, 1, 0, 104, 52, "", kC2dWood, 104, 52 },
+    { "kk", "coin_stack_small.glb", "Coins", 296, 394, 0, 0.8f, 26, 0, 0, "", Color{220,180,90,255}, 14, 14 },
+    { "kk", "torch_mounted.glb", "Torch", 6, 400, 90, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    { "kk", "torch_mounted.glb", "Torch", 514, 120, 270, 1, 62, 0, 0, "", Color{255,180,80,255}, 12, 12 },
+    IX("Exit", 260, 598),
+};
+#undef IX
 
 struct InteriorRoomDef {
     const char* key;
@@ -17774,60 +18099,72 @@ struct InteriorRoomDef {
     int propCount;
     Color floor;
     Color wall;
+    int floorSurf, wallSurf; // IntSurface textures (2026-09-26)
 };
-
-// Phase 3 - the Fur Trader's interior: pelt frames and fur bolts using the
-// tailor's existing legitimate models with a fur-shop identity (no new art).
-static const InteriorPropDef kInteriorPropsFurTrader[] = {
-    { "tailor", "Mannequin.gltf", "Pelt Frame", 280, 330, 0, 1, 0, 32, 32, "panel", Color{200,190,180,255}, 32, 32 },
-    { "tailor", "ClothBolt.gltf", "Fur Bolts", 150, 200, 0, 1, 0, 54, 36, "", Color{190,180,170,255}, 54, 36 },
-    { "tailor", "ClothBolt.gltf", "Fur Bolts", 430, 200, 90, 1, 0, 54, 36, "", Color{170,160,150,255}, 54, 36 },
-    { "tailor", "Shelf_Small1.obj", "Pelt Shelf", 505, 410, 90, 1, 0, 42, 32, "", Color{139,105,72,255}, 42, 32 },
-    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
-};
-
-// Phase 4 - the Miners' Guild assay office: assay table, guild anvil, ore
-// barrels, and a pick rack, using the smith's existing legitimate models.
-static const InteriorPropDef kInteriorPropsMinersGuild[] = {
-    { "smith", "Workbench.gltf", "Assay Table", 280, 200, 0, 1, 0, 64, 36, "panel", Color{139,110,75,255}, 64, 36 },
-    { "smith", "Anvil.gltf", "Guild Anvil", 150, 360, 20, 1, 0, 46, 30, "", Color{150,150,160,255}, 46, 30 },
-    { "smith", "Barrel.gltf", "Ore Barrel", 450, 300, 0, 1, 0, 32, 32, "", Color{120,88,58,255}, 32, 32 },
-    { "smith", "Barrel.gltf", "Ore Barrel", 510, 380, 0, 1, 0, 32, 32, "", Color{120,88,58,255}, 32, 32 },
-    { "smith", "WeaponStand.gltf", "Pick Rack", 120, 560, 90, 1, 0, 42, 26, "", Color{120,90,60,255}, 42, 26 },
-    { "smith", "Bucket_Metal.gltf", "Slag Bucket", 430, 570, 0, 1, 0, 0, 0, "", Color{150,150,160,255}, 24, 24 },
-    { "", "", "Exit", 280, 700, 0, 1, 0, 0, 0, "exit", Color{101,76,53,255}, 64, 28 },
-};
-
+#define ROOM(key, arr, fl, wl, fs, ws) { key, arr, (int)(sizeof(arr) / sizeof(arr[0])), fl, wl, fs, ws }
 static const InteriorRoomDef kInteriorRooms[] = {
-    { "smith", kInteriorPropsSmith, (int)(sizeof(kInteriorPropsSmith) / sizeof(kInteriorPropsSmith[0])), Color{74,52,38,255}, Color{48,40,44,255} },
-    { "carpenter", kInteriorPropsCarpenter, (int)(sizeof(kInteriorPropsCarpenter) / sizeof(kInteriorPropsCarpenter[0])), Color{150,110,70,255}, Color{110,82,55,255} },
-    { "tailor", kInteriorPropsTailor, (int)(sizeof(kInteriorPropsTailor) / sizeof(kInteriorPropsTailor[0])), Color{168,132,100,255}, Color{120,90,110,255} },
-    { "alchemy", kInteriorPropsAlchemy, (int)(sizeof(kInteriorPropsAlchemy) / sizeof(kInteriorPropsAlchemy[0])), Color{90,78,96,255}, Color{60,52,70,255} },
-    { "townhall", kInteriorPropsTownhall, (int)(sizeof(kInteriorPropsTownhall) / sizeof(kInteriorPropsTownhall[0])), Color{132,100,68,255}, Color{88,70,60,255} },
-    { "stable", kInteriorPropsStable, (int)(sizeof(kInteriorPropsStable) / sizeof(kInteriorPropsStable[0])), Color{128,104,66,255}, Color{96,76,52,255} },
-    { "healer", kInteriorPropsHealer, (int)(sizeof(kInteriorPropsHealer) / sizeof(kInteriorPropsHealer[0])), Color{150,140,120,255}, Color{110,100,88,255} },
-    { "bank", kInteriorPropsBank, (int)(sizeof(kInteriorPropsBank) / sizeof(kInteriorPropsBank[0])), Color{140,128,110,255}, Color{96,88,74,255} },
-    { "provisioner", kInteriorPropsProvisioner, (int)(sizeof(kInteriorPropsProvisioner) / sizeof(kInteriorPropsProvisioner[0])), Color{146,116,80,255}, Color{104,84,60,255} },
-    { "house", kInteriorPropsHouse, (int)(sizeof(kInteriorPropsHouse) / sizeof(kInteriorPropsHouse[0])), Color{158,126,88,255}, Color{116,92,70,255} },
-    { "wildhouse", kInteriorPropsWildHouse, (int)(sizeof(kInteriorPropsWildHouse) / sizeof(kInteriorPropsWildHouse[0])), Color{158,126,88,255}, Color{116,92,70,255} },
-    { "furtrader", kInteriorPropsFurTrader, (int)(sizeof(kInteriorPropsFurTrader) / sizeof(kInteriorPropsFurTrader[0])), Color{150,140,125,255}, Color{95,105,120,255} },
-    { "minersguild", kInteriorPropsMinersGuild, (int)(sizeof(kInteriorPropsMinersGuild) / sizeof(kInteriorPropsMinersGuild[0])), Color{135,120,100,255}, Color{92,84,70,255} }, // Phase 4
+    ROOM("smith", kInteriorPropsSmith, (Color{74,52,38,255}), (Color{48,40,44,255}), kIsFlagstone, kIsStoneWall),
+    ROOM("carpenter", kInteriorPropsCarpenter, (Color{150,110,70,255}), (Color{110,82,55,255}), kIsOak, kIsPlankWall),
+    ROOM("tailor", kInteriorPropsTailor, (Color{168,132,100,255}), (Color{120,90,110,255}), kIsDarkPlank, kIsTimber),
+    ROOM("alchemy", kInteriorPropsAlchemy, (Color{90,78,96,255}), (Color{60,52,70,255}), kIsFlagstone, kIsStoneWall),
+    ROOM("townhall", kInteriorPropsTownhall, (Color{132,100,68,255}), (Color{88,70,60,255}), kIsDarkPlank, kIsTimber),
+    ROOM("stable", kInteriorPropsStable, (Color{128,104,66,255}), (Color{96,76,52,255}), kIsStraw, kIsPlankWall),
+    ROOM("healer", kInteriorPropsHealer, (Color{150,140,120,255}), (Color{110,100,88,255}), kIsTile, kIsWhitewash),
+    ROOM("bank", kInteriorPropsBank, (Color{140,128,110,255}), (Color{96,88,74,255}), kIsMarble, kIsSandstone),
+    ROOM("provisioner", kInteriorPropsProvisioner, (Color{146,116,80,255}), (Color{104,84,60,255}), kIsOak, kIsTimber),
+    ROOM("house", kInteriorPropsHouse, (Color{158,126,88,255}), (Color{116,92,70,255}), kIsOak, kIsTimber),
+    ROOM("wildhouse", kInteriorPropsWildHouse, (Color{158,126,88,255}), (Color{116,92,70,255}), kIsOak, kIsTimber),
+    ROOM("furtrader", kInteriorPropsFurTrader, (Color{150,140,125,255}), (Color{95,105,120,255}), kIsDarkPlank, kIsLogWall),
+    ROOM("minersguild", kInteriorPropsMinersGuild, (Color{135,120,100,255}), (Color{92,84,70,255}), kIsFlagstone, kIsStoneWall), // Phase 4
 };
+#undef ROOM
 
 static const InteriorRoomDef* InteriorRoomFor(const std::string& key) {
     for (auto& r : kInteriorRooms) if (key == r.key) return &r;
     return nullptr;
 }
 
-// Static shop NPCs (2026-09-24 stretch goal): one named keeper per shop
-// interior, same greet-popup treatment as town townsfolk.
-struct InteriorNPCDef { const char* name; const char* greeting; float x, y; };
-static bool InteriorNPCFor(const std::string& key, InteriorNPCDef& out) {
-    if (key == "stable") { out = { "Cobb the Stableboy", "Mind the horses - they spook easy.", 280, 260 }; return true; }
-    if (key == "provisioner") { out = { "Mira the Provisioner", "Fine wares, fair prices - have a look.", 280, 225 }; return true; }
-    if (key == "furtrader") { out = { "Halla Furwife", "Pelts and winter gear, hunter - dress for the deep cold.", 280, 225 }; return true; }
-    if (key == "minersguild") { out = { "Guildmaster Harl", "The Guild pays top coin for ore - bulk, no questions, no haggling.", 280, 225 }; return true; } // Phase 4
-    return false;
+// Shop folk (2026-09-26): every shop has a keeper to greet, and some have a
+// worker at a job - hammering at the anvil, sawing, stirring the cauldron - or
+// a guard, or horses in the stalls. The first entry is the one you greet.
+// act: 0 idle, 1 hammer (pick loop at `at`), 2 saw (axe loop), 3 stir/cast, 4 guard, 5 horse.
+struct InteriorNPCDef { const char* name; const char* greeting; float x, y; float face; int act; float atX, atY; Color shirt; };
+static const float kFaceS = 1.5708f, kFaceN = -1.5708f, kFaceE = 0.0f, kFaceW = 3.14159f;
+static std::vector<InteriorNPCDef> InteriorNPCsFor(const std::string& key) {
+    std::vector<InteriorNPCDef> v;
+    auto add = [&](const char* n, const char* g, float x, float y, float face, int act, float ax, float ay, Color shirt) {
+        v.push_back({ n, g, x, y, face, act, ax, ay, shirt });
+    };
+    if (key == "smith") {
+        add("Brannoc the Smith", "Steel or iron, it all bends to the hammer eventually. What do you need forged?", 300, 350, kFaceS, 0, 0, 0, Color{ 90, 70, 60, 255 });
+        add("Apprentice Tobin", "", 205, 232, kFaceN, 1, 205, 200, Color{ 120, 100, 80, 255 });
+    } else if (key == "carpenter") {
+        add("Wren the Joiner", "Measure twice, cut once - and never trust a warped board.", 280, 372, kFaceS, 0, 0, 0, Color{ 110, 130, 80, 255 });
+        add("Apprentice Dell", "", 238, 282, kFaceN, 2, 238, 250, Color{ 140, 110, 70, 255 });
+    } else if (key == "tailor") {
+        add("Meraude the Tailor", "Fine cloth, finer stitching. Leather and linen both, if you've the coin.", 300, 392, kFaceS, 0, 0, 0, Color{ 150, 60, 90, 255 });
+    } else if (key == "alchemy") {
+        add("Old Vesk the Alchemist", "Careful - that one bites. Potions, poisons, and the odd explosion.", 260, 240, kFaceN, 3, 0, 0, Color{ 70, 90, 70, 255 });
+    } else if (key == "bank") {
+        add("Teller Osric", "Your gold is safe with the Vaultkeep - safer than in your boots, anyway.", 260, 262, kFaceS, 0, 0, 0, Color{ 60, 70, 120, 255 });
+        add("Vault Guard", "", 190, 110, kFaceS, 4, 0, 0, Color{ 110, 110, 120, 255 });
+    } else if (key == "stable") {
+        add("Cobb the Stableboy", "Mind the horses - they spook easy.", 330, 340, kFaceS, 0, 0, 0, Color{ 130, 110, 70, 255 });
+        add("", "", 170, 120, kFaceS, 5, 0, 0, WHITE);
+        add("", "", 290, 118, 1.3f, 5, 0, 0, Color{ 90, 70, 60, 255 });
+    } else if (key == "healer") {
+        add("Sister Halla", "Rest a moment. Bandages, tonics, and a gentle hand - all free to the wounded.", 410, 330, kFaceS, 3, 0, 0, Color{ 220, 220, 210, 255 });
+    } else if (key == "townhall") {
+        add("Clerk Aldous", "The council sits at the next moon. Any petitions, bring them to me.", 380, 200, kFaceS, 0, 0, 0, Color{ 100, 60, 60, 255 });
+    } else if (key == "provisioner") {
+        add("Mira the Provisioner", "Fine wares, fair prices - have a look.", 260, 292, kFaceS, 0, 0, 0, Color{ 160, 120, 70, 255 });
+    } else if (key == "furtrader") {
+        add("Halla Furwife", "Pelts and winter gear, hunter - dress for the deep cold.", 260, 380, kFaceS, 0, 0, 0, Color{ 120, 100, 80, 255 });
+    } else if (key == "minersguild") {
+        add("Guildmaster Harl", "The Guild pays top coin for ore - bulk, no questions, no haggling.", 260, 362, kFaceS, 0, 0, 0, Color{ 100, 90, 80, 255 });
+        add("Assayer Pim", "", 140, 250, kFaceN, 1, 140, 220, Color{ 90, 80, 70, 255 });
+    }
+    return v;
 }
 
 // House workshop corners: one corner per built home module (2026-09-24).
@@ -17904,13 +18241,16 @@ static std::vector<InteriorPropDef> InteriorPropsFor(GameState& s, const std::st
     return out;
 }
 
+static Vector3 g_intCamT = { 1e9f, 0, 0 }; // interior camera's smoothed target (1e9 = snap next frame)
 static void EnterInterior(GameState& s, const std::string& key) {
     if (!InteriorRoomFor(key)) return; // unknown key: stay outside
     s.interiorKey = key;
     s.screen = Screen::Interior;
     s.interiorFromWild = (key == "wildhouse");
     s.interior3DView = s.interiorFromWild ? s.wild3DView : s.town3DView;
-    s.interiorPlayerPos = { kInteriorRoomW * 0.5f, kInteriorRoomH - 140.0f };
+    s.interiorPlayerPos = { 260.0f, 520.0f }; // just inside the shop door (the homestead places you itself)
+    g_intCamT.x = 1e9f;                        // snap the interior camera on the first frame
+    g_t3dDist = 640.0f;
     s.playerFacing = { 0, -1 };
     s.selectedTile.reset();
     s.interiorGreeted = false;
@@ -17948,6 +18288,192 @@ static void ExitInterior(GameState& s) {
     PlaySfx(SfxId::Door);
 }
 
+
+// ---- Interior renderer 2.0 (2026-09-26) -------------------------------------------
+// Rooms are drawn from a small shell description - floor rectangles, wall
+// segments (with the room-facing normal), windows - so shops and the player's
+// own homestead share one renderer. The camera follows you at a closer,
+// steeper angle; walls between the camera and you drop to a knee-high stub
+// (the classic cutaway) so you can always see in. Lamplight is warm; windows
+// follow the real clock (bright panes and a light shaft by day, dark at night);
+// candles, torches and the forge glow.
+struct IntSeg { float ax, az, bx, bz; float nx, nz; int surf; };   // n: into the room (0,0 = partition)
+struct IntWindow { float x, z, nx, nz; };
+static float g_intW = 520.0f, g_intH = 620.0f;       // current room bounds (room coords)
+static std::vector<Rectangle> g_intFloors;            // walkable floor, room coords
+static std::vector<IntSeg> g_intSegs;
+static std::vector<IntWindow> g_intWins;
+static std::vector<Rectangle> g_intBlocks;            // extra collision (homestead walls / outside)
+static int g_intFloorSurf = kIsOak;
+static float g_intYaw = 0.0f;
+static const float kIntWallH = 120.0f, kIntWallT = 12.0f;
+static const float kIntModelScaleKK = 26.0f, kIntModelScaleQ = 34.0f;
+
+// Window positions per shop (z on the west/east walls, -1 = none).
+static void IntShopWindows(const std::string& key, float* wz, float* ez) {
+    *wz = 200.0f; *ez = 200.0f;
+    if (key == "smith") { *wz = 170.0f; *ez = -1.0f; }
+    else if (key == "carpenter") { *wz = 200.0f; *ez = 300.0f; }
+    else if (key == "tailor") { *wz = 130.0f; *ez = 150.0f; }
+    else if (key == "alchemy") { *wz = 250.0f; *ez = -1.0f; }
+    else if (key == "bank") { *wz = 300.0f; *ez = 300.0f; }
+    else if (key == "stable") { *wz = 180.0f; *ez = 180.0f; }
+    else if (key == "healer") { *wz = 250.0f; *ez = 150.0f; }
+    else if (key == "townhall") { *wz = 222.0f; *ez = 222.0f; }
+    else if (key == "provisioner") { *wz = 300.0f; *ez = 340.0f; }
+    else if (key == "furtrader" || key == "minersguild") { *wz = 250.0f; *ez = 320.0f; }
+    else if (key == "house") { *wz = 300.0f; *ez = 300.0f; }
+}
+// The standard shop shell: a 520x620 hall, door gap in the middle of the south wall.
+static void IntBuildShopShell(const InteriorRoomDef& room) {
+    g_intW = 520.0f; g_intH = 620.0f;
+    g_intFloors.assign(1, Rectangle{ 0, 0, g_intW, g_intH });
+    g_intSegs.clear(); g_intWins.clear(); g_intBlocks.clear();
+    g_intFloorSurf = room.floorSurf;
+    float h = kIntWallT * 0.5f, W = g_intW, H = g_intH, gap = 34.0f;
+    int ws = room.wallSurf;
+    g_intSegs.push_back({ -kIntWallT, -h, W + kIntWallT, -h, 0, 1, ws });   // north
+    g_intSegs.push_back({ -h, 0, -h, H, 1, 0, ws });                         // west
+    g_intSegs.push_back({ W + h, 0, W + h, H, -1, 0, ws });                  // east
+    g_intSegs.push_back({ -kIntWallT, H + h, W / 2 - gap, H + h, 0, -1, ws }); // south, left of the door
+    g_intSegs.push_back({ W / 2 + gap, H + h, W + kIntWallT, H + h, 0, -1, ws });
+    float wz, ez;
+    IntShopWindows(room.key, &wz, &ez);
+    if (wz > 0) g_intWins.push_back({ 0.0f, wz, 1, 0 });
+    if (ez > 0) g_intWins.push_back({ W, ez, -1, 0 });
+}
+// Warm lamplight for the lit shader (models, people); the next outdoor update re-pushes the sun.
+static void IntPushLamplight(float night) {
+    Town3DEnsureLit();
+    if (!g_t3dLit.ready) return;
+    float k = 0.78f - 0.16f * night;
+    g_t3dLightNow.sun = { 1.0f * k, 0.86f * k, 0.68f * k };
+    float a = 1.0f - 0.22f * night;
+    g_t3dLightNow.amb[0] = 0.50f * a; g_t3dLightNow.amb[1] = 0.43f * a; g_t3dLightNow.amb[2] = 0.37f * a; g_t3dLightNow.amb[3] = 1.0f;
+    g_t3dSkyHorizon = Color{ 30, 24, 20, 255 };
+    T3DPushLight(g_t3dLit.shader);
+    float fr[2] = { 5000.0f, 9000.0f };
+    SetShaderValue(g_t3dLit.shader, g_t3dLit.fogRangeLoc, fr, SHADER_UNIFORM_VEC2);
+    g_t3dLightDirty = true;
+}
+// Where a prop's flame sits (model height above its base, forward offset) - 0 = no flame.
+static bool IntFlameFor(const InteriorPropDef& p, float* h, float* fwd, float* r, Color* c) {
+    std::string m = p.model ? p.model : "";
+    *fwd = 0.0f; *c = Color{ 255, 170, 80, 255 };
+    if (m == "torch_mounted.glb") { *h = 18.0f; *fwd = 8.0f; *r = 44.0f; return true; }
+    if (m == "candle_triple.glb") { *h = 22.0f; *r = 26.0f; return true; }
+    if (m == "candle_lit.glb" || m == "candle_thin_lit.glb") { *h = 26.0f; *r = 20.0f; return true; }
+    if (m == "shelf_small_candles.glb") { *h = 17.0f; *r = 24.0f; return true; }
+    if (m == "Torch_Metal.gltf") { *h = 12.0f; *fwd = 6.0f; *r = 40.0f; return true; }
+    if (m == "Forge.gltf") { *h = 30.0f; *fwd = 18.0f; *r = 90.0f; *c = Color{ 255, 120, 50, 255 }; return true; }
+    if (m == "Cauldron.gltf" && p.dir && std::string(p.dir) == "alchemy") { *h = 30.0f; *r = 60.0f; *c = Color{ 110, 255, 140, 255 }; return true; }
+    return false;
+}
+static float IntModelScale(const InteriorPropDef& p) {
+    std::string d = p.dir ? p.dir : "";
+    return (d == "kk" || d == "kf") ? kIntModelScaleKK : kIntModelScaleQ;
+}
+
+static void DrawInteriorShell3D(Vector3 camPos, Vector3 camT, float night, float day) {
+    float hw = g_intW * 0.5f, hh = g_intH * 0.5f;
+    Vector2 v = { camPos.x - camT.x, camPos.z - camT.z };
+    float vl = sqrtf(v.x * v.x + v.y * v.y); if (vl > 1e-3f) { v.x /= vl; v.y /= vl; }
+    Color floorT = SurfMul(Color{ 255, 238, 214, 255 }, 0.92f - 0.2f * night);
+    Color wallT = SurfMul(Color{ 250, 234, 212, 255 }, 0.9f - 0.2f * night);
+    Color capT = SurfMul(Color{ 70, 48, 30, 255 }, 1.0f - 0.2f * night);
+    rlDisableBackfaceCulling();
+    // floor, then a soft darkening along the wall bases (cheap ambient occlusion)
+    float tile = g_intFloorSurf == kIsTile ? 64.0f : g_intFloorSurf == kIsFlagstone ? 96.0f : g_intFloorSurf == kIsMarble ? 150.0f
+               : g_intFloorSurf == kIsStraw ? 90.0f : 110.0f;
+    for (const Rectangle& f : g_intFloors)
+        SurfFloor(g_intFloorSurf, f.x - hw, f.y - hh, f.x + f.width - hw, f.y + f.height - hh, 0.0f, tile, floorT);
+    rlBegin(RL_QUADS);
+    for (const IntSeg& sg : g_intSegs) {
+        if (sg.nx == 0 && sg.nz == 0) continue;
+        float ax = sg.ax - hw + sg.nx * kIntWallT * 0.5f, az = sg.az - hh + sg.nz * kIntWallT * 0.5f;
+        float bx = sg.bx - hw + sg.nx * kIntWallT * 0.5f, bz = sg.bz - hh + sg.nz * kIntWallT * 0.5f;
+        float d = 26.0f;
+        rlColor4ub(0, 0, 0, 90); rlVertex3f(ax, 0.3f, az); rlVertex3f(bx, 0.3f, bz);
+        rlColor4ub(0, 0, 0, 0); rlVertex3f(bx + sg.nx * d, 0.3f, bz + sg.nz * d); rlVertex3f(ax + sg.nx * d, 0.3f, az + sg.nz * d);
+    }
+    rlEnd();
+    // walls: full height, or a knee-high stub when it stands between the camera and you
+    for (const IntSeg& sg : g_intSegs) {
+        float mx = (sg.ax + sg.bx) * 0.5f - hw, mz = (sg.az + sg.bz) * 0.5f - hh;
+        bool cut;
+        if (sg.nx != 0 || sg.nz != 0) cut = (sg.nx * v.x + sg.nz * v.y) < -0.35f;
+        else {
+            float dx = sg.bx - sg.ax, dz = sg.bz - sg.az, dl = sqrtf(dx * dx + dz * dz) + 1e-3f;
+            cut = fabsf((dx * v.x + dz * v.y) / dl) < 0.75f && ((mx - camT.x) * v.x + (mz - camT.z) * v.y) > 28.0f;
+        }
+        float top = cut ? 16.0f : kIntWallH;
+        SurfWall(sg.surf, sg.ax - hw, sg.az - hh, sg.bx - hw, sg.bz - hh, kIntWallT, 0.0f, top, kIntWallH, wallT, capT);
+    }
+    // windows: frame + panes on the inner face, and a shaft of daylight on the floor
+    for (const IntWindow& w : g_intWins) {
+        float x = w.x - hw + w.nx * 0.8f, z = w.z - hh + w.nz * 0.8f;
+        bool alongZ = w.nx != 0;
+        auto P = [&](float along, float y) -> Vector3 { return alongZ ? Vector3{ x, y, z + along } : Vector3{ x + along, y, z }; };
+        // skip windows on cut walls
+        if ((w.nx * v.x + w.nz * v.y) < -0.35f) continue;
+        Color frame = SurfMul(Color{ 64, 42, 26, 255 }, 1.0f - 0.2f * night);
+        Color pane = ColorLerp(Color{ 30, 40, 70, 255 }, Color{ 190, 220, 245, 255 }, day);
+        rlBegin(RL_QUADS);
+        rlColor4ub(frame.r, frame.g, frame.b, 255);
+        Vector3 a = P(-34, 40), b = P(34, 40), c = P(34, 106), d = P(-34, 106);
+        rlVertex3f(a.x, a.y, a.z); rlVertex3f(b.x, b.y, b.z); rlVertex3f(c.x, c.y, c.z); rlVertex3f(d.x, d.y, d.z);
+        rlColor4ub(pane.r, pane.g, pane.b, 255);
+        for (int i = 0; i < 2; i++)
+            for (int j = 0; j < 2; j++) {
+                float a0 = -29 + i * 30, y0 = 45 + j * 30;
+                Vector3 p0 = P(a0, y0), p1 = P(a0 + 27, y0), p2 = P(a0 + 27, y0 + 27), p3 = P(a0, y0 + 27);
+                Vector3 off = { w.nx * 0.4f, 0, w.nz * 0.4f };
+                rlVertex3f(p0.x + off.x, p0.y, p0.z + off.z); rlVertex3f(p1.x + off.x, p1.y, p1.z + off.z);
+                rlVertex3f(p2.x + off.x, p2.y, p2.z + off.z); rlVertex3f(p3.x + off.x, p3.y, p3.z + off.z);
+            }
+        rlEnd();
+        if (day > 0.05f) { // light shaft falling into the room
+            BeginBlendMode(BLEND_ADDITIVE);
+            rlDisableDepthMask();
+            unsigned char al = (unsigned char)(70 * day);
+            Vector3 f0 = P(-32, 0.6f), f1 = P(32, 0.6f);
+            Vector3 f2 = { f1.x + w.nx * 110, 0.6f, f1.z + w.nz * 110 }, f3 = { f0.x + w.nx * 110, 0.6f, f0.z + w.nz * 110 };
+            if (alongZ) { f2.z += 30; f3.z += 30; } else { f2.x += 30; f3.x += 30; }
+            rlBegin(RL_QUADS);
+            rlColor4ub(255, 240, 200, al); rlVertex3f(f0.x, f0.y, f0.z); rlVertex3f(f1.x, f1.y, f1.z);
+            rlColor4ub(255, 240, 200, 0); rlVertex3f(f2.x, f2.y, f2.z); rlVertex3f(f3.x, f3.y, f3.z);
+            rlEnd();
+            rlEnableDepthMask();
+            EndBlendMode();
+        }
+    }
+    rlEnableBackfaceCulling();
+}
+// Flames: an additive glow billboard with a gentle flicker, and a pool of light below.
+static void DrawInteriorGlows(const std::vector<InteriorPropDef>& props, Camera3D cam, float night) {
+    BeginBlendMode(BLEND_ADDITIVE);
+    rlDisableDepthMask();
+    float hw = g_intW * 0.5f, hh = g_intH * 0.5f;
+    float t = (float)GetTime();
+    for (size_t i = 0; i < props.size(); i++) {
+        const InteriorPropDef& p = props[i];
+        float h, fwd, r; Color c;
+        if (!IntFlameFor(p, &h, &fwd, &r, &c)) continue;
+        float s = IntModelScale(p) / kIntModelScaleKK * p.sc;
+        float yaw = p.rotDeg * DEG2RAD;
+        float x = p.x - hw + sinf(yaw) * fwd, z = p.y - hh + cosf(yaw) * fwd;
+        float y = p.yOff + h * s;
+        float fl = 0.85f + 0.15f * sinf(t * 9.0f + i * 1.7f) * sinf(t * 5.3f + i);
+        float k = (0.75f + 0.35f * night) * fl;
+        Color gc = { c.r, c.g, c.b, (unsigned char)(170 * k) };
+        DrawBillboard(cam, GlowTex(), { x, y, z }, r * 0.55f, gc);
+        DrawBillboard(cam, GlowTex(), { x, y, z }, r * 0.18f, Color{ 255, 250, 220, (unsigned char)(230 * fl) });
+        GlowPool(x, z, 0.8f, r * 1.8f, Color{ c.r, c.g, c.b, (unsigned char)(70 * k) });
+    }
+    rlEnableDepthMask();
+    EndBlendMode();
+}
+
 // Cached interior models - plain LoadModel, no town shadow shader: interiors
 // render in a fixed indoor light like the dungeons' procedural props.
 static std::map<std::string, Model> g_interiorModels;
@@ -17957,6 +18483,7 @@ static Model Interior3DModel(const std::string& dir, const std::string& model) {
     auto it = g_interiorModels.find(key);
     if (it != g_interiorModels.end()) return it->second;
     Model m = LoadModel(("assets/interiors/" + key).c_str());
+    if (m.meshCount > 0) Town3DApplyLitShader(m); // shaded by the room's lamplight (2026-09-26)
     g_interiorModels[key] = m;
     return m;
 }
@@ -17979,8 +18506,8 @@ static Vector2 InteriorCameraTopLeft(Vector2 playerPos) {
     // The room (560x760) is nearly the viewport size (540x790): center it, with
     // a thin dark surround where the room is smaller than the viewport.
     Vector2 tl = { playerPos.x - kViewport.width / 2.0f, playerPos.y - kViewport.height / 2.0f };
-    float maxX = kInteriorRoomW - kViewport.width;
-    float maxY = kInteriorRoomH - kViewport.height;
+    float maxX = g_intW - kViewport.width;
+    float maxY = g_intH - kViewport.height;
     tl.x = (maxX <= 0.0f) ? maxX * 0.5f : std::clamp(tl.x, 0.0f, maxX);
     tl.y = (maxY <= 0.0f) ? maxY * 0.5f : std::clamp(tl.y, 0.0f, maxY);
     return tl;
@@ -17998,12 +18525,12 @@ static void DrawInterior2D(GameState& s, int screenW, int screenH,
     DrawRectangle(kViewport.x, kViewport.y, kViewport.width, kViewport.height, Color{ 22, 18, 16, 255 });
     Vector2 ro = WorldToScreen({ 0, 0 }, cam); // room origin on screen
     // Floor + plank seams.
-    DrawRectangle((int)ro.x, (int)ro.y, (int)kInteriorRoomW, (int)kInteriorRoomH, room.floor);
-    for (float y = 40; y < kInteriorRoomH; y += 40)
-        DrawLine((int)ro.x, (int)(ro.y + y), (int)(ro.x + kInteriorRoomW), (int)(ro.y + y), Fade(BLACK, 0.12f));
+    DrawRectangle((int)ro.x, (int)ro.y, (int)g_intW, (int)g_intH, room.floor);
+    for (float y = 40; y < g_intH; y += 40)
+        DrawLine((int)ro.x, (int)(ro.y + y), (int)(ro.x + g_intW), (int)(ro.y + y), Fade(BLACK, 0.12f));
     // Walls.
-    DrawRectangleLinesEx({ ro.x, ro.y, kInteriorRoomW, kInteriorRoomH }, 12, room.wall);
-    DrawRectangleLinesEx({ ro.x - 6, ro.y - 6, kInteriorRoomW + 12, kInteriorRoomH + 12 }, 4, Fade(BLACK, 0.35f));
+    DrawRectangleLinesEx({ ro.x, ro.y, g_intW, g_intH }, 12, room.wall);
+    DrawRectangleLinesEx({ ro.x - 6, ro.y - 6, g_intW + 12, g_intH + 12 }, 4, Fade(BLACK, 0.35f));
     // Props.
     for (auto& p : props) {
         Vector2 sp = WorldToScreen({ p.x, p.y }, cam);
@@ -18065,7 +18592,7 @@ static bool Interior3DPointInUI(int screenW, int screenH) {
 // z3 = p.y - 380, base height p.yOff.
 static void Interior3DDrawCoastal(const InteriorPropDef& p) {
     if (!p.label || std::string(p.label) == "Exit") return;
-    float x3 = p.x - kInteriorRoomW * 0.5f, z3 = p.y - kInteriorRoomH * 0.5f, y0 = p.yOff;
+    float x3 = p.x - g_intW * 0.5f, z3 = p.y - g_intH * 0.5f, y0 = p.yOff;
     std::string L = p.label ? p.label : "";
     Color ropeC = { 178, 150, 105, 255 }, wood = { 110, 82, 55, 255 };
     if (L == "Rope Coil") {
@@ -18120,7 +18647,7 @@ static void Interior3DDrawCoastal(const InteriorPropDef& p) {
 // Phase 3 - model-less frost props InteriorPropsFor appends in town 3.
 static void Interior3DDrawFrost(const InteriorPropDef& p) {
     if (!p.label || std::string(p.label) == "Exit") return;
-    float x3 = p.x - kInteriorRoomW * 0.5f, z3 = p.y - kInteriorRoomH * 0.5f, y0 = p.yOff;
+    float x3 = p.x - g_intW * 0.5f, z3 = p.y - g_intH * 0.5f, y0 = p.yOff;
     std::string L = p.label ? p.label : "";
     if (L == "Ice Lantern") {
         DrawCylinder({ x3, y0 + 22, z3 }, 3, 3, 44, 8, Color{ 70, 75, 85, 255 }); // post
@@ -18142,21 +18669,39 @@ static void Interior3DDrawProp(const InteriorPropDef& p) {
     }
     Model m = Interior3DModel(p.dir, p.model);
     if (m.meshCount <= 0) return; // missing file: the 2D shape still shows the prop
-    float s = kT3DModScale * p.sc;
-    DrawModelEx(m, { p.x - kInteriorRoomW * 0.5f, p.yOff, p.y - kInteriorRoomH * 0.5f },
-                { 0, 1, 0 }, p.rotDeg, { s, s, s }, WHITE);
+    float sc = IntModelScale(p) * p.sc;
+    DrawModelEx(m, { p.x - g_intW * 0.5f, p.yOff, p.y - g_intH * 0.5f }, { 0, 1, 0 }, p.rotDeg, { sc, sc, sc }, WHITE);
 }
 
-// --- 3D interior render: the room as a walled box, props as CC0/procedural
-// models at kT3DModScale (22 world units per meter), player + shop NPC as
-// kit humanoids. Renders unlit like the dungeons' procedural props. ---
+// Shop folk in 3D: townsfolk bodies at their jobs, horses in the stalls.
+static void DrawInteriorNPCs3D(const std::vector<InteriorNPCDef>& npcs) {
+    float hw = g_intW * 0.5f, hh = g_intH * 0.5f, t = (float)GetTime();
+    for (size_t i = 0; i < npcs.size(); i++) {
+        const InteriorNPCDef& n = npcs[i];
+        float x = n.x - hw, z = n.y - hh;
+        if (n.act == 5) {
+            AnimalPose ap; ap.time = t + i * 1.3f; ap.track = 60 + (int)i;
+            if (!ColorIsEqual(n.shirt, WHITE)) ap.recolor = Color{ n.shirt.r, n.shirt.g, n.shirt.b, 130 };
+            DrawAnimal(kAnHorse, x, z, n.face, 1.0f, WHITE, ap, false);
+            continue;
+        }
+        float sc = 1.0f;
+        HumanOutfit o = HumanOutfitForTownsfolk(n.name, n.shirt, &sc);
+        HumanPose hp;
+        if (n.act == 1 || n.act == 2) { hp.gather = n.act == 1 ? 2 : 1; hp.gatherAt = { n.atX - hw, n.atY - hh }; hp.gatherAtValid = true; }
+        else if (n.act == 3) { float ph = fmodf(t + i * 0.7f, 3.4f); hp.castT = ph < 0.7f ? ph / 0.7f : -1.0f; }
+        else if (n.act == 4) { HumanGive(o, kHwHalberd, kHsPolearm); o.helm = kHhPlate; o.helmCol = Color{ 190, 194, 202, 255 }; hp.engaged = true; }
+        DrawHuman(170 + (int)i, x, z, n.face, sc, WHITE, o, hp, false);
+    }
+}
+
 static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
                                 const std::vector<InteriorPropDef>& props,
-                                const InteriorNPCDef* npc, int screenW, int screenH, bool uiOpen) {
+                                const std::vector<InteriorNPCDef>& npcs, int screenW, int screenH, bool uiOpen) {
+    (void)room;
     if (IsKeyPressed(KEY_C)) g_t3dFollowMode = !g_t3dFollowMode;
     Town3DPinchZoom(kInt3DDistMin, kInt3DDistMax);
-    // Drag orbits (follow mode keeps the Diablo angle); no picking indoors.
-    // Drags that start on an open panel/pop-up don't orbit.
+    // Drag orbits (follow mode keeps the fixed view from the door side).
     Vector2 mouse = GetMousePosition();
     if (!uiOpen && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, kViewport) &&
         !Interior3DPointInUI(screenW, screenH) && !ExploreMenuPointInUI(mouse, s)) {
@@ -18166,53 +18711,39 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
     if (g_t3dOrbiting && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
         Vector2 d = { mouse.x - g_t3dLastMouse.x, mouse.y - g_t3dLastMouse.y };
         g_t3dLastMouse = mouse;
-        if (!g_t3dFollowMode) {
-            g_t3dYaw -= d.x * 0.006f;
-            g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
-        }
+        if (!g_t3dFollowMode) g_intYaw -= d.x * 0.006f;
     }
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
+    float wheel = GetMouseWheelMove();
+    if (wheel != 0.0f && CheckCollisionPointRec(mouse, kViewport)) g_t3dDist *= (1.0f - wheel * 0.1f);
+    g_t3dDist = std::clamp(g_t3dDist, kInt3DDistMin, kInt3DDistMax);
 
-    float hw = kInteriorRoomW * 0.5f, hh = kInteriorRoomH * 0.5f;
-    // Room geometry is drawn centered on the origin (x3 = p.x - hw), so the
-    // camera must target the centered player position - raw room coords put
-    // the camera far outside the room (dark void). Clamp inside the room.
-    Vector2 intCamPos = { s.interiorPlayerPos.x - hw, s.interiorPlayerPos.y - hh };
-    intCamPos.x = std::clamp(intCamPos.x, -hw + 80.0f, hw - 80.0f);
-    intCamPos.y = std::clamp(intCamPos.y, -hh + 80.0f, hh - 80.0f);
-    Town3DCam c = Town3DGetCamFor(intCamPos, screenW, screenH, kInteriorCamId,
-                                 kInt3DDistMin, kInt3DDistMax, kT3DFollowPitch);
+    // --- camera: follows you, clamped so it frames the room ---
+    float hw = g_intW * 0.5f, hh = g_intH * 0.5f;
+    // Look a little ahead of you (into the room) and keep the frame inside the walls.
+    Vector3 want = { s.interiorPlayerPos.x - hw, 20.0f, s.interiorPlayerPos.y - hh - 70.0f };
+    want.x = hw > 150.0f ? std::clamp(want.x, -hw + 150.0f, hw - 150.0f) : 0.0f;
+    want.z = hh > 160.0f ? std::clamp(want.z, -hh + 150.0f, hh - 160.0f) : 0.0f;
+    if (g_intCamT.x > 1e8f) g_intCamT = want;
+    float k = std::min(1.0f, GetFrameTime() * 6.0f);
+    g_intCamT.x += (want.x - g_intCamT.x) * k; g_intCamT.z += (want.z - g_intCamT.z) * k; g_intCamT.y = want.y;
+    float yaw = g_t3dFollowMode ? 0.0f : g_intYaw, pitch = 0.86f, dist = g_t3dDist;
     Camera3D cam3d = { 0 };
-    cam3d.position = c.pos; cam3d.target = c.target; cam3d.up = c.up;
-    cam3d.fovy = c.fovY; cam3d.projection = CAMERA_PERSPECTIVE;
-    T3DUpdateDayNight(0.0f, true); // indoors / underground: always the noon palette
+    cam3d.target = g_intCamT;
+    cam3d.position = { g_intCamT.x + sinf(yaw) * cosf(pitch) * dist, g_intCamT.y + sinf(pitch) * dist,
+                       g_intCamT.z + cosf(yaw) * cosf(pitch) * dist };
+    cam3d.up = { 0, 1, 0 }; cam3d.fovy = 46.0f; cam3d.projection = CAMERA_PERSPECTIVE;
+
+    T3DUpdateDayNight(0.0f, false); // the real clock, for the windows
+    float night = g_t3dNight, day = std::clamp(1.0f - night * 1.2f, 0.0f, 1.0f);
+    IntPushLamplight(night);
+    if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &cam3d.position, SHADER_UNIFORM_VEC3);
+    T3CKitUseSunShader();
+    DrawRectangle((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height, Color{ 18, 14, 12, 255 });
     BeginMode3D(cam3d);
-
-    float wallH = 70.0f, wallT = 12.0f;
-    DrawCube({ 0, -2, 0 }, kInteriorRoomW, 4, kInteriorRoomH, room.floor); // floor
-    DrawCube({ 0, wallH / 2, -hh - wallT / 2 }, kInteriorRoomW + wallT * 2, wallH, wallT, room.wall); // north
-    float doorGap = 84.0f; // south wall keeps a door opening at the exit prop
-    float segW = (kInteriorRoomW - doorGap) * 0.5f;
-    DrawCube({ -(doorGap / 2 + segW / 2), wallH / 2, hh + wallT / 2 }, segW, wallH, wallT, room.wall);
-    DrawCube({ (doorGap / 2 + segW / 2), wallH / 2, hh + wallT / 2 }, segW, wallH, wallT, room.wall);
-    DrawCube({ 0, wallH - 12, hh + wallT / 2 }, doorGap, 24, wallT, room.wall); // lintel
-    DrawCube({ 0, 34, hh + wallT / 2 }, doorGap - 12, 68, 6, Color{ 60, 44, 30, 255 }); // door
-    DrawCube({ -hw - wallT / 2, wallH / 2, 0 }, wallT, wallH, kInteriorRoomH, room.wall); // west
-    DrawCube({ hw + wallT / 2, wallH / 2, 0 }, wallT, wallH, kInteriorRoomH, room.wall);  // east
-
+    DrawInteriorShell3D(cam3d.position, g_intCamT, night, day);
     for (auto& p : props) Interior3DDrawProp(p);
-
-    if (npc) { // static shopkeeper
-        T3CAnim na = T3CMakeAnim(kT3CTrackNPCInterior, npc->x, npc->y, true);
-        HumanOutfit ko = HumanOutfitPlain(Color{ 226, 186, 150, 255 }, Color{ 150, 110, 80, 255 }, Color{ 90, 70, 55, 255 },
-                                          Color{ 70, 50, 34, 255 }, Color{ 70, 48, 32, 255 });
-        ko.region[kHrSkirt] = Color{ 232, 226, 210, 255 }; // shop apron
-        HumanPose kp; kp.move = na.move;
-        if (!DrawHuman(kT3CTrackNPCInterior, npc->x - hw, npc->y - hh, 0.0f, 1.0f, WHITE, ko, kp, false))
-        T3CDrawHumanoid(g_t3cHumans[0].parts, npc->x - hw, npc->y - hh, 0.0f, 0.95f,
-                        Color{ 150, 110, 80, 255 }, Color{ 90, 70, 55, 255 },
-                        Color{ 215, 175, 135, 255 }, na, false);
-    }
+    DrawInteriorNPCs3D(npcs);
     { // player
         float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
         T3CAnim pa = T3CMakeAnim(kT3CTrackPlayerInterior, s.interiorPlayerPos.x, s.interiorPlayerPos.y, true);
@@ -18222,6 +18753,7 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
                         pyaw, 1.0f, Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
                         Color{ 240, 210, 180, 255 }, pa, false);
     }
+    DrawInteriorGlows(props, cam3d, night);
     EndMode3D();
 }
 
@@ -18284,6 +18816,9 @@ static void DrawHouseChestPanel(GameState& s, int screenW, int screenH) {
         DrawUIText(("+" + std::to_string(s.houseChest.size() - rows) + " more").c_str(), (int)x + 262, (int)(listY + rows * rowH), 12, kColorText);
 }
 
+static void HouseInteriorBuild(GameState& s) { // (replaced by the homestead builder below)
+    IntBuildShopShell(*InteriorRoomFor("house")); (void)s;
+}
 static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
     const InteriorRoomDef* room = InteriorRoomFor(s.interiorKey);
     if (!room) { // safety net
@@ -18292,9 +18827,11 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
         s.interiorFromWild = false;
         return;
     }
+    if (s.interiorKey == "wildhouse") HouseInteriorBuild(s); else IntBuildShopShell(*room);
     std::vector<InteriorPropDef> props = InteriorPropsFor(s, s.interiorKey);
-    InteriorNPCDef npcDef; const InteriorNPCDef* npc = nullptr;
-    if (InteriorNPCFor(s.interiorKey, npcDef)) npc = &npcDef;
+    std::vector<InteriorNPCDef> npcs = InteriorNPCsFor(s.interiorKey);
+    const InteriorNPCDef* npc = nullptr; // the one you greet
+    for (const auto& n : npcs) if (n.greeting && *n.greeting) { npc = &n; break; }
 
     bool uiOpen = s.selectedTile.has_value() || s.interiorGreeted;
     if (IsKeyPressed(KEY_X) && uiOpen) {
@@ -18324,15 +18861,16 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
         UpdatePlayerMovement(s.interiorPlayerPos, s.playerFacing, GameDt(), 100000.0f);
         for (auto& p : props) {
             if (p.bw <= 0 || p.bh <= 0) continue;
-            ResolveCircleRectCollision(s.interiorPlayerPos, kPlayerRadius,
-                                       { p.x - p.bw / 2, p.y - p.bh / 2, p.bw, p.bh });
+            ResolveCircleRectCollision(s.interiorPlayerPos, kPlayerRadius, { p.x - p.bw / 2, p.y - p.bh / 2, p.bw, p.bh });
         }
-        s.interiorPlayerPos.x = std::clamp(s.interiorPlayerPos.x, kInteriorWallMargin, kInteriorRoomW - kInteriorWallMargin);
-        s.interiorPlayerPos.y = std::clamp(s.interiorPlayerPos.y, kInteriorWallMargin, kInteriorRoomH - kInteriorWallMargin);
+        for (const Rectangle& r : g_intBlocks) ResolveCircleRectCollision(s.interiorPlayerPos, kPlayerRadius, r);
+        for (const auto& n : npcs) ResolveCircleCollision(s.interiorPlayerPos, kPlayerRadius, { n.x, n.y }, n.act == 5 ? 30.0f : 14.0f);
+        s.interiorPlayerPos.x = std::clamp(s.interiorPlayerPos.x, kPlayerRadius, g_intW - kPlayerRadius);
+        s.interiorPlayerPos.y = std::clamp(s.interiorPlayerPos.y, kPlayerRadius, g_intH - kPlayerRadius);
         if (inRange && IsKeyPressed(KEY_E) && InteriorDoInteract(s, nearest, npcNearest)) return;
     }
 
-    if (s.interior3DView) DrawInterior3DWorld(s, *room, props, npc, screenW, screenH, uiOpen);
+    if (s.interior3DView) DrawInterior3DWorld(s, *room, props, npcs, screenW, screenH, uiOpen);
     else DrawInterior2D(s, screenW, screenH, *room, props, prompt, nearest, npcNearest, npc);
 
     DrawVirtualJoystick();
