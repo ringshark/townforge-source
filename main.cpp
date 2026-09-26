@@ -178,6 +178,9 @@ static void CombatFeelTick() { // once per frame, before any update
     g_gameClock += GameDt();
 }
 static void CombatHitStop(float sec) { g_hitStopT = fmaxf(g_hitStopT, sec); }
+// Screen fade-in after walking between areas (2026-09-26), drawn last each frame.
+static const float kScreenFadeTime = 0.45f;
+static float g_screenFadeT = 0.0f;
 static void CombatShake(float amp) { g_shakeAmp = fminf(fmaxf(g_shakeAmp, amp), 14.0f); }
 
 // ---------------------------------------------------------------------
@@ -10222,7 +10225,15 @@ static unsigned char WildTerrainAt(float x, float z) {
     if (gx < 0 || gz < 0 || gx >= kWTN || gz >= kWTN) return 0;
     return g_wt[WTIdx(gx, gz)];
 }
-static bool WildBlocked(Vector2 p) { return (WildTerrainAt(p.x, p.y) & (kWTWater | kWTRidge)) != 0; }
+static bool WildBlockedPt(Vector2 p) { return (WildTerrainAt(p.x, p.y) & (kWTWater | kWTRidge)) != 0; }
+// Movers have a small footprint (their body is drawn around their feet), so a
+// point is blocked if water/ridge is within kWildFootR of it in any direction -
+// you stop on the bank instead of visibly standing in the water.
+static const float kWildFootR = 14.0f;
+static bool WildBlocked(Vector2 p) {
+    return WildBlockedPt(p) || WildBlockedPt({ p.x + kWildFootR, p.y }) || WildBlockedPt({ p.x - kWildFootR, p.y }) ||
+           WildBlockedPt({ p.x, p.y + kWildFootR }) || WildBlockedPt({ p.x, p.y - kWildFootR });
+}
 // Keep a mover out of water/ridges: slide along the edge on one axis if the
 // other axis is clear, else stay put.
 static void WildTerrainResolve(Vector2& pos, Vector2 prev) {
@@ -10288,10 +10299,10 @@ static void WildDraw2DTerrainOverlay(Vector2 camera) {
                 float w = WildFieldAt(wf, wx, wz), r = WildFieldAt(rf, wx, wz);
                 Color c = BLANK;
                 if (r > 0.3f) c = Color{ 112, 104, 94, (unsigned char)std::min(255.0f, (r - 0.3f) * 900.0f) };
-                if (w > 0.1f && w <= 0.42f) c = Color{ 206, 190, 146, (unsigned char)std::min(220.0f, (w - 0.1f) * 900.0f) };
-                if (w > 0.42f && w <= 0.5f) c = Color{ 220, 228, 214, 255 };
-                if (w > 0.5f) {
-                    float d = std::clamp((w - 0.5f) / 0.45f, 0.0f, 1.0f);
+                if (w > 0.12f && w <= 0.54f) c = Color{ 206, 190, 146, (unsigned char)std::min(220.0f, (w - 0.12f) * 900.0f) };
+                if (w > 0.54f && w <= 0.62f) c = Color{ 220, 228, 214, 255 };
+                if (w > 0.62f) {
+                    float d = std::clamp((w - 0.62f) / 0.35f, 0.0f, 1.0f);
                     c = Color{ (unsigned char)(78 - 44 * d), (unsigned char)(142 - 56 * d), (unsigned char)(150 - 34 * d), 255 };
                 }
                 px[y * N + x] = c;
@@ -10715,7 +10726,9 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     // Ground: procedural grass texture with baked plaza + dirt roads, plus a
     // large flat outer field so the horizon never shows a hard edge.
     DrawModel(g_t3dGround.model, { 500, 0, 500 }, 1.0f, WHITE);
-    Color outerCol = (s.selectedTown == 0) ? Color{ 96, 138, 76, 255 } : Color{ 90, 124, 82, 255 };
+    Color outerCol = (s.selectedTown == 0) ? Color{ 96, 138, 76, 255 } :
+                     (s.selectedTown == 2) ? Color{ 226, 234, 242, 255 } : // Frostmere: snowfields
+                     (s.selectedTown == 3) ? Color{ 133, 129, 121, 255 } : Color{ 90, 124, 82, 255 };
     // 2026-09-24: was -1.5 - z-fights with the ground model at long view
     // distances once the far clip plane is extended (see rlSetClipPlanes in
     // main(), fixing a web-only clipping bug); depth precision gets coarser
@@ -11083,6 +11096,7 @@ static void T3DUpdateViewFog(const Town3DCam& c) {
     if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.fogRangeLoc, g_t3dFogRange, SHADER_UNIFORM_VEC2);
 }
 static void T3DGrassDrawTown();
+static void Town3DDrawSurroundings(const GameState& s, const Town3DCam& c); // with the wilderness dressing
 static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     Vector2 mouse = GetMousePosition();
     bool panelOpen = s.selectedTile.has_value() || s.greetedNPC.has_value();
@@ -11146,6 +11160,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     T3DUpdateViewFog(c);
     T3DGrassFrameUpdate(c.pos); // sway clock for the grass shader
     Town3DDrawSceneContents(s, false);
+    Town3DDrawSurroundings(s, c); // the real wilderness beyond the town edge (2026-09-26)
     if (s.selectedTown != 2) T3DGrassDrawTown(); // no grass in snowy Frostmere
     // Ambience (smoke + birds): unlit, one batched draw call, main pass only.
     Town3DUpdateAmbience(GameDt());
@@ -11363,14 +11378,16 @@ static void Wild3DEnsureGround() {
                 float t = fminf(1.0f, (rk - 0.05f) / 0.45f) * 0.85f;
                 r += (104 - 10 * n - r) * t; g += (98 - 10 * n - g) * t; b += (90 - 8 * n - b) * t;
             }
-            if (w > 0.06f && w < 0.42f) { // sand / mud shore band
-                float t = 1.0f - fabsf(w - 0.26f) / 0.20f;
+            // Water is drawn a little inside the blocking edge (0.62 vs the
+            // grid's 0.5), so you visibly stop on the bank, not in the water.
+            if (w > 0.10f && w < 0.54f) { // sand / mud shore band
+                float t = 1.0f - fabsf(w - 0.32f) / 0.22f;
                 t = std::clamp(t, 0.0f, 1.0f) * 0.75f;
                 r += (198 - r) * t; g += (182 - g) * t; b += (140 - b) * t;
             }
-            if (w >= 0.42f && w < 0.5f) { r = 214; g = 222; b = 206; } // wet foam edge
-            if (w >= 0.5f) {
-                float depth = std::clamp((w - 0.5f) / 0.45f, 0.0f, 1.0f);
+            if (w >= 0.54f && w < 0.62f) { r = 214; g = 222; b = 206; } // wet foam edge
+            if (w >= 0.62f) {
+                float depth = std::clamp((w - 0.62f) / 0.35f, 0.0f, 1.0f);
                 float fr = WildFieldAt(ff, wx, wz);
                 if (fr > 0.3f) depth *= 0.25f; // fords: shallow, you can see the stones
                 r = 78 - 46 * depth + 10 * n; g = 142 - 58 * depth + 10 * n; b = 150 - 36 * depth + 8 * n;
@@ -12266,7 +12283,7 @@ static void WildMapPaintExtras(Image* img, float pxPerUnit) {
 static void Wild3DDrawDressing(const Town3DCam* cull) {
     Wild3DBuildDressing();
     static bool bridgesBuilt = false;
-    if (!bridgesBuilt) { bridgesBuilt = true; Wild3DBuildBridges(); }
+    if (!bridgesBuilt && g_wildBridgeModels.empty()) { bridgesBuilt = true; Wild3DBuildBridges(); }
     for (const WildBridgeModel& m : g_wildBridgeModels) {
         if (cull && !Wild3DInView(*cull, m.cx, m.cz, m.len * 0.6f + 30.0f)) continue;
         DrawModelEx(m.model, m.pos, { 0.0f, 1.0f, 0.0f }, m.yawDeg, { 1.0f, 1.0f, 1.0f }, WHITE);
@@ -12338,6 +12355,42 @@ static const GameState::DyingMonster* FindDyingRival(const GameState& s);
 static const GameState::DyingMonster* FindDyingBlade(const GameState& s, int bladeIdx);
 static const GameState::DyingMonster* FindDyingDungeonSlot(const GameState& s, int dungeonIdx,
                                                            int monsterIdx, bool isBoss);
+
+// Town surroundings (2026-09-26): instead of flat green forever past the town
+// edge, draw the actual wilderness around this town's gate - ground (roads,
+// rivers, coast, region colors), scenery, bridges, sea - offset so the town's
+// Wilderness Gate sits on its gate in the wilderness and the roads visibly run
+// out of town. Anything that would land inside the town is skipped.
+static Vector2 TownWildOffset(int townIdx) { // wilderness = town + offset
+    Vector2 g = kTownGates[std::clamp(townIdx, 0, (int)kTownGates.size() - 1)].wildernessPos;
+    return { g.x - kWildernessGatePos.x, g.y - kWildernessGatePos.y };
+}
+static void Town3DDrawSurroundings(const GameState& s, const Town3DCam& c) {
+    Wild3DLoadModels();
+    Wild3DEnsureGround();
+    Wild3DBuildDressing();
+    static bool bridgesBuilt = false; // shares Wild3DDrawDressing's build flag semantics
+    if (!bridgesBuilt && g_wildBridgeModels.empty()) { bridgesBuilt = true; Wild3DBuildBridges(); }
+    Vector2 O = TownWildOffset(s.selectedTown);
+    // Just under the town's own ground plane (y=0), so the town covers it.
+    DrawModel(g_wild3dGround.model, { 1600.0f - O.x, -0.8f, 1600.0f - O.y }, 1.0f, WHITE);
+    DrawPlane({ 5600.0f - O.x, -2.5f, 1600.0f - O.y }, { 4800, 8000 }, Color{ 44, 96, 122, 255 }); // open sea
+    auto outsideTown = [](float x, float z, float r) {
+        return x < -r || z < -r || x > kTownWorldSize + r || z > kTownWorldSize + r;
+    };
+    const Wild3DDressing& D = g_wild3dDress;
+    for (const WildDressItem& it : D.items) {
+        float x = it.x - O.x, z = it.z - O.y;
+        if (!outsideTown(x, z, 40.0f + it.cullR * 0.5f)) continue;
+        if (!Wild3DInView(c, x, z, it.cullR)) continue;
+        DrawModelEx(D.models[it.id], { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f }, it.rot, { it.scale, it.scale, it.scale }, it.tint);
+    }
+    for (const WildBridgeModel& m : g_wildBridgeModels) {
+        float x = m.cx - O.x, z = m.cz - O.y;
+        if (!outsideTown(x, z, m.len * 0.6f) || !Wild3DInView(c, x, z, m.len * 0.6f + 30.0f)) continue;
+        DrawModelEx(m.model, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f }, m.yawDeg, { 1.0f, 1.0f, 1.0f }, WHITE);
+    }
+}
 
 static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DCam* cull) {
     Wild3DLoadModels();
@@ -14621,13 +14674,43 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
                                   : gateIsNearest ? "Wilderness" : "Enter " + TileNameFor(nearestKey);
 
     if (!s.selectedTile.has_value()) {
-        UpdatePlayerMovement(s.townPlayerPos, s.playerFacing, GameDt(), kTownWorldSize);
+        bool townMoved = UpdatePlayerMovement(s.townPlayerPos, s.playerFacing, GameDt(), kTownWorldSize);
         for (auto& node : ActiveTownNodes(s.selectedTown))
             ResolveCircleCollision(s.townPlayerPos, kPlayerRadius, node.pos, kNodeRadius);
         ResolveCircleCollision(s.townPlayerPos, kPlayerRadius, kWildernessGatePos, kNodeRadius);
         // Townsfolk have no collision - they're ambient dressing, not obstacles; walking
         // through one is fine (see kTownNPCs' own comment).
         s.townPlayerPos = ClampToWorld(s.townPlayerPos, kPlayerEdgeMargin, kTownWorldSize);
+        // Walk off any edge of town into the wilderness (2026-09-26): keep
+        // pushing against an edge for a moment and you step out just beyond
+        // this town's gate in the wilderness, still heading the same way - the
+        // wilderness around the gate is what the 3D town shows past its edges.
+        {
+            static float edgePushT = 0.0f;
+            const float lo = kPlayerEdgeMargin + 0.5f, hi = kTownWorldSize - kPlayerEdgeMargin - 0.5f;
+            Vector2 p = s.townPlayerPos, f = s.playerFacing;
+            Vector2 out = { 0, 0 };
+            if (p.x <= lo && f.x < -0.5f) out = { -1, 0 };
+            else if (p.x >= hi && f.x > 0.5f) out = { 1, 0 };
+            else if (p.y <= lo && f.y < -0.5f) out = { 0, -1 };
+            else if (p.y >= hi && f.y > 0.5f) out = { 0, 1 };
+            bool pushing = townMoved && (out.x != 0 || out.y != 0);
+            edgePushT = pushing ? edgePushT + GameDt() : 0.0f;
+            if (edgePushT > 0.2f) {
+                edgePushT = 0.0f;
+                Vector2 gate = kTownGates[std::clamp(s.selectedTown, 0, (int)kTownGates.size() - 1)].wildernessPos;
+                Vector2 dst = { gate.x + out.x * 120.0f, gate.y + out.y * 120.0f };
+                dst.x = std::clamp(dst.x, 60.0f, kWildernessWorldSize - 60.0f);
+                dst.y = std::clamp(dst.y, 60.0f, kWildernessWorldSize - 60.0f);
+                s.screen = Screen::Wilderness;
+                s.wildernessPlayerPos = WildNearestFree(dst);
+                s.playerFacing = out;
+                s.wild3DView = s.town3DView; // same view mode on the other side
+                s.selectedTile.reset();
+                s.greetedNPC.reset();
+                g_screenFadeT = kScreenFadeTime;
+            }
+        }
         if (inRange && IsKeyPressed(KEY_E)) {
             if (npcIsNearest) s.greetedNPC = (s.greetedNPC.has_value() && *s.greetedNPC == nearestNPCIdx)
                                                ? std::nullopt : std::make_optional(nearestNPCIdx);
@@ -22147,6 +22230,10 @@ static void UpdateDrawFrame() {
         }
         // 3D exploration MENU (2026-09-26), drawn over the world like the
         // dungeon's. Skipped on the frame a screen switch happened.
+        if (g_screenFadeT > 0.0f) { // area-change fade-in (walked out of town)
+            DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, g_screenFadeT / kScreenFadeTime));
+            g_screenFadeT = fmaxf(0.0f, g_screenFadeT - GetFrameTime());
+        }
         if (state.screen == Screen::Wilderness && state.worldMapOpen) {
             DrawWorldMap(state); // full map (tap the minimap): above everything, any tap closes
         } else if (explore3D && ExploreHeaderCollapsed(state)) {
