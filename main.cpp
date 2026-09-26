@@ -1162,7 +1162,7 @@ static const int kBladeCount = 3;
 // GameState's respawn-timer arrays are sized by these, and the spot tables they
 // must match (kWildernessMonsterSpots, kCenters in DungeonMonsterNodePos) are
 // declared much later. static_asserts next to those tables verify the match.
-static const int kWildMonsterSpotCount = 27; // (2026-09-27) +7: the Grimtusk Hold orcs
+static const int kWildMonsterSpotCount = 29; // (2026-09-27) +7 Grimtusk Hold orcs, +2 Sorrow Wraiths
 static const int kDungeonBossSlot = 8; // boss slot index; regular slots are 0..7
 static const int kDungeonSlotCount = kDungeonBossSlot + 1; // 9 slots per dungeon
 static const char* kGhostNoTouch = "Ghosts cannot touch the world of the living.";
@@ -7456,7 +7456,7 @@ static void UpdateEscort(GameState& s, float dt) {
 // fully separate roaming entity, so every entry left in this array is an ordinary
 // always-melee monster again, no per-entry AI-variant flag needed.
 struct WildernessMonsterSpot { Vector2 pos; std::string name; int level; int baseLeather; int baseGold; int iconIdx; RegionId region; };
-static const std::array<WildernessMonsterSpot, 27> kWildernessMonsterSpots = {{
+static const std::array<WildernessMonsterSpot, 29> kWildernessMonsterSpots = {{
     { {1150, 1250}, "Wild Bat", 2, 1, 2, 0, RegionAt({1150, 1250}) },
     { {600, 1000}, "Timber Wolf", 5, 3, 4, 2, RegionAt({600, 1000}) }, // Phase 1: Whisperwood signature - was Wandering Goblin
     { {1150, 700}, "Lone Wolf", 9, 5, 7, 2, RegionAt({1150, 700}) },
@@ -7500,6 +7500,9 @@ static const std::array<WildernessMonsterSpot, 27> kWildernessMonsterSpots = {{
     { {1829, 2824}, "Orc Brute", 30, 12, 20, 9, RegionAt({1829, 2824}) },  // at the bonfire
     { {1832, 2975}, "Orc Shaman", 30, 4, 22, 9, RegionAt({1832, 2975}) },  // at the war drum
     { {1919, 2919}, "Orc Warlord", 42, 20, 60, 10, RegionAt({1919, 2919}) }, // before his hall
+    // The Fields of Sorrow (2026-09-27) - live wraiths replace the old pop-up ambush.
+    { {1880, 2280}, "Sorrow Wraith", 26, 0, 18, 6, RegionAt({1880, 2280}) },
+    { {2010, 2310}, "Sorrow Wraith", 32, 0, 24, 6, RegionAt({2010, 2310}) },
 }};
 static const int kWildMonsterIconCount = 9; // iconIdx 0-4 classic, 5 Ice Wolf, 6 Frostbitten Husk, 7 Rock Golem, 8 Mountain Cat
 static_assert(kWildernessMonsterSpots.size() == kWildMonsterSpotCount,
@@ -25457,15 +25460,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         bool quiet = !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
                      !s.ambush.has_value() && !s.combat.has_value() &&
                      !s.wildEngaged.has_value() && !s.dungeonEngaged.has_value();
-        // The Fields of Sorrow: lingering here draws the attention of the dead.
-        if (quiet && s.sorrowCooldown <= 0.0f &&
-            Dist(s.wildernessPlayerPos, kFieldsOfSorrow) < kFieldsOfSorrowRadius) {
-            int level = RollMurdererLevel(s);
-            s.ambush = GameState::AmbushEncounter{ "Sorrow Wraith", level };
-            s.sorrowCooldown = 90.0f;
-            s.logLine = "The mist thickens - a Sorrow Wraith rises from the broken field!";
-            PlaySfx(SfxId::Hunt);
-        }
+        // The Fields of Sorrow (2026-09-27): the old pop-up wraith ambush is gone - two
+        // Sorrow Wraiths now haunt the battlefield as live monsters (kWildernessMonsterSpots).
         // Grimtusk Hold war parties (2026-09-27): roam near the fortress and now and
         // then a band of orcs comes for you. War drums first - if your Tracking
         // catches them - then, a few seconds later, they burst out of the brush.
