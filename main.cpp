@@ -147,6 +147,7 @@
 #include <vector>
 #include <deque>
 #include <map>
+#include <cstring>
 #include <cstdlib>
 #include <ctime>
 #include <cmath>
@@ -9334,6 +9335,457 @@ static Color AnimalRecolorForMonsterName(const std::string& name) {
     return Color{ 0, 0, 0, 0 };
 }
 
+// ---------------------------------------------------------------------
+// Animated humans (2026-09-26): a real skinned body in place of the box kit.
+// assets/characters/Humanoid.glb is the Quaternius Universal Animation
+// Library mannequin (CC0) trimmed to the eight clips below. It is untextured,
+// so the outfit is painted into per-vertex colors by body region (skin, hair,
+// tunic, sleeves, gloves, trousers, boots...) from the equipped paperdoll,
+// and weapons/shield/helm/cloak ride the hand, forearm, head and chest bones.
+// Any Mixamo/Rigify-style rig with the same DEF-* bone names and clip names
+// drops in as a replacement file (see assets/characters/README.md).
+// ---------------------------------------------------------------------
+#include "raymath.h" // matrix/quaternion helpers for the bone attachments
+
+enum HumanRegion : unsigned char {
+    kHrSkin, kHrHair, kHrNeck, kHrChest, kHrBelt, kHrSkirt, kHrSleeve, kHrForearm,
+    kHrHands, kHrLegs, kHrBoots, kHrCount
+};
+enum HumanWeapon { kHwNone = -1, kHwSword, kHwAxe, kHwDagger, kHwStaff, kHwCrossbow, kHwShield, kHwGearCount };
+enum HumanHelm { kHhNone, kHhLeather, kHhChain, kHhPlate };
+
+struct HumanOutfit {
+    Color region[kHrCount];
+    int weapon = kHwNone;
+    bool shield = false;
+    int helm = kHhNone;
+    Color helmCol = { 190, 194, 202, 255 };
+    bool cloak = true;
+    Color cloakCol = { 104, 70, 44, 255 };
+};
+
+struct HumanPose {
+    float move = 0.0f;     // 0 idle .. 1 full run (T3CAnim.move)
+    float attackT = -1.0f; // 0..1 through a swing, <0 none
+    float castT = -1.0f;   // 0..1 through a cast, <0 none
+    float hurtT = -1.0f;   // 0..1 through a hit reaction, <0 none
+    float deathT = -1.0f;  // 0..1 through dying, <0 alive
+    bool engaged = false;  // in a fight: guard stance instead of the relaxed idle
+};
+
+struct HumanRig {
+    bool ok = false;
+    Model model{};
+    ModelAnimation* anims = nullptr;
+    int animCount = 0;
+    int idle = -1, walk = -1, jog = -1, attack = -1, guard = -1, cast = -1, hit = -1, death = -1;
+    float baseScale = 1.0f;                              // model units -> world units
+    float unit = 1.0f;                                   // model units per metre
+    std::vector<std::vector<unsigned char>> region;      // per mesh, per vertex
+    int boneHandR = -1, boneHandL = -1, boneForearmL = -1, boneHead = -1, boneChest = -1;
+    Model gear[kHwGearCount]{};
+    bool gearOk[kHwGearCount]{};
+    Model helm[4]{};   // procedural, head-bone space (index = HumanHelm)
+    Model cloak{};     // procedural, chest-bone space
+    Color painted[kHrCount]{};
+    bool paintedOnce = false;
+};
+static HumanRig g_human;
+static bool g_humanTried = false;
+
+static int HumanFindBone(const Model& m, const char* name) {
+    for (int i = 0; i < m.skeleton.boneCount; i++)
+        if (std::string(m.skeleton.bones[i].name) == name) return i;
+    return -1;
+}
+
+// Classify every vertex by its heaviest bone plus its rest-pose height
+// (normalised to a 1.83 m body), so one mannequin can wear any outfit.
+static HumanRegion HumanRegionFor(const std::string& bone, float y, float z, float headZ) {
+    auto has = [&](const char* s) { return bone.find(s) != std::string::npos; };
+    if (has("head")) return (y > 1.745f || (y > 1.60f && z < headZ - 0.045f)) ? kHrHair : kHrSkin;
+    if (has("neck")) return kHrNeck;
+    if (has("hand") || has("f_") || has("thumb") || has("palm")) return kHrHands;
+    if (has("forearm")) return kHrForearm;
+    if (has("upper_arm")) return kHrSleeve;
+    if (has("foot") || has("toe") || has("heel")) return kHrBoots;
+    if (has("shin")) return y > 0.40f ? kHrLegs : kHrBoots;
+    if (has("thigh")) return y > 0.74f ? kHrSkirt : kHrLegs;
+    // torso: spine / shoulder / breast / pelvis / hips
+    if (y > 1.03f) return kHrChest;
+    if (y > 0.955f) return kHrBelt;
+    return kHrSkirt;
+}
+
+static Model HumanBuildHelm(int kind) {
+    // Head-bone space in metres: bone origin at the top of the neck, +Y up
+    // through the skull, +Z out of the face.
+    T3CMeshBuilder b;
+    Color w = WHITE; // tinted per draw
+    // The mannequin's head spans ~0.03..0.26 above the bone, radius ~0.09 x 0.12.
+    if (kind == kHhLeather) {
+        T3CSphere(b, 0.0f, 0.170f, -0.004f, 0.099f, 0.118f, 0.126f, 6, 10, w);
+    } else if (kind == kHhChain) { // coif: covers the head and drapes to the shoulders
+        T3CSphere(b, 0.0f, 0.155f, -0.008f, 0.104f, 0.142f, 0.130f, 6, 10, w);
+        T3CCylinder(b, 0.0f, -0.07f, -0.012f, 0.10f, 0.135f, 0.106f, 10, w, false, false);
+    } else { // plate: steel cap with a nasal guard and brow band (the concept art's helm)
+        T3CSphere(b, 0.0f, 0.168f, -0.004f, 0.103f, 0.128f, 0.130f, 6, 10, w);
+        T3CCylinder(b, 0.0f, 0.118f, -0.004f, 0.148f, 0.108f, 0.106f, 12, w, false, false);
+        T3CBox(b, 0.0f, 0.100f, 0.124f, 0.022f, 0.090f, 0.018f, w);
+    }
+    return T3CFinish(b);
+}
+
+static Model HumanBuildCloak() {
+    // Chest-bone (spine.003) space in metres: hangs from the shoulders down the
+    // back to mid-calf, flaring out. Two-sided so the lining shows when it swings.
+    T3CMeshBuilder b;
+    Color c = WHITE;
+    const int cols = 6;
+    const float top = 0.22f, bot = -0.86f;
+    for (int i = 0; i < cols; i++) {
+        float u0 = -1.0f + 2.0f * i / cols, u1 = -1.0f + 2.0f * (i + 1) / cols;
+        auto P = [&](float u, float y, float* o) {
+            float t = (top - y) / (top - bot); // 0 at the shoulders, 1 at the hem
+            float hw = 0.15f + 0.09f * t;                  // shoulder-wide at the top, a little flare at the hem
+            o[0] = u * hw;
+            o[1] = y;
+            // wrapped around the back (edges curl forward), falling slightly away from the legs
+            o[2] = -0.12f - 0.07f * t - 0.04f * (1.0f - u * u) + 0.10f * u * u * (1.0f - 0.4f * t);
+        };
+        const int rows = 4;
+        for (int r = 0; r < rows; r++) {
+            float y0 = top + (bot - top) * r / rows, y1 = top + (bot - top) * (r + 1) / rows;
+            float a[3], bb[3], cc[3], d[3];
+            P(u0, y0, a); P(u1, y0, bb); P(u1, y1, cc); P(u0, y1, d);
+            T3CQuad(b, a, d, cc, bb, c);                                            // outside
+            T3CQuad(b, a, bb, cc, d, ColorBrightness(c, -0.25f));                  // lining
+        }
+    }
+    return T3CFinish(b);
+}
+
+static void HumanEnsure() {
+    if (g_humanTried) return;
+    g_humanTried = true;
+    HumanRig& H = g_human;
+    const char* file = "assets/characters/Humanoid.glb";
+    if (!FileExists(file)) return;
+    H.model = LoadModel(file);
+    if (H.model.meshCount <= 0 || H.model.skeleton.boneCount <= 0) return;
+    H.anims = LoadModelAnimations(file, &H.animCount);
+    for (int k = 0; k < H.animCount; k++) {
+        const std::string n = H.anims[k].name;
+        if (n == "Idle_Loop") H.idle = k;
+        else if (n == "Walk_Loop") H.walk = k;
+        else if (n == "Jog_Fwd_Loop") H.jog = k;
+        else if (n == "Sword_Attack") H.attack = k;
+        else if (n == "Sword_Idle") H.guard = k;
+        else if (n == "Spell_Simple_Shoot") H.cast = k;
+        else if (n == "Hit_Chest") H.hit = k;
+        else if (n == "Death01") H.death = k;
+    }
+    if (H.idle < 0 || H.walk < 0) return;
+    BoundingBox bb = GetModelBoundingBox(H.model);
+    float h = bb.max.y - bb.min.y;
+    if (h < 0.001f) return;
+    H.baseScale = 64.0f / h; // a touch shorter than the doorways the kit was built around
+    H.unit = h / 1.83f;
+    H.boneHandR = HumanFindBone(H.model, "DEF-hand.R");
+    H.boneHandL = HumanFindBone(H.model, "DEF-hand.L");
+    H.boneForearmL = HumanFindBone(H.model, "DEF-forearm.L");
+    H.boneHead = HumanFindBone(H.model, "DEF-head");
+    H.boneChest = HumanFindBone(H.model, "DEF-spine.003");
+    float headZ = 0.0f;
+    if (H.boneHead >= 0) headZ = H.model.skeleton.bindPose[H.boneHead].translation.z / H.unit;
+    // Regions + a writable color buffer on every mesh.
+    H.region.resize((size_t)H.model.meshCount);
+    for (int m = 0; m < H.model.meshCount; m++) {
+        Mesh& me = H.model.meshes[m];
+        int n = me.vertexCount;
+        H.region[(size_t)m].assign((size_t)n, kHrSkin);
+        for (int v = 0; v < n; v++) {
+            int best = 0;
+            float bw = -1.0f;
+            if (me.boneIndices && me.boneWeights)
+                for (int k = 0; k < 4; k++)
+                    if (me.boneWeights[v * 4 + k] > bw) { bw = me.boneWeights[v * 4 + k]; best = me.boneIndices[v * 4 + k]; }
+            float y = (me.vertices[v * 3 + 1] - bb.min.y) / H.unit;
+            float z = me.vertices[v * 3 + 2] / H.unit;
+            std::string bone = (best < H.model.skeleton.boneCount) ? H.model.skeleton.bones[best].name : "";
+            H.region[(size_t)m][(size_t)v] = HumanRegionFor(bone, y, z, headZ);
+        }
+        if (!me.colors) {
+            me.colors = (unsigned char*)MemAlloc((unsigned int)(n * 4));
+            memset(me.colors, 255, (size_t)n * 4);
+            rlEnableVertexArray(me.vaoId);
+            me.vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_COLOR] = rlLoadVertexBuffer(me.colors, n * 4, true);
+            rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_COLOR, 4, RL_UNSIGNED_BYTE, 1, 0, 0);
+            rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_COLOR);
+            rlDisableVertexArray();
+        }
+    }
+    for (int i = 0; i < H.model.materialCount; i++) H.model.materials[i].maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+    // Gear (KayKit Adventurers, CC0): grip at the origin, blade along +Y.
+    static const char* gearFiles[kHwGearCount] = {
+        "assets/characters/gear/sword_1handed.gltf", "assets/characters/gear/axe_1handed.gltf",
+        "assets/characters/gear/dagger.gltf",        "assets/characters/gear/staff.gltf",
+        "assets/characters/gear/crossbow_1handed.gltf", "assets/characters/gear/shield_round.gltf",
+    };
+    for (int g = 0; g < kHwGearCount; g++) {
+        if (!FileExists(gearFiles[g])) continue;
+        H.gear[g] = LoadModel(gearFiles[g]);
+        H.gearOk[g] = H.gear[g].meshCount > 0;
+    }
+    for (int k = kHhLeather; k <= kHhPlate; k++) H.helm[k] = HumanBuildHelm(k);
+    H.cloak = HumanBuildCloak();
+    H.ok = true;
+}
+
+// Armor tier -> color, read from the item's name (the catalog's naming is
+// consistent: "Leather ...", "Studded ...", "Ring Mail ...", "Chain...", "Plate ...").
+static bool HumanArmorColor(const std::optional<Item>& it, Color* out) {
+    if (!it.has_value()) return false;
+    const std::string& n = it->name;
+    auto has = [&](const char* s) { return n.find(s) != std::string::npos; };
+    if (has("Plate")) *out = Color{ 196, 200, 210, 255 };
+    else if (has("Chain")) *out = Color{ 160, 164, 172, 255 };
+    else if (has("Ring")) *out = Color{ 138, 136, 132, 255 };
+    else if (has("Studded")) *out = Color{ 100, 68, 44, 255 };
+    else if (has("Fur")) *out = Color{ 150, 120, 88, 255 };
+    else *out = Color{ 130, 88, 54, 255 }; // leather and anything unrecognised
+    return true;
+}
+
+static int HumanWeaponFor(const std::optional<Item>& it) {
+    if (!it.has_value() || it->type != ItemType::Weapon) return kHwNone;
+    const std::string& n = it->name;
+    const std::string& c = it->category;
+    auto has = [&](const char* s) { return n.find(s) != std::string::npos; };
+    if (has("Staff") || has("Spear") || has("Fork") || has("Halberd") || has("Bardiche") || has("Pitchfork"))
+        return kHwStaff;
+    if (c == "Archery" || has("Bow")) return kHwCrossbow;
+    if (c == "Fencing" || has("Dagger") || has("Kryss")) return kHwDagger;
+    if (c == "Macing") return kHwAxe;
+    return kHwSword;
+}
+
+// The player's look: the concept art's ranger (olive tunic, brown trousers and
+// boots, brown cloak) with every equipped piece painted over its region.
+static HumanOutfit HumanOutfitFor(const Equipment& e) {
+    HumanOutfit o;
+    Color tunic = { 112, 116, 78, 255 }, pants = { 92, 78, 60, 255 };
+    Color skin = { 226, 188, 152, 255 };
+    o.region[kHrSkin] = skin;
+    o.region[kHrHair] = Color{ 86, 58, 38, 255 };
+    o.region[kHrNeck] = skin;
+    o.region[kHrChest] = tunic;
+    o.region[kHrBelt] = Color{ 66, 44, 28, 255 };
+    o.region[kHrSkirt] = ColorBrightness(tunic, -0.08f);
+    o.region[kHrSleeve] = tunic;
+    o.region[kHrForearm] = ColorBrightness(tunic, -0.05f);
+    o.region[kHrHands] = skin;
+    o.region[kHrLegs] = pants;
+    o.region[kHrBoots] = Color{ 84, 56, 36, 255 };
+    Color c;
+    if (HumanArmorColor(e.chest, &c)) { o.region[kHrChest] = c; o.region[kHrSkirt] = ColorBrightness(c, -0.12f); }
+    if (HumanArmorColor(e.arms, &c)) { o.region[kHrSleeve] = c; o.region[kHrForearm] = ColorBrightness(c, -0.06f); }
+    if (HumanArmorColor(e.gloves, &c)) o.region[kHrHands] = ColorBrightness(c, -0.10f);
+    if (HumanArmorColor(e.legs, &c)) o.region[kHrLegs] = c;
+    if (HumanArmorColor(e.gorget, &c)) o.region[kHrNeck] = c;
+    if (e.helmet.has_value()) {
+        const std::string& n = e.helmet->name;
+        o.helm = (n.find("Plate") != std::string::npos || n.find("Studded") != std::string::npos) ? kHhPlate
+               : (n.find("Chain") != std::string::npos || n.find("Coif") != std::string::npos) ? kHhChain
+               : kHhLeather;
+        HumanArmorColor(e.helmet, &o.helmCol);
+        if (o.helm == kHhPlate) o.helmCol = Color{ 190, 194, 202, 255 };
+    }
+    o.weapon = HumanWeaponFor(e.rightHand);
+    if (o.weapon == kHwNone) o.weapon = HumanWeaponFor(e.leftHand);
+    if (e.leftHand.has_value()) {
+        const std::string& n = e.leftHand->name;
+        o.shield = n.find("Shield") != std::string::npos || n.find("Buckler") != std::string::npos;
+    }
+    return o;
+}
+
+static void HumanPaint(HumanRig& H, const HumanOutfit& o) {
+    if (H.paintedOnce && memcmp(H.painted, o.region, sizeof(H.painted)) == 0) return;
+    memcpy(H.painted, o.region, sizeof(H.painted));
+    H.paintedOnce = true;
+    for (int m = 0; m < H.model.meshCount; m++) {
+        Mesh& me = H.model.meshes[m];
+        const std::vector<unsigned char>& reg = H.region[(size_t)m];
+        for (int v = 0; v < me.vertexCount; v++) {
+            Color c = o.region[reg[(size_t)v]];
+            me.colors[v * 4 + 0] = c.r; me.colors[v * 4 + 1] = c.g;
+            me.colors[v * 4 + 2] = c.b; me.colors[v * 4 + 3] = 255;
+        }
+        UpdateMeshBuffer(me, RL_DEFAULT_SHADER_ATTRIB_LOCATION_COLOR, me.colors, me.vertexCount * 4, 0);
+    }
+}
+
+// Per-instance clip state, so clip changes cross-fade instead of popping.
+struct HumanAnimState { int clip = -1, prevClip = -1; float prevFrame = 0.0f; double switchT = 0.0; };
+static std::map<int, HumanAnimState> g_humanAnim;
+
+static Matrix HumanBoneMatrix(const HumanRig& H, int bone) {
+    const Transform& t = H.model.currentPose[bone];
+    return MatrixMultiply(QuaternionToMatrix(t.rotation), MatrixTranslate(t.translation.x, t.translation.y, t.translation.z));
+}
+
+// Gear grips, in hand-bone space (metres; +Y runs wrist->fingers, +Z across
+// the knuckles). Euler degrees + offset; the shield rides the left forearm.
+static Vector3 g_humanGripRot = { 90.0f, 0.0f, 0.0f }, g_humanGripOff = { -0.02f, 0.085f, 0.0f };
+static Vector3 g_humanShieldRot = { 0.0f, -90.0f, 0.0f }, g_humanShieldOff = { -0.09f, 0.14f, 0.0f };
+
+static void HumanDrawAttached(const Model& gear, const Material* matOverride, const Matrix& local,
+                              const Matrix& bone, const Matrix& world, Color tint) {
+    Matrix m = MatrixMultiply(MatrixMultiply(local, bone), world);
+    for (int i = 0; i < gear.meshCount; i++) {
+        Material mat = matOverride ? *matOverride : gear.materials[gear.meshMaterial[i]];
+        Color saved = mat.maps[MATERIAL_MAP_DIFFUSE].color;
+        Color c = saved;
+        c.r = (unsigned char)(c.r * tint.r / 255); c.g = (unsigned char)(c.g * tint.g / 255);
+        c.b = (unsigned char)(c.b * tint.b / 255); c.a = (unsigned char)(c.a * tint.a / 255);
+        mat.maps[MATERIAL_MAP_DIFFUSE].color = c;
+        DrawMesh(gear.meshes[i], mat, m);
+    }
+}
+
+static Color HumanMul(Color a, Color b) {
+    return { (unsigned char)(a.r * b.r / 255), (unsigned char)(a.g * b.g / 255),
+             (unsigned char)(a.b * b.b / 255), (unsigned char)(a.a * b.a / 255) };
+}
+
+// Pose + draw one human. yawRad is the facing (atan2(dz, dx)), like the kit.
+// Uses whatever shader the kit currently has (sun lighting outdoors, torch in
+// dungeons). Returns false when the model isn't available (caller draws the kit).
+static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMul, Color tint,
+                      const HumanOutfit& o, const HumanPose& p, bool shadowPass) {
+    HumanEnsure();
+    HumanRig& H = g_human;
+    if (!H.ok) return false;
+    if (shadowPass) return true; // skinned meshes skip the shadow map; blob shadow below
+    Shader sh = g_t3cHumans[2].parts.torso.materials[0].shader;
+    for (int i = 0; i < H.model.materialCount; i++) H.model.materials[i].shader = sh;
+
+    // ---- clip choice ----
+    int clip = H.idle;
+    float t = (float)g_gameClock, speed = 1.0f, phase = -1.0f; // phase >= 0: one-shot at that point
+    if (p.deathT >= 0.0f && H.death >= 0) { clip = H.death; phase = p.deathT; }
+    else if (p.attackT >= 0.0f && H.attack >= 0) { clip = H.attack; phase = 0.18f + 0.52f * p.attackT; }
+    else if (p.castT >= 0.0f && H.cast >= 0) { clip = H.cast; phase = p.castT; }
+    else if (p.hurtT >= 0.0f && H.hit >= 0) { clip = H.hit; phase = p.hurtT; }
+    else if (p.move > 0.62f && H.jog >= 0) { clip = H.jog; speed = 0.75f + 0.35f * p.move; }
+    else if (p.move > 0.06f) { clip = H.walk; speed = 0.55f + 0.9f * p.move; }
+    else if (p.engaged && H.guard >= 0) clip = H.guard;
+    auto frameOf = [&](int c, float ph, float sp) {
+        int n = std::max(1, H.anims[c].keyframeCount);
+        return ph >= 0.0f ? std::clamp(ph, 0.0f, 0.999f) * (float)(n - 1) : fmodf(t * 60.0f * sp, (float)n);
+    };
+    float frame = frameOf(clip, phase, speed);
+    HumanAnimState& st = g_humanAnim[trackId];
+    if (st.clip != clip) {
+        st.prevClip = st.clip;
+        st.switchT = g_gameClock;
+        st.clip = clip;
+    }
+    float fade = (float)((g_gameClock - st.switchT) / 0.14);
+    if (st.prevClip >= 0 && fade < 1.0f && p.deathT < 0.0f) {
+        UpdateModelAnimationEx(H.model, H.anims[st.prevClip], st.prevFrame, H.anims[clip], frame, std::clamp(fade, 0.0f, 1.0f));
+    } else {
+        UpdateModelAnimation(H.model, H.anims[clip], frame);
+        st.prevFrame = frame;
+    }
+    if (fade >= 1.0f || st.prevClip < 0) st.prevFrame = frame;
+
+    HumanPaint(H, o);
+    float sc = H.baseScale * scaleMul;
+    // Blob shadow sized from the kit body (the mannequin's T-pose bounds are arm-wide).
+    T3CDrawBlobShadow(g_t3cHumans[2].parts.merged, x, z, yawRad, scaleMul);
+    float rotDeg = 90.0f - yawRad * RAD2DEG; // model faces +Z
+    DrawModelEx(H.model, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f }, rotDeg, { sc, sc, sc }, tint);
+
+    // ---- attachments ----
+    Matrix world = MatrixMultiply(MatrixMultiply(MatrixScale(sc, sc, sc), MatrixRotateY(rotDeg * DEG2RAD)),
+                                  MatrixTranslate(x, 0.0f, z));
+    float u = H.unit;
+    Material flat = H.model.materials[0]; // untextured material with the current shader
+    flat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+    auto gearMat = [&](int g) {
+        for (int i = 0; i < H.gear[g].materialCount; i++) H.gear[g].materials[i].shader = sh;
+    };
+    if (o.weapon >= 0 && H.gearOk[o.weapon] && H.boneHandR >= 0) {
+        static const float gearScale[kHwGearCount] = { 0.56f, 0.56f, 0.42f, 0.80f, 0.50f, 0.56f };
+        float gs = gearScale[o.weapon] * u;
+        Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(gs, gs, gs),
+                                                     MatrixRotateXYZ(Vector3Scale(g_humanGripRot, DEG2RAD))),
+                                      MatrixTranslate(g_humanGripOff.x * u, g_humanGripOff.y * u, g_humanGripOff.z * u));
+        gearMat(o.weapon);
+        HumanDrawAttached(H.gear[o.weapon], nullptr, local, HumanBoneMatrix(H, H.boneHandR), world, tint);
+    }
+    if (o.shield && H.gearOk[kHwShield] && H.boneForearmL >= 0) {
+        float gs = 0.56f * u;
+        Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(gs, gs, gs),
+                                                     MatrixRotateXYZ(Vector3Scale(g_humanShieldRot, DEG2RAD))),
+                                      MatrixTranslate(g_humanShieldOff.x * u, g_humanShieldOff.y * u, g_humanShieldOff.z * u));
+        gearMat(kHwShield);
+        HumanDrawAttached(H.gear[kHwShield], nullptr, local, HumanBoneMatrix(H, H.boneForearmL), world, tint);
+    }
+    Matrix metres = MatrixScale(u, u, u);
+    if (o.helm != kHhNone && H.boneHead >= 0)
+        HumanDrawAttached(H.helm[o.helm], &flat, metres, HumanBoneMatrix(H, H.boneHead), world, HumanMul(o.helmCol, tint));
+    if (o.cloak && H.boneChest >= 0) {
+        // Swing the hem back as the body speeds up (a rigid cape would clip the legs mid-stride).
+        float lift = 0.06f + 0.30f * p.move;
+        Matrix local = MatrixMultiply(metres, MatrixRotateX(-lift));
+        HumanDrawAttached(H.cloak, &flat, local, HumanBoneMatrix(H, H.boneChest), world, HumanMul(o.cloakCol, tint));
+    }
+    return true;
+}
+
+// Player pose from the shared game state (the three outdoor/dungeon views).
+static HumanPose HumanPlayerPose(const GameState& s, float move, float atk, float cast) {
+    HumanPose hp;
+    hp.move = move;
+    hp.attackT = atk;
+    hp.castT = cast;
+    if (s.playerHurtT >= 0.0f) hp.hurtT = std::clamp(1.0f - s.playerHurtT / 0.30f, 0.0f, 1.0f);
+    if (s.playerDeathAnimT > 0.0f) hp.deathT = std::clamp(1.0f - s.playerDeathAnimT / kPlayerDeathAnimTime, 0.0f, 1.0f);
+    hp.engaged = s.wildEngaged.has_value() || s.dungeonEngaged.has_value();
+    return hp;
+}
+
+
+static void PlayerCombatPhases3D(const GameState& s, float* atk, float* cast);
+// The player on the animated body: swing/cast/hit/death clips ride the same
+// timers the kit poses did; red flash + knockback on a hit, translucent blue
+// as a ghost. enemy (optional) is what the knockback pushes away from.
+static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, float yawRad, float move,
+                            const Vector2* enemy, bool shadowPass) {
+    float atk = -1.0f, cast = -1.0f;
+    PlayerCombatPhases3D(s, &atk, &cast);
+    HumanPose hp = HumanPlayerPose(s, move, atk, cast);
+    Color tint = WHITE;
+    if (s.playerIsGhost) {
+        tint = Fade(Color{ 170, 205, 255, 255 }, 0.45f);
+        hp = HumanPose{};
+        hp.move = move;
+    } else if (s.playerDeathAnimT <= 0.0f && s.playerHurtT >= 0.0f) {
+        tint = Color{ 255, 150, 150, 255 };
+        if (enemy) {
+            float ax = x - enemy->x, az = z - enemy->y, al = std::sqrt(ax * ax + az * az);
+            if (al > 0.001f) {
+                float kb = 16.0f * (1.0f - s.playerHurtT / 0.30f);
+                x += ax / al * kb; z += az / al * kb;
+            }
+        }
+    }
+    return DrawHuman(trackId, x, z, yawRad, 1.0f, tint, HumanOutfitFor(s.equipped), hp, shadowPass);
+}
+
 // Orbit-camera state for the 3D town view. File-statics (like g_scrollDragging),
 // not GameState - purely transient view state, never saved.
 // g_t3dYaw/Pitch/Dist are the *targets* written by input; the smoothed copies
@@ -11043,6 +11495,7 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     {
         float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
         T3CAnim pa = T3CMakeAnim(kT3CTrackPlayerTown, s.townPlayerPos.x, s.townPlayerPos.y, !shadowPass);
+        if (!DrawPlayerHuman(s, kT3CTrackPlayerTown, s.townPlayerPos.x, s.townPlayerPos.y, pyaw, pa.move, nullptr, shadowPass))
         T3CDrawHumanoid(g_t3cHumans[2].parts, s.townPlayerPos.x, s.townPlayerPos.y, pyaw, 1.0f,
                         Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
                         Color{ 240, 210, 180, 255 }, pa, shadowPass);
@@ -12892,7 +13345,11 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     {
         float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
         T3CAnim pa3 = T3CMakeAnim(kT3CTrackPlayerWild, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y, !shadowPass);
-        if (s.playerDeathAnimT > 0.0f) {
+        Vector2 foe = s.wildEngaged.has_value() ? s.wildEngaged->pos : Vector2{ 0, 0 };
+        if (DrawPlayerHuman(s, kT3CTrackPlayerWild, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y, pyaw, pa3.move,
+                            s.wildEngaged.has_value() ? &foe : nullptr, shadowPass)) {
+            // animated body drawn
+        } else if (s.playerDeathAnimT > 0.0f) {
             float pshrink = std::max(0.05f, s.playerDeathAnimT / kPlayerDeathAnimTime);
             T3CDrawHumanoid(g_t3cHumans[2].parts, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y,
                             pyaw, pshrink, Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
@@ -13747,7 +14204,11 @@ static void Dungeon3DDrawPlayer(const GameState& s) {
     float x = s.dungeonPlayerPos.x, z = s.dungeonPlayerPos.y;
     float yaw = atan2f(s.playerFacing.y, s.playerFacing.x);
     T3CAnim a = T3CMakeAnim(kT3CTrackPlayerDungeon, x, z);
-    if (s.playerDeathAnimT > 0.0f) {
+    Vector2 foe = s.dungeonEngaged.has_value() ? s.dungeonEngaged->pos : Vector2{ 0, 0 };
+    if (DrawPlayerHuman(s, kT3CTrackPlayerDungeon, x, z, yaw, a.move, s.dungeonEngaged.has_value() ? &foe : nullptr,
+                        false)) {
+        // animated body drawn
+    } else if (s.playerDeathAnimT > 0.0f) {
         float pshrink = std::max(0.05f, s.playerDeathAnimT / kPlayerDeathAnimTime);
         T3CDrawHumanoid(g_t3cHumans[2].parts, x, z, yaw, pshrink,
                         Color{ 100, 130, 185, 255 }, Color{ 55, 60, 75, 255 },
@@ -14713,6 +15174,8 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
     { // player
         float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
         T3CAnim pa = T3CMakeAnim(kT3CTrackPlayerInterior, s.interiorPlayerPos.x, s.interiorPlayerPos.y, true);
+        if (!DrawPlayerHuman(s, kT3CTrackPlayerInterior, s.interiorPlayerPos.x - hw, s.interiorPlayerPos.y - hh, pyaw,
+                             pa.move, nullptr, false))
         T3CDrawHumanoid(g_t3cHumans[2].parts, s.interiorPlayerPos.x - hw, s.interiorPlayerPos.y - hh,
                         pyaw, 1.0f, Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
                         Color{ 240, 210, 180, 255 }, pa, false);
