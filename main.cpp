@@ -6220,6 +6220,12 @@ EM_JS(void, JS_InitPersistence, (), {
 EM_JS(int, JS_PersistReady, (), {
     return (typeof Module._TF_persistReady !== 'undefined' && Module._TF_persistReady) ? 1 : 0;
 });
+// Cloud saves (2026-09-27, web/cloud.js): the header's Cloud button, its status
+// dot, a save block while a cloud copy is being restored, and the reset notice.
+EM_JS(int, JS_CloudState, (), { return (window.TFCloud && window.TFCloud.configured) ? window.TFCloud.state() : 0; });
+EM_JS(void, JS_CloudOpen, (), { if (window.TFCloud) window.TFCloud.open(); });
+EM_JS(int, JS_SaveBlocked, (), { return Module._TF_blockSave ? 1 : 0; });
+EM_JS(void, JS_CloudOnReset, (), { if (window.TFCloud) window.TFCloud.onReset(); });
 EM_JS(void, JS_FlushPersistence, (), {
     FS.syncfs(false, function(err) {
         if (err) console.error('Town Forge: IDBFS save flush failed', err);
@@ -6318,6 +6324,9 @@ static int BackpackCap(const GameState& s) {
 }
 
 static void SaveGame(const GameState& s) {
+#ifdef __EMSCRIPTEN__
+    if (JS_SaveBlocked()) return; // a cloud save is being put in place - don't overwrite it
+#endif
     std::ofstream out(kSaveFilePath, std::ios::trunc);
     if (!out.is_open()) return; // JS: storage unavailable - keep playing without persistence
     out << "version=1\n";
@@ -29172,9 +29181,26 @@ static void UpdateDrawFrame() {
         bool resetArmed = resetArmedTimer > 0.0f;
         std::string resetLabel = resetArmed ? "Confirm?" : "Reset";
         if (Button({ (float)(screenW - 78), 16, 58, 22 }, resetLabel, !encounterPending && !state.combat.has_value())) {
-            if (resetArmed) { ResetGame(state); resetArmedTimer = 0.0f; }
+            if (resetArmed) {
+                ResetGame(state); resetArmedTimer = 0.0f;
+#ifdef __EMSCRIPTEN__
+                JS_CloudOnReset(); // cloud keeps the old character until you choose
+#endif
+            }
             else resetArmedTimer = 3.0f;
         }
+#ifdef __EMSCRIPTEN__
+        { // Cloud saves (2026-09-27): button + status dot, left of Reset (only when configured)
+            int cs = JS_CloudState();
+            if (cs > 0) {
+                Rectangle cb = { (float)(screenW - 150), 16, 64, 22 };
+                if (Button(cb, "Cloud", true)) JS_CloudOpen();
+                Color dot = cs == 2 ? Color{ 90, 200, 110, 255 } : cs == 3 ? Color{ 120, 170, 255, 255 }
+                          : cs == 4 ? Color{ 240, 170, 60, 255 } : Color{ 150, 150, 150, 255 };
+                DrawCircle((int)(cb.x + cb.width - 7), (int)cb.y + 6, 4.0f, dot);
+            }
+        }
+#endif
         }
 
         if (!inDungeon && !explore3D) {

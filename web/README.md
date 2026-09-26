@@ -7,3 +7,7 @@ Deployed next to the game build (`index.html`, `townforge.js/.wasm/.data`):
   replaced with a unique stamp on every deploy (see `deploy_web.sh`), so players
   pick up the new build on their next launch.
 - `icons/` - app icons (`apple-touch-icon.png` is the iPhone/iPad home-screen icon).
+- `cloud.js` - cloud saves (Supabase): sign-in window, background upload, "played on
+  another device" prompt, older-copy safety net. Off unless the deploy environment has
+  `SUPABASE_URL` and `SUPABASE_ANON_KEY` (written into `cloud-config.js` at deploy).
+- `supabase.sql` - the one-time table + security setup to run in the Supabase project.

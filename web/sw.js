@@ -6,7 +6,7 @@ const VERSION = '__VERSION__';
 const CACHE = 'townforge-' + VERSION;
 const CORE = [
   './', './index.html', './townforge.js', './townforge.wasm', './townforge.data',
-  './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
+  './manifest.webmanifest', './cloud.js', './cloud-config.js', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
 ];
 
 self.addEventListener('install', (e) => {
