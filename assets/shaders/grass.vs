@@ -29,8 +29,8 @@ void main()
 {
     vec3 p = vertexPosition;
 
-    // Tufts are ~26 units tall; weight the bend quadratically toward the tip.
-    float w = clamp(p.y / 26.0, 0.0, 1.0);
+    // Blades are ~7-15 units tall; weight the bend quadratically toward the tip.
+    float w = clamp(p.y / 15.0, 0.0, 1.0);
     w = w * w;
 
     // World-space phase (grass is drawn at identity, so model == world).
@@ -39,8 +39,8 @@ void main()
 
     float s1 = sin(time * 1.6 + ph);
     float s2 = sin(time * 2.7 + ph * 1.7 + 1.3);
-    p.x += w * (s1 * 3.5 + s2 * 1.2);
-    p.z += w * (cos(time * 1.2 + ph * 1.3) * 2.2);
+    p.x += w * (s1 * 2.2 + s2 * 0.8);
+    p.z += w * (cos(time * 1.2 + ph * 1.3) * 1.4);
 
     // Send vertex attributes to fragment shader
     fragPosition = vec3(matModel * vec4(p, 1.0));

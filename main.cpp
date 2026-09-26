@@ -1383,7 +1383,7 @@ struct GameState {
     // --- Free-movement exploration - the player's world position in each explorable
     // space. Only one is "active" at a time depending on state.screen/selectedDungeon,
     // but both persist independently so leaving and returning keeps your spot. ---
-    Vector2 townPlayerPos = {450, 600}; // on the main north-south street, clear of Townhall/Bank's collision radius
+    Vector2 townPlayerPos = {675, 900}; // layout {450,600} x kTS 1.5 - on the main north-south street, clear of Townhall/Bank's collision radius
     Vector2 dungeonPlayerPos = {900, 900};
     Vector2 bloodstainedPlayerPos = {450, 700};
     Vector2 wildernessPlayerPos = {900, 1650}; // just inside the gate from Town
@@ -1591,7 +1591,13 @@ static const float kWorldSize = 900.0f;       // Bloodstained Road world size (T
 // Town's own world size, separate from kWorldSize above (2026-09-21: Mark asked for buildings
 // spaced further apart; bumping the shared kWorldSize would have also grown the Bloodstained
 // Road, which wasn't asked for - same reasoning as kTownVisualScale not touching kNodeRadius).
-static const float kTownWorldSize = 1000.0f;
+// 2026-09-26: towns spread out 1.5x (buildings had grown during the art passes
+// but the spacing hadn't). Every town layout coordinate is written in the
+// original 0..1000 layout units and scaled through TS(), so the whole town
+// resizes from this one constant; object sizes (buildings, props) do not scale.
+static constexpr float kTS = 1.5f;
+static constexpr Vector2 TS(float x, float y) { return { x * kTS, y * kTS }; }
+static const float kTownWorldSize = 1000.0f * kTS;
 static const float kDungeonWorldSize = 1800.0f; // dungeons get their own, much bigger world - real
                                                    // room-and-corridor space to actually walk and explore
 // Wilderness's own world size, separate from kDungeonWorldSize above (2026-09-22,
@@ -3178,21 +3184,21 @@ struct TownFoliage { Vector2 pos; int variant; };
 // quadrant's open ground) is preserved exactly rather than left stale against the old grid.
 static const std::array<TownFoliage, 44> kFoliagePositions = {{
     // Quadrant interiors (between the grid's cross-shaped roads)
-    {{296, 272}, 0}, {{404, 320}, 1}, {{704, 272}, 2}, {{632, 416}, 3},
-    {{272, 632}, 4}, {{416, 704}, 0}, {{716, 680}, 1}, {{632, 596}, 2},
-    {{344, 416}, 3}, {{248, 320}, 4}, {{584, 368}, 0}, {{680, 320}, 1},
-    {{260, 680}, 2}, {{320, 740}, 3}, {{680, 740}, 4}, {{740, 656}, 0},
+    {TS(296, 272), 0}, {TS(404, 320), 1}, {TS(704, 272), 2}, {TS(632, 416), 3},
+    {TS(272, 632), 4}, {TS(416, 704), 0}, {TS(716, 680), 1}, {TS(632, 596), 2},
+    {TS(344, 416), 3}, {TS(248, 320), 4}, {TS(584, 368), 0}, {TS(680, 320), 1},
+    {TS(260, 680), 2}, {TS(320, 740), 3}, {TS(680, 740), 4}, {TS(740, 656), 0},
     // North of the grid (above the top building row, y < 150)
-    {{60, 90}, 1}, {{110, 140}, 2}, {{344, 80}, 5}, {{392, 120}, 4},
-    {{632, 90}, 0}, {{680, 130}, 1}, {{900, 80}, 2}, {{950, 120}, 3},
+    {TS(60, 90), 1}, {TS(110, 140), 2}, {TS(344, 80), 5}, {TS(392, 120), 4},
+    {TS(632, 90), 0}, {TS(680, 130), 1}, {TS(900, 80), 2}, {TS(950, 120), 3},
     // South of the grid (below the bottom row, clear of the Wilderness Gate's road)
-    {{60, 900}, 4}, {{100, 940}, 0}, {{344, 890}, 1}, {{392, 930}, 2},
-    {{632, 910}, 3}, {{656, 945}, 4}, {{900, 890}, 5}, {{950, 930}, 1},
+    {TS(60, 900), 4}, {TS(100, 940), 0}, {TS(344, 890), 1}, {TS(392, 930), 2},
+    {TS(632, 910), 3}, {TS(656, 945), 4}, {TS(900, 890), 5}, {TS(950, 930), 1},
     // West of the grid (clear of both farmland patches)
-    {{70, 180}, 2}, {{80, 236}, 3}, {{50, 548}, 4}, {{90, 820}, 0},
-    {{120, 500}, 1}, {{60, 800}, 5}, {{40, 880}, 3},
+    {TS(70, 180), 2}, {TS(80, 236), 3}, {TS(50, 548), 4}, {TS(90, 820), 0},
+    {TS(120, 500), 1}, {TS(60, 800), 5}, {TS(40, 880), 3},
     // East of the grid
-    {{880, 500}, 2}, {{920, 572}, 3}, {{950, 236}, 4}, {{910, 740}, 0}, {{940, 320}, 1},
+    {TS(880, 500), 2}, {TS(920, 572), 3}, {TS(950, 236), 4}, {TS(910, 740), 0}, {TS(940, 320), 1},
 }};
 
 // Hand-placed town-flavor props, same "top down village" CraftPix pack as the doors/
@@ -3217,45 +3223,45 @@ struct TownProp { Vector2 pos; int kind; float size; };
 static const std::array<TownProp, 33> kTownProps = {{
     // Fountain, tucked in a corner of the plaza clear of Town Hall and the crossroads
     // running through the plaza's center.
-    {{446, 560}, 0, 40.0f},
+    {TS(446, 560), 0, 40.0f},
     // Statue in the NW quadrant's open ground - "Mage City Arcanos" pack, see the
     // GameAssets comment above. (Originally placed in the plaza itself, but that spot
     // sat behind Town Hall's tall roof sprite from most camera angles since props draw
     // before buildings - moved out to open ground instead of fighting the draw order.)
-    {{344, 344}, 10, 44.0f},
+    {TS(344, 344), 10, 44.0f},
     // Street lamps flanking each of the 4 road spokes at its midpoint - reinforces the
     // crossroads shape from the road-merge fix (see DrawRoadToPlaza).
-    {{452, 302}, 1, 32.0f}, {{548, 302}, 1, 32.0f},
-    {{452, 698}, 1, 32.0f}, {{548, 698}, 1, 32.0f},
-    {{302, 452}, 1, 32.0f}, {{302, 548}, 1, 32.0f},
-    {{698, 452}, 1, 32.0f}, {{698, 548}, 1, 32.0f},
+    {TS(452, 302), 1, 32.0f}, {TS(548, 302), 1, 32.0f},
+    {TS(452, 698), 1, 32.0f}, {TS(548, 698), 1, 32.0f},
+    {TS(302, 452), 1, 32.0f}, {TS(302, 548), 1, 32.0f},
+    {TS(698, 452), 1, 32.0f}, {TS(698, 548), 1, 32.0f},
     // Cinderforge (Smith) gets a hanging anvil sign plus a physical anvil prop - the one
     // building whose available sign icon happens to match its trade exactly.
-    {{266, 230}, 2, 30.0f}, {{150, 230}, 9, 26.0f},
+    {TS(266, 230), 2, 30.0f}, {TS(150, 230), 9, 26.0f},
     // A lumber pile beside the Hewnwood Hall (Carpenter), plus a crate of fittings.
-    {{548, 254}, 6, 32.0f}, {{430, 270}, 8, 20.0f},
+    {TS(548, 254), 6, 32.0f}, {TS(430, 270), 8, 20.0f},
     // A small market cluster south of the Provisioner - 3 stall colors plus a barrel
     // and a crate, reading as a little market square rather than a lone building.
-    {{740, 860}, 3, 48.0f}, {{800, 880}, 4, 48.0f}, {{850, 860}, 5, 48.0f},
-    {{704, 830}, 7, 24.0f}, {{880, 830}, 8, 24.0f},
+    {TS(740, 860), 3, 48.0f}, {TS(800, 880), 4, 48.0f}, {TS(850, 860), 5, 48.0f},
+    {TS(704, 830), 7, 24.0f}, {TS(880, 830), 8, 24.0f},
     // Tailor's crate-and-barrel delivery, east side of the building.
-    {{880, 270}, 7, 24.0f}, {{740, 270}, 8, 24.0f},
+    {TS(880, 270), 7, 24.0f}, {TS(740, 270), 8, 24.0f},
     // A rain barrel outside Alchemy's garden wall.
-    {{270, 560}, 7, 24.0f},
+    {TS(270, 560), 7, 24.0f},
     // A supply crate by the Healer's door.
-    {{270, 860}, 8, 24.0f},
+    {TS(270, 860), 8, 24.0f},
     // Feed barrels and a crate flanking the Stable.
-    {{870, 560}, 7, 24.0f}, {{870, 440}, 8, 24.0f},
+    {TS(870, 560), 7, 24.0f}, {TS(870, 440), 8, 24.0f},
     // A strongbox crate outside the Vaultkeep (Bank).
-    {{560, 870}, 8, 24.0f},
+    {TS(560, 870), 8, 24.0f},
     // A small pen of farm animals beside the Stable - sheep, cow, chicken (kinds 11-13).
-    {{740, 570}, 11, 22.0f}, {{740, 430}, 12, 24.0f}, {{770, 600}, 13, 18.0f},
+    {TS(740, 570), 11, 22.0f}, {TS(740, 430), 12, 24.0f}, {TS(770, 600), 13, 18.0f},
     // A pair of brewing potions outside Alchemy (kinds 14-15).
-    {{270, 440}, 14, 18.0f}, {{170, 570}, 15, 18.0f},
+    {TS(270, 440), 14, 18.0f}, {TS(170, 570), 15, 18.0f},
     // A strongbox chest outside the Vaultkeep, next to its crate (kind 16).
-    {{440, 860}, 16, 26.0f},
+    {TS(440, 860), 16, 26.0f},
     // A bookshelf of town records just outside Town Hall (kind 17).
-    {{560, 460}, 17, 24.0f},
+    {TS(560, 460), 17, 24.0f},
 }};
 
 // ---------------------------------------------------------------------
@@ -3266,14 +3272,14 @@ static const std::array<TownProp, 33> kTownProps = {{
 // ---------------------------------------------------------------------
 struct CapitalProp { Vector2 pos; int kind; float size; }; // 18 = banner, 19 = brazier
 static const std::array<CapitalProp, 10> kCapitalProps = {{
-    // Banners + braziers flanking the Wilderness Gate (town side, {500,900})
-    {{462, 892}, 18, 34.0f}, {{538, 892}, 18, 34.0f},
-    {{448, 948}, 19, 30.0f}, {{552, 948}, 19, 30.0f},
+    // Banners + braziers flanking the Wilderness Gate (town side, {500,900} layout units)
+    {TS(462, 892), 18, 34.0f}, {TS(538, 892), 18, 34.0f},
+    {TS(448, 948), 19, 30.0f}, {TS(552, 948), 19, 30.0f},
     // Braziers at the four plaza corners (plaza {420,420,160,160})
-    {{435, 435}, 19, 30.0f}, {{565, 435}, 19, 30.0f},
-    {{435, 565}, 19, 30.0f}, {{565, 565}, 19, 30.0f},
-    // Banners flanking Town Hall ({500,500})
-    {{440, 500}, 18, 34.0f}, {{560, 500}, 18, 34.0f},
+    {TS(435, 435), 19, 30.0f}, {TS(565, 435), 19, 30.0f},
+    {TS(435, 565), 19, 30.0f}, {TS(565, 565), 19, 30.0f},
+    // Banners flanking Town Hall ({500,500} layout units)
+    {TS(440, 500), 18, 34.0f}, {TS(560, 500), 18, 34.0f},
 }};
 
 static void DrawCapitalProp2D(int kind, Vector2 sp, float size, float t) {
@@ -3333,15 +3339,15 @@ static void DrawCapitalProp3D(int kind, float x, float z, float size, float t) {
 struct CoastProp { Vector2 pos; int kind; float size; }; // 20=pier 21=boat 22=rope 23=netrack 24=anchor 25=pennant
 static const std::array<CoastProp, 9> kCoastProps = {{
     // Harbor corner (SE): pier, beached boat, rope coil, drying-net rack
-    {{910, 935}, 20, 40.0f}, {{800, 950}, 21, 44.0f}, {{860, 900}, 22, 22.0f}, {{740, 950}, 23, 40.0f},
+    {TS(910, 935), 20, 40.0f}, {TS(800, 950), 21, 44.0f}, {TS(860, 900), 22, 22.0f}, {TS(740, 950), 23, 40.0f},
     // Rope coil by the market
-    {{700, 905}, 22, 20.0f},
+    {TS(700, 905), 22, 20.0f},
     // Anchor monument north of the plaza
-    {{500, 380}, 24, 36.0f},
+    {TS(500, 380), 24, 36.0f},
     // Pennant poles flanking the gate approach
-    {{440, 930}, 25, 30.0f}, {{560, 930}, 25, 30.0f},
+    {TS(440, 930), 25, 30.0f}, {TS(560, 930), 25, 30.0f},
     // Drying-net rack by the stable (fishing folk)
-    {{830, 500}, 23, 36.0f},
+    {TS(830, 500), 23, 36.0f},
 }};
 
 // "Saltmere Docks" - wilderness landmark on the Salt Coast near the town gate.
@@ -3442,43 +3448,43 @@ static void DrawCoastProp3D(int kind, float x, float z, float size, float t) {
 // ---------------------------------------------------------------------
 struct TownNPC { Vector2 homePos; std::string name, greeting; };
 static const std::array<TownNPC, 6> kTownNPCs = {{
-    { {350, 350}, "Old Miran", "Fine morning for it, isn't it?" },
-    { {650, 350}, "Young Petra", "Careful past the gate - I hear the wolves have been bold lately." },
-    { {350, 650}, "Wystan the Baker", "Bread's fresh if you've got the coin." },
-    { {650, 650}, "Widow Aelith", "You look like you could use a good meal." },
-    { {150, 500}, "Cobb the Stableboy", "Mind the horses, they spook easy." },
-    { {850, 650}, "Sister Meraude", "May your travels be safe, traveler." },
+    { TS(350, 350), "Old Miran", "Fine morning for it, isn't it?" },
+    { TS(650, 350), "Young Petra", "Careful past the gate - I hear the wolves have been bold lately." },
+    { TS(350, 650), "Wystan the Baker", "Bread's fresh if you've got the coin." },
+    { TS(650, 650), "Widow Aelith", "You look like you could use a good meal." },
+    { TS(150, 500), "Cobb the Stableboy", "Mind the horses, they spook easy." },
+    { TS(850, 650), "Sister Meraude", "May your travels be safe, traveler." },
 }};
 // Town 2's own flavor (2026-09-22, "second town" plan) - same 6 wander spots (reuses
 // Town 1's exact layout, see DrawTownScreen), different names/greetings for a coastal
 // trade-port identity (echoing the UO Outlands "Horseshoe Bay" research).
 static const std::array<TownNPC, 6> kTown2NPCs = {{
-    { {350, 350}, "Harbormaster Thane", "Tide's good today - ships are making fine time." },
-    { {650, 350}, "Salty Bjorn", "Careful past the gate - the wilds don't care about your coin." },
-    { {350, 650}, "Nessa the Netmender", "Torn nets don't mend themselves, but talk's free." },
-    { {650, 650}, "Old Corwin", "Been trading gems out of this bay longer than you've been alive." },
-    { {150, 500}, "Dockhand Fenn", "Mind the crates, they shift when the tide turns." },
-    { {850, 650}, "Captain Ysolde", "Every port's got a story. This one's got a few too many." },
+    { TS(350, 350), "Harbormaster Thane", "Tide's good today - ships are making fine time." },
+    { TS(650, 350), "Salty Bjorn", "Careful past the gate - the wilds don't care about your coin." },
+    { TS(350, 650), "Nessa the Netmender", "Torn nets don't mend themselves, but talk's free." },
+    { TS(650, 650), "Old Corwin", "Been trading gems out of this bay longer than you've been alive." },
+    { TS(150, 500), "Dockhand Fenn", "Mind the crates, they shift when the tide turns." },
+    { TS(850, 650), "Captain Ysolde", "Every port's got a story. This one's got a few too many." },
 }};
 // Phase 3 - Frostmere's townsfolk: fur traders, trappers, and hardy northerners.
 // Wander spots are Frostmere's own (open ground between its 5 buildings).
 static const std::array<TownNPC, 6> kTown3NPCs = {{
-    { {500, 430}, "Trapper Sella", "Pelts are prime this season - the Frostbound Tomb keeps the wolves bold." },
-    { {280, 800}, "Old Jorunn", "Bundle up past the gate. The Wastes don't forgive the careless." },
-    { {720, 800}, "Brand the Smith", "Cold iron for a cold land. My forge never goes out." },
-    { {150, 430}, "Little Anka", "Have you seen the ice crystals glow at dusk? Pretty, aren't they?" },
-    { {850, 430}, "Halla Furwife", "Bring me furs, hunter, and I'll dress you for the deep cold." },
-    { {500, 120}, "Sentry Oddvar", "Tomb's been restless. King stirs beneath the ice, they say." },
+    { TS(500, 430), "Trapper Sella", "Pelts are prime this season - the Frostbound Tomb keeps the wolves bold." },
+    { TS(280, 800), "Old Jorunn", "Bundle up past the gate. The Wastes don't forgive the careless." },
+    { TS(720, 800), "Brand the Smith", "Cold iron for a cold land. My forge never goes out." },
+    { TS(150, 430), "Little Anka", "Have you seen the ice crystals glow at dusk? Pretty, aren't they?" },
+    { TS(850, 430), "Halla Furwife", "Bring me furs, hunter, and I'll dress you for the deep cold." },
+    { TS(500, 120), "Sentry Oddvar", "Tomb's been restless. King stirs beneath the ice, they say." },
 }};
 // Phase 4 - Cragmoor's townsfolk: miners, smiths, and mountain folk.
 // Wander spots are Cragmoor's own (open ground between its 5 buildings).
 static const std::array<TownNPC, 6> kTown4NPCs = {{
-    { {500, 430}, "Foreman Durgan", "Rich veins in the deep south - the Ember Depths keep the golems restless." },
-    { {280, 800}, "Old Tam", "Mind the loose rock past the gate. The peaks don't forgive the careless." },
-    { {720, 800}, "Sella Ironside", "My forge burns hotter than the Depths. Bring me ore, I'll bring you steel." },
-    { {150, 430}, "Pip Pickaxe", "Found a shiny one yesterday! Well... shiny-ish. Mostly rock." },
-    { {850, 430}, "Guildmaster Harl", "The Guild pays top coin for ore - bulk, no questions, no haggling." },
-    { {500, 120}, "Sentry Corva", "Depths have been rumbling. Emberlord stirs below, they say." },
+    { TS(500, 430), "Foreman Durgan", "Rich veins in the deep south - the Ember Depths keep the golems restless." },
+    { TS(280, 800), "Old Tam", "Mind the loose rock past the gate. The peaks don't forgive the careless." },
+    { TS(720, 800), "Sella Ironside", "My forge burns hotter than the Depths. Bring me ore, I'll bring you steel." },
+    { TS(150, 430), "Pip Pickaxe", "Found a shiny one yesterday! Well... shiny-ish. Mostly rock." },
+    { TS(850, 430), "Guildmaster Harl", "The Guild pays top coin for ore - bulk, no questions, no haggling." },
+    { TS(500, 120), "Sentry Corva", "Depths have been rumbling. Emberlord stirs below, they say." },
 }};
 // TownNPCLivePos (their wander position) is defined later, right after
 // WildernessMonsterLivePos - it needs MonsterWanderOffset, which isn't declared yet at
@@ -6309,7 +6315,7 @@ static bool LoadGame(GameState& s) {
         // applied before the save.
         s.screen = Screen::Town;
         s.selectedTown = 0;
-        s.townPlayerPos = { 450, 830 };
+        s.townPlayerPos = TS(450, 830);
         s.hp = s.maxHp;
         s.mana = MaxMana(s);
         s.playerIsGhost = false;
@@ -6706,23 +6712,23 @@ struct TownNodePos { std::string key; Vector2 pos; };
 // (2026-09-25: the town house building was retired in favor of custom wilderness
 // housing - the node is gone, but this comment stays to explain the grid history.)
 static const std::array<TownNodePos, 9> kTownNodePositions = {{
-    {"smith", {200, 200}}, {"carpenter", {500, 200}}, {"tailor", {800, 200}},
-    {"alchemy", {200, 500}}, {"townhall", {500, 500}}, {"stable", {800, 500}},
-    {"healer", {200, 800}}, {"bank", {500, 800}}, {"provisioner", {800, 800}},
+    {"smith", TS(200, 200)}, {"carpenter", TS(500, 200)}, {"tailor", TS(800, 200)},
+    {"alchemy", TS(200, 500)}, {"townhall", TS(500, 500)}, {"stable", TS(800, 500)},
+    {"healer", TS(200, 800)}, {"bank", TS(500, 800)}, {"provisioner", TS(800, 800)},
 }};
 // Phase 3 - Frostmere's own building set: 5 nodes on the same town grid (plaza at
 // 420,420 and the Wilderness Gate at 500,900 are shared). Roads, collision, and
 // hit-testing all iterate ActiveTownNodes(), so the smaller set just works.
 static const std::array<TownNodePos, 5> kTown3NodePositions = {{
-    {"bank", {350, 280}}, {"healer", {650, 280}},
-    {"provisioner", {500, 600}},
-    {"furtrader", {180, 620}}, {"smith", {820, 620}},
+    {"bank", TS(350, 280)}, {"healer", TS(650, 280)},
+    {"provisioner", TS(500, 600)},
+    {"furtrader", TS(180, 620)}, {"smith", TS(820, 620)},
 }};
 // Phase 4 - Cragmoor's own building set: 5 nodes, same grid conventions.
 static const std::array<TownNodePos, 5> kTown4NodePositions = {{
-    {"bank", {350, 280}}, {"healer", {650, 280}},
-    {"provisioner", {500, 600}},
-    {"smith", {180, 620}}, {"minersguild", {820, 620}},
+    {"bank", TS(350, 280)}, {"healer", TS(650, 280)},
+    {"provisioner", TS(500, 600)},
+    {"smith", TS(180, 620)}, {"minersguild", TS(820, 620)},
 }};
 // Range over the active town's building nodes - the two tables have different
 // sizes, so this (not a reference) is what the town loops iterate.
@@ -6767,7 +6773,7 @@ static Vector2 TownWildernessSpawn(int townIdx) {
 }
 // The town's central plaza - sized to hold only Townhall's grid slot, so every other
 // building (all 300 units out on the grid) is clearly outside it and gets a road.
-static const Rectangle kTownPlaza = { 420, 420, 160, 160 };
+static const Rectangle kTownPlaza = { 420 * kTS, 420 * kTS, 160 * kTS, 160 * kTS };
 
 // The Wilderness Gate - a Town-edge node like a building, but instead of an
 // upgrade/craft panel, walking up and pressing E switches to Screen::Wilderness.
@@ -6775,7 +6781,7 @@ static const Rectangle kTownPlaza = { 420, 420, 160, 160 };
 // so the same straight road that already reaches Bank continues on to the gate (see the
 // dedicated DrawWallBand call for that extension in DrawTownScreen) - the most direct,
 // obvious path out of town rather than a walk to a far corner.
-static const Vector2 kWildernessGatePos = { 500, 900 };
+static const Vector2 kWildernessGatePos = TS(500, 900);
 
 // ---------------------------------------------------------------------
 // The Wilderness - an open outdoor space (no interior walls, unlike the dungeons; just
@@ -9982,6 +9988,14 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
     HumanRig& H = g_human;
     if (!H.ok) return false;
     if (shadowPass) return true; // skinned meshes skip the shadow map; blob shadow below
+    { // Off-screen: skip the skinning entirely (it's the expensive part).
+        Matrix vp = MatrixMultiply(rlGetMatrixModelview(), rlGetMatrixProjection());
+        float y = 32.0f * scaleMul;
+        float cx = vp.m0 * x + vp.m4 * y + vp.m8 * z + vp.m12;
+        float cy = vp.m1 * x + vp.m5 * y + vp.m9 * z + vp.m13;
+        float cw = vp.m3 * x + vp.m7 * y + vp.m11 * z + vp.m15;
+        if (cw > 1.0f && (fabsf(cx) > cw * 1.25f || fabsf(cy) > cw * 1.4f)) return true;
+    }
     Shader sh = g_t3cHumans[2].parts.torso.materials[0].shader;
     for (int i = 0; i < H.model.materialCount; i++) H.model.materials[i].shader = sh;
     const int nb = H.model.skeleton.boneCount;
@@ -10267,6 +10281,40 @@ static HumanPose HumanMonsterPose(float move, float atkPhase, float hurtT, float
     hp.deathT = deathT;
     hp.engaged = engaged;
     return hp;
+}
+
+// ---- Townsfolk outfits (2026-09-26) ----
+// Each named NPC gets a look from their name/role; anyone unrecognised gets a
+// villager outfit from the shirt palette. Returns the body scale too
+// (children are smaller).
+static HumanOutfit HumanOutfitForTownsfolk(const std::string& name, Color shirt, float* scale) {
+    auto has = [&](const char* s) { return name.find(s) != std::string::npos; };
+    Color skin = { 232, 196, 162, 255 }, pants = { 88, 74, 60, 255 }, boots = { 70, 50, 34, 255 };
+    Color hair = { 92, 64, 40, 255 };
+    int h = 0; for (char c : name) h = h * 31 + (unsigned char)c;
+    static const Color hairs[5] = { { 92, 64, 40, 255 }, { 50, 38, 30, 255 }, { 170, 120, 60, 255 }, { 200, 170, 110, 255 }, { 120, 60, 36, 255 } };
+    hair = hairs[(unsigned)h % 5];
+    if (has("Old") || has("Widow") || has("Harbormaster") || has("Guildmaster")) hair = Color{ 196, 196, 190, 255 };
+    *scale = 1.0f;
+    HumanOutfit o = HumanOutfitPlain(skin, shirt, pants, boots, hair);
+    if (has("Young") || has("Little") || has("Pip")) *scale = 0.78f;
+    if (has("Sister")) { o = HumanOutfitPlain(skin, Color{ 236, 232, 222, 255 }, Color{ 226, 222, 212, 255 }, Color{ 90, 80, 70, 255 }, Color{ 236, 232, 222, 255 });
+                         o.region[kHrBelt] = Color{ 120, 90, 60, 255 }; }
+    if (has("Baker")) { o.region[kHrChest] = Color{ 240, 236, 226, 255 }; o.region[kHrSkirt] = Color{ 230, 226, 214, 255 }; }
+    if (has("Widow")) { o.region[kHrChest] = Color{ 70, 52, 76, 255 }; o.region[kHrSleeve] = o.region[kHrChest]; o.region[kHrSkirt] = Color{ 60, 46, 64, 255 }; o.region[kHrLegs] = Color{ 60, 46, 64, 255 }; }
+    if (has("Captain") || has("Sentry")) {
+        o.region[kHrChest] = Color{ 170, 174, 182, 255 }; o.region[kHrSleeve] = Color{ 150, 154, 162, 255 };
+        o.region[kHrSkirt] = Color{ 150, 40, 40, 255 }; o.helm = kHhPlate;
+        HumanGive(o, kHwSpear, kHsPolearm);
+        if (has("Captain")) { o.cloak = true; o.cloakCol = Color{ 150, 40, 40, 255 }; HumanGive(o, kHwHalberd, kHsPolearm); }
+    }
+    if (has("Smith")) { o.region[kHrChest] = Color{ 96, 70, 48, 255 }; o.region[kHrSkirt] = Color{ 90, 66, 46, 255 }; HumanGive(o, kHwHammer, kHsTwoHand, 0.6f); }
+    if (has("Trapper") || has("Furwife")) { o.region[kHrChest] = Color{ 140, 110, 80, 255 }; o.region[kHrSleeve] = Color{ 150, 118, 86, 255 }; o.cloak = true; o.cloakCol = Color{ 120, 96, 70, 255 }; }
+    if (has("Pickaxe") || has("Foreman")) { o.helm = kHhLeather; o.helmCol = Color{ 110, 86, 56, 255 }; HumanGive(o, kHwAxe, kHsOneHand); }
+    if (has("Dockhand") || has("Salty") || has("Netmender")) { o.region[kHrChest] = Color{ 70, 100, 140, 255 }; o.region[kHrSleeve] = Color{ 230, 226, 214, 255 }; }
+    if (has("Harbormaster") || has("Guildmaster")) { o.cloak = true; o.cloakCol = Color{ 50, 60, 90, 255 }; }
+    if (has("Stableboy")) { o.region[kHrChest] = Color{ 150, 120, 70, 255 }; }
+    return o;
 }
 
 // Player pose from the shared game state (the three outdoor/dungeon views).
@@ -10598,6 +10646,7 @@ struct Town3DLit {
     int viewPosLoc = -1, fogRangeLoc = -1;
 };
 static Town3DLit g_t3dLit;
+static void T3DSetLightUniforms(Shader sh); // with the ground shader below
 static void Town3DEnsureLit() {
     Town3DLit& L = g_t3dLit;
     if (L.ready || L.tried) return;
@@ -10607,17 +10656,7 @@ static void Town3DEnsureLit() {
     L.shader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(L.shader, "viewPos");
     L.viewPosLoc = L.shader.locs[SHADER_LOC_VECTOR_VIEW];
     L.fogRangeLoc = GetShaderLocation(L.shader, "fogRange");
-    Vector3 sunDir = kT3DSunDir;
-    SetShaderValue(L.shader, GetShaderLocation(L.shader, "lightDir"), &sunDir, SHADER_UNIFORM_VEC3);
-    Vector4 sunCol = ColorNormalize(Color{ 255, 242, 220, 255 }); // warm afternoon sun
-    SetShaderValue(L.shader, GetShaderLocation(L.shader, "lightColor"), &sunCol, SHADER_UNIFORM_VEC4);
-    float ambient[4] = { 0.45f, 0.40f, 0.33f, 1.0f };
-    SetShaderValue(L.shader, GetShaderLocation(L.shader, "ambient"), ambient, SHADER_UNIFORM_VEC4);
-    Vector3 fogCol = { kT3DSkyHorizon.r / 255.0f, kT3DSkyHorizon.g / 255.0f,
-                       kT3DSkyHorizon.b / 255.0f };
-    SetShaderValue(L.shader, GetShaderLocation(L.shader, "fogColor"), &fogCol, SHADER_UNIFORM_VEC3);
-    float fogRange[2] = { 900.0f, 2600.0f }; // subtle: only the far side hazes out
-    SetShaderValue(L.shader, GetShaderLocation(L.shader, "fogRange"), fogRange, SHADER_UNIFORM_VEC2);
+    T3DSetLightUniforms(L.shader); // sun, sky fill and fog shared with the grass + ground shaders
     L.ready = true;
 }
 
@@ -10637,12 +10676,226 @@ static void Town3DApplyLitShader(Model& m) {
 // main street down to the Wilderness Gate. Baked into the texture = zero
 // z-fighting, one draw call. World 0..1000 maps to px = world * (1024/1000),
 // v=0 at world z=0 (matches GenMeshPlane's UV layout).
+// ---- Ground detail shader (2026-09-26 environment pass) ----
+// The baked ground maps (town + wilderness) are ~1.5 world units per pixel:
+// fine from far away, flat green up close. assets/shaders/ground.fs layers two
+// small tiling detail textures over them - grass, and soil (cobbles + dirt) -
+// chosen per pixel by the ground map's alpha (1 grass, ~0.5 dirt, 0 stone).
+// Both detail textures are generated here, tileable, so no new art files.
+struct T3DGroundShader {
+    bool ready = false, tried = false;
+    Shader shader{};
+    int viewPosLoc = -1, fogRangeLoc = -1;
+    Texture2D grassDetail{}, soilDetail{};
+};
+static T3DGroundShader g_t3dGroundSh;
+
+// Tileable value noise on a period-P lattice (wraps at the texture edge).
+static float T3DTileHash(int x, int y, int seed) {
+    unsigned h = (unsigned)(x * 374761393 + y * 668265263 + seed * 2246822519u);
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return (float)((h ^ (h >> 16)) & 0xFFFF) / 65535.0f;
+}
+static float T3DTileNoise(float u, float v, int period, int seed) { // u, v in 0..1
+    float x = u * period, y = v * period;
+    int x0 = (int)floorf(x), y0 = (int)floorf(y);
+    float fx = x - x0, fy = y - y0;
+    fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
+    auto H = [&](int i, int j) { return T3DTileHash(((i % period) + period) % period, ((j % period) + period) % period, seed); };
+    float a = H(x0, y0), b = H(x0 + 1, y0), c = H(x0, y0 + 1), d = H(x0 + 1, y0 + 1);
+    return (a + (b - a) * fx) + ((c + (d - c) * fx) - (a + (b - a) * fx)) * fy;
+}
+static float T3DTileFbm(float u, float v, int seed) {
+    return 0.5f * T3DTileNoise(u, v, 4, seed) + 0.25f * T3DTileNoise(u, v, 8, seed + 1) +
+           0.15f * T3DTileNoise(u, v, 16, seed + 2) + 0.10f * T3DTileNoise(u, v, 32, seed + 3);
+}
+
+// Grass detail: mottled clumps plus thousands of short blade strokes, mean 0.5.
+static Texture2D T3DMakeGrassDetail() {
+    const int N = 256;
+    std::vector<float> L((size_t)N * N), hue((size_t)N * N);
+    for (int y = 0; y < N; y++)
+        for (int x = 0; x < N; x++) {
+            float u = (float)x / N, v = (float)y / N;
+            L[(size_t)y * N + x] = 0.5f + (T3DTileFbm(u, v, 11) - 0.5f) * 0.34f;
+            hue[(size_t)y * N + x] = T3DTileFbm(u, v, 29) - 0.5f;
+        }
+    unsigned rs = 12345u;
+    auto rnd = [&]() { rs = rs * 1664525u + 1013904223u; return (float)(rs >> 8) / 16777216.0f; };
+    for (int i = 0; i < 5200; i++) { // blades seen from above: short dark/light dashes
+        float x = rnd() * N, y = rnd() * N, a = rnd() * 6.2831853f, len = 2.0f + rnd() * 4.0f;
+        float d = (rnd() < 0.55f) ? -0.16f : 0.14f;
+        for (float t = 0; t < len; t += 0.7f) {
+            int px = ((int)(x + cosf(a) * t) % N + N) % N, py = ((int)(y + sinf(a) * t) % N + N) % N;
+            L[(size_t)py * N + px] += d * (1.0f - t / (len + 1.0f));
+        }
+    }
+    Image img = GenImageColor(N, N, WHITE);
+    Color* px = (Color*)img.data;
+    for (int i = 0; i < N * N; i++) {
+        // average with neighbours (wrapping) so the dashes read as soft blades
+        int x = i % N, y = i / N;
+        float s = L[(size_t)i] * 0.6f + 0.1f * (L[(size_t)y * N + (x + 1) % N] + L[(size_t)y * N + (x + N - 1) % N] +
+                                                L[(size_t)((y + 1) % N) * N + x] + L[(size_t)((y + N - 1) % N) * N + x]);
+        float h = hue[(size_t)i] * 0.10f;
+        px[i] = { (unsigned char)std::clamp((s + h) * 255.0f, 0.0f, 255.0f),
+                  (unsigned char)std::clamp((s + h * 0.3f) * 255.0f, 0.0f, 255.0f),
+                  (unsigned char)std::clamp((s - h) * 255.0f, 0.0f, 255.0f), 255 };
+    }
+    Texture2D t = LoadTextureFromImage(img);
+    UnloadImage(img);
+    GenTextureMipmaps(&t);
+    SetTextureFilter(t, TEXTURE_FILTER_TRILINEAR);
+    SetTextureWrap(t, TEXTURE_WRAP_REPEAT);
+    return t;
+}
+
+// Soil detail: r = cobblestones (tileable Voronoi, dark mortar gaps),
+// g = packed dirt with pebbles. Both centred on 0.5.
+static Texture2D T3DMakeSoilDetail() {
+    const int N = 256, P = 56;
+    unsigned rs = 777u;
+    auto rnd = [&]() { rs = rs * 1664525u + 1013904223u; return (float)(rs >> 8) / 16777216.0f; };
+    std::vector<Vector2> pts((size_t)P);
+    std::vector<float> shade((size_t)P);
+    for (int i = 0; i < P; i++) { pts[(size_t)i] = { rnd() * N, rnd() * N }; shade[(size_t)i] = rnd(); }
+    Image img = GenImageColor(N, N, WHITE);
+    Color* px = (Color*)img.data;
+    for (int y = 0; y < N; y++)
+        for (int x = 0; x < N; x++) {
+            float f1 = 1e9f, f2 = 1e9f;
+            int best = 0;
+            for (int i = 0; i < P; i++) {
+                float dx = fabsf(x - pts[(size_t)i].x), dy = fabsf(y - pts[(size_t)i].y);
+                dx = fminf(dx, N - dx); dy = fminf(dy, N - dy); // wrap
+                float d = sqrtf(dx * dx + dy * dy);
+                if (d < f1) { f2 = f1; f1 = d; best = i; } else if (d < f2) f2 = d;
+            }
+            float u = (float)x / N, v = (float)y / N;
+            float n = T3DTileFbm(u, v, 5);
+            float edge = f2 - f1;                                  // 0 on the mortar line
+            float stone = std::clamp((edge - 1.5f) / 3.0f, 0.0f, 1.0f);
+            float dome = 1.0f - std::clamp(f1 / 22.0f, 0.0f, 1.0f); // stones rounder in the middle
+            float cob = 0.26f + stone * (0.36f + 0.14f * shade[(size_t)best] + 0.10f * dome) + (n - 0.5f) * 0.10f;
+            float dirt = 0.5f + (n - 0.5f) * 0.30f + (T3DTileNoise(u, v, 64, 9) - 0.5f) * 0.12f;
+            float peb = T3DTileNoise(u, v, 48, 13);
+            if (peb > 0.80f) dirt += (peb - 0.80f) * 1.6f;          // light pebbles
+            if (peb < 0.12f) dirt -= (0.12f - peb) * 1.4f;          // dark grit
+            px[y * N + x] = { (unsigned char)std::clamp(cob * 255.0f, 0.0f, 255.0f),
+                              (unsigned char)std::clamp(dirt * 255.0f, 0.0f, 255.0f), 128, 255 };
+        }
+    Texture2D t = LoadTextureFromImage(img);
+    UnloadImage(img);
+    GenTextureMipmaps(&t);
+    SetTextureFilter(t, TEXTURE_FILTER_TRILINEAR);
+    SetTextureWrap(t, TEXTURE_WRAP_REPEAT);
+    return t;
+}
+
+// Sun, sky fill and fog shared by every lit shader (lit, grass, ground).
+static const Color kT3DSunColor = { 255, 238, 210, 255 };
+static const float kT3DAmbient[4] = { 0.42f, 0.41f, 0.40f, 1.0f };
+static void T3DSetLightUniforms(Shader sh) {
+    Vector3 sunDir = kT3DSunDir;
+    SetShaderValue(sh, GetShaderLocation(sh, "lightDir"), &sunDir, SHADER_UNIFORM_VEC3);
+    Vector4 sunCol = ColorNormalize(kT3DSunColor);
+    SetShaderValue(sh, GetShaderLocation(sh, "lightColor"), &sunCol, SHADER_UNIFORM_VEC4);
+    SetShaderValue(sh, GetShaderLocation(sh, "ambient"), kT3DAmbient, SHADER_UNIFORM_VEC4);
+    Vector3 fogCol = { kT3DSkyHorizon.r / 255.0f, kT3DSkyHorizon.g / 255.0f, kT3DSkyHorizon.b / 255.0f };
+    SetShaderValue(sh, GetShaderLocation(sh, "fogColor"), &fogCol, SHADER_UNIFORM_VEC3);
+    float fogRange[2] = { 900.0f, 2600.0f };
+    SetShaderValue(sh, GetShaderLocation(sh, "fogRange"), fogRange, SHADER_UNIFORM_VEC2);
+}
+
+static void T3DGroundShaderEnsure() {
+    T3DGroundShader& G = g_t3dGroundSh;
+    if (G.ready || G.tried) return;
+    G.tried = true;
+    G.shader = LoadShader("assets/shaders/lit.vs", "assets/shaders/ground.fs");
+    if (G.shader.id == 0) return;
+    G.shader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(G.shader, "viewPos");
+    G.shader.locs[SHADER_LOC_MAP_METALNESS] = GetShaderLocation(G.shader, "texture1");
+    G.shader.locs[SHADER_LOC_MAP_NORMAL] = GetShaderLocation(G.shader, "texture2");
+    G.viewPosLoc = G.shader.locs[SHADER_LOC_VECTOR_VIEW];
+    G.fogRangeLoc = GetShaderLocation(G.shader, "fogRange");
+    T3DSetLightUniforms(G.shader);
+    G.grassDetail = T3DMakeGrassDetail();
+    G.soilDetail = T3DMakeSoilDetail();
+    G.ready = true;
+}
+// Ground models use the detail shader; falls back to the plain lit shader.
+static void T3DApplyGroundShader(Model& m) {
+    T3DGroundShaderEnsure();
+    if (!g_t3dGroundSh.ready || m.meshCount <= 0) { Town3DApplyLitShader(m); return; }
+    for (int i = 0; i < m.materialCount; i++) {
+        m.materials[i].shader = g_t3dGroundSh.shader;
+        m.materials[i].maps[MATERIAL_MAP_METALNESS].texture = g_t3dGroundSh.grassDetail;
+        m.materials[i].maps[MATERIAL_MAP_NORMAL].texture = g_t3dGroundSh.soilDetail;
+    }
+}
+static void T3DGroundShaderSync(const Vector3* camPos, const float* fogRange) {
+    if (!g_t3dGroundSh.ready) return;
+    if (camPos) SetShaderValue(g_t3dGroundSh.shader, g_t3dGroundSh.viewPosLoc, camPos, SHADER_UNIFORM_VEC3);
+    if (fogRange) SetShaderValue(g_t3dGroundSh.shader, g_t3dGroundSh.fogRangeLoc, fogRange, SHADER_UNIFORM_VEC2);
+}
+
+// Soft sun shadows painted into a ground map (the realtime shadow map stays
+// off on web). The sun is fixed, so a building's shadow is its footprint
+// swept along the sun's ground direction for its height - baked once.
+static void T3DBakeBoxShadow(Color* px, int SZ, float k, float cx, float cz, float hx, float hz, float height,
+                             float strength) {
+    const float sx = -kT3DSunDir.x / kT3DSunDir.y, sz = -kT3DSunDir.z / kT3DSunDir.y; // ground offset per unit height
+    float ox = sx * height, oz = sz * height; // shadows fall away from the sun
+    const float soft = 10.0f;
+    float x0 = cx - hx - soft + fminf(0.0f, ox), x1 = cx + hx + soft + fmaxf(0.0f, ox);
+    float z0 = cz - hz - soft + fminf(0.0f, oz), z1 = cz + hz + soft + fmaxf(0.0f, oz);
+    int px0 = std::max(0, (int)(x0 * k)), px1 = std::min(SZ - 1, (int)(x1 * k));
+    int pz0 = std::max(0, (int)(z0 * k)), pz1 = std::min(SZ - 1, (int)(z1 * k));
+    for (int py = pz0; py <= pz1; py++)
+        for (int pxl = px0; pxl <= px1; pxl++) {
+            float wx = (pxl + 0.5f) / k, wz = (py + 0.5f) / k;
+            float d = 1e9f;
+            for (int s = 0; s <= 8; s++) { // sweep the footprint along the shadow direction
+                float t = s / 8.0f;
+                float qx = fabsf(wx - (cx + ox * t)) - hx, qz = fabsf(wz - (cz + oz * t)) - hz;
+                float out = sqrtf(fmaxf(qx, 0.0f) * fmaxf(qx, 0.0f) + fmaxf(qz, 0.0f) * fmaxf(qz, 0.0f));
+                d = fminf(d, out + fminf(fmaxf(qx, qz), 0.0f));
+            }
+            float cov = 1.0f - std::clamp((d + 2.0f) / soft, 0.0f, 1.0f);
+            if (cov <= 0.0f) continue;
+            Color& c = px[py * SZ + pxl];
+            float w = cov * strength;
+            c.r = (unsigned char)(c.r * (1.0f - w * 0.44f));
+            c.g = (unsigned char)(c.g * (1.0f - w * 0.40f));
+            c.b = (unsigned char)(c.b * (1.0f - w * 0.28f)); // shadows lean cool
+        }
+}
+static void T3DBakeBlobShadow(Color* px, int SZ, float k, float x, float z, float r, float height, float strength) {
+    const float sx = -kT3DSunDir.x / kT3DSunDir.y, sz = -kT3DSunDir.z / kT3DSunDir.y;
+    float cx = x + sx * height * 0.55f, cz = z + sz * height * 0.55f;
+    int px0 = std::max(0, (int)((cx - r * 1.3f) * k)), px1 = std::min(SZ - 1, (int)((cx + r * 1.3f) * k));
+    int pz0 = std::max(0, (int)((cz - r * 1.3f) * k)), pz1 = std::min(SZ - 1, (int)((cz + r * 1.3f) * k));
+    for (int py = pz0; py <= pz1; py++)
+        for (int pxl = px0; pxl <= px1; pxl++) {
+            float wx = (pxl + 0.5f) / k, wz = (py + 0.5f) / k;
+            float d = hypotf((wx - cx) / 1.25f, wz - cz) / r; // stretched a little along the sun
+            float cov = 1.0f - std::clamp((d - 0.55f) / 0.6f, 0.0f, 1.0f);
+            if (cov <= 0.0f) continue;
+            Color& c = px[py * SZ + pxl];
+            float w = cov * strength;
+            c.r = (unsigned char)(c.r * (1.0f - w * 0.44f));
+            c.g = (unsigned char)(c.g * (1.0f - w * 0.40f));
+            c.b = (unsigned char)(c.b * (1.0f - w * 0.28f));
+        }
+}
+
 static const int kT3DGroundPx = 1024;
 struct Town3DGround {
     bool loaded = false;
     int town = -1;
     Texture2D tex{};
     Model model{};
+    std::vector<unsigned char> mask; // ground map alpha (1 grass .. 0 stone), for grass placement
 };
 static Town3DGround g_t3dGround;
 
@@ -10656,7 +10909,7 @@ static Town3DGround g_t3dGround;
 static const float kT3DRoadW = 26.0f;
 
 static void Town3DGroundDisc(Image* img, float x, float z, float r, Color col) {
-    const float k = kT3DGroundPx / 1000.0f;
+    const float k = kT3DGroundPx / kTownWorldSize;
     ImageDrawCircle(img, (int)(x * k), (int)(z * k), (int)(r * k + 0.5f), col);
 }
 
@@ -10677,18 +10930,21 @@ static void Town3DGroundRoadPath(Image* img, const std::vector<Vector2>& pts, Co
 
 // The full network as polylines (also feeds the worn-grass edge pass below).
 static void Town3DStreetPolylines(std::vector<std::vector<Vector2>>& out) {
-    out.push_back({ { 500, 100 }, { 500, 900 } }); // main street, north edge to the gate
+    // Layout units scaled by kTS; each lane keeps its doorstep offset (+74)
+    // from its building row so it still runs right past the doors.
+    const float S = kTS;
+    out.push_back({ { 500 * S, 100 * S }, { 500 * S, 900 * S } }); // main street, north edge to the gate
     { // north lane: gentle bow past smith/carpenter/tailor's doors
         std::vector<Vector2> p;
         for (int i = 0; i <= 24; i++) {
             float t = (float)i / 24.0f, u = 1.0f - t;
-            p.push_back({ u * u * 140 + 2 * u * t * 500 + t * t * 860,
-                          u * u * 274 + 2 * u * t * 266 + t * t * 274 });
+            p.push_back({ (u * u * 140 + 2 * u * t * 500 + t * t * 860) * S,
+                          200 * S + u * u * 74 + 2 * u * t * 66 + t * t * 74 });
         }
         out.push_back(p);
     }
-    out.push_back({ { 140, 574 }, { 960, 574 } }); // middle lane, past alchemy/stable/house
-    out.push_back({ { 140, 876 }, { 860, 876 } }); // south lane, past healer/bank/provisioner
+    out.push_back({ { 140 * S, 500 * S + 74 }, { 960 * S, 500 * S + 74 } }); // middle lane, past alchemy/stable/house
+    out.push_back({ { 140 * S, 800 * S + 76 }, { 860 * S, 800 * S + 76 } }); // south lane, past healer/bank/provisioner
 }
 
 static float Town3DDistPtSeg(float px, float pz, float ax, float az, float bx, float bz) {
@@ -10699,6 +10955,7 @@ static float Town3DDistPtSeg(float px, float pz, float ax, float az, float bx, f
     return hypotf(px - (ax + t * dx), pz - (az + t * dz));
 }
 
+static std::vector<Vector2> Town3DTreeSpots(int town); // town greenery, with the wilderness dressing
 static void Town3DEnsureGround(const GameState& s) {
     Town3DGround& G = g_t3dGround;
     if (G.loaded && G.town == s.selectedTown) return;
@@ -10719,8 +10976,12 @@ static void Town3DEnsureGround(const GameState& s) {
     Color roadCol    = town4 ? Color{ 132, 128, 118, 255 } : town3 ? Color{ 200, 212, 226, 255 } : (town2 ? Color{ 150, 146, 138, 255 }  : Color{ 178, 146, 98, 255 });
 
     const int SZ = kT3DGroundPx;
-    const float k = SZ / 1000.0f;
+    const float k = SZ / kTownWorldSize;
+    const float pcx = 500.0f * kTS, pcz = 500.0f * kTS;           // plaza center
+    const float pR = 84.0f * kTS, pRim = 90.0f * kTS;             // plaza face / rim radii
     Color wornCol = town3 ? Color{ 205, 218, 232, 255 } : (town2 ? Color{ 140, 142, 108, 255 } : Color{ 170, 168, 112, 255 });
+    // Surface type in alpha for the ground detail shader: grass 255, dirt 128, stone 0.
+    roadCol.a = 128; plazaCol.a = 0; plazaRim.a = 0;
     Image ground = GenImageColor(SZ, SZ, grassLight);
     Image fineN = GenImagePerlinNoise(SZ, SZ, 0, 0, 4.0f);
     Image patchN = GenImagePerlinNoise(SZ, SZ, 0, 0, 1.2f);
@@ -10748,8 +11009,8 @@ static void Town3DEnsureGround(const GameState& s) {
     std::vector<std::vector<Vector2>> streets;
     Town3DStreetPolylines(streets);
     for (auto& pl : streets) Town3DGroundRoadPath(&ground, pl, roadCol);
-    ImageDrawCircle(&ground, (int)(500 * k), (int)(500 * k), (int)(90 * k), plazaRim);
-    ImageDrawCircle(&ground, (int)(500 * k), (int)(500 * k), (int)(84 * k), plazaCol);
+    ImageDrawCircle(&ground, (int)(pcx * k), (int)(pcz * k), (int)(pRim * k), plazaRim);
+    ImageDrawCircle(&ground, (int)(pcx * k), (int)(pcz * k), (int)(pR * k), plazaCol);
 
     // Detail pass: worn-grass tint feathering out from every road edge and
     // around the plaza rim, plus subtle stone mottling inside the plaza.
@@ -10766,9 +11027,9 @@ static void Town3DEnsureGround(const GameState& s) {
     for (int py = 0; py < SZ; py++) {
         for (int px = 0; px < SZ; px++) {
             float wx = px / k, wz = py / k;
-            float dc = hypotf(wx - 500.0f, wz - 500.0f);
+            float dc = hypotf(wx - pcx, wz - pcz);
             int idx = py * SZ + px;
-            if (dc < 84.0f) { // plaza face: stone mottling from the fine noise
+            if (dc < pR) { // plaza face: stone mottling from the fine noise
                 float s = (np[idx].r / 255.0f - 0.5f) * 22.0f;
                 dst[idx].r = (unsigned char)std::clamp(dst[idx].r + s, 0.0f, 255.0f);
                 dst[idx].g = (unsigned char)std::clamp(dst[idx].g + s, 0.0f, 255.0f);
@@ -10788,12 +11049,13 @@ static void Town3DEnsureGround(const GameState& s) {
             float wear = 0.0f;
             if (dw >= kT3DRoadW * 0.5f && dw < kT3DRoadW * 0.5f + 23.0f)
                 wear = (1.0f - (dw - kT3DRoadW * 0.5f) / 23.0f) * 0.55f;
-            float dpe = fabsf(dc - 90.0f); // worn ring just outside the plaza rim
+            float dpe = fabsf(dc - pRim); // worn ring just outside the plaza rim
             if (dpe < 24.0f) wear = fmaxf(wear, (1.0f - dpe / 24.0f) * 0.35f);
             if (wear > 0.0f) {
                 dst[idx].r = (unsigned char)(dst[idx].r + (wornCol.r - dst[idx].r) * wear);
                 dst[idx].g = (unsigned char)(dst[idx].g + (wornCol.g - dst[idx].g) * wear);
                 dst[idx].b = (unsigned char)(dst[idx].b + (wornCol.b - dst[idx].b) * wear);
+                dst[idx].a = (unsigned char)(255 - 110 * std::min(1.0f, wear * 1.8f)); // trampled: half grass, half dirt
             }
         }
     }
@@ -10803,13 +11065,24 @@ static void Town3DEnsureGround(const GameState& s) {
     UnloadImage(fineN);
     UnloadImage(patchN);
 
+    // Baked sun shadows: buildings (footprint swept by height) and trees.
+    for (auto& node : ActiveTownNodes(s.selectedTown)) {
+        bool wide = (node.key == "townhall" || node.key == "bank" || node.key == "stable");
+        T3DBakeBoxShadow(dst, SZ, k, node.pos.x, node.pos.y, wide ? 66.0f : 58.0f, wide ? 44.0f : 58.0f,
+                         Town3DBuildingHeight(node.key) * 0.8f, town3 ? 0.55f : 0.85f);
+    }
+    for (const Vector2& t : Town3DTreeSpots(s.selectedTown))
+        T3DBakeBlobShadow(dst, SZ, k, t.x, t.y, 34.0f, 90.0f, 0.7f);
+    G.mask.resize((size_t)SZ * SZ);
+    for (int i = 0; i < SZ * SZ; i++) G.mask[(size_t)i] = dst[i].a;
+
     G.tex = LoadTextureFromImage(ground);
     UnloadImage(ground);
     GenTextureMipmaps(&G.tex);
     SetTextureFilter(G.tex, TEXTURE_FILTER_TRILINEAR);
-    G.model = LoadModelFromMesh(GenMeshPlane(1000, 1000, 1, 1));
+    G.model = LoadModelFromMesh(GenMeshPlane(kTownWorldSize, kTownWorldSize, 1, 1));
     G.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = G.tex;
-    Town3DApplyLitShader(G.model);
+    T3DApplyGroundShader(G.model);
     G.town = s.selectedTown;
     G.loaded = true;
 }
@@ -11738,11 +12011,11 @@ static const T3DPosFix kT3DTreeFixes[] = {
 // Extra 3D-only greenery: gate approach and town edges, so the town reads
 // nestled in rather than pasted on.
 static const TownFoliage kT3DExtraTrees[] = {
-    { { 380, 950 }, 1 }, { { 620, 950 }, 1 },
-    { { 150, 45 }, 1 }, { { 550, 45 }, 0 }, { { 850, 45 }, 1 },
-    { { 30, 350 }, 0 }, { { 30, 650 }, 2 },
-    { { 975, 700 }, 1 }, { { 975, 930 }, 3 },
-    { { 200, 960 }, 0 }, { { 700, 960 }, 2 },
+    { TS(380, 950), 1 }, { TS(620, 950), 1 },
+    { TS(150, 45), 1 }, { TS(550, 45), 0 }, { TS(850, 45), 1 },
+    { TS(30, 350), 0 }, { TS(30, 650), 2 },
+    { TS(975, 700), 1 }, { TS(975, 930), 3 },
+    { TS(200, 960), 0 }, { TS(700, 960), 2 },
 };
 struct T3DPropFix { int kind; float ox, oz, nx, nz; };
 static const T3DPropFix kT3DPropFixes[] = {
@@ -11768,21 +12041,21 @@ static const T3DPropFix kT3DPropFixes[] = {
 // Street lamps for the 3D lane network (the 2D lamps flank the old spokes, so
 // the 3D view places its own along the main street + lanes instead).
 static const Vector2 kT3DLamps[] = {
-    { 458, 300 }, { 542, 300 }, { 458, 700 }, { 542, 700 },
-    { 300, 232 }, { 700, 232 }, { 300, 532 }, { 700, 532 },
-    { 300, 832 }, { 700, 832 },
+    TS(458, 300), TS(542, 300), TS(458, 700), TS(542, 700),
+    TS(300, 232), TS(700, 232), TS(300, 532), TS(700, 532),
+    TS(300, 832), TS(700, 832),
 };
 
 static void Town3DApplyTreeFix(float& x, float& z) {
     for (auto& fix : kT3DTreeFixes)
-        if (fabsf(x - fix.ox) < 0.5f && fabsf(z - fix.oz) < 0.5f) {
-            x = fix.nx; z = fix.nz; return;
+        if (fabsf(x - fix.ox * kTS) < 0.5f && fabsf(z - fix.oz * kTS) < 0.5f) {
+            x = fix.nx * kTS; z = fix.nz * kTS; return;
         }
 }
 static void Town3DApplyPropFix(int kind, float& x, float& z) {
     for (auto& fix : kT3DPropFixes)
-        if (fix.kind == kind && fabsf(x - fix.ox) < 0.5f && fabsf(z - fix.oz) < 0.5f) {
-            x = fix.nx; z = fix.nz; return;
+        if (fix.kind == kind && fabsf(x - fix.ox * kTS) < 0.5f && fabsf(z - fix.oz * kTS) < 0.5f) {
+            x = fix.nx * kTS; z = fix.nz * kTS; return;
         }
 }
 
@@ -11816,6 +12089,48 @@ static void Town3DDrawFoliageOne(const TownFoliage& f, float x, float z) {
 // The 3D town's drawable contents, shared by the shadow pass (depth from the
 // sun's POV) and the main pass (lit + shadowed). The sky is NOT included - it
 // is drawn only in the main pass, unlit, before the shadow shader is enabled.
+// Town gatehouse (2026-09-26): twin stone towers with battlements, an arch
+// over the road and its wooden doors swung open. Passage runs along z.
+static void Town3DDrawGatehouse(float x, float z, int town) {
+    static Model gh{};
+    static bool built = false;
+    if (!built) {
+        built = true;
+        T3CMeshBuilder b;
+        Color st = { 162, 156, 146, 255 }, stDk = { 124, 118, 110, 255 }, wood = { 110, 76, 46, 255 }, iron = { 60, 60, 66, 255 };
+        for (int s = -1; s <= 1; s += 2) {
+            float tx = s * 52.0f;
+            T3CBox(b, tx, 42, 0, 36, 84, 40, st);                 // tower
+            T3CBox(b, tx, 3, 0, 42, 6, 46, stDk);                 // plinth
+            T3CBox(b, tx, 86, 0, 40, 4, 44, stDk);                // parapet ledge
+            for (int i = 0; i < 3; i++)                            // merlons
+                for (int j = 0; j < 2; j++) {
+                    T3CBox(b, tx - 14 + i * 14, 93, j ? 19 : -19, 8, 10, 5, st);
+                    if (i != 1) T3CBox(b, j ? tx + 17 : tx - 17, 93, -8 + i * 8, 5, 10, 8, st);
+                }
+            T3CBox(b, tx - s * 18.5f, 40, 12, 1, 18, 8, Color{ 50, 44, 40, 255 }); // arrow slit
+            T3CBox(b, tx, 48, 20.5f, 5, 12, 1, Color{ 50, 44, 40, 255 });
+            // open door leaf against the passage wall
+            T3CBox(b, s * 31.0f, 26, 16, 3, 50, 26, wood);
+            T3CBox(b, s * 31.0f, 14, 16, 3.6f, 3, 26, iron);
+            T3CBox(b, s * 31.0f, 38, 16, 3.6f, 3, 26, iron);
+        }
+        T3CBox(b, 0, 70, 0, 72, 18, 40, st);                       // wall over the arch
+        T3CBox(b, 0, 60, 0, 68, 4, 42, stDk);                      // arch lintel
+        for (int i = 0; i < 4; i++) T3CBox(b, -24 + i * 16, 83, 17, 8, 8, 5, st);
+        gh = T3CFinish(b);
+        Town3DApplyLitShader(gh);
+    }
+    Color tint = (town == 2) ? Color{ 236, 242, 250, 255 } : (town == 3) ? Color{ 200, 196, 190, 255 } : WHITE;
+    DrawModelEx(gh, { x, 0, z }, { 0, 1, 0 }, 0.0f, { 1, 1, 1 }, tint);
+    // banners on the towers
+    Color ban = (town == 1) ? Color{ 50, 90, 150, 255 } : (town == 2) ? Color{ 120, 170, 210, 255 } : Color{ 160, 40, 40, 255 };
+    DrawCube({ x - 52, 60, z + 20.5f }, 14, 26, 1.0f, ban);
+    DrawCube({ x + 52, 60, z + 20.5f }, 14, 26, 1.0f, ban);
+}
+
+static void Town3DDrawGreenery(int town, const Town3DCam* cull); // with the wilderness dressing
+static void Town3DDrawProps(int town, float t);                   // same place
 static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     (void)shadowPass;
     Town3DLoadModels();
@@ -11823,7 +12138,8 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
 
     // Ground: procedural grass texture with baked plaza + dirt roads, plus a
     // large flat outer field so the horizon never shows a hard edge.
-    DrawModel(g_t3dGround.model, { 500, 0, 500 }, 1.0f, WHITE);
+    const float tc = kTownWorldSize * 0.5f; // town center
+    DrawModel(g_t3dGround.model, { tc, 0, tc }, 1.0f, WHITE);
     Color outerCol = (s.selectedTown == 0) ? Color{ 96, 138, 76, 255 } :
                      (s.selectedTown == 2) ? Color{ 226, 234, 242, 255 } : // Frostmere: snowfields
                      (s.selectedTown == 3) ? Color{ 133, 129, 121, 255 } : Color{ 90, 124, 82, 255 };
@@ -11832,7 +12148,7 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     // main(), fixing a web-only clipping bug); depth precision gets coarser
     // the farther the far plane sits. -15 is still visually nothing (flat-
     // color horizon filler, never seen edge-on) but leaves enough margin.
-    DrawPlane({ 500, -15.0f, 500 }, { 4000, 4000 }, outerCol);
+    DrawPlane({ tc, -15.0f, tc }, { 4000 * kTS, 4000 * kTS }, outerCol);
 
     // Buildings - Quaternius MegaKit assemblies (see Town3DDrawBuilding), one per
     // grid node on the same footprints the old programmer-art boxes used.
@@ -11849,10 +12165,10 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     }
     if (s.selectedTown == 2) { // Phase 3 - Frostmere 3D winter dressing: snow drifts + frost pines
         static const std::array<Vector2, 6> kFrostDrifts3D = {{
-            {120, 150}, {880, 120}, {950, 700}, {60, 750}, {750, 920}, {200, 920}
+            TS(120, 150), TS(880, 120), TS(950, 700), TS(60, 750), TS(750, 920), TS(200, 920)
         }};
         static const std::array<Vector2, 4> kFrostPines3D = {{
-            {100, 400}, {900, 350}, {520, 120}, {60, 600}
+            TS(100, 400), TS(900, 350), TS(520, 120), TS(60, 600)
         }};
         for (auto& d : kFrostDrifts3D)
             DrawSphere({ d.x, 2, d.y }, 34.0f, Color{ 240, 248, 255, 255 });
@@ -11864,10 +12180,10 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     }
     if (s.selectedTown == 3) { // Phase 4 - Cragmoor mountain dressing: granite outcrops + hardy pines
         static const std::array<Vector2, 6> kCragRocks3D = {{
-            {120, 150}, {880, 120}, {950, 700}, {60, 750}, {750, 920}, {200, 920}
+            TS(120, 150), TS(880, 120), TS(950, 700), TS(60, 750), TS(750, 920), TS(200, 920)
         }};
         static const std::array<Vector2, 3> kCragPines3D = {{
-            {100, 400}, {900, 350}, {520, 120}
+            TS(100, 400), TS(900, 350), TS(520, 120)
         }};
         for (auto& rk : kCragRocks3D) { // granite outcrops - primitive clusters, no new models
             DrawSphere({ rk.x, 8, rk.y }, 26.0f, Color{ 135, 130, 120, 255 });
@@ -11880,9 +12196,8 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
             DrawCylinder({ p3.x, 88, p3.y }, 1, 18, 40, 8, Color{ 95, 120, 88, 255 });
         }
     }
-    // Wilderness Gate - sage box, same role as in 2D.
-    DrawCube({ kWildernessGatePos.x, 35, kWildernessGatePos.y }, 90, 70, 90, Color{ 140, 165, 140, 255 });
-    DrawCube({ kWildernessGatePos.x, 79, kWildernessGatePos.y }, 102, 18, 102, Color{ 110, 135, 110, 255 });
+    // Wilderness Gate - stone gatehouse over the main street (2026-09-26; was a sage box).
+    Town3DDrawGatehouse(kWildernessGatePos.x, kWildernessGatePos.y, s.selectedTown);
 
     // Foliage - real CC0 models (Kenney Nature Kit) per variant, see
     // kFoliagePositions. Per-instance rotation + scale jitter from a
@@ -11900,77 +12215,11 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     }
     for (const TownFoliage& f : kT3DExtraTrees)
         Town3DDrawFoliageOne(f, f.pos.x, f.pos.y);
+    Town3DDrawGreenery(s.selectedTown, nullptr); // tree belt, groves, wall bushes
 
-    // Props - small primitive clusters per kind (see kTownProps' kind index),
-    // with 3D-side nudges off the 3D lanes (see kT3DPropFixes). Street lamps
-    // are placed for the 3D lane network instead (kT3DLamps).
-    for (const TownProp& p : kTownProps) {
-        if (p.kind == 1) continue; // 3D lamps drawn below
-        float x = p.pos.x, z = p.pos.y, sz = p.size;
-        Town3DApplyPropFix(p.kind, x, z);
-        switch (p.kind) {
-            case 0: // fountain
-                DrawCylinder({ x, 7, z }, sz * 0.65f, sz * 0.7f, 14, 10, Color{ 150, 150, 155, 255 });
-                DrawCylinder({ x, 12, z }, sz * 0.5f, sz * 0.5f, 6, 10, Color{ 90, 150, 200, 255 });
-                break;
-            case 1: // streetlamp
-                DrawCylinder({ x, 22, z }, 3, 4, 44, 6, Color{ 60, 60, 65, 255 });
-                DrawSphere({ x, 48, z }, 7, Color{ 255, 220, 130, 255 });
-                break;
-            case 2: // smith's sign
-                DrawCylinder({ x, 20, z }, 3, 3, 40, 6, Color{ 110, 75, 45, 255 });
-                DrawCube({ x, 38, z }, sz, 16, 6, Color{ 140, 100, 60, 255 });
-                break;
-            case 3: case 4: case 5: { // market stalls
-                Color sc = (p.kind == 3) ? Color{ 180, 80, 80, 255 }
-                           : (p.kind == 4) ? Color{ 80, 120, 180, 255 } : Color{ 90, 160, 90, 255 };
-                DrawCube({ x, 15, z }, sz, 30, sz * 0.8f, sc);
-                DrawCube({ x, 34, z }, sz * 1.1f, 8, sz * 0.9f, ColorBrightness(sc, -0.2f));
-                break;
-            }
-            case 6: // lumber pile
-                for (int i = 0; i < 3; i++)
-                    DrawCube({ x, 6.0f + i * 11.0f, z }, sz, 10, 12, Color{ 130, 90, 55, 255 });
-                break;
-            case 7: // barrel - KayKit Dungeon barrel (CC0), ~1m at modular scale
-                Town3DDrawPiece(g_t3dModels.barrel, { x, 0, z },
-                                Town3DHash01(x, z) * 360.0f, 1.0f);
-                break;
-            case 8: // crate - Quaternius Prop_Crate (already in the kit)
-                Town3DDrawPiece(g_t3dModels.crate, { x, 0, z },
-                                Town3DHash01(x, z) * 360.0f, 1.0f);
-                break;
-            case 9: // anvil
-                DrawCube({ x, 8, z }, 16, 16, 16, Color{ 90, 70, 55, 255 });
-                DrawCube({ x, 20, z }, 26, 8, 12, Color{ 70, 70, 75, 255 });
-                break;
-            case 10: // statue
-                DrawCube({ x, 10, z }, 24, 20, 24, Color{ 160, 160, 165, 255 });
-                DrawSphere({ x, 30, z }, 10, Color{ 170, 170, 175, 255 });
-                break;
-            case 11: case 12: case 13: { // farm animals
-                Color ac = (p.kind == 11) ? Color{ 230, 230, 230, 255 }
-                           : (p.kind == 12) ? Color{ 120, 85, 60, 255 } : Color{ 240, 240, 235, 255 };
-                DrawSphere({ x, 12, z }, 12, ac);
-                DrawSphere({ x + 10, 20, z }, 6, ac);
-                break;
-            }
-            case 14: // purple potion
-                DrawCylinder({ x, 8, z }, 7, 8, 16, 8, Color{ 150, 80, 180, 255 });
-                break;
-            case 15: // red potion
-                DrawCylinder({ x, 8, z }, 7, 8, 16, 8, Color{ 200, 70, 70, 255 });
-                break;
-            case 16: // chest - KayKit Dungeon chest (CC0), 0.7x to fit the old footprint
-                Town3DDrawPiece(g_t3dModels.chest, { x, 0, z },
-                                Town3DHash01(x, z) * 360.0f, 0.7f);
-                break;
-            case 17: // bookshelf
-                DrawCube({ x, 22, z }, 30, 44, 12, Color{ 110, 75, 45, 255 });
-                break;
-            default: break;
-        }
-    }
+    // Props - fountain, stalls, lamps, animals and per-building clusters
+    // (Town3DDrawProps; kTownProps still drives the 2D view).
+    Town3DDrawProps(s.selectedTown, (float)g_gameClock);
 
     // Phase 1 - Emberhold capital dressing (town 1 only).
     if (s.selectedTown == 0) {
@@ -11984,13 +12233,6 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
             DrawCoastProp3D(p.kind, p.pos.x, p.pos.y, p.size, s.worldTime);
     }
 
-    // Street lamps along the 3D lane network (kT3DLamps) - the 2D lamps flank
-    // the old spoke layout, so the 3D view places its own here instead.
-    for (const Vector2& lp : kT3DLamps) {
-        DrawCylinder({ lp.x, 22, lp.y }, 3, 4, 44, 6, Color{ 60, 60, 65, 255 });
-        DrawSphere({ lp.x, 48, lp.y }, 7, Color{ 255, 220, 130, 255 });
-    }
-
     // Plaza fence - Quaternius wooden fence rails (CC0, same kit as the
     // buildings) marking the plaza edges, with gaps where the streets
     // enter/exit. The 2D view draws fence posts here; the 3D view previously
@@ -12001,15 +12243,16 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     // open as a gateway where the middle lane passes.
     {
         Town3DModels& M = g_t3dModels;
-        const float zN = 420.0f, zS = 580.0f, xW = 420.0f, xE = 580.0f;
-        Town3DDrawPiece(M.fenceSingle, { 442.5f, 0, zN }, 0.0f);
-        Town3DDrawPiece(M.fenceExt,    { 557.5f, 0, zN }, 0.0f);
-        Town3DDrawPiece(M.fenceSingle, { 442.5f, 0, zS }, 0.0f);
-        Town3DDrawPiece(M.fenceExt,    { 557.5f, 0, zS }, 0.0f);
-        Town3DDrawPiece(M.fenceSingle, { xW, 0, 442.5f }, 90.0f);
-        Town3DDrawPiece(M.fenceExt,    { xW, 0, 502.5f }, 90.0f);
-        Town3DDrawPiece(M.fenceSingle, { xE, 0, 442.5f }, 90.0f);
-        Town3DDrawPiece(M.fenceExt,    { xE, 0, 502.5f }, 90.0f);
+        const float xW = kTownPlaza.x, xE = kTownPlaza.x + kTownPlaza.width;
+        const float zN = kTownPlaza.y, zS = kTownPlaza.y + kTownPlaza.height;
+        // Rails run in from each corner (45 units apiece), leaving the street gaps open.
+        const float r1 = 22.5f, r2 = 67.5f;
+        Town3DDrawPiece(M.fenceSingle, { xW + r1, 0, zN }, 0.0f); Town3DDrawPiece(M.fenceExt, { xW + r2, 0, zN }, 0.0f);
+        Town3DDrawPiece(M.fenceSingle, { xE - r1, 0, zN }, 0.0f); Town3DDrawPiece(M.fenceExt, { xE - r2, 0, zN }, 0.0f);
+        Town3DDrawPiece(M.fenceSingle, { xW + r1, 0, zS }, 0.0f); Town3DDrawPiece(M.fenceExt, { xW + r2, 0, zS }, 0.0f);
+        Town3DDrawPiece(M.fenceSingle, { xE - r1, 0, zS }, 0.0f); Town3DDrawPiece(M.fenceExt, { xE - r2, 0, zS }, 0.0f);
+        Town3DDrawPiece(M.fenceSingle, { xW, 0, zN + r1 }, 90.0f); Town3DDrawPiece(M.fenceExt, { xW, 0, zN + r2 }, 90.0f);
+        Town3DDrawPiece(M.fenceSingle, { xE, 0, zN + r1 }, 90.0f); Town3DDrawPiece(M.fenceExt, { xE, 0, zN + r2 }, 90.0f);
     }
 
     // Player + wandering townsfolk (Phase 3: procedural humanoids from the
@@ -12031,6 +12274,12 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
         float nyaw = (ndx * ndx + ndz * ndz < 0.04f)
                      ? Town3DHash01(np.x, np.y) * 6.2832f : atan2f(ndz, ndx);
         T3CAnim na2 = T3CMakeAnim(kT3CTrackNPCTown + i, np.x, np.y, !shadowPass);
+        {
+            float nsc = 1.0f;
+            HumanOutfit no = HumanOutfitForTownsfolk(activeNPCs[i].name, kT3CNPCShirts[i % 6], &nsc);
+            HumanPose nhp; nhp.move = na2.move;
+            if (DrawHuman(kT3CTrackNPCTown + i, np.x, np.y, nyaw, nsc, WHITE, no, nhp, shadowPass)) continue;
+        }
         T3CDrawHumanoid(g_t3cHumans[0].parts, np.x, np.y, nyaw, 0.97f,
                         kT3CNPCShirts[i % 6], Color{ 70, 62, 55, 255 },
                         Color{ 235, 205, 175, 255 }, na2, shadowPass);
@@ -12048,11 +12297,11 @@ static void Town3DShadowPass(GameState& s) {
     // Fixed orthographic sun camera covering the whole 1000x1000 town. Set here
     // (not in Town3DEnsureShadow) so the wilderness shadow pass can point the
     // same shared light camera at its own bigger world on its own frames.
-    Vector3 center = { 500, 0, 500 };
-    g_t3dLightCam.position = T3VSub(center, T3VScale(kT3DSunDir, -1300.0f));
+    Vector3 center = { kTownWorldSize * 0.5f, 0, kTownWorldSize * 0.5f };
+    g_t3dLightCam.position = T3VSub(center, T3VScale(kT3DSunDir, -1300.0f * kTS));
     g_t3dLightCam.target = center;
     g_t3dLightCam.up = { 0, 1, 0 };
-    g_t3dLightCam.fovy = 1350.0f; // ortho box height; aspect is 1:1 on the square FBO
+    g_t3dLightCam.fovy = 1350.0f * kTS; // ortho box height; aspect is 1:1 on the square FBO
     g_t3dLightCam.projection = CAMERA_ORTHOGRAPHIC;
     BeginTextureMode(g_t3dShadow.map);
     ClearBackground(WHITE); // depth cleared; no color attachment on this FBO
@@ -12140,9 +12389,9 @@ static void Town3DDrawAmbience(const Town3DCam& c, int townIdx) {
     for (int i = 0; i < kT3DBirdCount; i++) {
         float ang = t * 0.22f + (float)i * 1.5708f;
         float rad = 720.0f + (float)i * 110.0f;
-        Vector3 ctr = { 500.0f + cosf(ang) * rad,
+        Vector3 ctr = { 500.0f * kTS + cosf(ang) * rad,
                         470.0f + (float)i * 32.0f + sinf(t * 0.6f + (float)i) * 24.0f,
-                        500.0f + sinf(ang) * rad };
+                        500.0f * kTS + sinf(ang) * rad };
         Vector3 fwd = { -sinf(ang), 0.0f, cosf(ang) };  // direction of travel
         Vector3 side = { cosf(ang), 0.0f, -sinf(ang) };  // wing axis
         Vector3 nose = T3VAdd(ctr, T3VScale(fwd, 16.0f));
@@ -12193,8 +12442,19 @@ static void T3DUpdateViewFog(const Town3DCam& c) {
     g_t3dFogRange[0] = d + 350.0f;
     g_t3dFogRange[1] = d + 1900.0f;
     if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.fogRangeLoc, g_t3dFogRange, SHADER_UNIFORM_VEC2);
+    T3DGroundShaderSync(&c.pos, g_t3dFogRange);
 }
-static void T3DGrassDrawTown();
+// Soft vignette over the 3D viewport (2026-09-26): darkens the edges a touch so
+// the eye settles on the middle of the scene; drawn right after EndMode3D, under the HUD.
+static void T3DDrawVignette() {
+    const Rectangle v = kViewport;
+    const Color edge = { 18, 16, 24, 70 }, clear = { 18, 16, 24, 0 };
+    DrawRectangleGradientV((int)v.x, (int)v.y, (int)v.width, 110, edge, clear);
+    DrawRectangleGradientV((int)v.x, (int)(v.y + v.height - 150), (int)v.width, 150, clear, edge);
+    DrawRectangleGradientH((int)v.x, (int)v.y, 70, (int)v.height, edge, clear);
+    DrawRectangleGradientH((int)(v.x + v.width - 70), (int)v.y, 70, (int)v.height, clear, edge);
+}
+static void T3DGrassDrawTown(int town);
 static void Town3DDrawSurroundings(const GameState& s, const Town3DCam& c); // with the wilderness dressing
 static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     Vector2 mouse = GetMousePosition();
@@ -12260,7 +12520,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     T3DGrassFrameUpdate(c.pos); // sway clock for the grass shader
     Town3DDrawSceneContents(s, false);
     Town3DDrawSurroundings(s, c); // the real wilderness beyond the town edge (2026-09-26)
-    if (s.selectedTown != 2) T3DGrassDrawTown(); // no grass in snowy Frostmere
+    if (s.selectedTown != 2) T3DGrassDrawTown(s.selectedTown); // no grass in snowy Frostmere
     // Ambience (smoke + birds): unlit, one batched draw call, main pass only.
     Town3DUpdateAmbience(GameDt());
     Town3DDrawAmbience(c, s.selectedTown);
@@ -12286,6 +12546,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
         }
     }
     EndMode3D();
+    T3DDrawVignette();
 
     // --- 2D overlay: building labels projected from 3D, interaction prompt, hints ---
     // Labels fade and shrink as the camera pulls back (tuning constants below),
@@ -12412,7 +12673,7 @@ static void Wild3DEnsureGround() {
     Color grassDark  = { 96, 142, 74, 255 };
     Color grassLight = { 142, 186, 104, 255 };
     Color dirtCol    = { 164, 134, 94, 255 };
-    Color pathCol    = { 178, 150, 106, 255 };
+    Color pathCol    = { 178, 150, 106, 128 }; // alpha = surface type for the ground shader (dirt)
     Image ground = GenImageColor(SZ, SZ, grassLight);
     Image fineN = GenImagePerlinNoise(SZ, SZ, 0, 0, 5.0f);
     Image blotchN = GenImagePerlinNoise(SZ, SZ, 0, 0, 1.4f);
@@ -12476,6 +12737,7 @@ static void Wild3DEnsureGround() {
             if (rk > 0.05f) { // rocky, broken ground under and around the ridges
                 float t = fminf(1.0f, (rk - 0.05f) / 0.45f) * 0.85f;
                 r += (104 - 10 * n - r) * t; g += (98 - 10 * n - g) * t; b += (90 - 8 * n - b) * t;
+                px[i].a = (unsigned char)fminf(px[i].a, 255.0f - 190.0f * t); // gravel toward stone
             }
             // Water is drawn a little inside the blocking edge (0.62 vs the
             // grid's 0.5), so you visibly stop on the bank, not in the water.
@@ -12485,6 +12747,7 @@ static void Wild3DEnsureGround() {
                 r += (198 - r) * t; g += (182 - g) * t; b += (140 - b) * t;
             }
             if (w >= 0.54f && w < 0.62f) { r = 214; g = 222; b = 206; } // wet foam edge
+            if (w > 0.10f) px[i].a = (unsigned char)fminf(px[i].a, 128.0f); // shore, foam and water: dirt/sand detail
             if (w >= 0.62f) {
                 float depth = std::clamp((w - 0.62f) / 0.35f, 0.0f, 1.0f);
                 float fr = WildFieldAt(ff, wx, wz);
@@ -12509,7 +12772,7 @@ static void Wild3DEnsureGround() {
     SetTextureFilter(G.tex, TEXTURE_FILTER_TRILINEAR);
     G.model = LoadModelFromMesh(GenMeshPlane(WS, WS, 1, 1));
     G.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = G.tex;
-    Town3DApplyLitShader(G.model);
+    T3DApplyGroundShader(G.model);
     G.loaded = true;
 }
 
@@ -12574,64 +12837,12 @@ static bool Wild3DInView(const Town3DCam& c, float x, float z, float radius) {
 // the town is a single draw call, the wilderness is 4 quadrant chunks culled
 // by the camera. Skipped in the shadow pass (like the ambience batch): tufts
 // neither cast shadows nor pay the depth-pass cost. No dungeon grass.
-static const float kT3DGrassTuftH = 26.0f;
-static const float kT3DGrassTuftW = 15.0f;
-static const int kT3DGrassTownMax = 200;
-static const int kT3DGrassWildMax = 1800; // 2026-09-26: was 260 (paths only); meadow pass below
-
 struct T3DGrassShader {
     bool ready = false, tried = false;
     Shader shader{};
     int timeLoc = -1, viewPosLoc = -1, fogRangeLoc = -1;
 };
 static T3DGrassShader g_t3dGrassShader;
-
-struct T3DGrassField { bool built = false; Model model{}; };
-static T3DGrassField g_t3dGrassTown;
-static T3DGrassField g_t3dGrassWild[4];
-static bool g_t3dGrassWildBuilt = false;
-
-// Per-vertex-color triangle (the kit's T3CPushTri takes one color per tri;
-// grass wants a dark-base -> light-tip gradient).
-static void T3DGrassTri(T3CMeshBuilder& b, const float p0[3], const float p1[3],
-                        const float p2[3], Color c0, Color c1, Color c2) {
-    float ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
-    float vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
-    float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-    float l = sqrtf(nx * nx + ny * ny + nz * nz);
-    if (l < 1e-9f) return;
-    nx /= l; ny /= l; nz /= l;
-    const float* ps[3] = { p0, p1, p2 };
-    const Color cs[3] = { c0, c1, c2 };
-    for (int i = 0; i < 3; i++) {
-        b.pos.push_back(ps[i][0]); b.pos.push_back(ps[i][1]); b.pos.push_back(ps[i][2]);
-        b.nor.push_back(nx); b.nor.push_back(ny); b.nor.push_back(nz);
-        b.uv.push_back(0.0f); b.uv.push_back(0.0f);
-        b.col.push_back(cs[i].r); b.col.push_back(cs[i].g);
-        b.col.push_back(cs[i].b); b.col.push_back(255);
-    }
-}
-
-// One tuft: two crossed tapered quads, double-sided, gradient-shaded.
-static void T3DGrassTuft(T3CMeshBuilder& b, float x, float z, float s,
-                         Color cDark, Color cLight) {
-    float H = kT3DGrassTuftH * s, W = kT3DGrassTuftW * s;
-    float lean  = (Town3DHash01(x * 3.1f, z * 7.7f) - 0.5f) * 8.0f * s;
-    float leanZ = (Town3DHash01(z * 5.3f, x * 1.9f) - 0.5f) * 8.0f * s;
-    float base = Town3DHash01(x, z) * 3.14159265f;
-    for (int q = 0; q < 2; q++) {
-        float a = base + (float)q * 1.5707963f;
-        float dx = cosf(a) * W * 0.5f, dz = sinf(a) * W * 0.5f;
-        float v0[3] = { x - dx, 0.0f, z - dz };
-        float v1[3] = { x + dx, 0.0f, z + dz };
-        float v2[3] = { x + dx * 0.3f + lean, H, z + dz * 0.3f + leanZ };
-        float v3[3] = { x - dx * 0.3f + lean, H, z - dz * 0.3f + leanZ };
-        T3DGrassTri(b, v0, v1, v2, cDark, cDark, cLight);
-        T3DGrassTri(b, v0, v2, v3, cDark, cLight, cLight);
-        T3DGrassTri(b, v0, v2, v1, cDark, cLight, cDark);
-        T3DGrassTri(b, v0, v3, v2, cDark, cLight, cLight);
-    }
-}
 
 static void T3DGrassEnsureShader() {
     T3DGrassShader& G = g_t3dGrassShader;
@@ -12644,18 +12855,7 @@ static void T3DGrassEnsureShader() {
     G.timeLoc = GetShaderLocation(G.shader, "time");
     G.viewPosLoc = GetShaderLocation(G.shader, "viewPos");
     G.fogRangeLoc = GetShaderLocation(G.shader, "fogRange");
-    // Static uniforms mirror Town3DEnsureLit's values.
-    Vector3 sunDir = kT3DSunDir;
-    SetShaderValue(G.shader, GetShaderLocation(G.shader, "lightDir"), &sunDir, SHADER_UNIFORM_VEC3);
-    Vector4 sunCol = ColorNormalize(Color{ 255, 242, 220, 255 });
-    SetShaderValue(G.shader, GetShaderLocation(G.shader, "lightColor"), &sunCol, SHADER_UNIFORM_VEC4);
-    float ambient[4] = { 0.45f, 0.40f, 0.33f, 1.0f };
-    SetShaderValue(G.shader, GetShaderLocation(G.shader, "ambient"), ambient, SHADER_UNIFORM_VEC4);
-    Vector3 fogCol = { kT3DSkyHorizon.r / 255.0f, kT3DSkyHorizon.g / 255.0f,
-                       kT3DSkyHorizon.b / 255.0f };
-    SetShaderValue(G.shader, GetShaderLocation(G.shader, "fogColor"), &fogCol, SHADER_UNIFORM_VEC3);
-    float fogRange[2] = { 900.0f, 2600.0f };
-    SetShaderValue(G.shader, GetShaderLocation(G.shader, "fogRange"), fogRange, SHADER_UNIFORM_VEC2);
+    T3DSetLightUniforms(G.shader); // same sun/fill/fog as the lit shader
     G.ready = true;
 }
 
@@ -12676,172 +12876,169 @@ static void T3DGrassApplyShader(Model& m) {
     for (int i = 0; i < m.materialCount; i++) m.materials[i].shader = g_t3dGrassShader.shader;
 }
 
+static float TownEnvBuildingDist(int town, float x, float z); // with the town greenery
+// ---- Grass (2026-09-26 environment pass) ----
+// Dense clumps of thin blades - knee-high on a 64-unit character - with a few
+// flowers mixed in, instead of the old sparse 26-unit crossed cards. Blades
+// are single-sided and drawn with backface culling off, with up-facing
+// normals so they light like the ground they grow from. Town grass is one
+// mesh placed from the town ground map (grass only where the map says
+// grass); wilderness grass is built lazily in 400-unit chunks around the
+// camera, a couple per frame, so there's never a long hitch.
+struct T3DGrassField { bool built = false; Model model{}; };
+static T3DGrassField g_t3dGrassTown;
+static int g_t3dGrassTownIdx = -1;
+static const int kT3DGrassChunk = 400;
+static const int kT3DGrassChunksPerSide = 8; // 3200 / 400
+static T3DGrassField g_t3dGrassWild[kT3DGrassChunksPerSide * kT3DGrassChunksPerSide];
+
+static void T3DGrassVert(T3CMeshBuilder& b, float x, float y, float z, Color c) {
+    b.pos.push_back(x); b.pos.push_back(y); b.pos.push_back(z);
+    b.nor.push_back(0.0f); b.nor.push_back(1.0f); b.nor.push_back(0.0f);
+    b.uv.push_back(0.0f); b.uv.push_back(0.0f);
+    b.col.push_back(c.r); b.col.push_back(c.g); b.col.push_back(c.b); b.col.push_back(255);
+}
+// One clump: 4-6 tapered blades fanning out from a point, dark at the root,
+// lighter at the tip. flower: 0 none, else a small colored head on one stem.
+static void T3DGrassClump(T3CMeshBuilder& b, float x, float z, float s, Color cDark, Color cLight, int flower) {
+    int n = 4 + (int)(Town3DHash01(x * 1.3f, z * 0.7f) * 3.0f);
+    float base = Town3DHash01(x, z) * 6.2831853f;
+    for (int i = 0; i < n; i++) {
+        float a = base + (float)i * 6.2831853f / n + (Town3DHash01(x + i, z) - 0.5f) * 0.9f;
+        float r = 1.5f + 2.5f * Town3DHash01(z + i * 3.0f, x);
+        float bx = x + cosf(a) * r, bz = z + sinf(a) * r;
+        float H = (7.0f + 8.0f * Town3DHash01(x * 3.0f + i, z * 2.0f)) * s;
+        float lean = (0.25f + 0.35f * Town3DHash01(z * 5.0f + i, x)) * H;
+        float tx = bx + cosf(a) * lean, tz = bz + sinf(a) * lean;
+        float wdt = 1.3f * s;
+        float px = -sinf(a) * wdt, pz = cosf(a) * wdt; // blade width across the lean
+        Color tip = cLight;
+        T3DGrassVert(b, bx - px, 0.0f, bz - pz, cDark);
+        T3DGrassVert(b, bx + px, 0.0f, bz + pz, cDark);
+        T3DGrassVert(b, tx, H, tz, tip);
+    }
+    if (flower) {
+        static const Color kFlower[5] = { { 250, 244, 236, 255 }, { 250, 214, 70, 255 }, { 226, 110, 160, 255 },
+                                          { 150, 120, 230, 255 }, { 240, 120, 70, 255 } };
+        Color fc = kFlower[(flower - 1) % 5];
+        float fh = 12.0f * s, fr = 1.6f * s;
+        T3DGrassVert(b, x - 0.5f, 0.0f, z, cDark); T3DGrassVert(b, x + 0.5f, 0.0f, z, cDark); // stem
+        T3DGrassVert(b, x, fh, z, cLight);
+        T3DGrassVert(b, x - fr, fh, z - fr, fc); T3DGrassVert(b, x + fr, fh, z - fr, fc); T3DGrassVert(b, x + fr, fh + 0.5f, z + fr, fc);
+        T3DGrassVert(b, x - fr, fh, z - fr, fc); T3DGrassVert(b, x + fr, fh + 0.5f, z + fr, fc); T3DGrassVert(b, x - fr, fh + 0.5f, z + fr, fc);
+    }
+}
 static void T3DGrassShade(float x, float z, Color cDark, Color cLight, Color& cd, Color& cl) {
-    float v = 0.9f + 0.2f * Town3DHash01(x + 9.0f, z + 3.0f);
+    float v = 0.86f + 0.28f * Town3DHash01(x * 0.013f + 9.0f, z * 0.017f + 3.0f); // patchy, not per-clump noise
+    float y = Town3DHash01(x * 0.007f, z * 0.009f + 5.0f);                         // some drier, yellower patches
     cd = { (unsigned char)fminf(cDark.r * v, 255.0f), (unsigned char)fminf(cDark.g * v, 255.0f),
            (unsigned char)fminf(cDark.b * v, 255.0f), 255 };
-    cl = { (unsigned char)fminf(cLight.r * v, 255.0f), (unsigned char)fminf(cLight.g * v, 255.0f),
+    cl = { (unsigned char)fminf(cLight.r * v + y * 30.0f, 255.0f), (unsigned char)fminf(cLight.g * v + y * 12.0f, 255.0f),
            (unsigned char)fminf(cLight.b * v, 255.0f), 255 };
 }
+static int T3DGrassFlower(float x, float z, float chance) {
+    float h = Town3DHash01(x * 2.3f, z * 1.9f);
+    if (h > chance) return 0;
+    // flowers come in drifts of one color
+    return 1 + (int)(Town3DHash01(floorf(x / 90.0f), floorf(z / 90.0f)) * 5.0f) % 5;
+}
 
-// Town lawns: grid jitter, kept off streets, plaza, buildings, and the gate.
-static void T3DGrassBuildTown() {
+// Town lawns, placed from the ground map's surface mask (grass only).
+static void T3DGrassBuildTown(int town) {
     T3DGrassField& F = g_t3dGrassTown;
-    if (F.built) return;
+    if (F.built && g_t3dGrassTownIdx == town) return;
+    if (F.built && F.model.meshCount > 0) UnloadModel(F.model);
+    F = T3DGrassField{};
     F.built = true;
-    std::vector<std::vector<Vector2>> streets;
-    Town3DStreetPolylines(streets);
-    Color cDark = { 88, 128, 70, 255 }, cLight = { 150, 192, 114, 255 };
+    g_t3dGrassTownIdx = town;
+    const Town3DGround& G = g_t3dGround;
+    if (G.mask.empty()) return;
+    const int SZ = kT3DGroundPx;
+    const float k = SZ / kTownWorldSize;
+    Color cDark = { 70, 112, 52, 255 }, cLight = { 150, 190, 96, 255 };
+    if (town == 1) { cDark = { 72, 108, 62, 255 }; cLight = { 146, 178, 110, 255 }; }
+    if (town == 3) { cDark = { 84, 100, 62, 255 }; cLight = { 150, 160, 104, 255 }; }
     T3CMeshBuilder b;
-    int count = 0;
-    for (float gx = 60.0f; gx <= 940.0f && count < kT3DGrassTownMax; gx += 46.0f) {
-        for (float gz = 60.0f; gz <= 940.0f && count < kT3DGrassTownMax; gz += 46.0f) {
-            float jx = gx + (Town3DHash01(gx, gz) - 0.5f) * 30.0f;
-            float jz = gz + (Town3DHash01(gz, gx + 11.0f) - 0.5f) * 30.0f;
-            if (Town3DHash01(jx * 1.3f, jz * 2.9f) > 0.45f) continue;
-            if (hypotf(jx - 500.0f, jz - 500.0f) < 104.0f) continue; // plaza
-            bool onRoad = false;
-            for (auto& pl : streets) {
-                for (size_t i = 0; i + 1 < pl.size(); i++) {
-                    if (Town3DDistPtSeg(jx, jz, pl[i].x, pl[i].y, pl[i + 1].x, pl[i + 1].y) < 30.0f) {
-                        onRoad = true; break;
-                    }
-                }
-                if (onRoad) break;
-            }
-            if (onRoad) continue;
-            bool nearB = false;
-            for (auto& n : kTownNodePositions) {
-                float dx = jx - n.pos.x, dz = jz - n.pos.y;
-                if (dx * dx + dz * dz < 85.0f * 85.0f) { nearB = true; break; }
-            }
-            if (nearB) continue;
-            { // wilderness gate
-                float dx = jx - kWildernessGatePos.x, dz = jz - kWildernessGatePos.y;
-                if (dx * dx + dz * dz < 60.0f * 60.0f) continue;
-            }
-            float s = 0.75f + 0.55f * Town3DHash01(jz, jx + 5.0f);
+    const float step = 15.0f;
+    for (float gz = step * 0.5f; gz < kTownWorldSize; gz += step)
+        for (float gx = step * 0.5f; gx < kTownWorldSize; gx += step) {
+            float jx = gx + (Town3DHash01(gx * 0.71f, gz * 0.37f) - 0.5f) * step;
+            float jz = gz + (Town3DHash01(gz * 0.59f, gx * 0.83f + 2.0f) - 0.5f) * step;
+            int px = std::clamp((int)(jx * k), 0, SZ - 1), pz = std::clamp((int)(jz * k), 0, SZ - 1);
+            if (G.mask[(size_t)pz * SZ + px] < 235) continue;           // lawn only
+            float clump = T3DTileFbm(jx / 900.0f, jz / 900.0f, 41);      // drifts, not an even carpet
+            if (Town3DHash01(jx * 1.31f, jz * 0.77f) > 0.25f + clump * 0.6f) continue;
+            if (TownEnvBuildingDist(town, jx, jz) < 70.0f) continue;
             Color cd, cl;
             T3DGrassShade(jx, jz, cDark, cLight, cd, cl);
-            T3DGrassTuft(b, jx, jz, s, cd, cl);
-            count++;
+            T3DGrassClump(b, jx, jz, 0.85f + 0.4f * clump, cd, cl, T3DGrassFlower(jx, jz, 0.03f));
         }
-    }
-    if (count == 0) return;
+    if (b.pos.empty()) return;
     F.model = T3CFinish(b);
     T3DGrassApplyShader(F.model);
 }
 
-// Wilderness: tufts along the dirt paths (offset from the path center) plus a
-// small ring at each dungeon entrance. Chunked into quadrants for culling.
-static void T3DGrassBuildWild() {
-    if (g_t3dGrassWildBuilt) return;
-    g_t3dGrassWildBuilt = true;
-    std::vector<Vector2> clear;
-    for (auto& n : kWildernessGatherNodes) clear.push_back(n.pos);
-    for (auto& sp : kWildernessCreatureSpots) clear.push_back(sp.pos);
-    for (auto& m : kWildernessMonsterSpots) clear.push_back(m.pos);
-    for (auto& f : kWildernessFoliage) clear.push_back(f.pos);
-    for (auto& ip : kWildernessInnocentSpots) clear.push_back(ip.pos);
-    clear.push_back(kWildernessReturnGatePos);
-    clear.push_back(kWildernessTown2GatePos);
-    clear.push_back(kWildernessTown3GatePos);
-    auto isClear = [&](float x, float z) {
-        for (const Vector2& p : clear) {
-            float dx = x - p.x, dz = z - p.y;
-            if (dx * dx + dz * dz < 45.0f * 45.0f) return false;
-        }
-        return true;
-    };
-    struct Tuft { float x, z, s; };
-    std::vector<Tuft> quads[4];
-    int total = 0;
-    auto addTuft = [&](float x, float z) {
-        if (total >= kT3DGrassWildMax) return;
-        if (x < 40.0f || x > 3160.0f || z < 40.0f || z > 3160.0f) return;
-        if (WildTerrainAt(x, z) & (kWTWater | kWTRidge | kWTRoad | kWTBridge | kWTRiver)) return; // terrain (2026-09-26)
-        int q = (x >= 1600.0f ? 1 : 0) + (z >= 1600.0f ? 2 : 0);
-        quads[q].push_back({ x, z, 0.8f + 0.6f * Town3DHash01(z, x + 5.0f) });
-        total++;
-    };
-    // Road-edge tufts (2026-09-26: follows the real road network, which
-    // replaced the straight gate-to-entrance spokes).
+// One wilderness chunk: meadow grass by region, off roads/water/ridges.
+static void T3DGrassBuildWildChunk(int cx, int cz) {
+    T3DGrassField& F = g_t3dGrassWild[cz * kT3DGrassChunksPerSide + cx];
+    F.built = true;
     WildTerrainEnsure();
-    for (const auto& road : g_wtRoads) {
-        float acc = 0.0f;
-        for (size_t i = 0; i + 1 < road.size(); i++) {
-            Vector2 a = road[i], b = road[i + 1];
-            float len = hypotf(b.x - a.x, b.y - a.y);
-            if (len < 1.0f) continue;
-            acc += len;
-            if (acc < 70.0f) continue;
-            acc = 0.0f;
-            float px = -(b.y - a.y) / len, pz = (b.x - a.x) / len; // perpendicular
-            int k = 1 + (Town3DHash01(a.x, a.y) > 0.5f ? 1 : 0);
-            for (int j = 0; j < k; j++) {
-                float side = (Town3DHash01(a.x + (float)j * 7.0f, a.y) > 0.5f) ? 1.0f : -1.0f;
-                float off = side * (30.0f + 22.0f * Town3DHash01(a.y + (float)j * 3.0f, a.x));
-                float jx = a.x + px * off + (Town3DHash01(a.x * 2.0f, a.y) - 0.5f) * 20.0f;
-                float jz = a.y + pz * off + (Town3DHash01(a.y * 2.0f, a.x + 9.0f) - 0.5f) * 20.0f;
-                if (isClear(jx, jz)) addTuft(jx, jz);
-            }
-        }
-    }
-    for (auto& e : kWildernessDungeonEntrances) { // small ring at each entrance
-        for (int j = 0; j < 8; j++) {
-            float an = Town3DHash01(e.pos.x + (float)j, e.pos.y) * 6.2831853f;
-            float rr = 48.0f + 26.0f * Town3DHash01(e.pos.y + (float)j * 3.0f, e.pos.x);
-            addTuft(e.pos.x + cosf(an) * rr, e.pos.y + sinf(an) * rr);
-        }
-    }
-    // Meadow pass (2026-09-26): open-field tufts on a jittered 62-unit grid,
-    // densest in the Whisperwood heartland, sparse on the coast and peaks, none
-    // in the snow. Kept off the dirt paths.
-    for (float gx = 31.0f; gx < 3200.0f; gx += 62.0f) {
-        for (float gz = 31.0f; gz < 3200.0f; gz += 62.0f) {
-            float jx = gx + (Town3DHash01(gx * 0.71f, gz * 0.37f) - 0.5f) * 56.0f;
-            float jz = gz + (Town3DHash01(gz * 0.59f, gx * 0.83f + 2.0f) - 0.5f) * 56.0f;
+    T3CMeshBuilder b;
+    Color cDark = { 74, 116, 56, 255 }, cLight = { 148, 188, 100, 255 };
+    const float step = 14.0f;
+    float x0 = (float)(cx * kT3DGrassChunk), z0 = (float)(cz * kT3DGrassChunk);
+    for (float gz = z0 + step * 0.5f; gz < z0 + kT3DGrassChunk; gz += step)
+        for (float gx = x0 + step * 0.5f; gx < x0 + kT3DGrassChunk; gx += step) {
+            float jx = gx + (Town3DHash01(gx * 0.71f, gz * 0.37f) - 0.5f) * step;
+            float jz = gz + (Town3DHash01(gz * 0.59f, gx * 0.83f + 2.0f) - 0.5f) * step;
             RegionId rg = RegionAt({ jx, jz });
-            float dens = (rg == RegionId::Whisperwood) ? 0.46f : (rg == RegionId::SaltCoast) ? 0.20f
-                       : (rg == RegionId::Stonepeaks) ? 0.16f : 0.0f;
-            if (Town3DHash01(jx * 0.97f, jz * 1.21f) > dens) continue;
-            if (Wild3DRoadDist({ jx, jz }) < 34.0f || !isClear(jx, jz)) continue;
-            addTuft(jx, jz);
-        }
-    }
-    Color cDark = { 80, 122, 62, 255 }, cLight = { 144, 188, 106, 255 };
-    for (int q = 0; q < 4; q++) {
-        T3DGrassField& F = g_t3dGrassWild[q];
-        F.built = true;
-        if (quads[q].empty()) continue;
-        T3CMeshBuilder b;
-        for (auto& tf : quads[q]) {
+            float dens = (rg == RegionId::Whisperwood) ? 0.62f : (rg == RegionId::SaltCoast) ? 0.30f
+                       : (rg == RegionId::Stonepeaks) ? 0.24f : 0.0f;
+            if (dens <= 0.0f) continue;
+            float clump = T3DTileFbm(jx / 1100.0f, jz / 1100.0f, 43);
+            if (Town3DHash01(jx * 1.31f, jz * 0.77f) > dens * (0.45f + clump)) continue;
+            if (WildTerrainAt(jx, jz) & (kWTWater | kWTRidge | kWTRoad | kWTBridge | kWTRiver | kWTShore | kWTSea)) continue;
+            if (Wild3DRoadDist({ jx, jz }) < 26.0f) continue;
             Color cd, cl;
-            T3DGrassShade(tf.x, tf.z, cDark, cLight, cd, cl);
-            T3DGrassTuft(b, tf.x, tf.z, tf.s, cd, cl);
+            T3DGrassShade(jx, jz, cDark, cLight, cd, cl);
+            T3DGrassClump(b, jx, jz, 0.9f + 0.45f * clump, cd, cl, T3DGrassFlower(jx, jz, 0.035f));
         }
-        F.model = T3CFinish(b);
-        T3DGrassApplyShader(F.model);
-    }
+    if (b.pos.empty()) return;
+    F.model = T3CFinish(b);
+    T3DGrassApplyShader(F.model);
 }
 
-static void T3DGrassDrawTown() {
-    T3DGrassBuildTown();
+static void T3DGrassDrawTown(int town) {
+    T3DGrassBuildTown(town);
     T3DGrassField& F = g_t3dGrassTown;
     if (!F.built || F.model.meshCount <= 0) return;
+    rlDisableBackfaceCulling();
     DrawModel(F.model, { 0.0f, 0.0f, 0.0f }, 1.0f, WHITE);
+    rlDrawRenderBatchActive();
+    rlEnableBackfaceCulling();
 }
 
+// Chunks near the camera target; builds at most one missing chunk a frame.
 static void T3DGrassDrawWild(const Town3DCam* cull) {
-    T3DGrassBuildWild();
-    for (int q = 0; q < 4; q++) {
-        T3DGrassField& F = g_t3dGrassWild[q];
-        if (!F.built || F.model.meshCount <= 0) continue;
-        float cx = (q % 2 == 0) ? 800.0f : 2400.0f;
-        float cz = (q < 2) ? 800.0f : 2400.0f;
-        if (cull && !Wild3DInView(*cull, cx, cz, 1150.0f)) continue;
-        DrawModel(F.model, { 0.0f, 0.0f, 0.0f }, 1.0f, WHITE);
-    }
+    if (!cull) return;
+    const float reach = 1200.0f;
+    int built = 0;
+    rlDisableBackfaceCulling();
+    for (int cz = 0; cz < kT3DGrassChunksPerSide; cz++)
+        for (int cx = 0; cx < kT3DGrassChunksPerSide; cx++) {
+            float mx = (cx + 0.5f) * kT3DGrassChunk, mz = (cz + 0.5f) * kT3DGrassChunk;
+            if (fabsf(mx - cull->target.x) > reach || fabsf(mz - cull->target.z) > reach) continue;
+            if (!Wild3DInView(*cull, mx, mz, kT3DGrassChunk * 0.75f)) continue;
+            T3DGrassField& F = g_t3dGrassWild[cz * kT3DGrassChunksPerSide + cx];
+            if (!F.built) {
+                if (built >= 1) continue;
+                T3DGrassBuildWildChunk(cx, cz);
+                built++;
+            }
+            if (F.model.meshCount > 0) DrawModel(F.model, { 0.0f, 0.0f, 0.0f }, 1.0f, WHITE);
+        }
+    rlDrawRenderBatchActive();
+    rlEnableBackfaceCulling();
 }
 
 // Gather nodes as real 3D objects at their EXACT 2D positions
@@ -13395,6 +13592,427 @@ static void Wild3DDrawDressing(const Town3DCam* cull) {
     }
 }
 
+// ---- Town greenery (2026-09-26 environment pass) ----
+// Frames each town with a tree belt along its edges (gaps where the streets
+// leave town), drops small groves into the open lawns, and plants bushes
+// against building walls. Uses the same KayKit trees as the wilderness so the
+// town and the land around it read as one place. Positions are deterministic
+// per town, and also feed the baked tree shadows and grass placement.
+struct TownGreen { float x, z, rot, scale; int kind; }; // kind: WildPropId, or -1 = Kenney bush
+struct TownEnv { int town = -1; std::vector<TownGreen> trees, bushes; std::vector<std::vector<Vector2>> streets; };
+static TownEnv g_townEnv;
+
+static float TownEnvStreetDist(const TownEnv& E, float x, float z) {
+    float d = 1e9f;
+    for (auto& pl : E.streets)
+        for (size_t i = 0; i + 1 < pl.size(); i++)
+            d = fminf(d, Town3DDistPtSeg(x, z, pl[i].x, pl[i].y, pl[i + 1].x, pl[i + 1].y));
+    return d;
+}
+static float TownEnvBuildingDist(int town, float x, float z) {
+    float d = 1e9f;
+    for (auto& n : ActiveTownNodes(town)) d = fminf(d, hypotf(x - n.pos.x, z - n.pos.y));
+    return fminf(d, hypotf(x - kWildernessGatePos.x, z - kWildernessGatePos.y));
+}
+// Open lawn: clear of streets, buildings, the plaza and the town's props.
+static bool TownEnvOpen(const TownEnv& E, int town, float x, float z, float streetPad, float buildPad) {
+    if (TownEnvStreetDist(E, x, z) < streetPad) return false;
+    if (TownEnvBuildingDist(town, x, z) < buildPad) return false;
+    float pcx = kTownPlaza.x + kTownPlaza.width * 0.5f, pcz = kTownPlaza.y + kTownPlaza.height * 0.5f;
+    if (hypotf(x - pcx, z - pcz) < kTownPlaza.width * 0.75f) return false;
+    for (const TownProp& p : kTownProps) {
+        bool big = p.kind == 0 || (p.kind >= 3 && p.kind <= 5) || p.kind >= 11; // fountain, stalls, animals
+        float px = p.pos.x, pz = p.pos.y;
+        Town3DApplyPropFix(p.kind, px, pz); // where the 3D view actually draws it
+        if (hypotf(x - px, z - pz) < (big ? 95.0f : 45.0f)) return false;
+    }
+    if (town == 0) for (const CapitalProp& p : kCapitalProps) if (hypotf(x - p.pos.x, z - p.pos.y) < 50.0f) return false;
+    if (town == 1) for (const CoastProp& p : kCoastProps) if (hypotf(x - p.pos.x, z - p.pos.y) < 60.0f) return false;
+    for (const TownFoliage& f : kFoliagePositions) if (hypotf(x - f.pos.x, z - f.pos.y) < 60.0f) return false;
+    return true;
+}
+
+static void TownEnvBuild(int town) {
+    TownEnv& E = g_townEnv;
+    if (E.town == town) return;
+    E = TownEnv{};
+    E.town = town;
+    Town3DStreetPolylines(E.streets);
+    const float W = kTownWorldSize;
+    bool snowy = town == 2, rocky = town == 3;
+    auto treeKind = [&](float h) {
+        if (snowy || rocky) return (h < 0.5f) ? (int)kWPTreesBMedium : (h < 0.8f ? (int)kWPTreeB : (int)kWPTreesBSmall);
+        if (h < 0.22f) return (int)kWPTreesALarge;
+        if (h < 0.44f) return (int)kWPTreesAMedium;
+        if (h < 0.58f) return (int)kWPTreeA;
+        if (h < 0.72f) return (int)kWPTreesBMedium;
+        if (h < 0.86f) return (int)kWPTreeB;
+        return (int)kWPTreesASmall;
+    };
+    auto addTree = [&](float x, float z, float sMul) {
+        float h = Town3DHash01(x * 0.37f, z * 0.71f);
+        E.trees.push_back({ x, z, Town3DHash01(z, x) * 360.0f, kWPScaleTrees * sMul * (0.85f + 0.35f * h), treeKind(h) });
+    };
+    // Tree belt: a double row just inside every edge, open where a street runs out.
+    for (int edge = 0; edge < 4; edge++) {
+        for (float t = 40.0f; t < W - 40.0f; t += 62.0f) {
+            for (int row = 0; row < 2; row++) {
+                float j = Town3DHash01(t * 0.13f + edge, (float)row * 3.1f);
+                float inset = 42.0f + row * 70.0f + (j - 0.5f) * 36.0f;
+                float along = t + (Town3DHash01(t, (float)edge + row * 7.0f) - 0.5f) * 40.0f + row * 31.0f;
+                float x = 0, z = 0;
+                if (edge == 0) { x = along; z = inset; }
+                else if (edge == 1) { x = along; z = W - inset; }
+                else if (edge == 2) { x = inset; z = along; }
+                else { x = W - inset; z = along; }
+                if (row == 1 && j < 0.55f) continue; // ragged inner row
+                if (!TownEnvOpen(E, town, x, z, 70.0f, 150.0f)) continue;
+                addTree(x, z, 1.05f);
+            }
+        }
+    }
+    // Groves in the open lawns: a few 3-5 tree clusters.
+    int groves = 0;
+    for (float gx = 180.0f; gx < W - 180.0f && groves < 9; gx += 115.0f) {
+        for (float gz = 180.0f; gz < W - 180.0f && groves < 9; gz += 115.0f) {
+            float h = Town3DHash01(gx * 0.91f + town, gz * 1.13f);
+            if (h > 0.22f) continue;
+            if (!TownEnvOpen(E, town, gx, gz, 95.0f, 190.0f)) continue;
+            int n = 3 + (int)(h * 10.0f) % 3;
+            for (int i = 0; i < n; i++) {
+                float a = Town3DHash01(gx + i, gz) * 6.2831853f, r = (i == 0) ? 0.0f : 34.0f + 26.0f * Town3DHash01(gz + i, gx);
+                float x = gx + cosf(a) * r, z = gz + sinf(a) * r;
+                if (TownEnvOpen(E, town, x, z, 60.0f, 150.0f)) addTree(x, z, 0.9f + 0.1f * (float)(i == 0));
+            }
+            groves++;
+        }
+    }
+    // Bushes hugging the building walls (doors face +z, so the front stays clear).
+    for (auto& n : ActiveTownNodes(town)) {
+        bool wide = (n.key == "townhall" || n.key == "bank" || n.key == "stable");
+        float hw = wide ? 70.0f : 62.0f, hd = wide ? 48.0f : 62.0f;
+        const float spots[6][2] = { { -hw - 10, -hd * 0.5f }, { -hw - 12, hd * 0.35f }, { hw + 10, -hd * 0.4f },
+                                    { hw + 12, hd * 0.4f }, { -hw * 0.55f, hd + 12 }, { hw * 0.55f, hd + 12 } };
+        for (int i = 0; i < 6; i++) {
+            float x = n.pos.x + spots[i][0], z = n.pos.y + spots[i][1];
+            float h = Town3DHash01(x * 1.7f, z * 0.3f);
+            if (h < 0.18f) continue;
+            if (TownEnvStreetDist(E, x, z) < kT3DRoadW * 0.5f + 8.0f) continue;
+            E.bushes.push_back({ x, z, h * 360.0f, 2.0f + 1.0f * h, -1 });
+            if (h > 0.6f) E.bushes.push_back({ x + (h - 0.8f) * 30.0f, z + 14.0f, h * 900.0f, 1.5f + 0.6f * h, -1 });
+        }
+    }
+}
+
+// Every tree in town (hand-placed foliage + the greenery above), for shadows.
+static std::vector<Vector2> Town3DTreeSpots(int town) {
+    TownEnvBuild(town);
+    std::vector<Vector2> out;
+    if (town != 2)
+        for (const TownFoliage& f : kFoliagePositions) {
+            float fx = f.pos.x, fz = f.pos.y;
+            Town3DApplyTreeFix(fx, fz);
+            if (f.variant != 5) out.push_back({ fx, fz });
+        }
+    for (const TownFoliage& f : kT3DExtraTrees) out.push_back(f.pos);
+    for (const TownGreen& g : g_townEnv.trees) out.push_back({ g.x, g.z });
+    return out;
+}
+
+static void Town3DDrawGreenery(int town, const Town3DCam* cull) {
+    TownEnvBuild(town);
+    Wild3DBuildDressing(); // loads the shared KayKit tree models
+    const Wild3DDressing& D = g_wild3dDress;
+    // Frostmere: snow-laden (pale blue-white); Cragmoor: darker mountain pines.
+    Color tint = (town == 2) ? Color{ 196, 222, 236, 255 } : (town == 3) ? Color{ 150, 170, 150, 255 } : WHITE;
+    for (const TownGreen& g : g_townEnv.trees) {
+        if (!D.ok[g.kind]) continue;
+        if (cull && !Wild3DInView(*cull, g.x, g.z, 90.0f)) continue;
+        DrawModelEx(D.models[g.kind], { g.x, 0.0f, g.z }, { 0.0f, 1.0f, 0.0f }, g.rot, { g.scale, g.scale, g.scale }, tint);
+    }
+    for (const TownGreen& b : g_townEnv.bushes) {
+        if (cull && !Wild3DInView(*cull, b.x, b.z, 30.0f)) continue;
+        Town3DDrawPiece(g_t3dModels.bush, { b.x, 0.0f, b.z }, b.rot, b.scale);
+    }
+}
+
+// ---- Town props (2026-09-26 environment pass) ----
+// Procedural low-poly props in the same faceted style as the kit (vertex
+// colors, lit shader), built once: fountain, market stalls, well, bench,
+// flower planter, hay bale, anvil, lamp post, sheep, chicken, statue. Plus
+// the KayKit barrels/crates/sacks/lumber/weapon racks already loaded for the
+// wilderness, and the animated horse at the stable. Every building gets a
+// small cluster that fits its trade, beside it rather than on its doorstep.
+enum TownPropModel {
+    kTPFountain, kTPStallRed, kTPStallBlue, kTPStallGreen, kTPWell, kTPBench, kTPPlanter, kTPHay,
+    kTPAnvil, kTPLamp, kTPSheep, kTPChicken, kTPStatue, kTPCount
+};
+static Model g_townPropModels[kTPCount];
+static bool g_townPropModelsBuilt = false;
+
+static void TPStallCanopy(T3CMeshBuilder& b, float w, float d, float h0, float h1, Color c1, Color c2) {
+    const int stripes = 6;
+    for (int i = 0; i < stripes; i++) { // sloped striped awning, front edge low
+        float x0 = -w / 2 + w * i / stripes, x1 = -w / 2 + w * (i + 1) / stripes;
+        float p0[3] = { x0, h1, -d / 2 }, p1[3] = { x1, h1, -d / 2 }, p2[3] = { x1, h0, d / 2 + 6 }, p3[3] = { x0, h0, d / 2 + 6 };
+        Color c = (i % 2) ? c1 : c2;
+        T3CQuad(b, p0, p3, p2, p1, c);
+        T3CQuad(b, p0, p1, p2, p3, ColorBrightness(c, -0.25f));
+        T3CBox(b, (x0 + x1) / 2, h0 - 2.5f, d / 2 + 6, x1 - x0, 5.0f, 1.0f, c); // scalloped valance
+    }
+}
+static Model TPBuildStall(Color c1) {
+    T3CMeshBuilder b;
+    Color wood = { 118, 84, 52, 255 }, woodDk = { 88, 62, 40, 255 }, cream = { 238, 226, 204, 255 };
+    const float W = 52, D = 30;
+    for (int i = 0; i < 4; i++) T3CBox(b, (i % 2 ? 1 : -1) * (W / 2 - 2), 22, (i / 2 ? 1 : -1) * (D / 2 - 2), 3, 44, 3, woodDk);
+    T3CBox(b, 0, 12, D / 2 - 6, W - 4, 3, 12, wood);           // counter
+    T3CBox(b, 0, 6, D / 2 - 6, W - 6, 12, 10, woodDk);
+    TPStallCanopy(b, W + 6, D, 36, 48, c1, cream);
+    // goods on the counter: fruit/veg piles and a small crate
+    static const Color goods[4] = { { 210, 60, 50, 255 }, { 240, 180, 50, 255 }, { 110, 170, 70, 255 }, { 160, 90, 170, 255 } };
+    for (int i = 0; i < 4; i++) T3CSphere(b, -18 + i * 12, 16.5f, D / 2 - 6, 4.5f, 3.5f, 4.5f, 4, 6, goods[(i + (int)c1.r) % 4]);
+    T3CBox(b, 20, 3.5f, D / 2 + 6, 9, 7, 9, wood);
+    return T3CFinish(b);
+}
+
+static void TownPropModelsEnsure() {
+    if (g_townPropModelsBuilt) return;
+    g_townPropModelsBuilt = true;
+    Color stone = { 168, 164, 156, 255 }, stoneDk = { 132, 128, 122, 255 }, water = { 70, 140, 175, 255 };
+    Color wood = { 118, 84, 52, 255 }, woodDk = { 88, 62, 40, 255 }, iron = { 70, 72, 78, 255 };
+    { // fountain: octagonal basin, water, pillar and a small top bowl
+        T3CMeshBuilder b;
+        T3CCylinder(b, 0, 0, 0, 3, 54, 54, 16, stoneDk);             // footing
+        T3CCylinder(b, 0, 3, 0, 15, 50, 50, 16, stone);              // basin wall
+        T3CCylinder(b, 0, 15, 0, 15.3f, 44, 44, 16, water, true, false); // water inside the rim
+        T3CCylinder(b, 0, 0, 0, 30, 7, 6, 8, stone);
+        T3CCylinder(b, 0, 30, 0, 36, 16, 20, 10, stone);
+        T3CCylinder(b, 0, 34, 0, 36.5f, 16, 16, 10, water, true, false);
+        T3CSphere(b, 0, 42, 0, 5, 7, 5, 4, 6, stone);
+        g_townPropModels[kTPFountain] = T3CFinish(b);
+    }
+    g_townPropModels[kTPStallRed] = TPBuildStall(Color{ 196, 58, 52, 255 });
+    g_townPropModels[kTPStallBlue] = TPBuildStall(Color{ 58, 102, 180, 255 });
+    g_townPropModels[kTPStallGreen] = TPBuildStall(Color{ 70, 150, 80, 255 });
+    { // well: stone ring, posts, little roof, crank and bucket
+        T3CMeshBuilder b;
+        T3CCylinder(b, 0, 0, 0, 16, 20, 20, 12, stone);
+        T3CCylinder(b, 0, 14, 0, 16.5f, 15, 15, 12, Color{ 40, 60, 70, 255 }, true, false);
+        T3CBox(b, -17, 28, 0, 4, 40, 4, woodDk); T3CBox(b, 17, 28, 0, 4, 40, 4, woodDk);
+        T3CBox(b, 0, 38, 0, 36, 3, 3, wood); // crank bar
+        float r0[3] = { -24, 46, -18 }, r1[3] = { 24, 46, -18 }, r2[3] = { 24, 58, 0 }, r3[3] = { -24, 58, 0 };
+        float r4[3] = { -24, 46, 18 }, r5[3] = { 24, 46, 18 };
+        Color roof = { 140, 70, 48, 255 };
+        T3CQuad(b, r0, r3, r2, r1, roof); T3CQuad(b, r4, r5, r2, r3, ColorBrightness(roof, -0.1f));
+        T3CQuad(b, r0, r1, r2, r3, ColorBrightness(roof, -0.3f)); T3CQuad(b, r4, r3, r2, r5, ColorBrightness(roof, -0.3f));
+        T3CCylinder(b, 0, 26, 0, 33, 4, 5, 6, wood); // bucket
+        g_townPropModels[kTPWell] = T3CFinish(b);
+    }
+    { // bench
+        T3CMeshBuilder b;
+        T3CBox(b, 0, 9, 0, 40, 3, 11, wood);
+        T3CBox(b, 0, 17, -5, 40, 9, 2.5f, wood);
+        for (int i = -1; i <= 1; i += 2) { T3CBox(b, i * 16, 4, 0, 3, 8, 10, woodDk); T3CBox(b, i * 16, 13, -5, 3, 12, 2.5f, woodDk); }
+        g_townPropModels[kTPBench] = T3CFinish(b);
+    }
+    { // planter: wooden box of soil with flowers
+        T3CMeshBuilder b;
+        T3CBox(b, 0, 5, 0, 34, 10, 14, wood);
+        T3CBox(b, 0, 10.2f, 0, 31, 1, 11, Color{ 80, 58, 40, 255 });
+        static const Color fl[4] = { { 230, 70, 90, 255 }, { 250, 210, 70, 255 }, { 240, 240, 240, 255 }, { 160, 100, 220, 255 } };
+        for (int i = 0; i < 10; i++) {
+            float x = -13 + (i % 5) * 6.5f, z = (i < 5) ? -3.0f : 3.0f;
+            T3CSphere(b, x, 13.5f, z, 3.4f, 3.0f, 3.4f, 3, 5, Color{ 70, 130, 60, 255 });
+            T3CSphere(b, x + 1, 16.0f, z, 2.2f, 1.8f, 2.2f, 3, 5, fl[(i * 3) % 4]);
+        }
+        g_townPropModels[kTPPlanter] = T3CFinish(b);
+    }
+    { // round hay bale
+        T3CMeshBuilder b;
+        T3CCylinder(b, 0, 0, 0, 18, 14, 14, 10, Color{ 214, 184, 104, 255 });
+        T3CCylinder(b, 0, 17.9f, 0, 18.5f, 11, 11, 10, Color{ 196, 164, 88, 255 }, true, false);
+        g_townPropModels[kTPHay] = T3CFinish(b);
+    }
+    { // anvil on a stump
+        T3CMeshBuilder b;
+        T3CCylinder(b, 0, 0, 0, 12, 9, 10, 8, woodDk);
+        T3CBox(b, 0, 14, 0, 10, 5, 8, iron);
+        T3CBox(b, 0, 19, 0, 22, 5, 9, iron);
+        float base[3] = { 11, 19, 0 }, dir[3] = { 1, 0, 0 };
+        T3CConeDir(b, base, dir, 9, 3.5f, 6, iron); // horn
+        g_townPropModels[kTPAnvil] = T3CFinish(b);
+    }
+    { // lamp post: stone foot, dark post, arm, hanging lantern
+        T3CMeshBuilder b;
+        T3CBox(b, 0, 3, 0, 10, 6, 10, stoneDk);
+        T3CCylinder(b, 0, 6, 0, 58, 2.2f, 1.8f, 6, iron);
+        T3CBox(b, 6, 56, 0, 14, 2, 2, iron);
+        T3CBox(b, 12, 48, 0, 7, 9, 7, iron);
+        T3CBox(b, 12, 48, 0, 5.4f, 7, 7.4f, Color{ 255, 214, 120, 255 });
+        T3CBox(b, 12, 48, 0, 7.4f, 7, 5.4f, Color{ 255, 214, 120, 255 });
+        g_townPropModels[kTPLamp] = T3CFinish(b);
+    }
+    { // sheep
+        T3CMeshBuilder b;
+        Color wool = { 236, 232, 222, 255 }, face = { 60, 54, 50, 255 };
+        T3CSphere(b, 0, 13, 0, 13, 9, 9, 5, 8, wool);
+        T3CSphere(b, -6, 16, 0, 7, 6, 7, 4, 6, wool); T3CSphere(b, 6, 15, 2, 7, 6, 7, 4, 6, wool);
+        T3CSphere(b, 14, 16, 0, 5, 5, 4, 4, 6, face);
+        for (int i = 0; i < 4; i++) T3CBox(b, (i % 2 ? 7 : -7), 3, (i / 2 ? 4 : -4), 2.5f, 7, 2.5f, face);
+        g_townPropModels[kTPSheep] = T3CFinish(b);
+    }
+    { // chicken
+        T3CMeshBuilder b;
+        T3CSphere(b, 0, 6, 0, 5, 4.5f, 4, 4, 6, Color{ 240, 236, 226, 255 });
+        T3CSphere(b, 4.5f, 10, 0, 2.6f, 2.8f, 2.4f, 3, 5, Color{ 240, 236, 226, 255 });
+        T3CBox(b, 4.5f, 13, 0, 2, 1.6f, 1, Color{ 210, 40, 40, 255 });
+        float base[3] = { 6.8f, 10, 0 }, dir[3] = { 1, 0, 0 };
+        T3CConeDir(b, base, dir, 2.2f, 0.9f, 4, Color{ 240, 170, 50, 255 });
+        T3CBox(b, -5, 8, 0, 4, 4, 1, Color{ 220, 214, 200, 255 }); // tail
+        g_townPropModels[kTPChicken] = T3CFinish(b);
+    }
+    { // statue: stepped plinth and a cloaked hero leaning on a sword
+        T3CMeshBuilder b;
+        T3CBox(b, 0, 4, 0, 40, 8, 40, stoneDk);
+        T3CBox(b, 0, 14, 0, 30, 12, 30, stone);
+        Color st = { 186, 182, 172, 255 };
+        T3CCylinder(b, 0, 20, 0, 48, 9, 6, 8, st);           // robe
+        T3CSphere(b, 0, 53, 0, 5, 5.5f, 5, 4, 6, st);          // head
+        T3CBox(b, 0, 44, -4, 18, 6, 4, st);                     // shoulders / cloak
+        T3CBox(b, 8, 32, 6, 2, 26, 2, st);                      // sword blade, point down
+        T3CBox(b, 8, 45, 6, 8, 2, 2, st);                       // crossguard
+        g_townPropModels[kTPStatue] = T3CFinish(b);
+    }
+    for (int i = 0; i < kTPCount; i++) Town3DApplyLitShader(g_townPropModels[i]);
+}
+
+// A placed prop: kind < kTPCount = procedural model, 100+ = KayKit WildPropId,
+// 200 = Kenney chest, 201 = wagon, 202 = animated horse.
+struct TownDressItem { int kind; float x, z, rot, scale; };
+static const int kTDKayKit = 100, kTDChest = 200, kTDWagon = 201, kTDHorse = 202;
+
+// Per-building clusters, in local offsets beside the building (never on the
+// doorstep or a lane; each spot is re-checked against the streets).
+static void TownDressBuild(TownEnv& E, std::vector<TownDressItem>& out, int town) {
+    auto put = [&](int kind, float x, float z, float rot, float scale) {
+        if (TownEnvStreetDist(E, x, z) < kT3DRoadW * 0.5f + 10.0f) return;
+        for (auto& n : ActiveTownNodes(town)) if (fabsf(x - n.pos.x) < 60.0f && fabsf(z - n.pos.y) < 56.0f) return;
+        out.push_back({ kind, x, z, rot, scale });
+    };
+    for (auto& n : ActiveTownNodes(town)) {
+        float x = n.pos.x, z = n.pos.y;
+        bool wide = (n.key == "townhall" || n.key == "bank" || n.key == "stable");
+        float hw = wide ? 70.0f : 62.0f;
+        const std::string& k = n.key;
+        if (k == "smith") {
+            put(kTPAnvil, x + hw + 30, z + 10, 20, 1.0f);
+            put(kTDKayKit + kWPWeaponRack, x + hw + 32, z - 30, 90, kWPScaleProp);
+            put(kTDKayKit + kWPBarrel, x - hw - 24, z + 20, 0, kWPScaleProp);
+            put(kTDKayKit + kWPStonePile, x - hw - 30, z - 20, 40, kWPScaleProp);
+        } else if (k == "carpenter") {
+            put(kTDKayKit + kWPLumber, x + hw + 34, z + 4, 90, kWPScaleProp);
+            put(kTDKayKit + kWPLumber, x - hw - 36, z - 12, 10, kWPScaleProp);
+            put(kTDKayKit + kWPWheelbarrow, x + hw + 30, z + 44, 200, kWPScaleProp);
+        } else if (k == "tailor" || k == "furtrader") {
+            put(kTDKayKit + kWPCrateBig, x + hw + 26, z + 20, 15, kWPScaleProp);
+            put(kTDKayKit + kWPSack, x + hw + 30, z - 8, 0, kWPScaleProp);
+            put(kTDKayKit + kWPSack, x + hw + 18, z - 20, 50, kWPScaleProp);
+            put(kTPPlanter, x - hw - 18, z + 30, 90, 1.0f);
+        } else if (k == "alchemy") {
+            put(kTPPlanter, x - hw - 18, z + 20, 90, 1.0f);
+            put(kTPPlanter, x - hw - 18, z - 22, 90, 1.0f);
+            put(kTDKayKit + kWPBarrel, x + hw + 22, z + 26, 0, kWPScaleProp);
+            put(kTDKayKit + kWPBucket, x + hw + 30, z + 6, 0, kWPScaleProp);
+        } else if (k == "townhall") {
+            put(kTPPlanter, x - 50, z + 80, 0, 1.1f);
+            put(kTPPlanter, x + 50, z + 80, 0, 1.1f);
+        } else if (k == "stable") {
+            put(kTPHay, x + hw + 28, z - 16, 0, 1.0f);
+            put(kTPHay, x + hw + 30, z + 16, 30, 1.0f);
+            put(kTPHay, x + hw + 52, z + 2, 60, 0.9f);
+            put(kTDHorse, x + hw + 70, z + 40, 200, 1.0f);
+            put(kTDKayKit + kWPBucket, x + hw + 24, z + 38, 0, kWPScaleProp);
+        } else if (k == "healer") {
+            put(kTPPlanter, x - hw - 18, z + 20, 90, 1.0f);
+            put(kTPBench, x + hw + 24, z + 30, 270, 1.0f);
+        } else if (k == "bank") {
+            put(kTDChest, x + hw + 26, z + 20, 30, 0.8f);
+            put(kTDKayKit + kWPCrateSmall, x - hw - 24, z + 20, 0, kWPScaleProp);
+        } else if (k == "provisioner") {
+            put(kTPStallRed, x - hw - 50, z + 30, 180, 1.0f);
+            put(kTPStallGreen, x + hw + 50, z + 30, 180, 1.0f);
+            put(kTDKayKit + kWPSack, x - hw - 26, z - 20, 0, kWPScaleProp);
+            put(kTDKayKit + kWPCrateLong, x + hw + 30, z - 24, 90, kWPScaleProp);
+            put(kTDKayKit + kWPBarrel, x + hw + 24, z - 4, 0, kWPScaleProp);
+        }
+    }
+    // Plaza: benches facing in from each side of the ring, a well off one corner.
+    float pcx = kTownPlaza.x + kTownPlaza.width * 0.5f, pcz = kTownPlaza.y + kTownPlaza.height * 0.5f;
+    float pr = kTownPlaza.width * 0.5f;
+    for (int i = 0; i < 4; i++) {
+        float a = 0.785398f + i * 1.5707963f;
+        out.push_back({ kTPBench, pcx + cosf(a) * (pr - 20), pcz + sinf(a) * (pr - 20), -a * RAD2DEG - 90.0f, 1.0f });
+    }
+    put(kTPWell, pcx + pr + 70, pcz - pr - 40, 0, 1.0f);
+}
+
+// The old kTownProps (shared with the 2D view), drawn with the new models.
+static void TownDressFromLegacy(std::vector<TownDressItem>& out, int town) {
+    (void)town;
+    for (const TownProp& p : kTownProps) {
+        float x = p.pos.x, z = p.pos.y, r = Town3DHash01(x, z) * 360.0f;
+        Town3DApplyPropFix(p.kind, x, z);
+        switch (p.kind) {
+            case 0: out.push_back({ kTPFountain, x, z, 0, 1.0f }); break;
+            case 3: out.push_back({ kTPStallRed, x, z, 0, 1.0f }); break;
+            case 4: out.push_back({ kTPStallBlue, x, z, 0, 1.0f }); break;
+            case 5: out.push_back({ kTPStallGreen, x, z, 0, 1.0f }); break;
+            case 6: out.push_back({ kTDKayKit + kWPLumber, x, z, r, kWPScaleProp }); break;
+            case 7: out.push_back({ kTDKayKit + kWPBarrel, x, z, r, kWPScaleProp }); break;
+            case 8: out.push_back({ kTDKayKit + kWPCrateBig, x, z, r, kWPScaleProp }); break;
+            case 9: out.push_back({ kTPAnvil, x, z, r, 1.0f }); break;
+            case 10: out.push_back({ kTPStatue, x, z, 200, 1.1f }); break;
+            case 11: out.push_back({ kTPSheep, x, z, r, 1.0f }); out.push_back({ kTPSheep, x + 26, z + 14, r + 70, 0.9f }); break;
+            case 12: out.push_back({ kTDHorse, x, z, r, 1.0f }); break;
+            case 13: for (int i = 0; i < 3; i++) out.push_back({ kTPChicken, x + i * 9.0f, z + (i % 2) * 8.0f, r + i * 80, 1.0f }); break;
+            case 16: out.push_back({ kTDChest, x, z, r, 0.7f }); break;
+            default: break; // lamps are placed for the 3D lanes; potions/bookshelf were 2D-only details
+        }
+    }
+    for (const Vector2& lp : kT3DLamps) out.push_back({ kTPLamp, lp.x, lp.y, (lp.x < kTownWorldSize * 0.5f) ? 0.0f : 180.0f, 1.0f });
+}
+
+static std::vector<TownDressItem> g_townDress;
+static int g_townDressTown = -1;
+static void Town3DDrawProps(int town, float t) {
+    TownPropModelsEnsure();
+    TownEnvBuild(town);
+    if (g_townDressTown != town) {
+        g_townDress.clear();
+        TownDressFromLegacy(g_townDress, town);
+        TownDressBuild(g_townEnv, g_townDress, town);
+        g_townDressTown = town;
+    }
+    const Wild3DDressing& D = g_wild3dDress;
+    for (const TownDressItem& it : g_townDress) {
+        if (it.kind < kTPCount) {
+            DrawModelEx(g_townPropModels[it.kind], { it.x, 0, it.z }, { 0, 1, 0 }, it.rot, { it.scale, it.scale, it.scale }, WHITE);
+        } else if (it.kind >= kTDKayKit && it.kind < kTDKayKit + kWPCount) {
+            int id = it.kind - kTDKayKit;
+            if (D.ok[id]) DrawModelEx(D.models[id], { it.x, 0, it.z }, { 0, 1, 0 }, it.rot, { it.scale, it.scale, it.scale }, WHITE);
+        } else if (it.kind == kTDChest) {
+            Town3DDrawPiece(g_t3dModels.chest, { it.x, 0, it.z }, it.rot, it.scale);
+        } else if (it.kind == kTDWagon) {
+            Town3DDrawPiece(g_t3dModels.wagon, { it.x, 0, it.z }, it.rot, it.scale);
+        } else if (it.kind == kTDHorse) {
+            AnimalPose ap;
+            ap.time = t + it.x * 0.01f;
+            DrawAnimal(kAnHorse, it.x, it.z, it.rot * DEG2RAD, 1.0f, WHITE, ap, false);
+        }
+    }
+}
+
 // Dungeon entrance: stone arch + glowing portal disc in the entrance's own color.
 static void Wild3DDrawEntrance(const WildernessDungeonEntrance& e) {
     Color stone = { 150, 148, 142, 255 }, dark = { 110, 108, 102, 255 };
@@ -13841,6 +14459,12 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                      ? Town3DHash01(ip.x, ip.y) * 6.2832f : atan2f(idz, idx2);
         T3CAnim ia2 = T3CMakeAnim(kT3CTrackInnocentWild + (int)i, ip.x, ip.y, !shadowPass);
         const InnocentDef& idef = kInnocentDefs[std::clamp(s.innocentSpots[i].identity, 0, 3)];
+        {
+            HumanOutfit io = HumanOutfitPlain(idef.skin, idef.shirt, idef.pants, Color{ 70, 50, 34, 255 }, Color{ 90, 64, 42, 255 });
+            io.cloak = true; io.cloakCol = ColorBrightness(idef.pants, -0.1f);
+            HumanPose ihp; ihp.move = ia2.move;
+            if (DrawHuman(kT3CTrackInnocentWild + (int)i, ip.x, ip.y, iyaw, 0.97f, WHITE, io, ihp, shadowPass)) continue;
+        }
         T3CDrawHumanoid(g_t3cHumans[0].parts, ip.x, ip.y, iyaw, 0.95f,
                         idef.shirt, idef.pants, idef.skin, ia2, shadowPass);
     }
@@ -13851,6 +14475,10 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             float eyaw = atan2f(s.wildernessPlayerPos.y - ep.y, s.wildernessPlayerPos.x - ep.x);
             T3CAnim ea = T3CMakeAnim(kT3CTrackInnocentWild + 10, ep.x, ep.y, !shadowPass);
             const InnocentDef& edef = kInnocentDefs[std::clamp(s.escortInnocent, 0, 3)];
+            HumanOutfit eo = HumanOutfitPlain(edef.skin, edef.shirt, edef.pants, Color{ 70, 50, 34, 255 }, Color{ 90, 64, 42, 255 });
+            eo.cloak = true; eo.cloakCol = ColorBrightness(edef.pants, -0.1f);
+            HumanPose ehp; ehp.move = ea.move;
+            if (!DrawHuman(kT3CTrackInnocentWild + 10, ep.x, ep.y, eyaw, 0.97f, WHITE, eo, ehp, shadowPass))
             T3CDrawHumanoid(g_t3cHumans[0].parts, ep.x, ep.y, eyaw, 0.95f,
                             edef.shirt, edef.pants, edef.skin, ea, shadowPass);
         }
@@ -14146,6 +14774,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
                                  Fade(Color{ 255, 196, 110, 255 }, pulse));
     }
     EndMode3D();
+    T3DDrawVignette();
 
     // --- 2D overlay: gate/entrance labels (distance-faded like the town's) ---
     {
@@ -15713,6 +16342,11 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
 
     if (npc) { // static shopkeeper
         T3CAnim na = T3CMakeAnim(kT3CTrackNPCInterior, npc->x, npc->y, true);
+        HumanOutfit ko = HumanOutfitPlain(Color{ 226, 186, 150, 255 }, Color{ 150, 110, 80, 255 }, Color{ 90, 70, 55, 255 },
+                                          Color{ 70, 50, 34, 255 }, Color{ 70, 48, 32, 255 });
+        ko.region[kHrSkirt] = Color{ 232, 226, 210, 255 }; // shop apron
+        HumanPose kp; kp.move = na.move;
+        if (!DrawHuman(kT3CTrackNPCInterior, npc->x - hw, npc->y - hh, 0.0f, 1.0f, WHITE, ko, kp, false))
         T3CDrawHumanoid(g_t3cHumans[0].parts, npc->x - hw, npc->y - hh, 0.0f, 0.95f,
                         Color{ 150, 110, 80, 255 }, Color{ 90, 70, 55, 255 },
                         Color{ 215, 175, 135, 255 }, na, false);
@@ -16015,8 +16649,8 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     // (both now in the grid's west column) same as before - offsets kept the same
     // distance from Alchemy/Healer's own (now 300-unit-spaced) positions.
     static const std::array<Rectangle, 2> kFarmlandPatches = {{
-        {20, 356, 100, 100},  // near the Alchemy garden
-        {20, 632, 100, 100},  // near the Healer's kitchen garden
+        {20 * kTS, 356 * kTS, 100, 100},  // near the Alchemy garden
+        {20 * kTS, 632 * kTS, 100, 100},  // near the Healer's kitchen garden
     }};
     // Skipped for Town 2 - farmland doesn't fit its coastal trade-port identity; no
     // equivalent dressing added this pass (see the plan's deferred list).
@@ -16069,10 +16703,10 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     // hand-placed clear of the 5 buildings/plaza/gate road (decorative only).
     if (s.selectedTown == 2) {
         static const std::array<Vector2, 6> kFrostDrifts = {{
-            {120, 150}, {880, 120}, {950, 700}, {60, 750}, {750, 920}, {200, 920}
+            TS(120, 150), TS(880, 120), TS(950, 700), TS(60, 750), TS(750, 920), TS(200, 920)
         }};
         static const std::array<Vector2, 4> kFrostPines = {{
-            {100, 400}, {900, 350}, {520, 120}, {60, 600}
+            TS(100, 400), TS(900, 350), TS(520, 120), TS(60, 600)
         }};
         for (auto& d : kFrostDrifts) {
             Vector2 sp = WorldToScreen(d, camera);
@@ -16175,9 +16809,9 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     if (s.selectedTown == 2) {
         struct FrostProp { int kind; Vector2 pos; float size; };
         static const std::array<FrostProp, 7> kFrostProps = {{
-            {0, {250, 450}, 30}, {0, {750, 450}, 30},   // ice lanterns
-            {1, {280, 700}, 26}, {1, {720, 700}, 26},   // snow-capped wood piles
-            {2, {500, 180}, 34}, {2, {150, 850}, 30}, {2, {850, 850}, 30}, // frost banners
+            {0, TS(250, 450), 30}, {0, TS(750, 450), 30},   // ice lanterns
+            {1, TS(280, 700), 26}, {1, TS(720, 700), 26},   // snow-capped wood piles
+            {2, TS(500, 180), 34}, {2, TS(150, 850), 30}, {2, TS(850, 850), 30}, // frost banners
         }};
         for (const FrostProp& p : kFrostProps) {
             Vector2 csp = WorldToScreen(p.pos, camera);
@@ -16481,7 +17115,7 @@ static void FinishPlayerDeathAnim(GameState& s) {
 static void ResurrectPlayer(GameState& s) {
     int townIdx = GhostResurrectTown(s);
     s.selectedTown = townIdx;
-    s.townPlayerPos = { 450, 830 }; // town gate/healer area, same as a fresh arrival
+    s.townPlayerPos = TS(450, 830); // town gate/healer area, same as a fresh arrival
     s.screen = Screen::Town;
     if (s.wild3DView) s.town3DView = true; // stay in 3D across the resurrection (view state only)
     s.hp = s.maxHp;
@@ -17122,7 +17756,7 @@ static void TeleportToTown(GameState& s, int townIdx, const std::string& why) {
     s.recallPickerOpen = false;
     s.selectedTown = townIdx;
     s.screen = Screen::Town;
-    s.townPlayerPos = { 450, 830 }; // same relative spawn every town uses, just south of its own gate
+    s.townPlayerPos = TS(450, 830); // same relative spawn every town uses, just south of its own gate
     if (s.wild3DView || s.hunt3DView) s.town3DView = true; // stay in 3D across the jump (view state only)
     Journal(s, why + ActiveTownName(townIdx) + ".");
     PlaySfx(SfxId::Cast);
@@ -20005,21 +20639,21 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             CancelEscort(s, "parts ways at the gate - the escort is broken.");
             s.selectedTown = 1;
             s.screen = Screen::Town;
-            s.townPlayerPos = { 450, 830 }; // same relative spawn every town uses, just south of its own gate
+            s.townPlayerPos = TS(450, 830); // same relative spawn every town uses, just south of its own gate
             if (s.wild3DView) s.town3DView = true; // stay in 3D across the gate (view state only)
         }
         else if (nearestKind == WildNodeKind::Town3Gate) {
             CancelEscort(s, "parts ways at the gate - the escort is broken.");
             s.selectedTown = 2;
             s.screen = Screen::Town;
-            s.townPlayerPos = { 450, 830 }; // same relative spawn every town uses, just south of its own gate
+            s.townPlayerPos = TS(450, 830); // same relative spawn every town uses, just south of its own gate
             if (s.wild3DView) s.town3DView = true; // stay in 3D across the gate (view state only)
         }
         else if (nearestKind == WildNodeKind::Town4Gate) { // Phase 4: Cragmoor
             CancelEscort(s, "parts ways at the gate - the escort is broken.");
             s.selectedTown = 3;
             s.screen = Screen::Town;
-            s.townPlayerPos = { 450, 830 }; // same relative spawn every town uses, just south of its own gate
+            s.townPlayerPos = TS(450, 830); // same relative spawn every town uses, just south of its own gate
             if (s.wild3DView) s.town3DView = true; // stay in 3D across the gate (view state only)
         }
         else if (nearestKind == WildNodeKind::HousePlot) {
@@ -20057,7 +20691,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         }
         else {
             CancelEscort(s, "parts ways at the gate - the escort is broken.");
-            s.selectedTown = 0; s.screen = Screen::Town; s.townPlayerPos = { 450, 830 };
+            s.selectedTown = 0; s.screen = Screen::Town; s.townPlayerPos = TS(450, 830);
             if (s.wild3DView) s.town3DView = true; // walking back through the gate returns to 3D town
         } // just south of kWildernessGatePos
     };
