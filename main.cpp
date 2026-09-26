@@ -9211,6 +9211,129 @@ static const int kT3CTrackPlayerDungeon = 130;
 static const int kT3CTrackMonsterDungeon = 140; // + monster idx (0..8), engaged = +9
 // ==== T3C-KIT-END ====
 
+// ---------------------------------------------------------------------
+// Animated animals (2026-09-26): Quaternius "Ultimate Animated Animals"
+// (CC0, assets/animals - trimmed to the clips below). Real skinned models with
+// idle/walk/gallop/attack/hit/death clips replace the blocky kit for the
+// species they fit (dog, wolves, horse), and drive ambient wildlife (deer,
+// stags, foxes). raylib skins them on the CPU (UpdateModelAnimation), so each
+// instance poses the shared model right before it is drawn.
+// ---------------------------------------------------------------------
+enum AnimalId { kAnDog, kAnWolf, kAnHorse, kAnDeer, kAnStag, kAnFox, kAnCount };
+struct AnimalModel {
+    bool ok = false;
+    Model model{};
+    ModelAnimation* anims = nullptr;
+    int animCount = 0;
+    int idle = -1, walk = -1, gallop = -1, attack = -1, death = -1, hit = -1;
+    float baseScale = 1.0f; // model units -> world units for the target height
+};
+static AnimalModel g_animals[kAnCount];
+static bool g_animalsTried = false;
+static void AnimalsEnsure() {
+    if (g_animalsTried) return;
+    g_animalsTried = true;
+    struct Def { const char* file; float height; };
+    static const Def defs[kAnCount] = {
+        { "assets/animals/ShibaInu.glb", 30.0f }, { "assets/animals/Wolf.glb", 40.0f },
+        { "assets/animals/Horse.glb", 66.0f },    { "assets/animals/Deer.glb", 52.0f },
+        { "assets/animals/Stag.glb", 64.0f },     { "assets/animals/Fox.glb", 24.0f },
+    };
+    for (int i = 0; i < kAnCount; i++) {
+        AnimalModel& A = g_animals[i];
+        if (!FileExists(defs[i].file)) continue; // missing: callers fall back to the kit
+        A.model = LoadModel(defs[i].file);
+        if (A.model.meshCount <= 0) continue;
+        A.anims = LoadModelAnimations(defs[i].file, &A.animCount);
+        for (int k = 0; k < A.animCount; k++) {
+            const std::string n = A.anims[k].name;
+            if (n == "Idle") A.idle = k;
+            else if (n == "Walk") A.walk = k;
+            else if (n == "Gallop") A.gallop = k;
+            else if (n == "Attack" || n == "Attack_Headbutt") A.attack = k;
+            else if (n == "Death") A.death = k;
+            else if (n == "Idle_HitReact1") A.hit = k;
+        }
+        if (A.idle < 0 || A.walk < 0) continue; // unusable without the basics
+        BoundingBox bb = GetModelBoundingBox(A.model);
+        float h = bb.max.y - bb.min.y;
+        A.baseScale = (h > 0.001f) ? defs[i].height / h : 1.0f;
+        Town3DApplyLitShader(A.model);
+        A.ok = true;
+    }
+}
+struct AnimalPose {
+    Color recolor = { 0, 0, 0, 0 }; // alpha = blend amount toward rgb (e.g. an ice-white wolf); 0 = model colors
+    float move = 0.0f;     // 0 idle .. 1 full run (T3CAnim.move)
+    float attackT = -1.0f; // 0..1 through an attack, <0 none
+    float hurtT = -1.0f;   // seconds since hit, <0 none
+    float deathT = -1.0f;  // 0..1 through dying, <0 alive
+    float time = 0.0f;     // animation clock (seconds)
+};
+// Pose + draw one animal. yawRad is the facing direction (atan2(dz, dx)),
+// the same convention as the kit. Returns false if the model isn't available.
+static bool DrawAnimal(int id, float x, float z, float yawRad, float scaleMul, Color tint, const AnimalPose& p,
+                       bool shadowPass) {
+    AnimalsEnsure();
+    if (id < 0 || id >= kAnCount || !g_animals[id].ok) return false;
+    if (shadowPass) return true; // no shadow-map pass for skinned meshes (blob shadow below)
+    AnimalModel& A = g_animals[id];
+    int clip = A.idle;
+    float speed = 1.0f, t = p.time;
+    bool loop = true;
+    if (p.deathT >= 0.0f && A.death >= 0) { clip = A.death; loop = false; t = p.deathT; }
+    else if (p.attackT >= 0.0f && A.attack >= 0) { clip = A.attack; loop = false; t = p.attackT; }
+    else if (p.hurtT >= 0.0f && p.hurtT < 0.35f && A.hit >= 0) { clip = A.hit; loop = false; t = p.hurtT / 0.35f; }
+    else if (p.move > 0.55f && A.gallop >= 0) { clip = A.gallop; speed = 0.8f + 0.6f * p.move; }
+    else if (p.move > 0.08f) { clip = A.walk; speed = 0.6f + 1.2f * p.move; }
+    const ModelAnimation& an = A.anims[clip];
+    int n = std::max(1, an.keyframeCount);
+    float frame = loop ? fmodf(t * 60.0f * speed, (float)n) : std::clamp(t, 0.0f, 0.999f) * (float)(n - 1);
+    UpdateModelAnimation(A.model, an, frame);
+    float sc = A.baseScale * scaleMul;
+    T3CDrawBlobShadow(A.model, x, z, yawRad - 1.5707963f, sc); // model faces +Z; the blob helper expects +X
+    // Recolor: blend every material toward a target, then restore (tint alone
+    // can only darken, so a near-black wolf could never read as an ice wolf).
+    Color saved[16];
+    int nm = std::min(A.model.materialCount, 16);
+    if (p.recolor.a > 0) {
+        float k = p.recolor.a / 255.0f;
+        for (int m = 0; m < nm; m++) {
+            Color& c = A.model.materials[m].maps[MATERIAL_MAP_DIFFUSE].color;
+            saved[m] = c;
+            c = { (unsigned char)(c.r + (p.recolor.r - c.r) * k), (unsigned char)(c.g + (p.recolor.g - c.g) * k),
+                  (unsigned char)(c.b + (p.recolor.b - c.b) * k), c.a };
+        }
+    }
+    // DrawModelEx turns local +Z toward (sin a, cos a); face (cos yaw, sin yaw).
+    DrawModelEx(A.model, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f }, 90.0f - yawRad * RAD2DEG, { sc, sc, sc }, tint);
+    if (p.recolor.a > 0)
+        for (int m = 0; m < nm; m++) A.model.materials[m].maps[MATERIAL_MAP_DIFFUSE].color = saved[m];
+    return true;
+}
+// Which animated model (if any) stands in for a wilderness creature / monster.
+static int AnimalForCreature(int creatureIdx) {
+    switch (creatureIdx) {
+        case 0: return kAnDog;   // Stray Dog
+        case 1: return kAnWolf;  // Timber Wolf
+        case 5: return kAnHorse; // War Horse
+        default: return -1;
+    }
+}
+// Three wolves that read differently: Timber (grey-brown), Lone (the model's
+// own charcoal), Ice (near-white and bigger).
+static int AnimalForMonster(int iconIdx, Color* recolor, float* scale) {
+    switch (iconIdx) {
+        case 2: *recolor = Color{ 0, 0, 0, 0 };        *scale = 1.0f;  return kAnWolf; // Lone Wolf
+        case 5: *recolor = Color{ 232, 242, 255, 200 }; *scale = 1.25f; return kAnWolf; // Ice Wolf
+        default: return -1;
+    }
+}
+static Color AnimalRecolorForMonsterName(const std::string& name) {
+    if (name == "Timber Wolf") return Color{ 128, 112, 96, 150 }; // grey-brown forest wolf
+    return Color{ 0, 0, 0, 0 };
+}
+
 // Orbit-camera state for the 3D town view. File-statics (like g_scrollDragging),
 // not GameState - purely transient view state, never saved.
 // g_t3dYaw/Pitch/Dist are the *targets* written by input; the smoothed copies
@@ -9227,7 +9350,7 @@ static int g_t3dCamScreen = -1; // which screen the smoothed camera last served 
 static const float kT3DPitchMin = 0.22f; // polar clamp: camera can never dip below the ground
 static const float kT3DPitchMax = 1.35f; // ~77 deg: near-top-down is as far as it goes
 static const float kT3DDistMin = 260.0f; // closest zoom: building fills the view
-static const float kT3DDistMax = 1100.0f; // 2026-09-26: was 1500 - past this the town shrank to a hazy diorama// farthest zoom: whole town in frame
+static const float kT3DDistMax = 1100.0f; // farthest zoom: whole town in frame (2026-09-26: was 1500 - the town shrank to a hazy diorama)
 static const float kT3DCamDamp = 9.0f;   // orbit smoothing speed (per second; higher = snappier)
 static const float kT3DZoomDamp = 7.0f;  // zoom smoothing speed (per second)
 static const float kT3DTargetDamp = 6.0f;// how fast the camera follows the walking player
@@ -12356,6 +12479,86 @@ static const GameState::DyingMonster* FindDyingBlade(const GameState& s, int bla
 static const GameState::DyingMonster* FindDyingDungeonSlot(const GameState& s, int dungeonIdx,
                                                            int monsterIdx, bool isBoss);
 
+// Ambient wildlife (2026-09-26): deer herds with a stag, and lone foxes, that
+// graze and wander around a home meadow and bolt when you get close. Purely
+// scenery - no interaction, not saved - and they respect water and ridges.
+struct WildAnimal { int id; Vector2 home, pos, target; float timer, fleeT, speed; bool placed; };
+static std::vector<WildAnimal> g_wildAnimals;
+static void WildAnimalsEnsure() {
+    static bool built = false;
+    if (built) return;
+    built = true;
+    WildTerrainEnsure();
+    struct Home { float x, z; bool herd; };
+    static const Home homes[] = {
+        { 1250, 2230, true }, { 620, 2640, true }, { 1950, 2950, true }, { 2600, 700, true }, { 1200, 3000, true },
+        { 1500, 1500, false }, { 2400, 2950, false }, { 380, 2950, false }, { 2850, 950, false }, { 800, 1300, false },
+    };
+    auto clearOfGameplay = [](Vector2 p) {
+        for (const auto& m : kWildernessMonsterSpots) if (hypotf(p.x - m.pos.x, p.y - m.pos.y) < 170.0f) return false;
+        for (const auto& g : kTownGates) if (hypotf(p.x - g.wildernessPos.x, p.y - g.wildernessPos.y) < 200.0f) return false;
+        return true;
+    };
+    for (const Home& h : homes) {
+        Vector2 home = WildNearestFree({ h.x, h.z });
+        if (WildBlocked(home) || !clearOfGameplay(home)) continue;
+        int n = h.herd ? 4 : 1;
+        for (int k = 0; k < n; k++) {
+            WildAnimal a{};
+            a.id = h.herd ? (k == 0 ? kAnStag : kAnDeer) : kAnFox;
+            a.home = home;
+            float ang = k * 1.9f + h.x * 0.01f;
+            a.pos = WildNearestFree({ home.x + cosf(ang) * 40.0f * k, home.y + sinf(ang) * 40.0f * k });
+            a.target = a.pos;
+            a.timer = 1.0f + k * 1.3f;
+            g_wildAnimals.push_back(a);
+        }
+    }
+}
+static void WildAnimalsUpdateDraw(const GameState& s, const Town3DCam* cull, bool shadowPass) {
+    WildAnimalsEnsure();
+    float dt = shadowPass ? 0.0f : GameDt();
+    int idx = 0;
+    for (WildAnimal& a : g_wildAnimals) {
+        idx++;
+        float dxp = s.wildernessPlayerPos.x - a.pos.x, dzp = s.wildernessPlayerPos.y - a.pos.y;
+        float dp = hypotf(dxp, dzp);
+        bool shy = !s.playerIsGhost && dp < (a.id == kAnFox ? 150.0f : 190.0f);
+        if (shy && a.fleeT <= 0.0f) { // bolt directly away, but stay near home
+            a.fleeT = 2.4f;
+            Vector2 away = { -dxp / std::max(1.0f, dp), -dzp / std::max(1.0f, dp) };
+            a.target = { a.pos.x + away.x * 260.0f, a.pos.y + away.y * 260.0f };
+            float hx = a.target.x - a.home.x, hz = a.target.y - a.home.y, hd = hypotf(hx, hz);
+            if (hd > 420.0f) { a.target.x = a.home.x + hx / hd * 420.0f; a.target.y = a.home.y + hz / hd * 420.0f; }
+        }
+        a.fleeT -= dt;
+        a.timer -= dt;
+        if (a.fleeT <= 0.0f && a.timer <= 0.0f) { // new graze spot near home
+            float h1 = Town3DHash01((float)idx * 7.1f, s.worldTime * 0.37f);
+            float h2 = Town3DHash01(s.worldTime * 0.53f, (float)idx * 3.3f);
+            a.target = { a.home.x + (h1 - 0.5f) * 320.0f, a.home.y + (h2 - 0.5f) * 320.0f };
+            a.timer = 3.0f + 5.0f * h1;
+        }
+        float want = (a.fleeT > 0.0f) ? 200.0f : 38.0f;
+        float tx = a.target.x - a.pos.x, tz = a.target.y - a.pos.y, td = hypotf(tx, tz);
+        float spd = (td > 6.0f) ? want : 0.0f;
+        a.speed += (spd - a.speed) * std::min(1.0f, dt * 5.0f);
+        if (td > 1.0f && a.speed > 1.0f) {
+            Vector2 prev = a.pos;
+            float step = std::min(td, a.speed * dt);
+            a.pos.x += tx / td * step; a.pos.y += tz / td * step;
+            if (WildBlocked(a.pos)) { a.pos = prev; a.target = prev; a.fleeT = 0.0f; } // shore/ridge: stop and graze
+        }
+        if (cull && !Wild3DInView(*cull, a.pos.x, a.pos.y, 60.0f)) continue;
+        float yaw = atan2f(tz, tx);
+        if (td < 2.0f) yaw = Town3DHash01((float)idx, 1.7f) * 6.2832f;
+        AnimalPose ap;
+        ap.move = std::clamp(a.speed / 200.0f * (a.speed > 60.0f ? 1.0f : 0.5f), 0.0f, 1.0f);
+        ap.time = s.worldTime + idx * 0.61f;
+        DrawAnimal(a.id, a.pos.x, a.pos.y, yaw, 1.0f, WHITE, ap, shadowPass);
+    }
+}
+
 // Town surroundings (2026-09-26): instead of flat green forever past the town
 // edge, draw the actual wilderness around this town's gate - ground (roads,
 // rivers, coast, region colors), scenery, bridges, sea - offset so the town's
@@ -12530,10 +12733,17 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         if (!vis(sp.pos.x, sp.pos.y, 70.0f)) continue;
         T3CQuadLook look = T3CCreatureLook(sp.creatureIdx);
         T3CAnim ca = T3CMakeAnim(kT3CTrackCreatureWild + (int)i, sp.pos.x, sp.pos.y, !shadowPass);
+        {   // Animated model where one fits the species (2026-09-26).
+            AnimalPose ap; ap.move = ca.move; ap.time = ca.t + ca.seed * 0.37f;
+            if (sp.creatureIdx == 1) ap.recolor = Color{ 128, 112, 96, 150 }; // Timber Wolf: grey-brown
+            if (DrawAnimal(AnimalForCreature(sp.creatureIdx), sp.pos.x, sp.pos.y,
+                           Town3DHash01(sp.pos.x, sp.pos.y) * 6.2832f, 1.0f, WHITE, ap, shadowPass)) continue;
+        }
         T3CDrawQuad(g_t3cQuads[look.specIdx].parts, sp.pos.x, sp.pos.y,
                     Town3DHash01(sp.pos.x, sp.pos.y) * 6.2832f,
                     look.scale, look.coat, ca, kitDist(sp.pos.x, sp.pos.y), shadowPass);
     }
+    WildAnimalsUpdateDraw(s, cull, shadowPass); // ambient deer, stags, foxes (2026-09-26)
     // Monsters at their live positions (the engaged one at its fight position,
     // pack attackers at their chase positions).
     bool wildDying = false;
@@ -12561,6 +12771,19 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         if (!isDying) {
             if (eng) mHurtT = s.wildEngaged->monsterHurtT;
             else if (extra) mHurtT = extra->monsterHurtT;
+        }
+        Color anRecolor = { 0, 0, 0, 0 }; float anScale = 1.0f;
+        int anId = mlook.humanoid ? -1 : AnimalForMonster(kWildernessMonsterSpots[i].iconIdx, &anRecolor, &anScale);
+        if (anId >= 0) { // animated model (2026-09-26): its own attack/hit/death clips
+            AnimalPose ap;
+            ap.recolor = anRecolor;
+            Color named = AnimalRecolorForMonsterName(kWildernessMonsterSpots[i].name);
+            if (named.a > 0) ap.recolor = named;
+            ap.move = ma.move; ap.time = ma.t + ma.seed * 0.37f;
+            ap.attackT = mAtk; ap.hurtT = mHurtT;
+            if (isDying) ap.deathT = 1.0f - dying->timer / std::max(0.01f, dying->duration);
+            if (DrawAnimal(anId, mp.x, mp.y, face, anScale, CombatHitTint(mHurtT, WHITE, Color{ 220, 90, 90, 255 }), ap, shadowPass))
+                continue;
         }
         if (mlook.humanoid) {
             T3CDrawHumanoid(g_t3cHumans[0].parts, mp.x, mp.y, face, mlook.scale * shrink,
