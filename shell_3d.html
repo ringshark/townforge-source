@@ -3,7 +3,16 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-    <title>Town Forge - 3D Preview</title>
+    <title>Town Forge</title>
+    <!-- Installable app (2026-09-27): home-screen icon, full screen, offline play. -->
+    <link rel="manifest" href="manifest.webmanifest">
+    <meta name="theme-color" content="#140d08">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Town Forge">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
     <style>
       html, body {
@@ -23,6 +32,9 @@
         height: 100vh;
         height: 100dvh;
         overflow: hidden;
+        /* keep the game clear of the notch / home indicator when installed full screen */
+        box-sizing: border-box;
+        padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
       }
 
       /* NOTE: Canvas *must not* have any border or padding, or mouse coords will be wrong */
@@ -49,6 +61,42 @@
         background: #000;
         pointer-events: none;
       }
+
+      /* "Install Town Forge" hint - iPhone/iPad (Share > Add to Home Screen) or a
+         one-tap Install button where the browser supports it. */
+      #install {
+        position: fixed;
+        left: 50%;
+        bottom: calc(14px + env(safe-area-inset-bottom));
+        transform: translateX(-50%);
+        width: min(92vw, 420px);
+        box-sizing: border-box;
+        display: none;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        background: #2a1b10;
+        border: 2px solid #b8893c;
+        border-radius: 10px;
+        box-shadow: 0 6px 18px rgba(0,0,0,.6);
+        font-family: arial, sans-serif;
+        font-size: 14px;
+        line-height: 1.35;
+        color: #f0dcae;
+        z-index: 10;
+      }
+      #install img { width: 40px; height: 40px; border-radius: 9px; flex: none; }
+      #install .txt { flex: 1; }
+      #install button {
+        flex: none;
+        border: 1px solid #b8893c;
+        border-radius: 7px;
+        background: #6b4520;
+        color: #f6e2b0;
+        font-size: 14px;
+        padding: 7px 11px;
+      }
+      #install .x { background: none; border: none; font-size: 20px; padding: 0 4px; color: #c9ab76; }
     </style>
   </head>
   <body>
@@ -56,6 +104,12 @@
       <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex=-1></canvas>
     </div>
     <div id="loading">Loading...</div>
+    <div id="install">
+      <img src="icons/apple-touch-icon.png" alt="">
+      <div class="txt" id="install-txt"></div>
+      <button id="install-btn" style="display:none">Install</button>
+      <button class="x" id="install-x" aria-label="Close">&times;</button>
+    </div>
 
     <script type='text/javascript'>
         var loadingEl = document.querySelector('#loading');
@@ -108,6 +162,52 @@
         window.addEventListener('pointerdown', function resumeAudioOnce() {
             audioContexts.forEach(ctx => { if (ctx.state === 'suspended') ctx.resume(); });
         }, { passive: true });
+
+        // --- Installable app (2026-09-27) ---
+        // Offline cache + instant start once installed (service workers need https).
+        if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+            window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () {}); });
+        }
+        // Ask the browser to keep saves even when storage runs low.
+        if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () {});
+        (function () {
+            var box = document.getElementById('install'), txt = document.getElementById('install-txt');
+            var btn = document.getElementById('install-btn'), close = document.getElementById('install-x');
+            var standalone = window.matchMedia('(display-mode: standalone)').matches ||
+                             window.matchMedia('(display-mode: fullscreen)').matches || navigator.standalone === true;
+            var dismissed = false;
+            try { dismissed = localStorage.getItem('tf-install-dismissed') === '1'; } catch (e) {}
+            if (standalone || dismissed) return;
+            function show(html) {
+                txt.innerHTML = html;
+                box.style.display = 'flex';
+                setTimeout(function () { box.style.display = 'none'; }, 20000);
+            }
+            close.onclick = function () {
+                box.style.display = 'none';
+                try { localStorage.setItem('tf-install-dismissed', '1'); } catch (e) {}
+            };
+            var ua = navigator.userAgent;
+            var iOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+            if (iOS) {
+                setTimeout(function () {
+                    show('<b>Install Town Forge</b><br>Tap <b>Share</b> &#x2B06;&#xFE0E; then <b>Add to Home Screen</b>.');
+                }, 4000);
+                return;
+            }
+            var deferred = null;
+            window.addEventListener('beforeinstallprompt', function (e) {
+                e.preventDefault();
+                deferred = e;
+                btn.style.display = 'block';
+                show('<b>Install Town Forge</b><br>Play full screen from your home screen.');
+            });
+            btn.onclick = function () {
+                if (!deferred) return;
+                deferred.prompt();
+                deferred.userChoice.finally(function () { deferred = null; box.style.display = 'none'; });
+            };
+        })();
     </script>
     {{{ SCRIPT }}}
   </body>
