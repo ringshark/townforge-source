@@ -1028,15 +1028,15 @@ struct GameState {
     // 3D town view toggle (2026-09-24, first 3D milestone) - switches DrawTownScreen's
     // world render between the classic 2D sprite view and the new 3D programmer-art
     // view (DrawTown3DWorld). Transient UI state, not saved - same as selectedTile above.
-    bool town3DView = false;
+    bool town3DView = true;   // 3D is the main view (2026-09-26); 2D stays a toggle
     // 3D wilderness view toggle (2026-09-24, Phase 1 of the wilderness 3D work) -
     // same deal for DrawWildernessScreen: the 3D view is a pure view layer, all game
     // logic stays in the shared DrawWildernessScreen code. Transient, not saved.
-    bool wild3DView = false;
+    bool wild3DView = true;
     // 3D dungeon view toggle (2026-09-24, Phase 2 - dungeons 3D) - same deal for
     // DrawHuntScreen's explorable dungeon arena: the 3D view is a pure view layer,
     // all game logic stays in the shared DrawHuntScreen code. Transient, not saved.
-    bool hunt3DView = false;
+    bool hunt3DView = true;
     // In-dungeon MENU (2026-09-25): the global tab bar / resource HUD collapse
     // behind a single MENU toggle while inside a dungeon so the dungeon gets
     // nearly the full screen. Transient, not saved.
@@ -1395,7 +1395,7 @@ struct GameState {
     // the interior (or re-entering) just resets the spawn. ---
     std::string interiorKey;                 // building key whose room we're inside ("" = not inside)
     Vector2 interiorPlayerPos = {280, 640};  // room-local position
-    bool interior3DView = false;             // 3D/2D view inside interiors (mirrors town3DView on entry, V toggles)
+    bool interior3DView = true;             // 3D/2D view inside interiors (mirrors town3DView on entry, V toggles)
     bool interiorGreeted = false;            // greeting popup open for the room's static NPC (if any)
 
     // --- Live Wilderness combat (first slice of the real-time combat rework - see
@@ -9403,7 +9403,7 @@ enum HumanRegion : unsigned char {
 // Gear: the first six are KayKit models, the rest are built procedurally.
 enum HumanWeapon {
     kHwNone = -1, kHwSword, kHwAxe, kHwDagger, kHwStaff, kHwCrossbow, kHwShield,
-    kHwBow, kHwSpear, kHwHalberd, kHwMace, kHwHammer, kHwClub, kHwGearCount
+    kHwBow, kHwSpear, kHwHalberd, kHwMace, kHwHammer, kHwClub, kHwPickaxe, kHwRod, kHwGearCount
 };
 // How a character fights: picks the attack moves and the idle carry.
 enum HumanStyle { kHsUnarmed, kHsOneHand, kHsTwoHand, kHsPolearm, kHsDagger, kHsBow, kHsMagic };
@@ -9431,6 +9431,9 @@ struct HumanPose {
     float hurtT = -1.0f;   // 0..1 through a hit reaction, <0 none
     float deathT = -1.0f;  // 0..1 through dying, <0 alive
     bool engaged = false;  // in a fight: guard stance instead of the relaxed idle
+    int gather = 0;        // 1 chopping, 2 mining, 3 fishing (tool shown, work loop plays)
+    Vector2 gatherAt = { 0.0f, 0.0f }; // world point being worked (fishing: where the line lands)
+    bool gatherAtValid = false;
 };
 
 struct HumanRig {
@@ -9549,6 +9552,19 @@ static Model HumanBuildWeapon(int kind) {
         case kHwHammer:
             T3CCylinder(b, 0.0f, -0.35f, 0.0f, 0.95f, 0.022f, 0.022f, 6, wood);
             T3CBox(b, 0.0f, 0.95f, 0.0f, 0.34f, 0.15f, 0.15f, iron);
+            break;
+        case kHwPickaxe: { // miner's pick: shaft with a curved iron head across the top
+            T3CCylinder(b, 0.0f, -0.20f, 0.0f, 0.62f, 0.02f, 0.022f, 6, wood);
+            T3CBox(b, 0.0f, 0.60f, 0.0f, 0.06f, 0.06f, 0.07f, iron);
+            float bl[3] = { 0.02f, 0.60f, 0.0f }, dl[3] = { 1.0f, -0.25f, 0.0f };
+            float br[3] = { -0.02f, 0.60f, 0.0f }, dr[3] = { -1.0f, -0.25f, 0.0f };
+            T3CConeDir(b, bl, dl, 0.26f, 0.032f, 5, steel);
+            T3CConeDir(b, br, dr, 0.20f, 0.030f, 5, steel);
+            break;
+        }
+        case kHwRod: // fishing rod: long tapering pole with a reel
+            T3CCylinder(b, 0.0f, -0.25f, 0.0f, 1.55f, 0.016f, 0.006f, 5, dark);
+            T3CCylinder(b, 0.0f, 0.02f, 0.035f, 0.08f, 0.028f, 0.028f, 6, iron);
             break;
         case kHwClub:
         default:
@@ -10057,6 +10073,43 @@ static void HumanAttackMove(HumanRig& H, const HumanOutfit& o, int variant, floa
     }
 }
 
+// Gathering loops (2026-09-26), t = 0..1 around the loop: a two-handed axe
+// swing into a trunk, an overhead pick strike at the rock, a rod cast then a
+// patient wait with a twitch of the line.
+static void HumanGatherMove(HumanRig& H, int kind, float t) {
+    const Vector3 Yax = { 0.0f, 1.0f, 0.0f }, Xax = { 1.0f, 0.0f, 0.0f };
+    if (kind == 1) {
+        float wind = HumanEase(t, 0.0f, 0.45f) * (1.0f - HumanEase(t, 0.45f, 0.58f));
+        float hit = HumanEase(t, 0.45f, 0.58f) * (1.0f - HumanEase(t, 0.75f, 1.0f));
+        HumanTurn(H, H.boneSpine1, Yax, -38.0f * wind + 22.0f * hit);
+        HumanArm(H, true, { -0.85f, 0.40f, -0.35f }, { -0.6f, 0.4f, 0.2f }, wind);
+        HumanArm(H, false, { -0.30f, 0.20f, 0.90f }, { -0.9f, 0.3f, 0.2f }, wind);
+        HumanBlade(H, true, { -0.8f, 0.45f, -0.6f }, wind);
+        HumanArm(H, true, { 0.25f, -0.10f, 1.0f }, { 0.8f, -0.1f, 0.6f }, hit);
+        HumanArm(H, false, { 0.55f, -0.10f, 0.9f }, { 0.9f, 0.0f, 0.3f }, hit);
+        HumanBlade(H, true, { 1.0f, -0.05f, 0.35f }, hit);
+    } else if (kind == 2) {
+        float wind = HumanEase(t, 0.0f, 0.50f) * (1.0f - HumanEase(t, 0.50f, 0.62f));
+        float hit = HumanEase(t, 0.50f, 0.62f) * (1.0f - HumanEase(t, 0.80f, 1.0f));
+        HumanTurn(H, H.boneSpine1, Xax, -12.0f * wind + 26.0f * hit);
+        HumanArm(H, true, { 0.12f, 1.0f, -0.25f }, { 0.1f, 0.6f, -1.0f }, wind);
+        HumanArm(H, false, { -0.12f, 1.0f, -0.25f }, { -0.1f, 0.6f, -1.0f }, wind);
+        HumanBlade(H, true, { 0.0f, 0.3f, -1.0f }, wind);
+        HumanArm(H, true, { 0.12f, -0.45f, 1.0f }, { 0.05f, -0.6f, 1.0f }, hit);
+        HumanArm(H, false, { -0.12f, -0.45f, 1.0f }, { -0.05f, -0.6f, 1.0f }, hit);
+        HumanBlade(H, true, { 0.0f, -0.85f, 1.0f }, hit);
+    } else {
+        float cast = HumanEase(t, 0.0f, 0.08f) * (1.0f - HumanEase(t, 0.08f, 0.16f));
+        float hold = HumanEase(t, 0.08f, 0.22f);
+        float twitch = (t > 0.62f && t < 0.70f) ? sinf((t - 0.62f) / 0.08f * 3.14159f) * 0.25f : 0.0f;
+        HumanArm(H, true, { -0.2f, 0.9f, -0.5f }, { 0.0f, 0.7f, -0.8f }, cast);
+        HumanBlade(H, true, { 0.0f, 0.6f, -1.0f }, cast);
+        HumanArm(H, true, { -0.2f, -0.25f, 1.0f }, { 0.0f, 0.15f + twitch, 1.0f }, hold);
+        HumanArm(H, false, { 0.15f, -0.35f, 1.0f }, { -0.4f, 0.0f, 1.0f }, hold * 0.8f);
+        HumanBlade(H, true, { 0.0f, 0.5f + twitch, 1.0f }, hold);
+    }
+}
+
 // Procedural casts: a staff raised then thrust at the target, or a two-hand push.
 static void HumanCastMove(HumanRig& H, const HumanOutfit& o, float t) {
     float wind = HumanEase(t, 0.0f, 0.35f) * (1.0f - HumanEase(t, 0.35f, 0.5f));
@@ -10118,6 +10171,10 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
     bool attacking = atkT >= 0.0f && atkT < 1.0f;
     bool casting = castT >= 0.0f && castT < 1.0f;
     bool hurting = hurtT >= 0.0f && hurtT < 1.0f;
+    // Working a resource: only while standing (walking cancels the loop visually).
+    bool gathering = p.gather > 0 && p.deathT < 0.0f && !attacking && !casting && !hurting && !st.moving;
+    static const float kGatherPeriod[4] = { 1.0f, 1.1f, 1.2f, 4.5f };
+    float gatherT = gathering ? fmodf((float)now / kGatherPeriod[p.gather], 1.0f) : 0.0f;
 
     // ---- base clip (locomotion / stance) ----
     int clip = H.idle;
@@ -10148,6 +10205,7 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
     } else if (st.moving && H.jog >= 0 && p.move > 0.62f) { clip = H.jog; speed = 0.9f + 0.3f * p.move; }
     else if (st.moving) { clip = H.walk; speed = 0.8f + 0.6f * p.move; }
     else if (fightStance) clip = H.guard;
+    if (gathering && clip == H.guard) clip = H.idle;
     // Stop/start with a little hysteresis so a character easing to a halt
     // settles into idle instead of shuffling in slow motion.
     if (st.moving && p.move < 0.10f) st.moving = false;
@@ -10181,8 +10239,9 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
 
     // ---- procedural layers ----
     if (!dying) {
-        float carry = (attacking || casting) ? 0.0f : 1.0f;
+        float carry = (attacking || casting || gathering) ? 0.0f : 1.0f;
         if (carry > 0.0f) HumanCarry(H, o, carry);
+        if (gathering) HumanGatherMove(H, p.gather, gatherT);
         if (procAttack >= 0) HumanAttackMove(H, o, st.atkVariant, atkT);
         if (procCast) HumanCastMove(H, o, castT);
     }
@@ -10204,21 +10263,42 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
     auto gearMat = [&](int g) {
         for (int i = 0; i < H.gear[g].materialCount; i++) H.gear[g].materials[i].shader = sh;
     };
-    if (o.weapon >= 0 && H.gearOk[o.weapon]) {
+    // While gathering, the tool replaces the weapon in hand.
+    int wpn = gathering ? (p.gather == 1 ? kHwAxe : p.gather == 2 ? kHwPickaxe : kHwRod) : o.weapon;
+    float wScale = gathering ? (p.gather == 1 ? 1.15f : 1.0f) : o.weaponScale;
+    if (wpn >= 0 && H.gearOk[wpn]) {
         static const float gearScale[kHwGearCount] = { 0.56f, 0.56f, 0.42f, 0.80f, 0.50f, 0.56f,
-                                                       1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
-        bool leftHand = o.weapon == kHwBow;
+                                                       1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+        bool leftHand = wpn == kHwBow;
         int hb = leftHand ? H.boneHandL : H.boneHandR;
         if (hb >= 0) {
-            float gs = gearScale[o.weapon] * o.weaponScale * u;
+            float gs = gearScale[wpn] * wScale * u;
             Vector3 off = g_humanGripOff;
             if (leftHand) off.x = -off.x;
             Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(gs, gs, gs),
                                                          MatrixRotateXYZ(Vector3Scale(g_humanGripRot, DEG2RAD))),
                                           MatrixTranslate(off.x * u, off.y * u, off.z * u));
-            bool procedural = o.weapon >= kHwBow;
-            if (!procedural) gearMat(o.weapon);
-            HumanDrawAttached(H.gear[o.weapon], procedural ? &flat : nullptr, local, HumanBoneMatrix(H, hb), world, tint);
+            bool procedural = wpn >= kHwBow;
+            if (!procedural) gearMat(wpn);
+            HumanDrawAttached(H.gear[wpn], procedural ? &flat : nullptr, local, HumanBoneMatrix(H, hb), world, tint);
+            if (wpn == kHwRod && gathering) { // fishing line from the rod tip to a bobbing float
+                Matrix toWorld = MatrixMultiply(MatrixMultiply(local, HumanBoneMatrix(H, hb)), world);
+                Vector3 tip = Vector3Transform({ 0.0f, 1.55f, 0.0f }, toWorld);
+                Vector3 fwd = { cosf(yawRad), 0.0f, sinf(yawRad) };
+                Vector2 at = p.gatherAtValid ? p.gatherAt : Vector2{ x + fwd.x * 120.0f, z + fwd.z * 120.0f };
+                float bob = (gatherT > 0.16f) ? sinf((float)now * 3.0f) * 1.2f - ((gatherT > 0.62f && gatherT < 0.70f) ? 3.0f : 0.0f) : 0.0f;
+                float cast = std::clamp((gatherT - 0.08f) / 0.1f, 0.0f, 1.0f); // line flies out on the cast
+                Vector3 land = { at.x, 1.5f + bob, at.y };
+                Vector3 end = Vector3Lerp(tip, land, cast);
+                Vector3 mid = Vector3Lerp(tip, end, 0.5f);
+                mid.y -= 14.0f * cast; // a little sag
+                DrawLine3D(tip, mid, Color{ 230, 230, 230, 200 });
+                DrawLine3D(mid, end, Color{ 230, 230, 230, 200 });
+                if (cast >= 1.0f) {
+                    DrawSphereEx(end, 2.2f, 6, 6, Color{ 220, 40, 40, 255 });
+                    DrawSphereEx({ end.x, end.y + 1.6f, end.z }, 1.6f, 6, 6, WHITE);
+                }
+            }
         }
         // Nocked arrow while drawing the bow: right hand to just past the bow.
         if (o.weapon == kHwBow && attacking && atkT > 0.15f && atkT < 0.62f && H.boneHandR >= 0 && H.boneHandL >= 0) {
@@ -10474,6 +10554,23 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
                 float kb = 16.0f * (1.0f - s.playerHurtT / 0.30f);
                 x += ax / al * kb; z += az / al * kb;
             }
+        }
+    }
+    // Gathering (2026-09-26): show the tool and work loop; in the wilderness,
+    // turn to the nearest node of that resource and work it.
+    if (s.gatheringResource.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
+        !s.wildEngaged.has_value() && !s.dungeonEngaged.has_value()) {
+        const std::string& r = *s.gatheringResource;
+        hp.gather = (r == "wood") ? 1 : (r == "fish") ? 3 : 2; // ore, rich ore, ice: the pick
+        if (trackId == kT3CTrackPlayerWild) {
+            float best = 260.0f;
+            for (const WildernessGatherNode& n : kWildernessGatherNodes) {
+                bool match = (r == n.resource) || (r == "ore" && n.resource == "richore") || (r == "richore" && n.resource == "ore");
+                if (!match) continue;
+                float d = hypotf(n.pos.x - x, n.pos.y - z);
+                if (d < best) { best = d; hp.gatherAt = n.pos; hp.gatherAtValid = true; }
+            }
+            if (hp.gatherAtValid && move < 0.1f) yawRad = atan2f(hp.gatherAt.y - z, hp.gatherAt.x - x);
         }
     }
     return DrawHuman(trackId, x, z, yawRad, 1.0f, tint, HumanOutfitFor(s.equipped), hp, shadowPass);
@@ -10931,18 +11028,17 @@ static void T3DPushLightGrass(); // with the grass shader
 struct T3DLightState { Vector3 sun; float amb[4]; Color horizon, zenith; float sunI; };
 static T3DLightState g_t3dLightNow;
 static Color g_t3dSkyHorizon = kT3DSkyHorizon, g_t3dSkyZenith = kT3DSkyZenith;
-static const float kT3DDayLength = 22.0f * 60.0f; // seconds of game clock per full day
 
-static T3DLightState T3DLightAt(float tod) { // tod 0..1: 0 midnight, 0.25 sunrise, 0.5 noon, 0.8 dusk
+static T3DLightState T3DLightAt(float tod) { // tod 0..1 of a real day: 0 midnight, 0.25 6am, 0.5 noon, 0.81 7:30pm
     struct Key { float t; Color sun; float i; float amb[3]; Color hor, zen; };
     static const Key keys[] = {
         { 0.00f, { 130, 150, 210, 255 }, 0.22f, { 0.10f, 0.12f, 0.22f }, { 34, 42, 76, 255 },   { 12, 18, 44, 255 } },
-        { 0.18f, { 130, 150, 210, 255 }, 0.22f, { 0.10f, 0.12f, 0.22f }, { 34, 42, 76, 255 },   { 12, 18, 44, 255 } },
-        { 0.24f, { 255, 170, 120, 255 }, 0.62f, { 0.30f, 0.26f, 0.30f }, { 244, 170, 128, 255 }, { 92, 112, 172, 255 } },
-        { 0.32f, kT3DSunColor,           1.00f, { 0.42f, 0.41f, 0.40f }, kT3DSkyHorizon,         kT3DSkyZenith },
-        { 0.70f, kT3DSunColor,           1.00f, { 0.42f, 0.41f, 0.40f }, kT3DSkyHorizon,         kT3DSkyZenith },
-        { 0.78f, { 255, 150, 92, 255 },  0.66f, { 0.32f, 0.25f, 0.27f }, { 250, 150, 100, 255 }, { 74, 82, 152, 255 } },
-        { 0.85f, { 130, 150, 210, 255 }, 0.22f, { 0.10f, 0.12f, 0.22f }, { 34, 42, 76, 255 },   { 12, 18, 44, 255 } },
+        { 0.21f, { 130, 150, 210, 255 }, 0.22f, { 0.10f, 0.12f, 0.22f }, { 34, 42, 76, 255 },   { 12, 18, 44, 255 } },  // 5:00
+        { 0.26f, { 255, 170, 120, 255 }, 0.62f, { 0.30f, 0.26f, 0.30f }, { 244, 170, 128, 255 }, { 92, 112, 172, 255 } }, // 6:15 sunrise
+        { 0.32f, kT3DSunColor,           1.00f, { 0.42f, 0.41f, 0.40f }, kT3DSkyHorizon,         kT3DSkyZenith },          // 7:40
+        { 0.75f, kT3DSunColor,           1.00f, { 0.42f, 0.41f, 0.40f }, kT3DSkyHorizon,         kT3DSkyZenith },          // 18:00
+        { 0.81f, { 255, 150, 92, 255 },  0.66f, { 0.32f, 0.25f, 0.27f }, { 250, 150, 100, 255 }, { 74, 82, 152, 255 } },  // 19:30 dusk
+        { 0.875f, { 130, 150, 210, 255 }, 0.22f, { 0.10f, 0.12f, 0.22f }, { 34, 42, 76, 255 },  { 12, 18, 44, 255 } },  // 21:00
         { 1.00f, { 130, 150, 210, 255 }, 0.22f, { 0.10f, 0.12f, 0.22f }, { 34, 42, 76, 255 },   { 12, 18, 44, 255 } },
     };
     const int n = (int)(sizeof(keys) / sizeof(keys[0]));
@@ -10971,8 +11067,21 @@ static void T3DPushLight(Shader sh) {
     SetShaderValue(sh, GetShaderLocation(sh, "fogColor"), &fogCol, SHADER_UNIFORM_VEC3);
 }
 // Called at the top of each outdoor 3D view (and with noon for interiors).
+// Time of day follows the device's local clock (2026-09-26): dusk in the game
+// when it's dusk where you are. localtime() uses the browser's time zone.
+static float T3DLocalTimeOfDay() {
+#ifdef TF_HOUR
+    return (float)TF_HOUR / 24.0f; // debug builds: pin the hour
+#else
+    std::time_t now = std::time(nullptr);
+    std::tm* lt = std::localtime(&now);
+    if (!lt) return 0.5f;
+    return (lt->tm_hour + lt->tm_min / 60.0f + lt->tm_sec / 3600.0f) / 24.0f;
+#endif
+}
 static void T3DUpdateDayNight(float worldTime, bool indoors) {
-    float tod = indoors ? 0.5f : fmodf(worldTime / kT3DDayLength + 0.35f, 1.0f); // new games start mid-morning
+    (void)worldTime;
+    float tod = indoors ? 0.5f : T3DLocalTimeOfDay();
     g_t3dLightNow = T3DLightAt(tod);
     g_t3dSkyHorizon = g_t3dLightNow.horizon;
     g_t3dSkyZenith = g_t3dLightNow.zenith;
@@ -24097,6 +24206,36 @@ static void DrawBankScreen(GameState& s, int screenW, int screenH) {
 // this is called, up to maxLen. No focus/click management since only two screens
 // (Character, House) ever call this, each on its own field - it's just "always live"
 // whenever that screen is showing.
+// Touch devices have no keyboard to type into the canvas (2026-09-26): tapping a
+// name box opens the browser's own text prompt, which brings up the phone's
+// keyboard. Desktop can still just type.
+#ifdef __EMSCRIPTEN__
+#include <emscripten/em_js.h>
+EM_JS_DEPS(tf_prompt_deps, "$UTF8ToString,$stringToUTF8");
+EM_JS(int, TF_PromptText, (const char* title, const char* current, char* out, int outLen), {
+    var r = window.prompt(UTF8ToString(title), UTF8ToString(current));
+    if (r === null) return 0;
+    stringToUTF8(r, out, outLen);
+    return 1;
+});
+#endif
+static void PromptTextInto(const char* title, std::string& value, size_t maxLen) {
+#ifdef __EMSCRIPTEN__
+    char buf[160] = { 0 };
+    if (!TF_PromptText(title, value.c_str(), buf, (int)sizeof(buf))) return; // cancelled
+    std::string clean;
+    for (const char* p = buf; *p; p++)
+        if (*p >= 32 && *p <= 125 && clean.size() < maxLen) clean += *p; // same charset as typing
+    value = clean;
+#else
+    (void)title; (void)value; (void)maxLen;
+#endif
+}
+// Tap on a text box: open the prompt (released inside the box, so a scroll/drag doesn't).
+static void TapToEditText(Rectangle box, const char* title, std::string& value, size_t maxLen) {
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), box))
+        PromptTextInto(title, value, maxLen);
+}
 static void UpdateTextInput(std::string& text, size_t maxLen) {
     int key = GetCharPressed();
     while (key > 0) {
@@ -24118,7 +24257,8 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     Rectangle nameBox = { 20, (float)y, (float)(screenW - 40), 26 };
     DrawRectangleRec(nameBox, Fade(WHITE, 0.6f));
     DrawRectangleRoundedLines(nameBox, 0.15f, 4, Fade(BLACK, 0.4f));
-    std::string nameShown = s.houseName.empty() ? "Name your house" : s.houseName;
+    TapToEditText(nameBox, "Name your house", s.houseName, 24);
+    std::string nameShown = s.houseName.empty() ? "Name your house (tap to edit)" : s.houseName;
     DrawUIText(nameShown.c_str(), (int)nameBox.x + 6, (int)nameBox.y + 6, 13,
                s.houseName.empty() ? Fade(DARKGRAY, 0.6f) : kColorText);
     if (std::fmod(GetTime(), 1.0) < 0.5) {
@@ -24351,7 +24491,8 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     Rectangle nameBox = { 20, (float)y, (float)(screenW - 40), 26 };
     DrawRectangleRec(nameBox, Fade(WHITE, 0.6f));
     DrawRectangleRoundedLines(nameBox, 0.15f, 4, Fade(BLACK, 0.4f));
-    std::string nameShown = s.characterName.empty() ? "Name your character" : s.characterName;
+    TapToEditText(nameBox, "Name your character", s.characterName, 24);
+    std::string nameShown = s.characterName.empty() ? "Name your character (tap to edit)" : s.characterName;
     DrawUIText(nameShown.c_str(), (int)nameBox.x + 6, (int)nameBox.y + 6, 13,
                s.characterName.empty() ? Fade(DARKGRAY, 0.6f) : kColorText);
     if (std::fmod(GetTime(), 1.0) < 0.5) {
@@ -24566,6 +24707,8 @@ static void UpdateDrawFrame() {
         bool hadSave = LoadGame(g_state);
         if (hadSave && !g_state.logLine.empty() && g_state.logLine == "Welcome to Town Forge.")
             g_state.logLine = "Welcome back.";
+        if (hadSave && !g_state.characterName.empty() && g_state.screen == Screen::Character)
+            g_state.screen = Screen::Town; // returning adventurers open straight into the (3D) town
     }
 #endif
     GameState& state = g_state;
