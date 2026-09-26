@@ -1224,6 +1224,9 @@ struct GameState {
     bool guideSeen = false;       // persisted: the walkthrough already showed
     // First steps (2026-09-27): one goal at a time for new players. -1 = done/skipped.
     int starterStep = 0; float starterT = 0.0f, starterWalked = 0.0f; int starterBase = 0;
+    // "Young" (2026-09-27, after UO): a new character's first 20 minutes of play (and the
+    // whole first-steps guide) are safe from Murder Inc., ambushes and orc war parties.
+    float youngT = 1200.0f; // PERSISTED - protected play time left
     bool guideOpen = false;       // transient: overlay currently showing
     int guidePage = 0;            // transient: current walkthrough page
     bool guideNoShowAgain = true; // transient: overlay checkbox, default checked
@@ -4664,9 +4667,11 @@ static int RollMurdererLevel(const GameState& s) {
 static const bool kAmbushSystemEnabled = false;
 // Returns true if an ambush was triggered (sets s.ambush). Called after gathering
 // completes and after a dungeon fight ends - never while something else is pending.
+static bool PlayerYoung(const GameState& s); // new-player protection (with the guild code)
 static bool TryTriggerAmbush(GameState& s, const std::string& /*source*/) {
     if (!kAmbushSystemEnabled) return false;
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) return false; // the dead can't be ambushed
+    if (PlayerYoung(s)) return false; // (2026-09-27) nor the Young
     // Also guards against an active live fight (Wilderness/dungeon) - without this, a
     // live fight left running while the player tabbed to another screen (it pauses,
     // since updateEngaged*MonsterAI only runs inside its own Draw*Screen) could end up
@@ -6424,7 +6429,8 @@ static void SaveGame(const GameState& s) {
     out << "combatHotbar=";
     for (size_t i = 0; i < s.combatHotbar.size(); i++) out << s.combatHotbar[i] << (i + 1 < s.combatHotbar.size() ? "," : "\n");
     out << "guideSeen=" << (s.guideSeen ? 1 : 0) << "\n";
-    out << "starterStep=" << s.starterStep << "\nstarterBase=" << s.starterBase << "\n"; // newbie walkthrough already shown (2026-09-25)
+    out << "starterStep=" << s.starterStep << "\nstarterBase=" << s.starterBase << "\n";
+    out << "youngT=" << s.youngT << "\n"; // newbie walkthrough already shown (2026-09-25)
     out << "markedTowns=" << s.markedTowns << "\n"; // UO-style travel: recall destinations bitmask (2026-09-25)
 
     WriteEquipSlot(out, "equipped.leftHand", s.equipped.leftHand);
@@ -6513,6 +6519,7 @@ static bool LoadGame(GameState& s) {
     int saveVersion = 1; // missing = pre-ladder seven-slot format
     bool sawMarkedTowns = false; // UO-style travel (2026-09-25): pre-marking saves lack the key
     bool sawStarter = false;     // (2026-09-27) saves from before "first steps" are veterans: skip it
+    bool sawYoung = false;       // (2026-09-27) ...and they aren't Young either
     std::string line;
     while (std::getline(in, line)) {
         size_t eq = line.find('=');
@@ -6657,6 +6664,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "guideSeen") { s.guideSeen = (val == "1"); }
         else if (key == "starterStep") { s.starterStep = std::clamp(std::atoi(val.c_str()), -1, 7); sawStarter = true; }
         else if (key == "starterBase") s.starterBase = std::atoi(val.c_str());
+        else if (key == "youngT") { s.youngT = std::max(0.0f, (float)std::atof(val.c_str())); sawYoung = true; }
         else if (key == "markedTowns") { s.markedTowns = std::atoi(val.c_str()); sawMarkedTowns = true; }
         else if (key == "equipped.leftHand") ReadEquipSlot(val, s.equipped.leftHand);
         else if (key == "equipped.rightHand") ReadEquipSlot(val, s.equipped.rightHand);
@@ -6717,6 +6725,7 @@ static bool LoadGame(GameState& s) {
     // next time the player walks through their gates.
     if (!sawMarkedTowns) s.markedTowns = (1 << 0);
     if (!sawStarter) s.starterStep = -1; // an existing adventurer doesn't need the first steps
+    if (!sawYoung) s.youngT = 0.0f;
 
     // Custom housing migration (2026-09-25): the town house building is retired.
     // Tier, hue, name, and workshop wings carry over untouched (same fields); the
@@ -7566,6 +7575,9 @@ static bool GuildThreatActive(const GameState& s, int exceptBlade = -1) {
 // someone who can read the signs. Every warning is a roll on effective Tracking
 // (none at 0 - they simply arrive); being hunted teaches it, so even a novice
 // slowly learns. At 40+ the warning also says which way the tracks lead.
+// Young (UO-style new-player protection): during the first-steps guide and the
+// first 20 minutes of play, nobody hunts you.
+static bool PlayerYoung(const GameState& s) { return s.starterStep >= 0 || s.youngT > 0.0f; }
 static std::string CompassWord(Vector2 from, Vector2 to) {
     float a = atan2f(to.y - from.y, to.x - from.x) * RAD2DEG; // +y is south
     static const char* dirs[8] = { "east", "southeast", "south", "southwest", "west", "northwest", "north", "northeast" };
@@ -8051,7 +8063,7 @@ static bool GuildPathClear(Vector2 from, Vector2 dir, float look); // (with the 
 // there, else the champion). Seen with your own eyes - no Tracking roll.
 static void GuildCampRally(GameState& s, int who) {
     Vector2 camp = kRivalCampSpots[s.rivalCampIdx];
-    if (s.playerIsGhost || Dist(s.wildernessPlayerPos, camp) > 520.0f) return;
+    if (s.playerIsGhost || PlayerYoung(s) || Dist(s.wildernessPlayerPos, camp) > 520.0f) return;
     int first = -1, second = -1;
     for (int bi = 0; bi < kBladeCount; bi++) {
         if (bi == who) continue;
@@ -8272,7 +8284,7 @@ static bool GuildWantsHunt(GameState& s, int who, float level, float dt) {
     m.thinkT -= dt;
     if (m.thinkT > 0.0f) return false;
     m.thinkT = kGuildThinkPeriod * (0.8f + 0.4f * RandUnit());
-    if (s.screen != Screen::Wilderness || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return false;
+    if (s.screen != Screen::Wilderness || s.playerIsGhost || s.playerDeathAnimT > 0.0f || PlayerYoung(s)) return false;
     if (m.downT > 0.0f || GuildAbsent(pos) || m.task == kGtFlee || m.task == kGtInTown) return false;
     float d = Dist(pos, s.wildernessPlayerPos);
     if (d > (who < 0 ? kGuildSenseRange : kBladeSenseRange)) return false;
@@ -8348,7 +8360,8 @@ static void UpdateGuildOffscreen(GameState& s, float dt) {
 static void UpdateRivalRoaming(GameState& s, float dt) {
     if (s.wildEngaged.has_value() && s.wildEngaged->isRival) return;
     // Ghosts are beneath the red's notice - break off any hunt/stalk, patrol instead.
-    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
+    // Young players too (2026-09-27): nobody hunts a character still learning the ropes.
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f || PlayerYoung(s)) {
         if (s.rivalActivity == GameState::RivalActivity::Hunting ||
             s.rivalActivity == GameState::RivalActivity::Stalking) {
             s.rivalActivity = GameState::RivalActivity::Patrol;
@@ -8482,8 +8495,8 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
 static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
     auto& b = s.blades[bi];
     if (s.wildEngaged.has_value() && s.wildEngaged->bladeIdx == bi) return;
-    // Same ghost rule as the champion - the crew doesn't hunt the dead either.
-    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) {
+    // Same ghost rule as the champion - the crew doesn't hunt the dead (or the Young) either.
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f || PlayerYoung(s)) {
         if (b.activity == GameState::RivalActivity::Hunting ||
             b.activity == GameState::RivalActivity::Stalking) {
             b.activity = GameState::RivalActivity::Patrol;
@@ -25463,7 +25476,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             if (raidWarnT >= 0.0f) {
                 raidWarnT -= dt;
                 if (raidWarnT <= 0.0f) { raidWarnT = -1.0f; if (quiet) OrcRaidStrike(s); }
-            } else if (quiet && s.starterStep < 0 && raidCooldown <= 0.0f && df > kOrcFortRadius + 140.0f && df < 1300.0f) {
+            } else if (quiet && !PlayerYoung(s) && raidCooldown <= 0.0f && df > kOrcFortRadius + 140.0f && df < 1300.0f) {
                 raidCheckT -= dt;
                 if (raidCheckT <= 0.0f) {
                     raidCheckT = 45.0f;
@@ -25482,7 +25495,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             }
         }
         // Stumbling into Murder Inc.'s camp starts a hunt - the hard way to find it.
-        if (quiet && !GuildThreatActive(s) &&
+        if (quiet && !GuildThreatActive(s) && !PlayerYoung(s) &&
             Dist(s.wildernessPlayerPos, kRivalCampSpots[s.rivalCampIdx]) < 130.0f) {
             int nb = -1;
             for (int bi = 0; bi < kBladeCount; bi++) {
@@ -25654,7 +25667,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // mid-panel with an ambush or innocent encounter. (If the moment passes, it passes.)
     if (s.rivalAutoEngage) {
         s.rivalAutoEngage = false;
-        if (!s.playerIsGhost && s.playerDeathAnimT <= 0.0f && !s.wildEngaged.has_value() && !s.ambush.has_value() && !s.innocentEncounter.has_value() &&
+        if (!PlayerYoung(s) && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && !s.wildEngaged.has_value() && !s.ambush.has_value() && !s.innocentEncounter.has_value() &&
             Dist(s.rivalPos, s.wildernessPlayerPos) < kRivalCatchRange * 1.5f)
             tryEngageRival();
     }
@@ -29598,6 +29611,16 @@ static void UpdateDrawFrame() {
         UpdateDeathAndRespawn(state, dt); // death anims, ghost timer, monster respawns, corpse fades
         UpdateGuildOffscreen(state, dt);  // the rival and Murder Inc. keep living while you're elsewhere
 
+        if (state.youngT > 0.0f && (state.screen == Screen::Wilderness || state.screen == Screen::Town || state.screen == Screen::Hunt)) {
+            state.youngT -= dt; // Young time only runs while you're out playing
+            if (state.youngT <= 0.0f) {
+                state.youngT = 0.0f;
+                if (state.starterStep < 0) {
+                    state.logLine = "You are no longer Young - Murder Inc. may hunt you now. Train Tracking to hear them coming.";
+                    Journal(state, state.logLine);
+                }
+            }
+        }
         { // Tracking (2026-09-27): reading the land while you roam the wilderness - slow and steady
             static float trackT = 0.0f;
             if (state.screen == Screen::Wilderness && !state.playerIsGhost && (trackT += dt) >= 12.0f) {
