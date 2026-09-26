@@ -1037,6 +1037,7 @@ struct GameState {
     // behind a single MENU toggle while inside a dungeon so the dungeon gets
     // nearly the full screen. Transient, not saved.
     bool dungeonMenuOpen = false;
+    bool exploreMenuOpen = false; // 3D town/wilderness/interior MENU dropdown (2026-09-26), transient
     // Towns (2026-09-22 "second town" plan, 2026-09-25 Phase 3) - 0 = Emberhold,
     // 1 = Saltmere, 2 = Frostmere. Towns 1-2 reuse the same 9-node layout; Frostmere
     // has its own 5-node set (see ActiveTownNodes). Only the building set/tint/
@@ -7856,6 +7857,11 @@ static void DrawDyingWorldNode(Vector2 screenPos, float radius, const Texture2D*
 }
 
 // Simple clickable button helper.
+// Tap shield (2026-09-26): while a floating panel (the 3D MENU dropdown) is
+// open, buttons drawn earlier in the frame underneath it must not take the
+// tap too. The panel's own buttons set g_uiShieldBypass while drawing.
+static Rectangle g_uiShield = { 0, 0, 0, 0 };
+static bool g_uiShieldOn = false, g_uiShieldBypass = false;
 static bool Button(Rectangle r, const std::string& label, bool enabled) {
     // A small (1.5px/side) outset on both the visual rect and the click/tap hit-test -
     // enough to feel a bit more generous without crowding neighboring buttons the way
@@ -7871,6 +7877,7 @@ static bool Button(Rectangle r, const std::string& label, bool enabled) {
     DrawUIText(label.c_str(), (int)(big.x + (big.width - tw) / 2.0f), (int)(big.y + (big.height - 14) / 2.0f),
               14, kColorText);
     bool clicked = enabled && hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (clicked && g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(mouse, g_uiShield)) clicked = false;
     if (clicked) PlaySfx(SfxId::Click); // central UI click - one place covers all buttons
     return clicked;
 }
@@ -10066,7 +10073,29 @@ static void DrawMinimap(GameState& s) {
     DrawUIText("[M] toggles map", lx, ly + 38, 9, Fade(legCol, 0.75f));
 }
 
+// 3D exploration header (2026-09-26): the 3D town, wilderness and interior
+// views render over the whole screen, including the top 110px where the title,
+// resource line, tab bar and Reset live - so in 3D those were invisible but
+// still took taps (a hidden tab switch, or two taps on the hidden Reset). Like
+// the dungeons, the header now collapses behind one MENU toggle in these views.
+static bool ExploreHeaderCollapsed(const GameState& s) {
+    return (s.screen == Screen::Town && s.town3DView) ||
+           (s.screen == Screen::Wilderness && s.wild3DView) ||
+           (s.screen == Screen::Interior && s.interior3DView);
+}
+static const Rectangle kCompactMenuBtn = { 20, 56, 104, 40 };
+static Rectangle CompactMenuPanelRect(bool inDungeon) {
+    return { 12, 104, 336, inDungeon ? 328.0f : 318.0f };
+}
+static bool ExploreMenuPointInUI(Vector2 m, const GameState& s) {
+    if (!ExploreHeaderCollapsed(s)) return false;
+    if (CheckCollisionPointRec(m, kCompactMenuBtn)) return true;
+    if (s.exploreMenuOpen && CheckCollisionPointRec(m, CompactMenuPanelRect(false))) return true;
+    return false;
+}
+
 static bool Town3DPointInUI(Vector2 m, const GameState& s, int screenW) {
+    if (ExploreMenuPointInUI(m, s)) return true; // MENU toggle + dropdown
     if (CheckCollisionPointRec(m, { 20, 120, 130, 30 })) return true;  // Gather Wood
     if (CheckCollisionPointRec(m, { 160, 120, 120, 30 })) return true;  // Gather Ore
     if (CheckCollisionPointRec(m, { 290, 120, 150, 30 })) return true;  // Auto-Gather
@@ -12130,6 +12159,7 @@ static Wild3DNearest Wild3DNearestInfo(const GameState& s) {
 static Rectangle JournalPanelRect();      // defined with the journal UI below
 static Rectangle JournalWildButtonRect(); // defined with the journal UI below
 static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
+    if (ExploreMenuPointInUI(m, s)) return true; // MENU toggle + dropdown
     if (CheckCollisionPointRec(m, { 452, 120, 68, 30 })) return true; // 3D/2D toggle
     if (CheckCollisionPointRec(m, { 528, 120, 96, 30 })) return true; // camera mode button
     if (CheckCollisionPointRec(m, { kViewport.x + kViewport.width - 150.0f,
@@ -13736,7 +13766,7 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
     // Drags that start on an open panel/pop-up don't orbit.
     Vector2 mouse = GetMousePosition();
     if (!uiOpen && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, kViewport) &&
-        !Interior3DPointInUI(screenW, screenH)) {
+        !Interior3DPointInUI(screenW, screenH) && !ExploreMenuPointInUI(mouse, s)) {
         g_t3dOrbiting = true;
         g_t3dLastMouse = mouse;
     }
@@ -18717,6 +18747,68 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 // bossSection + combatPanel), scoped to the parts covered above.
 // ---------------------------------------------------------------------
 
+// Compact MENU (2026-09-25 dungeons, 2026-09-26 shared with 3D exploration):
+// the title/resource/tab header collapses behind one MENU/HIDE toggle, with a
+// slim HP bar always visible beside it. The dropdown holds every tab (and, in
+// a dungeon, the Magery escape); picking one navigates and closes it.
+static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
+    g_uiShieldBypass = true; // this panel's own buttons sit inside the shield
+    DrawUIText(TextFormat("HP: %d/%d", s.hp, s.maxHp), 236, 60, 14, kColorText);
+    {
+        Rectangle dhpBg = { 236, 80, 130, 10 };
+        DrawRectangleRec(dhpBg, Fade(BLACK, 0.3f));
+        float dhpPct = std::clamp((float)s.hp / (float)std::max(1, s.maxHp), 0.0f, 1.0f);
+        DrawRectangleRec({ dhpBg.x, dhpBg.y, dhpBg.width * dhpPct, dhpBg.height },
+                         dhpPct > 0.3f ? Color{ 63, 94, 63, 255 } : Color{ 122, 46, 46, 255 });
+    }
+    if (open) {
+        Rectangle panel = CompactMenuPanelRect(inDungeon);
+        DrawRectangleRounded(panel, 0.08f, 8, Fade(kColorPageBg, 0.97f));
+        DrawRectangleRoundedLines(panel, 0.08f, 8, Fade(BLACK, 0.45f));
+        float by = 140.0f;
+        if (inDungeon) {
+            DrawUIText(TextFormat("HP: %d / %d   Gold: %d", s.hp, s.maxHp, s.gold), 24, 116, 13, kColorText);
+        } else {
+            // The resource line the collapsed header no longer shows.
+            DrawUIText(TextFormat("Gold: %d   Wood: %d   Ore: %d   Leather: %d", s.gold, s.wood, s.ore, s.leather),
+                       24, 114, 13, kColorText);
+            DrawUIText(TextFormat("Fish: %d   Furs: %d   Ice: %d", s.fish, s.furs, s.ice), 24, 132, 13, kColorText);
+            by = 156.0f;
+        }
+        // Same gating as the main tab bar: no tab-travel mid-fight, as a
+        // ghost, or mid-death-animation.
+        bool tabsEnabled = !s.combat.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f;
+        std::string townLabel = ActiveTownName(s.selectedTown);
+        float bx0 = 24.0f, bx1 = 188.0f;
+        if (Button({ bx0, by, 152, 40 }, "Char", tabsEnabled)) { s.screen = Screen::Character; open = false; }
+        if (Button({ bx1, by, 152, 40 }, townLabel, tabsEnabled)) { s.screen = Screen::Town; open = false; }
+        by += 48;
+        if (Button({ bx0, by, 152, 40 }, "Craft", tabsEnabled)) {
+            Screen target = Screen::Craft;
+            GuardZoneConfiscateIfMurderer(s, target);
+            s.screen = target; open = false;
+        }
+        if (Button({ bx1, by, 152, 40 }, "Magic", tabsEnabled)) { s.screen = Screen::Magic; open = false; }
+        by += 48;
+        if (Button({ bx0, by, 152, 40 }, "Pets", tabsEnabled)) { s.screen = Screen::Pets; open = false; }
+        if (Button({ bx1, by, 152, 40 }, "Bank", tabsEnabled)) { s.screen = Screen::Bank; open = false; }
+        by += 48;
+        if (Button({ bx0, by, 152, 40 }, "House", tabsEnabled)) { s.screen = Screen::House; open = false; }
+        if (Button({ bx1, by, 152, 40 }, "Skills", tabsEnabled)) { s.screen = Screen::Skills; open = false; }
+        by += 48;
+        if (Button({ bx0, by, 152, 40 }, "Guide", tabsEnabled)) { s.screen = Screen::Guide; s.guidePage = 0; open = false; }
+        if (inDungeon) {
+            // UO-style travel (2026-09-25): magery escape. Allowed mid-fight -
+            // the 3s cast breaks on damage, so it can't blank a boss mid-swing.
+            by += 48;
+            bool canLeave = !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && s.leaveDungT < 0.0f;
+            if (Button({ 24, by, 312, 40 }, "Leave Dungeon (Magery)", canLeave)) TryStartLeaveDungeon(s);
+        }
+    }
+    if (Button(kCompactMenuBtn, open ? "HIDE" : "MENU", true)) open = !open;
+    g_uiShieldBypass = false;
+}
+
 static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     if (GetTouchPointCount() > 0) g_touchSeen = true; // latch: TARGET button appears on touch devices
     // In-dungeon collapsed mode (2026-09-25): the header stack (HP/stats, corpses,
@@ -19723,53 +19815,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // gets nearly the full screen in both 2D and 3D. Drawn last so it floats
     // above the world; tapping a destination navigates and closes the menu. ---
     if (s.selectedDungeon.has_value()) {
-        bool menuOpen = s.dungeonMenuOpen;
-        Rectangle menuBtn = { 20, 56, 104, 40 };
-        // Persistent slim HUD (2026-09-25): a dungeon should never feel HUD-less -
-        // compact HP bar always visible next to MENU/LOG in the free top strip.
-        DrawUIText(TextFormat("HP: %d/%d", s.hp, s.maxHp), 236, 60, 14, kColorText);
-        {
-            Rectangle dhpBg = { 236, 80, 130, 10 };
-            DrawRectangleRec(dhpBg, Fade(BLACK, 0.3f));
-            float dhpPct = std::clamp((float)s.hp / (float)std::max(1, s.maxHp), 0.0f, 1.0f);
-            DrawRectangleRec({ dhpBg.x, dhpBg.y, dhpBg.width * dhpPct, dhpBg.height },
-                             dhpPct > 0.3f ? Color{ 63, 94, 63, 255 } : Color{ 122, 46, 46, 255 });
-        }
-        if (menuOpen) {
-            Rectangle panel = { 12, 104, 336, 328 };
-            DrawRectangleRounded(panel, 0.08f, 8, Fade(kColorPageBg, 0.97f));
-            DrawRectangleRoundedLines(panel, 0.08f, 8, Fade(BLACK, 0.45f));
-            DrawUIText(TextFormat("HP: %d / %d   Gold: %d", s.hp, s.maxHp, s.gold),
-                       24, 116, 13, kColorText);
-            // Same gating as the main tab bar: no tab-travel mid-fight, as a
-            // ghost, or mid-death-animation.
-            bool tabsEnabled = !s.combat.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f;
-            std::string townLabel = ActiveTownName(s.selectedTown);
-            float bx0 = 24.0f, bx1 = 188.0f, by = 140.0f;
-            if (Button({ bx0, by, 152, 40 }, "Char", tabsEnabled)) { s.screen = Screen::Character; s.dungeonMenuOpen = false; }
-            if (Button({ bx1, by, 152, 40 }, townLabel, tabsEnabled)) { s.screen = Screen::Town; s.dungeonMenuOpen = false; }
-            by += 48;
-            if (Button({ bx0, by, 152, 40 }, "Craft", tabsEnabled)) {
-                Screen target = Screen::Craft;
-                GuardZoneConfiscateIfMurderer(s, target);
-                s.screen = target; s.dungeonMenuOpen = false;
-            }
-            if (Button({ bx1, by, 152, 40 }, "Magic", tabsEnabled)) { s.screen = Screen::Magic; s.dungeonMenuOpen = false; }
-            by += 48;
-            if (Button({ bx0, by, 152, 40 }, "Pets", tabsEnabled)) { s.screen = Screen::Pets; s.dungeonMenuOpen = false; }
-            if (Button({ bx1, by, 152, 40 }, "Bank", tabsEnabled)) { s.screen = Screen::Bank; s.dungeonMenuOpen = false; }
-            by += 48;
-            if (Button({ bx0, by, 152, 40 }, "House", tabsEnabled)) { s.screen = Screen::House; s.dungeonMenuOpen = false; }
-            if (Button({ bx1, by, 152, 40 }, "Skills", tabsEnabled)) { s.screen = Screen::Skills; s.dungeonMenuOpen = false; }
-            by += 48;
-            if (Button({ bx0, by, 152, 40 }, "Guide", tabsEnabled)) { s.screen = Screen::Guide; s.guidePage = 0; s.dungeonMenuOpen = false; }
-            // UO-style travel (2026-09-25): magery escape. Allowed mid-fight -
-            // the 3s cast breaks on damage, so it can't blank a boss mid-swing.
-            by += 48;
-            bool canLeave = !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && s.leaveDungT < 0.0f;
-            if (Button({ 24, by, 312, 40 }, "Leave Dungeon (Magery)", canLeave)) TryStartLeaveDungeon(s);
-        }
-        if (Button(menuBtn, menuOpen ? "HIDE" : "MENU", true)) s.dungeonMenuOpen = !menuOpen;
+        DrawCompactMenu(s, s.dungeonMenuOpen, true);
         DrawLeaveDungeonCastbar(s);
     }
     // Event journal (2026-09-25): LOG button + L key. Always visible in dungeons
@@ -21325,6 +21371,22 @@ static void UpdateDrawFrame() {
 #endif
         ClearBackground(kColorPageBg); // parchment background
 
+        // Inside a dungeon (2026-09-25), and in the 3D town/wilderness/interior
+        // views (2026-09-26): the header - title, Reset, resource HUD, tab bar -
+        // collapses behind a MENU toggle (DrawCompactMenu) so the world gets
+        // nearly the full screen. The 3D views draw over this strip anyway, so
+        // skipping it also stops invisible tabs/Reset from taking taps.
+        bool inDungeon = (state.screen == Screen::Hunt && state.selectedDungeon.has_value());
+        bool explore3D = ExploreHeaderCollapsed(state) && !state.ambush.has_value() &&
+                         !state.innocentEncounter.has_value();
+        if (!explore3D) state.exploreMenuOpen = false;
+        // Shield the MENU button (and the open dropdown) from the screen's own
+        // buttons, which are drawn before it.
+        g_uiShieldOn = explore3D;
+        g_uiShield = state.exploreMenuOpen ? CompactMenuPanelRect(false) : kCompactMenuBtn;
+        if (state.exploreMenuOpen) g_uiShield.y = kCompactMenuBtn.y; // cover the toggle too
+        if (state.exploreMenuOpen) g_uiShield.height += CompactMenuPanelRect(false).y - kCompactMenuBtn.y;
+        if (!explore3D) {
         DrawUIText("TOWN FORGE", 20, 16, 22, kColorHeading);
         DrawUIText("Your power comes from what you build", 20, 40, 13, DARKGRAY);
 
@@ -21336,12 +21398,9 @@ static void UpdateDrawFrame() {
             if (resetArmed) { ResetGame(state); resetArmedTimer = 0.0f; }
             else resetArmedTimer = 3.0f;
         }
+        }
 
-        // Inside a dungeon (2026-09-25): the resource HUD and the tab bar below
-        // collapse behind the dungeon's own MENU toggle (see DrawHuntScreen's
-        // tail) so the dungeon gets nearly the full screen in 2D and 3D.
-        bool inDungeon = (state.screen == Screen::Hunt && state.selectedDungeon.has_value());
-        if (!inDungeon) {
+        if (!inDungeon && !explore3D) {
         // Resource HUD (mirrors .resources pill row in the HTML) - shown on all screens
         std::string hud = TextFormat("Gold: %d   Wood: %d   Ore: %d   Leather: %d   Fish: %d   Furs: %d   Ice: %d",
                                        state.gold, state.wood, state.ore, state.leather, state.fish, state.furs, state.ice);
@@ -21435,6 +21494,10 @@ static void UpdateDrawFrame() {
         } else {
             DrawWildernessScreen(state, screenW, screenH);
         }
+        // 3D exploration MENU (2026-09-26), drawn over the world like the
+        // dungeon's. Skipped on the frame a screen switch happened.
+        if (explore3D && ExploreHeaderCollapsed(state)) DrawCompactMenu(state, state.exploreMenuOpen, false);
+        g_uiShieldOn = false;
 
         // Newbie guide (2026-09-25): on a fresh save's first visit to town or
         // the wilderness - and only then - open the walkthrough overlay. Never
