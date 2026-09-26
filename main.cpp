@@ -9226,8 +9226,11 @@ static const float kT3DTargetDamp = 6.0f;// how fast the camera follows the walk
 static bool g_t3dFollowMode = true;
 static const float kT3DFollowYaw = 0.7f;   // fixed yaw (matches the old default view)
 static const float kT3DFollowPitch = 0.96f;// fixed pitch: ~55 deg down, Diablo-style (dungeons + interiors)
-static const float kT3DOverheadFollowPitch = 1.20f;// ~69 deg down, near-overhead so town and
-                                          // wilderness read like their charming 2D maps (less occlusion)
+// 2026-09-26: was 1.20 (~69 deg, near-overhead). Lowered to match the dungeon
+// camera: at 69 deg the town read as roofs and hat-tops, while 55 deg shows the
+// building fronts (plaster, timber, doors) and more of each character, and gives
+// the whole game one consistent Diablo-style camera.
+static const float kT3DOverheadFollowPitch = 0.96f;// ~55 deg down, town + wilderness
 static const float kT3DLookTime = 0.35f;   // lookahead = smoothed velocity * this (seconds of travel)
 static const float kT3DLookMax = 130.0f;   // max lookahead offset (world units)
 static const float kT3DVelDamp = 8.0f;      // velocity smoothing speed (per second)
@@ -12252,6 +12255,10 @@ static void Dungeon3DBuildWalls(int dungeonIdx) {
         mesh.normals[i * 3] = v.nx; mesh.normals[i * 3 + 1] = v.ny; mesh.normals[i * 3 + 2] = v.nz;
         mesh.texcoords[i * 2] = v.u; mesh.texcoords[i * 2 + 1] = v.v;
         mesh.colors[i * 4] = tr; mesh.colors[i * 4 + 1] = tg; mesh.colors[i * 4 + 2] = tb; mesh.colors[i * 4 + 3] = 255;
+        // Wall tops read as near-black void (2026-09-26), Diablo-style: from the
+        // follow camera, textured tops looked like more floor and swamped the
+        // screen; dark tops make every room's shape read at a glance.
+        if (v.ny > 0.5f) { mesh.colors[i * 4] = 14; mesh.colors[i * 4 + 1] = 12; mesh.colors[i * 4 + 2] = 16; }
     }
     for (size_t i = 0; i < idx.size(); i++) mesh.indices[i] = idx[i];
     UploadMesh(&mesh, false);
