@@ -1162,6 +1162,7 @@ struct GameState {
         int bladeIdx = -1;
         std::string name; int baseGold = 0, baseLeather = 0, level = 1;
         int iconIdx = -1; // wilderness monster icon (for the corpse visual), -1 = generic
+        bool guildKill = false; // slain by the rival or a blade: visual only, no rewards for you
     };
     // Simultaneous deaths (2026-09-25): melee cleaves and AoE spells can kill
     // several monsters in one hit, so the death pipeline is a list - each entry
@@ -1216,6 +1217,31 @@ struct GameState {
     // lastActiveEpoch/elapsed calculation already there for ApplyOfflineAutoGather,
     // rather than tracking a second, redundant epoch just for the Rival); the rest is
     // transient, same reasoning as companionPos above.
+    // A guild member's inner life (2026-09-26, "living rival"): what it's doing
+    // between hunts (gathering, farming monsters, resting at camp, selling its
+    // haul in town), how hurt it is, and what it carries. hpFrac/gold/bag/downT
+    // are PERSISTED; the rest is transient steering state.
+    struct GuildMind {
+        int task = 0;              // GuildTask (kGt*), 0 = choose one
+        int taskIdx = -1;          // gather node / monster spot being worked
+        Vector2 target = { 0, 0 }; // where the task is
+        bool working = false;      // arrived and at it (vs walking there)
+        float taskT = 0.0f;        // work seconds left
+        float hpFrac = 1.0f;       // PERSISTED - health carries between fights
+        int gold = 0;              // PERSISTED - what you'd find on its body
+        int bag = 0;               // PERSISTED - goods gathered, sold in town
+        float downT = 0.0f;        // PERSISTED - seconds until it's back after being beaten
+        float thinkT = 0.0f;       // next "do I go after the player?" check
+        float huntCooldown = 30.0f;// no fresh hunt until this runs out
+        bool cornered = false;     // already fled once - it fights to the end now
+        float stuckT = 0.0f; Vector2 stuckFrom = { 0, 0 };
+        float yaw = 0.0f; Vector2 lastPos = { 0, 0 }; bool lastPosValid = false;
+        float swingT = 0.0f;       // farming: seconds since its last swing began
+        float sayT = 0.0f; std::string say; // speech bubble
+        float sayCooldown = 0.0f;
+    };
+    GuildMind rivalMind;
+    float rivalGrudge = 0.0f; // PERSISTED - rises when you kill it or its crew; fuels revenge hunts
     float rivalLevel = 16.0f; // starting value matches the old static spot's level
     Vector2 rivalPos = { 900, 900 }; // the old spot's position, now just a starting point
     bool rivalHasBeatenPlayer = false; // once true, losing to it again is a harsher "murderer" loss
@@ -1251,6 +1277,7 @@ struct GameState {
         float activityTimer = 0.0f;  // transient - patrol pause / hunt give-up countdown
         float stalkTimer = 0.0f;     // transient - counts down a stalk before commit/break-off
         bool autoEngage = false;     // transient - set when a hunt closes to catch range
+        GuildMind mind;              // what it does between hunts (see GuildMind)
     };
     std::array<BladeState, kBladeCount> blades = {{ // persistent levels/positions; activities transient
         { 12.0f, { 400.0f, 900.0f } },    // Blade II - west woods
@@ -4526,6 +4553,18 @@ static float StealChance(const GameState& s) {
 // ---------------------------------------------------------------------
 
 static std::string RivalEpithetName(const GameState& s); // defined with the rival
+// Living-guild tuning (see GuildLive further down).
+enum GuildTask { kGtNone = 0, kGtWander, kGtGather, kGtFarm, kGtRest, kGtSell, kGtInTown, kGtFlee, kGtEscort };
+static const Vector2 kGuildAbsentPos = { -9000.0f, -9000.0f }; // off the map: down, or inside a town
+static const float kGuildWalkSpeed = 95.0f;
+static const float kGuildFleeSpeed = 205.0f;   // a touch under kPlayerSpeed: a chase you can win
+static const float kGuildSenseRange = 1000.0f; // the champion notices you within this
+static const float kBladeSenseRange = 800.0f;
+static const float kGuildThinkPeriod = 3.0f;
+static const float kGuildSwingPeriod = 1.3f;
+static const int kGuildBagCap = 12;
+static bool GuildAbsent(Vector2 p) { return p.x < -1000.0f; }
+static const char* GuildTaskLabel(const GameState::GuildMind& m); // defined with the rival
 static std::string BladeName(int bi);                    // defined with Murder Inc.
 
 // Grouped tuning - one place to adjust the feel.
@@ -4631,7 +4670,20 @@ static std::string InnocentRumor(const GameState& s, int id) {
     else if (s.rivalPos.x < 900.0f) region = "in the western woods";
     else if (s.rivalPos.y < 700.0f) region = "up in the northern hills";
     else region = "in the heart of the wilds";
-    options.push_back("I saw " + RivalEpithetName(s) + " skulking " + region + " not a day ago. Walk careful out there.");
+    if (s.rivalMind.downT > 0.0f)
+        options.push_back("Someone finally put " + RivalEpithetName(s) + " in the dirt. Won't last - that sort always crawls back.");
+    else if (s.rivalMind.task == kGtInTown)
+        options.push_back(RivalEpithetName(s) + " was in town selling a heavy pack. Flush with coin, they say - " +
+                          std::to_string(s.rivalMind.gold) + " gold, if the tavern's to be believed.");
+    else {
+        options.push_back("I saw " + RivalEpithetName(s) + " skulking " + region + " not a day ago. Walk careful out there.");
+        std::string doing = GuildTaskLabel(s.rivalMind);
+        for (auto& ch : doing) ch = (char)std::tolower((unsigned char)ch);
+        if (s.rivalActivity == GameState::RivalActivity::Patrol && s.rivalMind.task != kGtNone)
+            options.push_back("Passed the Rival " + region + " - " + doing + ", bold as you like. Carries a fat purse, that one.");
+    }
+    if (s.rivalGrudge >= 1.0f)
+        options.push_back("The Rival's been asking after you by name. Whatever you did, it wasn't forgotten.");
     if (s.rivalActivity == GameState::RivalActivity::Hunting ||
         s.rivalActivity == GameState::RivalActivity::Stalking)
         options.push_back("Word is the Rival's hunting someone in the wilds right now. Could be you. Keep moving.");
@@ -5975,11 +6027,18 @@ static void SaveGame(const GameState& s) {
            "\nrivalKillsOnPlayer=" << s.rivalKillsOnPlayer <<
            "\nrivalCampIdx=" << s.rivalCampIdx << "\nrivalCampTimer=" << s.rivalCampTimer <<
            "\nrefugeKnown=" << (s.refugeKnown ? 1 : 0) << "\n"; // Phase 6
+    // Living guild (2026-09-26): health, purse, pack, time until back on their feet.
+    out << "rivalHp=" << s.rivalMind.hpFrac << "\nrivalGold=" << s.rivalMind.gold << "\nrivalBag=" << s.rivalMind.bag <<
+           "\nrivalDown=" << s.rivalMind.downT << "\nrivalGrudge=" << s.rivalGrudge << "\n";
     // Murder Inc. blades (2026-09-24) - levels and positions persist like the champion's
     for (int bi = 0; bi < kBladeCount; bi++) {
         out << "blade" << bi << "Level=" << s.blades[bi].level << "\n"
             << "blade" << bi << "PosX=" << s.blades[bi].pos.x << "\n"
-            << "blade" << bi << "PosY=" << s.blades[bi].pos.y << "\n";
+            << "blade" << bi << "PosY=" << s.blades[bi].pos.y << "\n"
+            << "blade" << bi << "Hp=" << s.blades[bi].mind.hpFrac << "\n"
+            << "blade" << bi << "Gold=" << s.blades[bi].mind.gold << "\n"
+            << "blade" << bi << "Bag=" << s.blades[bi].mind.bag << "\n"
+            << "blade" << bi << "Down=" << s.blades[bi].mind.downT << "\n";
     }
     out << "poisoning=" << s.poisoning << "\nweaponPoisonCharges=" << s.weaponPoisonCharges <<
            "\nweaponPoisonPotency=" << s.weaponPoisonPotency << "\n";
@@ -6167,6 +6226,11 @@ static bool LoadGame(GameState& s) {
         else if (key == "rivalCampIdx") s.rivalCampIdx = std::clamp(std::atoi(val.c_str()), 0, (int)kRivalCampSpots.size() - 1); // Phase 6
         else if (key == "rivalCampTimer") s.rivalCampTimer = std::max(0.0f, (float)std::atof(val.c_str())); // Phase 6
         else if (key == "refugeKnown") s.refugeKnown = std::atoi(val.c_str()) != 0; // Phase 6
+        else if (key == "rivalHp") s.rivalMind.hpFrac = std::clamp((float)std::atof(val.c_str()), 0.0f, 1.0f);
+        else if (key == "rivalGold") s.rivalMind.gold = std::max(0, std::atoi(val.c_str()));
+        else if (key == "rivalBag") s.rivalMind.bag = std::max(0, std::atoi(val.c_str()));
+        else if (key == "rivalDown") s.rivalMind.downT = std::max(0.0f, (float)std::atof(val.c_str()));
+        else if (key == "rivalGrudge") s.rivalGrudge = std::clamp((float)std::atof(val.c_str()), 0.0f, 5.0f);
         // Murder Inc. blades (2026-09-24) - old saves without these keys keep the defaults
         else if (key.compare(0, 5, "blade") == 0 && key.size() > 6 && std::isdigit((unsigned char)key[5])) {
             int bi = key[5] - '0';
@@ -6175,6 +6239,10 @@ static bool LoadGame(GameState& s) {
                 if (field == "Level") s.blades[bi].level = (float)std::atof(val.c_str());
                 else if (field == "PosX") s.blades[bi].pos.x = (float)std::atof(val.c_str());
                 else if (field == "PosY") s.blades[bi].pos.y = (float)std::atof(val.c_str());
+                else if (field == "Hp") s.blades[bi].mind.hpFrac = std::clamp((float)std::atof(val.c_str()), 0.0f, 1.0f);
+                else if (field == "Gold") s.blades[bi].mind.gold = std::max(0, std::atoi(val.c_str()));
+                else if (field == "Bag") s.blades[bi].mind.bag = std::max(0, std::atoi(val.c_str()));
+                else if (field == "Down") s.blades[bi].mind.downT = std::max(0.0f, (float)std::atof(val.c_str()));
             }
         }
         else if (key == "poisoning") s.poisoning = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
@@ -6298,7 +6366,26 @@ static bool LoadGame(GameState& s) {
             float target = (float)CombatPower(s);
             float growthFactor = std::min(0.5f, hours * 0.01f);
             s.rivalLevel = std::clamp(s.rivalLevel + (target - s.rivalLevel) * growthFactor, 5.0f, 500.0f);
+            // Living guild (2026-09-26): time heals, packs get sold, the downed get up.
+            for (int who = -1; who < kBladeCount; who++) {
+                GameState::GuildMind& m = who < 0 ? s.rivalMind : s.blades[who].mind;
+                m.downT = std::max(0.0f, m.downT - (float)elapsed);
+                m.hpFrac = std::min(1.0f, m.hpFrac + (float)elapsed / 240.0f);
+                if (elapsed > 600 && m.bag > 0) { m.gold += m.bag * 4; m.bag = 0; }
+            }
+            s.rivalGrudge = std::max(0.0f, s.rivalGrudge - (float)elapsed / 900.0f);
         }
+    }
+    // Anyone saved while down or inside a town (off the map) who is up again
+    // starts from the camp.
+    for (int who = -1; who < kBladeCount; who++) {
+        GameState::GuildMind& m = who < 0 ? s.rivalMind : s.blades[who].mind;
+        Vector2& gp = who < 0 ? s.rivalPos : s.blades[who].pos;
+        if (m.downT <= 0.0f && GuildAbsent(gp)) {
+            Vector2 c = kRivalCampSpots[s.rivalCampIdx];
+            gp = { c.x + (who + 1) * 40.0f, c.y + 30.0f };
+        }
+        m.hpFrac = std::max(m.hpFrac, m.downT > 0.0f ? 0.0f : 0.2f);
     }
     // Retroactive fixup for saves written before maxHp switched from "50 + str" to a
     // literal "maxHp == str" (Mark's call) - recompute from the loaded str rather than
@@ -7100,7 +7187,7 @@ static void RivalStartHunt(GameState& s) {
     s.rivalSprintStartDist = Dist(s.rivalPos, s.wildernessPlayerPos);
     s.rivalSprintStartVel = s.rivalPlayerVel;
     std::string nm = RivalEpithetName(s);
-    s.rivalBanner = "The " + nm + " is hunting you!";
+    s.rivalBanner = s.rivalGrudge >= 1.0f ? "The " + nm + " wants revenge!" : "The " + nm + " is hunting you!";
     s.rivalBannerTimer = kRivalBannerTime;
     s.logLine = "The " + nm + " is hunting you!";
     PlaySfx(SfxId::Hunt);
@@ -7121,6 +7208,8 @@ static void RivalCorpseLoot(GameState& s) {
     s.rivalKillsOnPlayer++;
     int loot = (int)std::round(s.gold * kRivalCorpseLootPct);
     s.gold = std::max(0, s.gold - loot);
+    s.rivalMind.gold += loot; // your gold rides off in its purse - take it back
+    s.rivalGrudge = std::max(0.0f, s.rivalGrudge - 1.0f); // score settled, for now
     std::string msg = "The " + RivalEpithetName(s) + " loots your corpse (" +
                       std::to_string(loot) + " gold)";
     if (!s.backpack.empty()) {
@@ -7142,11 +7231,11 @@ struct EngagedMonsterStats { std::string name; int level; int baseGold; int base
 static EngagedMonsterStats EngagedWildMonsterStats(const GameState& s, const GameState::ActiveMonster& am) {
     if (am.isRival) {
         int lvl = std::max(1, (int)std::round(s.rivalLevel));
-        return { RivalEpithetName(s), lvl, std::max(1, (int)std::round(lvl * 0.75f)), std::max(1, (int)std::round(lvl * 0.5f)) };
+        return { RivalEpithetName(s), lvl, std::max(1, (int)std::round(lvl * 0.75f)) + s.rivalMind.gold / 2, std::max(1, (int)std::round(lvl * 0.5f)) };
     }
     if (am.bladeIdx >= 0 && am.bladeIdx < kBladeCount) {
         int lvl = std::max(1, (int)std::round(s.blades[am.bladeIdx].level));
-        return { BladeName(am.bladeIdx), lvl, std::max(1, (int)std::round(lvl * 0.75f)), std::max(1, (int)std::round(lvl * 0.5f)) };
+        return { BladeName(am.bladeIdx), lvl, std::max(1, (int)std::round(lvl * 0.75f)) + s.blades[am.bladeIdx].mind.gold / 2, std::max(1, (int)std::round(lvl * 0.5f)) };
     }
     const WildernessMonsterSpot& spot = kWildernessMonsterSpots[am.spotIdx];
     return { spot.name, spot.level, spot.baseGold, spot.baseLeather };
@@ -7164,6 +7253,19 @@ static void RivalFightEnded(GameState& s, const GameState::ActiveMonster& am) {
     s.rivalLevel = std::clamp(s.rivalLevel + (target - s.rivalLevel) * kRivalGrowthLerpPerFight, 5.0f, 500.0f);
     s.rivalActivity = GameState::RivalActivity::Patrol;
     s.rivalActivityTimer = 0.0f; // pick a fresh patrol target immediately rather than waiting out a stale timer
+    // Living guild (2026-09-26): its wounds carry over, and beaten means gone for
+    // a while (it limps back to camp later) with half its purse left on the body.
+    GameState::GuildMind& m = s.rivalMind;
+    m.hpFrac = std::clamp(am.hp / std::max(1.0f, am.maxHp), 0.0f, 1.0f);
+    m.task = kGtNone; m.working = false;
+    m.huntCooldown = 45.0f + RandUnit() * 45.0f;
+    if (am.hp <= 0.0f) {
+        m.downT = 150.0f + RandUnit() * 120.0f;
+        m.gold -= m.gold / 2;
+        m.cornered = false;
+        s.rivalGrudge = std::min(5.0f, s.rivalGrudge + 1.0f);
+        s.rivalPos = kGuildAbsentPos;
+    }
 }
 // Called when a fight against a blade ends (win, loss, or disengage) - persists
 // its position and nudges its level toward 45-60% of the champion's target power,
@@ -7178,6 +7280,17 @@ static void BladeFightEnded(GameState& s, int bi, const GameState::ActiveMonster
     b.activity = GameState::RivalActivity::Patrol;
     b.activityTimer = 0.0f; // pick a fresh patrol target immediately
     b.autoEngage = false;
+    GameState::GuildMind& m = b.mind; // same carry-over as the champion's
+    m.hpFrac = std::clamp(am.hp / std::max(1.0f, am.maxHp), 0.0f, 1.0f);
+    m.task = kGtNone; m.working = false;
+    m.huntCooldown = 45.0f + RandUnit() * 45.0f;
+    if (am.hp <= 0.0f) {
+        m.downT = 120.0f + RandUnit() * 90.0f;
+        m.gold -= m.gold / 2;
+        m.cornered = false;
+        s.rivalGrudge = std::min(5.0f, s.rivalGrudge + 0.4f); // the boss hears about it
+        b.pos = kGuildAbsentPos;
+    }
 }
 // Tuning for the live engagement above. Melee range (60) sits just past where
 // ResolveCircleCollision already naturally separates two kNodeRadius*0.7 (35) circles
@@ -7320,6 +7433,432 @@ static const std::array<WildernessDungeonEntrance, 6> kWildernessDungeonEntrance
     { {1050, 1900}, 5, Color{ 110, 100, 90, 255 }, RegionAt({1050, 1900}) }, // [5] The Hollow
 }};
 
+// ---- The living guild (2026-09-26) ---------------------------------------------
+// Between hunts the champion and his blades live like players do: they chop,
+// mine and fish at the real gather nodes, farm the real monster spots (a kill
+// takes that spot off the map until it respawns - they compete with you for
+// it), rest at the camp when hurt, and walk to a town gate to sell a full pack.
+// They carry what they earn: beat one and half its purse is on the body; die to
+// the champion and your gold rides off with them. Whether to jump you is a
+// judgement, not a dice roll on a timer: they have to be near enough to notice
+// you, and they weigh their own health and strength (blades count nearby
+// crewmates) against yours - strong and healthy against weak or hurt, they
+// strike; hurt or outmatched, they back off; killed by you, they hold a grudge.
+static Vector2 WildernessMonsterLivePos(int idx, float worldTime);
+static float RollWildRespawn();
+static const GameState::ActiveMonster* FindWildExtra(const GameState& s, int spotIdx);
+static bool WildBlocked(Vector2 p);
+static void WildTerrainResolve(Vector2& pos, Vector2 prev);
+
+static int GuildGatherKind(const std::string& r) { return r == "wood" ? 1 : (r == "fish" ? 3 : 2); }
+static GameState::GuildMind& GuildMindOf(GameState& s, int who) { return who < 0 ? s.rivalMind : s.blades[who].mind; }
+static Vector2& GuildPosOf(GameState& s, int who) { return who < 0 ? s.rivalPos : s.blades[who].pos; }
+static std::string GuildWho(int who) { return who < 0 ? std::string("Rival Adventurer") : BladeName(who); }
+static const char* GuildTaskLabel(const GameState::GuildMind& m) {
+    switch (m.task) {
+        case kGtGather: {
+            if (!m.working || m.taskIdx < 0) return "Off to gather";
+            int k = GuildGatherKind(kWildernessGatherNodes[m.taskIdx].resource);
+            return k == 1 ? "Chopping wood" : (k == 3 ? "Fishing" : "Mining");
+        }
+        case kGtFarm: return m.working ? "Fighting monsters" : "Looking for a fight";
+        case kGtRest: return m.working ? "Resting at camp" : "Heading to camp";
+        case kGtSell: return "Taking loot to town";
+        case kGtFlee: return "Fleeing!";
+        case kGtEscort: return "Running with the champion";
+        default: return "Roaming";
+    }
+}
+static std::string GuildActivityText(GameState::RivalActivity a, const GameState::GuildMind& m) {
+    if (a == GameState::RivalActivity::Hunting) return "Hunting...";
+    if (a == GameState::RivalActivity::Stalking) return "Stalking...";
+    return GuildTaskLabel(m);
+}
+
+// What they say. Kinds: 0 gather, 1 fishing, 2 farm kill, 3 kill-steal, 4 rest,
+// 5 sell, 6 back on its feet, 7 notices you, 8 backs off, 9 flees, 10 gloats,
+// 11 revenge, 12 cornered.
+static const char* GuildLine(int who, int kind) {
+    static const char* champ[13][3] = {
+        { "Mine now. All of it.", "Quiet out here. Good.", "Every bit of this is coin." },
+        { "Come on, bite...", "Better than fighting. Barely.", "Fish don't hit back." },
+        { "Too easy.", "Next!", "Another one for the pile." },
+        { "Hey! That one was MINE.", "Kill-stealer. I'll remember that.", "Oh, you want to play it that way?" },
+        { "Need a breather...", "Patch up, then back out.", "Ow. Worth it." },
+        { "Pack's full. Time to cash in.", "Off to town - don't touch my spots.", "Heavy pack, light heart." },
+        { "Did you miss me?", "Back on my feet. Where were we?", "Can't keep a good red down." },
+        { "Nice gear. Shame if something happened to it.", "I see you...", "Wander a little closer. Go on." },
+        { "Not today.", "You got lucky. Next time.", "I'll catch you when you're weaker." },
+        { "Enough! I'm out!", "This isn't over!", "You'll pay for this!" },
+        { "Thanks for the gold.", "Stay down.", "Better luck next life." },
+        { "Remember me? I remember YOU.", "Payback time!", "You should have stayed in town." },
+        { "Fine. To the death, then!", "Cornered, am I? Come on!", "No more running." },
+    };
+    static const char* blade[13][2] = {
+        { "Boss wants ore. Boss gets ore.", "Chop, chop." },
+        { "Nothing's biting.", "Supper, maybe." },
+        { "Heh.", "Easy coin." },
+        { "Oi! That was ours!", "Murder Inc. doesn't share." },
+        { "Need to patch up.", "Back to camp." },
+        { "Hauling loot to town.", "Pack's full." },
+        { "Murder Inc. doesn't stay down.", "Back again." },
+        { "The boss would like to meet you.", "Look who's out alone." },
+        { "Not against that. Not alone.", "Another time." },
+        { "Run!", "Not worth dying for!" },
+        { "Murder Inc. sends its regards.", "Stay down." },
+        { "That's for the crew!", "You cut down one of ours." },
+        { "Nowhere left to run. Fine!", "Come on then!" },
+    };
+    kind = std::clamp(kind, 0, 12);
+    return who < 0 ? champ[kind][std::rand() % 3] : blade[kind][std::rand() % 2];
+}
+// Speech bubble + journal line - only when you're close enough to hear it.
+static void GuildSay(GameState& s, int who, int kind, bool force = false) {
+    GameState::GuildMind& m = GuildMindOf(s, who);
+    Vector2 pos = GuildPosOf(s, who);
+    if (!force && m.sayCooldown > 0.0f) return;
+    if (s.screen != Screen::Wilderness || GuildAbsent(pos) || Dist(pos, s.wildernessPlayerPos) > 700.0f) return;
+    m.say = GuildLine(who, kind);
+    m.sayT = 3.5f;
+    m.sayCooldown = 10.0f + RandUnit() * 10.0f;
+    Journal(s, GuildWho(who) + ": \"" + m.say + "\"");
+}
+
+static Vector2 GuildCampPos(const GameState& s, int who) {
+    Vector2 c = kRivalCampSpots[s.rivalCampIdx];
+    if (who < 0) return c;
+    float a = 1.3f + who * 2.1f;
+    return { c.x + cosf(a) * 70.0f, c.y + sinf(a) * 70.0f };
+}
+static Vector2 GuildNearestGate(Vector2 p) {
+    const Vector2 gates[4] = { kWildernessReturnGatePos, kWildernessTown2GatePos, kWildernessTown3GatePos, kWildernessTown4GatePos };
+    Vector2 best = gates[0];
+    for (const Vector2& g : gates) if (Dist(p, g) < Dist(p, best)) best = g;
+    return best;
+}
+// Is this monster spot unavailable to a guild member (dead, yours, or a crewmate's)?
+static bool GuildSpotTaken(const GameState& s, int spot, int self) {
+    if (s.wildSpotRespawn[spot] > 0.0f) return true;
+    if (s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0 && s.wildEngaged->spotIdx == spot) return true;
+    if (FindWildExtra(s, spot)) return true;
+    for (const auto& d : s.dyingMonsters) if (d.zone == 0 && d.spotIdx == spot) return true;
+    if (self != -1 && s.rivalMind.task == kGtFarm && s.rivalMind.taskIdx == spot) return true;
+    for (int j = 0; j < kBladeCount; j++)
+        if (j != self && s.blades[j].mind.task == kGtFarm && s.blades[j].mind.taskIdx == spot) return true;
+    return false;
+}
+static bool GuildPlayerHasSpot(const GameState& s, int spot) {
+    return (s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0 && s.wildEngaged->spotIdx == spot) ||
+           FindWildExtra(s, spot) != nullptr;
+}
+// Level growth from honest work, capped relative to you so it never runs away:
+// the champion tops out a little above your power, blades well below it (and
+// never above the champion).
+static void GuildGrow(GameState& s, float& level, int who, float amt) {
+    float power = (float)CombatPower(s);
+    float cap = who < 0 ? std::max(16.0f, power * 1.15f) : std::min(std::max(5.0f, s.rivalLevel), std::max(8.0f, power * 0.6f));
+    if (level < cap) level = std::min(cap, level + amt);
+}
+
+static void GuildPickTask(GameState& s, int who, float level) {
+    GameState::GuildMind& m = GuildMindOf(s, who);
+    Vector2 pos = GuildPosOf(s, who);
+    m.working = false; m.taskIdx = -1; m.stuckT = 0.0f; m.stuckFrom = pos;
+    if (m.hpFrac < 0.45f) { m.task = kGtRest; m.target = GuildCampPos(s, who); GuildSay(s, who, 4); return; }
+    if (m.bag >= kGuildBagCap) { m.task = kGtSell; m.target = GuildNearestGate(pos); GuildSay(s, who, 5); return; }
+    // Blades like to run with the boss now and then.
+    if (who >= 0 && RandUnit() < 0.25f && !GuildAbsent(s.rivalPos) &&
+        s.rivalActivity == GameState::RivalActivity::Patrol &&
+        (s.rivalMind.task == kGtFarm || s.rivalMind.task == kGtGather || s.rivalMind.task == kGtWander) &&
+        Dist(pos, s.rivalPos) < 1400.0f) {
+        m.task = kGtEscort; m.taskT = 30.0f + RandUnit() * 30.0f; return;
+    }
+    Vector2 home = who < 0 ? pos : GuildCampPos(s, who);
+    float range = who < 0 ? 1300.0f : 1000.0f;
+    float roll = RandUnit();
+    if (roll < 0.47f) { // farm a monster it can handle
+        int best = -1; float bestScore = 1e9f;
+        for (int i = 0; i < (int)kWildernessMonsterSpots.size(); i++) {
+            const WildernessMonsterSpot& sp = kWildernessMonsterSpots[i];
+            if ((float)sp.level > level * (who < 0 ? 1.15f : 1.3f)) continue;
+            float d = Dist(home, sp.pos);
+            if (d > range || GuildSpotTaken(s, i, who)) continue;
+            float score = d * (0.6f + RandUnit()); // nearish, with some whim
+            if (score < bestScore) { bestScore = score; best = i; }
+        }
+        if (best >= 0) { m.task = kGtFarm; m.taskIdx = best; m.target = kWildernessMonsterSpots[best].pos; return; }
+    }
+    if (roll < 0.88f) { // gather
+        int best = -1; float bestScore = 1e9f;
+        for (int i = 0; i < (int)kWildernessGatherNodes.size(); i++) {
+            float d = Dist(home, kWildernessGatherNodes[i].pos);
+            if (d > range) continue;
+            bool busy = false;
+            if (who != -1 && s.rivalMind.task == kGtGather && s.rivalMind.taskIdx == i) busy = true;
+            for (int j = 0; j < kBladeCount; j++)
+                if (j != who && s.blades[j].mind.task == kGtGather && s.blades[j].mind.taskIdx == i) busy = true;
+            if (busy) continue;
+            float score = d * (0.5f + RandUnit());
+            if (score < bestScore) { bestScore = score; best = i; }
+        }
+        if (best >= 0) { m.task = kGtGather; m.taskIdx = best; m.target = kWildernessGatherNodes[best].pos; return; }
+    }
+    // wander: stretch the legs somewhere nearby that isn't water or a ridge
+    for (int tries = 0; tries < 8; tries++) {
+        float a = RandUnit() * 6.2831853f, r = 150.0f + RandUnit() * 350.0f;
+        Vector2 t = ClampToWorld({ home.x + cosf(a) * r, home.y + sinf(a) * r }, 120.0f, kWildernessWorldSize);
+        if (!WildBlocked(t)) { m.task = kGtWander; m.target = t; m.taskT = 3.0f + RandUnit() * 4.0f; return; }
+    }
+    m.task = kGtRest; m.target = GuildCampPos(s, who);
+}
+
+// Walk toward a point, sliding along water/ridges. 0 walking, 1 arrived, 2 stuck.
+static int GuildWalk(GameState::GuildMind& m, Vector2& pos, Vector2 target, float speed, float dt, float arrive) {
+    Vector2 d = { target.x - pos.x, target.y - pos.y };
+    float l = std::sqrt(d.x * d.x + d.y * d.y);
+    if (l <= arrive) { m.stuckT = 0.0f; m.stuckFrom = pos; return 1; }
+    Vector2 prev = pos;
+    float step = std::min(l, speed * dt);
+    pos.x += d.x / l * step; pos.y += d.y / l * step;
+    if (!WildBlocked(prev)) WildTerrainResolve(pos, prev);
+    m.stuckT += dt;
+    if (m.stuckT >= 2.0f) { // made real progress in the last 2 s?
+        bool stuck = Dist(pos, m.stuckFrom) < speed * 2.0f * 0.25f;
+        m.stuckT = 0.0f; m.stuckFrom = pos;
+        if (stuck) return 2;
+    }
+    return 0;
+}
+
+// Everything a guild member does when it isn't hunting you. who: -1 champion, else blade.
+static void GuildLive(GameState& s, int who, float& level, float dt) {
+    GameState::GuildMind& m = GuildMindOf(s, who);
+    Vector2& pos = GuildPosOf(s, who);
+    m.sayT -= dt; m.sayCooldown -= dt; m.huntCooldown -= dt;
+    if (who < 0) s.rivalGrudge = std::max(0.0f, s.rivalGrudge - dt / 900.0f); // grudges fade over ~15 min each
+    if (m.downT > 0.0f) { // beaten: out of the world until it recovers
+        m.downT -= dt;
+        pos = kGuildAbsentPos;
+        if (m.downT <= 0.0f) {
+            m.downT = 0.0f; m.hpFrac = 0.6f; m.cornered = false;
+            pos = GuildCampPos(s, who);
+            m.task = kGtRest; m.target = pos; m.working = true;
+            m.lastPosValid = false;
+            if (s.screen == Screen::Wilderness)
+                Journal(s, "Word in the wilds: the " + GuildWho(who) + " is back on their feet.");
+        }
+        return;
+    }
+    if (m.task == kGtInTown) { // inside a town selling the haul
+        m.taskT -= dt;
+        pos = kGuildAbsentPos;
+        if (m.taskT <= 0.0f) {
+            m.gold += m.bag * 4 + 5; m.bag = 0; m.hpFrac = 1.0f;
+            GuildGrow(s, level, who, 0.4f); // new kit from the proceeds
+            pos = { m.target.x + (RandUnit() - 0.5f) * 80.0f, m.target.y + 70.0f };
+            if (WildBlocked(pos)) pos = m.target;
+            m.task = kGtNone; m.lastPosValid = false;
+        }
+        return;
+    }
+    if (GuildAbsent(pos)) { pos = GuildCampPos(s, who); m.lastPosValid = false; }
+    bool resting = m.task == kGtRest && m.working;
+    m.hpFrac = std::min(1.0f, m.hpFrac + dt / (resting ? 35.0f : 240.0f));
+    if (m.hpFrac > 0.6f) m.cornered = false;
+    if (m.task == kGtNone) GuildPickTask(s, who, level);
+    Vector2 face = { 0, 0 }; bool faceSet = false;
+    switch (m.task) {
+        case kGtWander: {
+            if (!m.working) {
+                int r = GuildWalk(m, pos, m.target, kGuildWalkSpeed, dt, 30.0f);
+                if (r == 1) m.working = true; else if (r == 2) m.task = kGtNone;
+            } else if ((m.taskT -= dt) <= 0.0f) m.task = kGtNone;
+            break;
+        }
+        case kGtGather: {
+            const WildernessGatherNode& n = kWildernessGatherNodes[m.taskIdx];
+            if (!m.working) {
+                int r = GuildWalk(m, pos, n.pos, kGuildWalkSpeed, dt, 42.0f);
+                if (r == 2 && Dist(pos, n.pos) < 150.0f) r = 1; // the bank of a fishing spot is close enough
+                if (r == 1) {
+                    m.working = true; m.taskT = 9.0f + RandUnit() * 7.0f;
+                    GuildSay(s, who, GuildGatherKind(n.resource) == 3 ? 1 : 0);
+                } else if (r == 2) m.task = kGtNone;
+            } else {
+                face = n.pos; faceSet = true;
+                if ((m.taskT -= dt) <= 0.0f) { m.bag += 1 + std::rand() % 2; m.task = kGtNone; }
+            }
+            break;
+        }
+        case kGtFarm: {
+            int i = m.taskIdx;
+            if (GuildPlayerHasSpot(s, i)) { // you took its kill
+                if (m.working || Dist(pos, WildernessMonsterLivePos(i, s.worldTime)) < 300.0f) GuildSay(s, who, 3, true);
+                if (who < 0) s.rivalGrudge = std::min(5.0f, s.rivalGrudge + 0.25f);
+                m.task = kGtNone; break;
+            }
+            if (s.wildSpotRespawn[i] > 0.0f) { m.task = kGtNone; break; }
+            const WildernessMonsterSpot& sp = kWildernessMonsterSpots[i];
+            Vector2 mp = WildernessMonsterLivePos(i, s.worldTime);
+            if (!m.working) {
+                int r = GuildWalk(m, pos, mp, kGuildWalkSpeed, dt, 50.0f);
+                if (r == 1) {
+                    m.working = true; m.swingT = 0.0f;
+                    m.taskT = std::clamp(7.0f * (float)sp.level / std::max(1.0f, level), 4.0f, 16.0f);
+                } else if (r == 2) m.task = kGtNone;
+                break;
+            }
+            if (Dist(pos, mp) > 58.0f) GuildWalk(m, pos, mp, 60.0f, dt, 50.0f); // keep in reach as it shuffles
+            face = mp; faceSet = true;
+            m.swingT += dt;
+            if (m.swingT >= kGuildSwingPeriod) { // trading blows costs it health
+                m.swingT -= kGuildSwingPeriod;
+                m.hpFrac -= std::clamp((float)sp.level / std::max(1.0f, level), 0.2f, 2.0f) * 0.02f;
+            }
+            if (m.hpFrac < 0.3f) { m.task = kGtRest; m.target = GuildCampPos(s, who); m.working = false; GuildSay(s, who, 4); break; }
+            if ((m.taskT -= dt) <= 0.0f) { // the kill
+                s.wildSpotRespawn[i] = RollWildRespawn();
+                if (s.screen == Screen::Wilderness && Dist(mp, s.wildernessPlayerPos) < 1600.0f) {
+                    GameState::DyingMonster dm;
+                    dm.zone = 0; dm.pos = mp; dm.timer = dm.duration = kMonsterDeathAnimTime;
+                    dm.spotIdx = i; dm.name = sp.name; dm.iconIdx = sp.iconIdx; dm.guildKill = true;
+                    s.dyingMonsters.push_back(dm);
+                }
+                m.gold += sp.baseGold;
+                if (sp.baseLeather > 0) m.bag += 1;
+                GuildGrow(s, level, who, 0.15f * std::clamp((float)sp.level / std::max(1.0f, level), 0.3f, 1.5f));
+                if (RandUnit() < 0.4f) GuildSay(s, who, 2);
+                m.task = kGtNone;
+            }
+            break;
+        }
+        case kGtRest: {
+            if (!m.working) {
+                int r = GuildWalk(m, pos, m.target, kGuildWalkSpeed, dt, 30.0f);
+                if (r != 0) m.working = true; // stuck on the way: rest where it stands
+            } else if (m.hpFrac >= 0.97f) m.task = kGtNone;
+            break;
+        }
+        case kGtSell: {
+            int r = GuildWalk(m, pos, m.target, kGuildWalkSpeed, dt, 40.0f);
+            if (r == 1) { m.task = kGtInTown; m.taskT = 35.0f + RandUnit() * 35.0f; pos = kGuildAbsentPos; }
+            else if (r == 2) { m.target = GuildNearestGate({ pos.x + 300.0f, pos.y }); }
+            break;
+        }
+        case kGtFlee: {
+            Vector2 camp = GuildCampPos(s, who);
+            GuildWalk(m, pos, camp, kGuildFleeSpeed, dt, 30.0f);
+            m.taskT -= dt;
+            if (m.taskT <= 0.0f || Dist(pos, s.wildernessPlayerPos) > 750.0f || s.screen != Screen::Wilderness) {
+                m.task = kGtRest; m.target = camp; m.working = false;
+            }
+            break;
+        }
+        case kGtEscort: {
+            m.taskT -= dt;
+            bool bossBusy = GuildAbsent(s.rivalPos) || s.rivalActivity != GameState::RivalActivity::Patrol ||
+                            (s.wildEngaged.has_value() && s.wildEngaged->isRival) || // duels stay 1v1: give the boss room
+                            s.rivalMind.task == kGtFlee || s.rivalMind.task == kGtRest || s.rivalMind.task == kGtSell;
+            if (bossBusy || m.taskT <= 0.0f) { m.task = kGtNone; break; }
+            float a = s.rivalMind.yaw + 3.14159f + (who - 1) * 0.6f; // fanned out behind the boss
+            Vector2 slot = { s.rivalPos.x + cosf(a) * 75.0f, s.rivalPos.y + sinf(a) * 75.0f };
+            float d = Dist(pos, slot);
+            GuildWalk(m, pos, slot, d > 200.0f ? 150.0f : 105.0f, dt, 18.0f);
+            if (d < 40.0f && s.rivalMind.working) { face = s.rivalPos; faceSet = true; }
+            break;
+        }
+        default: m.task = kGtNone; break;
+    }
+    // Facing: the work in hand, else the way it's walking.
+    if (faceSet) {
+        m.yaw = atan2f(face.y - pos.y, face.x - pos.x);
+    } else if (m.lastPosValid) {
+        float dx = pos.x - m.lastPos.x, dz = pos.y - m.lastPos.y;
+        if (dx * dx + dz * dz > 0.04f) m.yaw = atan2f(dz, dx);
+    }
+    m.lastPos = pos; m.lastPosValid = true;
+}
+
+// The "do I jump them?" judgement, checked every few seconds while it's near.
+static bool GuildWantsHunt(GameState& s, int who, float level, float dt) {
+    GameState::GuildMind& m = GuildMindOf(s, who);
+    Vector2& pos = GuildPosOf(s, who);
+    m.thinkT -= dt;
+    if (m.thinkT > 0.0f) return false;
+    m.thinkT = kGuildThinkPeriod * (0.8f + 0.4f * RandUnit());
+    if (s.screen != Screen::Wilderness || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return false;
+    if (m.downT > 0.0f || GuildAbsent(pos) || m.task == kGtFlee || m.task == kGtInTown) return false;
+    float d = Dist(pos, s.wildernessPlayerPos);
+    if (d > (who < 0 ? kGuildSenseRange : kBladeSenseRange)) return false;
+    // Weigh it up: its strength (blades count crewmates close by) against yours.
+    float mine = level * std::max(0.1f, m.hpFrac);
+    if (who >= 0)
+        for (int j = 0; j < kBladeCount; j++)
+            if (j != who && s.blades[j].mind.downT <= 0.0f && Dist(s.blades[j].pos, pos) < 500.0f)
+                mine += s.blades[j].level * std::max(0.1f, s.blades[j].mind.hpFrac);
+    float theirs = std::max(1.0f, (float)CombatPower(s)) * std::max(0.1f, (float)s.hp / std::max(1.0f, (float)s.maxHp));
+    float odds = mine / theirs;
+    bool vulnerable = s.gatheringResource.has_value() || s.wildEngaged.has_value() || (float)s.hp < (float)s.maxHp * 0.5f;
+    bool nearSafety = Dist(s.wildernessPlayerPos, kWildernessReturnGatePos) < kRivalSafetyRadius ||
+                      Dist(s.wildernessPlayerPos, kWildernessTown2GatePos) < kRivalSafetyRadius ||
+                      Dist(s.wildernessPlayerPos, kWildernessTown3GatePos) < kRivalSafetyRadius ||
+                      Dist(s.wildernessPlayerPos, kWildernessTown4GatePos) < kRivalSafetyRadius;
+    for (const auto& e : kWildernessDungeonEntrances)
+        if (Dist(s.wildernessPlayerPos, e.pos) < kRivalSafetyRadius) nearSafety = true;
+    if (m.huntCooldown <= 0.0f && m.hpFrac >= 0.5f) {
+        float c = who < 0 ? 0.11f : 0.07f;
+        if (odds >= 1.3f) c *= 1.7f;
+        else if (odds < 0.6f) c *= 0.1f;
+        else if (odds < 0.9f) c *= 0.45f;
+        if (vulnerable) c += 0.08f;
+        if (who < 0) c += std::min(0.25f, s.rivalGrudge * 0.06f);
+        if (d < 300.0f) c *= 1.5f; // you're right there
+        if (nearSafety) c *= 0.3f;
+        if (RandUnit() < c) return true;
+    }
+    // Didn't strike. Outmatched and you're close: it backs away from you.
+    if ((odds < 0.6f || m.hpFrac < 0.5f) && d < 350.0f && m.task != kGtRest && m.task != kGtSell) {
+        Vector2 away = { pos.x - s.wildernessPlayerPos.x, pos.y - s.wildernessPlayerPos.y };
+        float al = std::max(1.0f, std::sqrt(away.x * away.x + away.y * away.y));
+        Vector2 t = ClampToWorld({ pos.x + away.x / al * 550.0f, pos.y + away.y / al * 550.0f }, 120.0f, kWildernessWorldSize);
+        m.task = kGtWander; m.target = t; m.working = false; m.taskT = 4.0f; m.stuckT = 0.0f; m.stuckFrom = pos;
+        GuildSay(s, who, 8);
+    } else if (d < 450.0f && RandUnit() < 0.3f) {
+        GuildSay(s, who, 7);
+    }
+    return false;
+}
+
+// For drawing: is a guild member mid-fight with this monster spot?
+static bool GuildFarmingSpot(const GameState& s, int spot, Vector2* who, float* swingT) {
+    auto check = [&](const GameState::GuildMind& m, Vector2 p, GameState::RivalActivity a) {
+        if (a != GameState::RivalActivity::Patrol || m.task != kGtFarm || !m.working || m.taskIdx != spot || GuildAbsent(p)) return false;
+        *who = p; *swingT = m.swingT; return true;
+    };
+    if (!(s.wildEngaged.has_value() && s.wildEngaged->isRival) && check(s.rivalMind, s.rivalPos, s.rivalActivity)) return true;
+    for (int j = 0; j < kBladeCount; j++)
+        if (!(s.wildEngaged.has_value() && s.wildEngaged->bladeIdx == j) && check(s.blades[j].mind, s.blades[j].pos, s.blades[j].activity)) return true;
+    return false;
+}
+// The guild keeps living while you're in town, a dungeon or a menu - no hunting
+// then (they can't see you), and a hunt in progress is called off.
+static void UpdateGuildOffscreen(GameState& s, float dt) {
+    if (s.screen == Screen::Wilderness) return;
+    if (s.rivalActivity != GameState::RivalActivity::Patrol) {
+        s.rivalActivity = GameState::RivalActivity::Patrol; s.rivalMind.task = kGtNone; s.rivalMind.huntCooldown = 30.0f;
+    }
+    GuildLive(s, -1, s.rivalLevel, dt);
+    for (int bi = 0; bi < kBladeCount; bi++) {
+        auto& b = s.blades[bi];
+        if (b.activity != GameState::RivalActivity::Patrol) {
+            b.activity = GameState::RivalActivity::Patrol; b.mind.task = kGtNone; b.mind.huntCooldown = 30.0f;
+        }
+        b.autoEngage = false;
+        GuildLive(s, bi, b.level, dt);
+    }
+    s.rivalAutoEngage = false;
+}
+
 static void UpdateRivalRoaming(GameState& s, float dt) {
     if (s.wildEngaged.has_value() && s.wildEngaged->isRival) return;
     // Ghosts are beneath the red's notice - break off any hunt/stalk, patrol instead.
@@ -7328,7 +7867,9 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
             s.rivalActivity == GameState::RivalActivity::Stalking) {
             s.rivalActivity = GameState::RivalActivity::Patrol;
             s.rivalActivityTimer = 0.0f;
+            s.rivalMind.task = kGtNone;
         }
+        GuildLive(s, -1, s.rivalLevel, dt); // life goes on while you're a ghost
         return;
     }
 
@@ -7368,7 +7909,10 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
         }
         if (s.rivalStalkTimer <= 0.0f) {
             if (RandUnit() < 0.5f) RivalStartHunt(s); // commits - the banner fires
-            else { s.rivalActivity = GameState::RivalActivity::Patrol; s.rivalActivityTimer = 0.0f; }
+            else {
+                s.rivalActivity = GameState::RivalActivity::Patrol; s.rivalActivityTimer = 0.0f;
+                s.rivalMind.task = kGtNone; s.rivalMind.huntCooldown = 40.0f + RandUnit() * 40.0f;
+            }
         }
         return;
     }
@@ -7422,60 +7966,24 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
             return;
         }
         // Give up and go back to patrolling if the hunt times out.
-        if (s.rivalActivityTimer <= 0.0f) s.rivalActivity = GameState::RivalActivity::Patrol;
-        return;
-    }
-    // Patrolling: walk toward rivalPatrolTarget - the timer only counts down once
-    // actually AT the target (not during travel, or a long walk would eat the whole
-    // pause before it even arrives), then either pick a new patrol target or commit to
-    // a hunt. Doubles as "time until next decision" in both the paused and hunting
-    // cases - simplest thing that reads as intentional rather than literally
-    // simulating gathering/fighting.
-    Vector2 toTarget = { s.rivalPatrolTarget.x - s.rivalPos.x, s.rivalPatrolTarget.y - s.rivalPos.y };
-    float distToTarget = std::sqrt(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
-    if (distToTarget > kRivalArrivalRadius) {
-        s.rivalPos.x += toTarget.x / distToTarget * kRivalPatrolSpeed * dt;
-        s.rivalPos.y += toTarget.y / distToTarget * kRivalPatrolSpeed * dt;
-        return;
-    }
-    s.rivalActivityTimer -= dt;
-    if (s.rivalActivityTimer > 0.0f) return; // arrived, still pausing ("gathering/fighting") here
-    // Opportunistic hunt roll - the red strikes when you're vulnerable, not on a
-    // schedule: gathering, mid-fight, or hurt raises the odds; lingering near the
-    // return gate, dungeon entrances, or the Town2 gate lowers them.
-    float huntChance = kRivalHuntBaseChance;
-    bool vulnerable = s.gatheringResource.has_value() ||
-                      (s.wildEngaged.has_value() && !s.wildEngaged->isRival) ||
-                      (float)s.hp < (float)s.maxHp * 0.5f;
-    if (vulnerable) huntChance += kRivalHuntVulnerableBonus;
-    bool nearSafety = Dist(s.wildernessPlayerPos, kWildernessReturnGatePos) < kRivalSafetyRadius ||
-                      Dist(s.wildernessPlayerPos, kWildernessTown2GatePos) < kRivalSafetyRadius ||
-                      Dist(s.wildernessPlayerPos, kWildernessTown3GatePos) < kRivalSafetyRadius ||
-                      Dist(s.wildernessPlayerPos, kWildernessTown4GatePos) < kRivalSafetyRadius; // Phase 4
-    if (!nearSafety) {
-        for (const auto& e : kWildernessDungeonEntrances) {
-            if (Dist(s.wildernessPlayerPos, e.pos) < kRivalSafetyRadius) { nearSafety = true; break; }
+        if (s.rivalActivityTimer <= 0.0f) {
+            s.rivalActivity = GameState::RivalActivity::Patrol;
+            s.rivalMind.task = kGtNone; s.rivalMind.huntCooldown = 40.0f + RandUnit() * 40.0f;
         }
+        return;
     }
-    if (nearSafety) huntChance -= kRivalHuntSafetyPenalty;
-    huntChance = std::clamp(huntChance, 0.05f, 0.95f);
-    // Murder Inc. coordination (2026-09-24): one threat at a time - the champion is a
-    // solo predator and won't pile onto a blade's hunt. His own speeds, chances,
-    // and loot below are untouched.
-    if (!GuildThreatActive(s) && RandUnit() < huntChance) {
+    // Not hunting: live (gather, farm, rest, sell - see GuildLive), and every few
+    // seconds weigh up whether you're worth jumping (GuildWantsHunt). Murder Inc.
+    // coordination (2026-09-24) still holds: one threat at a time - the champion is
+    // a solo predator and won't pile onto a blade's hunt.
+    GuildLive(s, -1, s.rivalLevel, dt);
+    s.rivalPatrolTarget = s.rivalMind.target;
+    if (GuildWantsHunt(s, -1, s.rivalLevel, dt) && !GuildThreatActive(s)) {
+        s.rivalMind.task = kGtNone; s.rivalMind.working = false;
+        if (s.rivalGrudge >= 1.0f) GuildSay(s, -1, 11, true);
         if (RandUnit() < kRivalStalkChance) RivalStartStalk(s);
         else RivalStartHunt(s);
-        return;
     }
-    // Pick a new patrol waypoint among the gather nodes and the other real monsters'
-    // spots - the same set of "places" that sell the it's-out-there-doing-things
-    // fiction without actually running the gather/combat systems against them.
-    int totalSpots = (int)kWildernessGatherNodes.size() + (int)kWildernessMonsterSpots.size();
-    int pick = std::rand() % totalSpots;
-    s.rivalPatrolTarget = pick < (int)kWildernessGatherNodes.size()
-        ? kWildernessGatherNodes[pick].pos
-        : kWildernessMonsterSpots[pick - (int)kWildernessGatherNodes.size()].pos;
-    s.rivalActivityTimer = kRivalPauseDuration;
 }
 
 // Murder Inc. guild blade roaming (2026-09-24) - the champion's crew. Same
@@ -7494,7 +8002,9 @@ static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
             b.activity == GameState::RivalActivity::Stalking) {
             b.activity = GameState::RivalActivity::Patrol;
             b.activityTimer = 0.0f;
+            b.mind.task = kGtNone;
         }
+        GuildLive(s, bi, b.level, dt);
         return;
     }
 
@@ -7515,7 +8025,10 @@ static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
         }
         if (b.stalkTimer <= 0.0f) {
             if (RandUnit() < 0.5f) BladeStartHunt(s, bi, -1); // commits solo - pairs only form on fresh patrol commits
-            else { b.activity = GameState::RivalActivity::Patrol; b.activityTimer = 0.0f; }
+            else {
+                b.activity = GameState::RivalActivity::Patrol; b.activityTimer = 0.0f;
+                b.mind.task = kGtNone; b.mind.huntCooldown = 40.0f + RandUnit() * 40.0f;
+            }
         }
         return;
     }
@@ -7538,66 +8051,41 @@ static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
             b.autoEngage = true;
             return;
         }
-        if (b.activityTimer <= 0.0f) b.activity = GameState::RivalActivity::Patrol;
+        if (b.activityTimer <= 0.0f) {
+            b.activity = GameState::RivalActivity::Patrol;
+            b.mind.task = kGtNone; b.mind.huntCooldown = 40.0f + RandUnit() * 40.0f;
+        }
         return;
     }
 
-    // --- Patrolling: walk the waypoint, pause, then decide ---
-    Vector2 toTarget = { b.patrolTarget.x - b.pos.x, b.patrolTarget.y - b.pos.y };
-    float distToTarget = std::sqrt(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
-    if (distToTarget > kRivalArrivalRadius) {
-        b.pos.x += toTarget.x / distToTarget * kBladePatrolSpeed * dt;
-        b.pos.y += toTarget.y / distToTarget * kBladePatrolSpeed * dt;
-        return;
-    }
-    b.activityTimer -= dt;
-    if (b.activityTimer > 0.0f) return; // arrived, still pausing here
-    // Hunt roll - same vulnerability/safety instincts as the champion, at half the
-    // base appetite. Any fight (even the champion's) smells like blood to the crew.
-    // One threat at a time: never while the champion is on the prowl, never while
-    // another blade is hunting - pairs form ONLY via the pair roll below.
-    float huntChance = kBladeHuntBaseChance;
-    bool vulnerable = s.gatheringResource.has_value() ||
-                      s.wildEngaged.has_value() ||
-                      (float)s.hp < (float)s.maxHp * 0.5f;
-    if (vulnerable) huntChance += kRivalHuntVulnerableBonus;
-    bool nearSafety = Dist(s.wildernessPlayerPos, kWildernessReturnGatePos) < kRivalSafetyRadius ||
-                      Dist(s.wildernessPlayerPos, kWildernessTown2GatePos) < kRivalSafetyRadius ||
-                      Dist(s.wildernessPlayerPos, kWildernessTown3GatePos) < kRivalSafetyRadius ||
-                      Dist(s.wildernessPlayerPos, kWildernessTown4GatePos) < kRivalSafetyRadius; // Phase 4
-    if (!nearSafety) {
-        for (const auto& e : kWildernessDungeonEntrances) {
-            if (Dist(s.wildernessPlayerPos, e.pos) < kRivalSafetyRadius) { nearSafety = true; break; }
-        }
-    }
-    if (nearSafety) huntChance -= kRivalHuntSafetyPenalty;
-    huntChance = std::clamp(huntChance, 0.05f, 0.95f);
-    if (!GuildThreatActive(s, bi) && RandUnit() < huntChance) {
+    // --- Living: gather, farm, rest, sell, run with the boss (GuildLive), and weigh
+    // up a hunt every few seconds (GuildWantsHunt). One threat at a time: never
+    // while the champion is on the prowl, never while another blade is hunting -
+    // pairs form ONLY via the pair roll below.
+    GuildLive(s, bi, b.level, dt);
+    b.patrolTarget = b.mind.target;
+    if (GuildWantsHunt(s, bi, b.level, dt) && !GuildThreatActive(s, bi)) {
+        b.mind.task = kGtNone; b.mind.working = false;
         if (RandUnit() < kBladeStalkChance) { BladeStartStalk(s, bi); return; }
         // Pair hunt - the signature Murder Inc. jump: 30% chance a second blade
-        // joins the same hunt. Only a patrolling/stalking, non-engaged blade can
-        // be pulled in; the champion never pair-hunts.
+        // joins the same hunt. Only a blade that's up, idle, and within reach of
+        // you can be pulled in; the champion never pair-hunts.
         int partner = -1;
         if (RandUnit() < kBladePairChance) {
             for (int j = 0; j < kBladeCount; j++) {
                 if (j == bi) continue;
-                auto aj = s.blades[j].activity;
-                if (aj != GameState::RivalActivity::Patrol && aj != GameState::RivalActivity::Stalking) continue;
+                const auto& bj = s.blades[j];
+                if (bj.activity != GameState::RivalActivity::Patrol) continue;
                 if (s.wildEngaged.has_value() && s.wildEngaged->bladeIdx == j) continue;
+                if (bj.mind.downT > 0.0f || GuildAbsent(bj.pos) || bj.mind.task == kGtFlee || bj.mind.hpFrac < 0.5f) continue;
+                if (Dist(bj.pos, s.wildernessPlayerPos) > 1100.0f) continue;
                 partner = j;
+                s.blades[j].mind.task = kGtNone;
                 break;
             }
         }
         BladeStartHunt(s, bi, partner);
-        return;
     }
-    // New patrol waypoint - the same gather-node/monster-spot set the champion walks.
-    int totalSpots = (int)kWildernessGatherNodes.size() + (int)kWildernessMonsterSpots.size();
-    int pick = std::rand() % totalSpots;
-    b.patrolTarget = pick < (int)kWildernessGatherNodes.size()
-        ? kWildernessGatherNodes[pick].pos
-        : kWildernessMonsterSpots[pick - (int)kWildernessGatherNodes.size()].pos;
-    b.activityTimer = kRivalPauseDuration;
 }
 
 // ---------------------------------------------------------------------
@@ -14902,6 +15390,30 @@ static float Wild3DWanderFacing(int idx, float x, float z, float worldTime) {
 // them before their definitions appear in the file.
 static void PlayerCombatPhases3D(const GameState& s, float* atk, float* cast);
 static float MonsterCombatPhase3D(float monsterAttackT);
+// Speech bubble for a guild member's line; `anchor` is the screen point just
+// above its head. Fades out over the last half second.
+static void DrawGuildBubble(Vector2 anchor, const std::string& text, float alpha) {
+    int fsz = 13;
+    int w = MeasureUIText(text.c_str(), fsz);
+    Rectangle r = { anchor.x - w / 2.0f - 8.0f, anchor.y - 30.0f, w + 16.0f, 22.0f };
+    DrawRectangleRounded(r, 0.45f, 6, Fade(Color{ 250, 246, 236, 255 }, 0.93f * alpha));
+    DrawRectangleRoundedLinesEx(r, 0.45f, 6, 1.5f, Fade(Color{ 120, 40, 36, 255 }, 0.9f * alpha));
+    DrawTriangle({ anchor.x - 5.0f, anchor.y - 8.5f }, { anchor.x, anchor.y - 1.0f }, { anchor.x + 5.0f, anchor.y - 8.5f },
+                 Fade(Color{ 250, 246, 236, 255 }, 0.93f * alpha));
+    DrawUIText(text.c_str(), (int)(r.x + 8.0f), (int)(r.y + 4.0f), fsz, Fade(Color{ 40, 30, 28, 255 }, alpha));
+}
+// For drawing: the work pose (tool + loop, or sword swings at a monster).
+static void GuildWorkPose(const GameState::GuildMind& m, GameState::RivalActivity a, HumanPose& p) {
+    if (a != GameState::RivalActivity::Patrol || !m.working) return;
+    if (m.task == kGtGather && m.taskIdx >= 0) {
+        p.gather = GuildGatherKind(kWildernessGatherNodes[m.taskIdx].resource);
+        p.gatherAt = kWildernessGatherNodes[m.taskIdx].pos; p.gatherAtValid = true;
+    } else if (m.task == kGtFarm) {
+        p.attackT = MonsterCombatPhase3D(m.swingT);
+        p.engaged = true;
+    }
+}
+
 static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m);
 static void Dungeon3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m);
 static bool Wild3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
@@ -14914,6 +15426,7 @@ static void DrawHitSparks3D(int zone, const Camera3D& cam);
 static void T3DApplyShake(Town3DCam& c);
 static Color CombatHitTint(float hurtT, Color base, Color tail);
 static void DrawFloatTexts3D(GameState& s, const Town3DCam& c, int zone, int screenW, int screenH);
+static void DrawGuildTags3D(const GameState& s, const Town3DCam& c, int screenW, int screenH);
 // Target switching (2026-09-25) - defined with the flag helpers, called from the
 // click/tap handlers above their definitions.
 static void CycleFlagTarget(GameState& s);
@@ -15225,6 +15738,14 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             if (eng) mHurtT = s.wildEngaged->monsterHurtT;
             else if (extra) mHurtT = extra->monsterHurtT;
         }
+        { // a guild member is farming it: it turns and trades blows with them
+            Vector2 fp; float fsw;
+            if (!eng && !extra && !isDying && GuildFarmingSpot(s, (int)i, &fp, &fsw)) {
+                face = atan2f(fp.y - mp.y, fp.x - mp.x);
+                mAtk = MonsterCombatPhase3D(fmodf(fsw + kGuildSwingPeriod * 0.5f, kGuildSwingPeriod));
+                if (fsw > 0.12f && fsw < 0.3f) mHurtT = 0.0f; // its swing lands
+            }
+        }
         Color anRecolor = { 0, 0, 0, 0 }; float anScale = 1.0f;
         int anId = mlook.humanoid ? -1 : AnimalForMonster(kWildernessMonsterSpots[i].iconIdx, &anRecolor, &anScale);
         if (anId >= 0) { // animated model (2026-09-26): its own attack/hit/death clips
@@ -15263,7 +15784,10 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         Vector2 rp = rivalDying3D ? rivalDying3D->pos
                      : ((wasEngaged && s.wildEngaged->isRival) ? s.wildEngaged->pos : s.rivalPos);
         if (vis(rp.x, rp.y, 70.0f)) {
-            float ryaw = atan2f(s.wildernessPlayerPos.y - rp.y, s.wildernessPlayerPos.x - rp.x);
+            // Faces you when it's after you (or fighting you); otherwise it faces
+            // its work or the way it's walking (living guild, 2026-09-26).
+            bool rAfterYou = (wasEngaged && s.wildEngaged->isRival) || s.rivalActivity != GameState::RivalActivity::Patrol;
+            float ryaw = rAfterYou ? atan2f(s.wildernessPlayerPos.y - rp.y, s.wildernessPlayerPos.x - rp.x) : s.rivalMind.yaw;
             T3CAnim ra = T3CMakeAnim(kT3CTrackRival, rp.x, rp.y, !shadowPass);
             float rscale = rivalDying3D ? std::max(0.05f, rivalDying3D->timer / rivalDying3D->duration) : 1.0f;
             // Combat read (2026-09-24): engaged Rival lunges/flashes with its timers.
@@ -15271,8 +15795,10 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             float rAtk = rEng ? MonsterCombatPhase3D(s.wildEngaged->monsterAttackT) : -1.0f;
             float rDeath = rivalDying3D ? 1.0f - rivalDying3D->timer / std::max(0.01f, rivalDying3D->duration) : -1.0f;
             float rHurt = rEng ? s.wildEngaged->monsterHurtT : -1.0f;
+            HumanPose rPose = HumanMonsterPose(ra.move, rAtk, rHurt, rDeath, rEng);
+            if (!rEng && !rivalDying3D) GuildWorkPose(s.rivalMind, s.rivalActivity, rPose);
             if (!DrawHuman(kT3CTrackRival, rp.x, rp.y, ryaw, 1.02f, CombatHitTint(rHurt, WHITE, Color{ 220, 90, 90, 255 }),
-                           HumanOutfitRival(), HumanMonsterPose(ra.move, rAtk, rHurt, rDeath, rEng), shadowPass))
+                           HumanOutfitRival(), rPose, shadowPass))
             T3CDrawHumanoid(g_t3cHumans[3].parts, rp.x, rp.y, ryaw, rscale,
                             CombatHitTint(rEng ? s.wildEngaged->monsterHurtT : -1.0f, Color{ 150, 60, 55, 255 }, Color{ 220, 90, 90, 255 }),
                             Color{ 60, 50, 55, 255 },
@@ -15290,7 +15816,8 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         Vector2 bp = bladeDying3D ? bladeDying3D->pos
                      : ((wasEngaged && s.wildEngaged->bladeIdx == bi) ? s.wildEngaged->pos : s.blades[bi].pos);
         if (vis(bp.x, bp.y, 70.0f)) {
-            float byaw = atan2f(s.wildernessPlayerPos.y - bp.y, s.wildernessPlayerPos.x - bp.x);
+            bool bAfterYou = (wasEngaged && s.wildEngaged->bladeIdx == bi) || s.blades[bi].activity != GameState::RivalActivity::Patrol;
+            float byaw = bAfterYou ? atan2f(s.wildernessPlayerPos.y - bp.y, s.wildernessPlayerPos.x - bp.x) : s.blades[bi].mind.yaw;
             T3CAnim ba = T3CMakeAnim(kT3CTrackBladeWild + bi, bp.x, bp.y, !shadowPass);
             float bscale = (bladeDying3D ? std::max(0.05f, bladeDying3D->timer / bladeDying3D->duration) : 1.0f) * 0.95f;
             // Combat read (2026-09-24): engaged blade lunges/flashes with its timers.
@@ -15298,8 +15825,10 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             float bAtk = bEng ? MonsterCombatPhase3D(s.wildEngaged->monsterAttackT) : -1.0f;
             float bDeath = bladeDying3D ? 1.0f - bladeDying3D->timer / std::max(0.01f, bladeDying3D->duration) : -1.0f;
             float bHurt = bEng ? s.wildEngaged->monsterHurtT : -1.0f;
+            HumanPose bPose = HumanMonsterPose(ba.move, bAtk, bHurt, bDeath, bEng);
+            if (!bEng && !bladeDying3D) GuildWorkPose(s.blades[bi].mind, s.blades[bi].activity, bPose);
             if (!DrawHuman(kT3CTrackBladeWild + bi, bp.x, bp.y, byaw, 0.95f, CombatHitTint(bHurt, WHITE, Color{ 220, 90, 90, 255 }),
-                           HumanOutfitBlade(), HumanMonsterPose(ba.move, bAtk, bHurt, bDeath, bEng), shadowPass))
+                           HumanOutfitBlade(), bPose, shadowPass))
             T3CDrawHumanoid(g_t3cHumans[3].parts, bp.x, bp.y, byaw, bscale,
                             CombatHitTint(bEng ? s.wildEngaged->monsterHurtT : -1.0f, Color{ 70, 25, 30, 255 }, Color{ 220, 90, 90, 255 }),
                             Color{ 35, 30, 35, 255 },
@@ -15683,6 +16212,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
         DrawUIText(prompt.c_str(), sx, sy, 14, WHITE);
     }
     DrawFloatTexts3D(s, c, 0, screenW, screenH); // combat feel: damage numbers / MISS
+    DrawGuildTags3D(s, c, screenW, screenH);     // rival/Murder Inc. names, activity, speech
     DrawUIText("3D view: drag to orbit, wheel to zoom. [V] toggles 2D.", 20, 196, 12,
                Color{ 90, 74, 52, 255 });
     // Phase 0: HUD region label (3D view) - same top-center pill as the 2D view,
@@ -18257,6 +18787,10 @@ static void BeginDungeonExtraDeath(GameState& s, int dungeonIdx, const GameState
 // Shaken relief, ambush/innocent chaining. Economy behavior is unchanged, only
 // delayed by the animation. One call per kill - simultaneous kills each resolve.
 static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
+    if (dm.guildKill) { // the rival's or a blade's kill: just the body, no rewards for you
+        s.worldCorpses.push_back({ dm.pos, kCorpseFadeTime * 0.5f, kCorpseFadeTime * 0.5f, dm.zone, dm.iconIdx, dm.name });
+        return;
+    }
     float corpseDur = (dm.isRival || dm.bladeIdx >= 0) ? kRivalCorpseFadeTime : kCorpseFadeTime;
     s.worldCorpses.push_back({ dm.pos, corpseDur, corpseDur, dm.zone, dm.iconIdx, dm.name });
     int goldFound = std::max(1, dm.baseGold + (std::rand() % 3) - 1);
@@ -18926,9 +19460,10 @@ static void ResolveEnemyRangedImpact(GameState& s, bool castByRival, int castByB
         PlaySfx(SfxId::Hurt);
         s.logLine = "The " + mname + " strikes you from range for " + std::to_string(dmg) + " damage!";
         if (s.hp <= 0) {
-            if (am.bladeIdx >= 0) { BladeFightEnded(s, am.bladeIdx, am); EndWildMonsterLoss(s, mname); return; }
+            if (am.bladeIdx >= 0) { BladeFightEnded(s, am.bladeIdx, am); GuildSay(s, am.bladeIdx, 10, true); EndWildMonsterLoss(s, mname); return; }
             bool wasAlreadyBeaten = s.rivalHasBeatenPlayer;
             RivalFightEnded(s, am);
+            GuildSay(s, -1, 10, true);
             s.rivalHasBeatenPlayer = true;
             if (wasAlreadyBeaten) EndWildMonsterMurdererLoss(s, mname); else EndWildMonsterLoss(s, mname);
             RivalCorpseLoot(s);
@@ -19095,11 +19630,11 @@ static bool FlagTargetLivePos(const GameState& s, Vector2* out) {
     const auto& f = *s.flagTarget;
     if (f.zone == 0) {
         if (s.wildEngaged.has_value()) { *out = s.wildEngaged->pos; return true; }
-        if (f.isRival) { *out = s.rivalPos; return true; }
+        if (f.isRival) { *out = s.rivalPos; return !GuildAbsent(s.rivalPos); } // gone to town or down: flag goes stale
         if (f.bladeIdx >= 0) {
             if (f.bladeIdx >= kBladeCount) return false;
             *out = s.blades[f.bladeIdx].pos;
-            return true;
+            return !GuildAbsent(*out);
         }
         if (f.spotIdx < 0 || f.spotIdx >= (int)kWildernessMonsterSpots.size()) return false;
         if (s.wildSpotRespawn[f.spotIdx] > 0.0f) return false; // died - flag goes stale
@@ -19791,6 +20326,12 @@ static FlagTargetInfo GetFlagTargetInfo(const GameState& s, int zone) {
                 float full = std::max(1.0f, spot.level * 3.0f);
                 return { spot.name, full, full, true };
             }
+            if (f.isRival || (f.bladeIdx >= 0 && f.bladeIdx < kBladeCount)) { // its wounds carry over - show them
+                float lvl = f.isRival ? s.rivalLevel : s.blades[f.bladeIdx].level;
+                float frac = f.isRival ? s.rivalMind.hpFrac : s.blades[f.bladeIdx].mind.hpFrac;
+                float full = std::max(1.0f, lvl * 3.0f);
+                return { FlagTargetName(s), std::max(1.0f, full * frac), full, true };
+            }
             return { FlagTargetName(s), 1.0f, 1.0f, false };
         }
     } else if (s.selectedDungeon.has_value()) {
@@ -20108,6 +20649,36 @@ static void DrawFloatTexts3D(GameState& s, const Town3DCam& c, int zone, int scr
         DrawUIText(ft.text.c_str(), sx, sy - 1, fsz, oc);
         DrawUIText(ft.text.c_str(), sx, sy + 1, fsz, oc);
         DrawUIText(ft.text.c_str(), sx, sy, fsz, Fade(ft.color, a));
+    }
+}
+
+
+// Name tags + speech bubbles over the rival and Murder Inc. in the 3D wilderness
+// (living guild, 2026-09-26) - within earshot you can read what they're up to.
+static void DrawGuildTags3D(const GameState& s, const Town3DCam& c, int screenW, int screenH) {
+    for (int who = -1; who < kBladeCount; who++) {
+        const GameState::GuildMind& m = who < 0 ? s.rivalMind : s.blades[who].mind;
+        Vector2 p = who < 0 ? s.rivalPos : s.blades[who].pos;
+        GameState::RivalActivity act = who < 0 ? s.rivalActivity : s.blades[who].activity;
+        bool engaged = s.wildEngaged.has_value() && (who < 0 ? s.wildEngaged->isRival : s.wildEngaged->bladeIdx == who);
+        if (engaged) p = s.wildEngaged->pos;
+        if (GuildAbsent(p) || Dist(p, s.wildernessPlayerPos) > 650.0f) continue;
+        Vector2 sp;
+        if (!Town3DProject(c, { p.x, 66.0f + WildGroundY(p.x, p.y), p.y }, &sp)) continue;
+        if (sp.x < -60 || sp.x > screenW + 60 || sp.y < -40 || sp.y > screenH + 40) continue;
+        float y = sp.y;
+        if (!engaged) {
+            std::string nm = who < 0 ? RivalEpithetName(s) : BladeName(who);
+            std::string sub = GuildActivityText(act, m);
+            int w1 = MeasureUIText(nm.c_str(), 14), w2 = MeasureUIText(sub.c_str(), 13);
+            int bw = std::max(w1, w2) + 12;
+            Color subC = act == GameState::RivalActivity::Patrol ? Color{ 235, 230, 215, 255 } : Color{ 255, 130, 110, 255 };
+            DrawRectangleRounded({ sp.x - bw / 2.0f, y - 36.0f, (float)bw, 34.0f }, 0.3f, 6, Fade(BLACK, 0.45f));
+            DrawUIText(nm.c_str(), (int)(sp.x - w1 / 2), (int)y - 34, 14, Color{ 255, 120, 100, 255 });
+            DrawUIText(sub.c_str(), (int)(sp.x - w2 / 2), (int)y - 18, 13, subC);
+            y -= 38.0f;
+        }
+        if (m.sayT > 0.0f) DrawGuildBubble({ sp.x, y }, m.say, std::min(1.0f, m.sayT / 0.5f));
     }
 }
 
@@ -20810,8 +21381,17 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // Stumbling into Murder Inc.'s camp starts a hunt - the hard way to find it.
         if (quiet && !GuildThreatActive(s) &&
             Dist(s.wildernessPlayerPos, kRivalCampSpots[s.rivalCampIdx]) < 130.0f) {
-            BladeStartHunt(s, std::rand() % kBladeCount, -1);
-            Journal(s, "You stumble into Murder Inc.'s camp - they've seen you!");
+            int nb = -1;
+            for (int bi = 0; bi < kBladeCount; bi++) {
+                const auto& b = s.blades[bi];
+                if (b.mind.downT > 0.0f || GuildAbsent(b.pos) || b.mind.hpFrac < 0.4f) continue;
+                if (nb < 0 || Dist(b.pos, s.wildernessPlayerPos) < Dist(s.blades[nb].pos, s.wildernessPlayerPos)) nb = bi;
+            }
+            if (nb >= 0 && Dist(s.blades[nb].pos, s.wildernessPlayerPos) < 900.0f) {
+                s.blades[nb].mind.task = kGtNone;
+                BladeStartHunt(s, nb, -1);
+                Journal(s, "You stumble into Murder Inc.'s camp - they've seen you!");
+            }
         }
     }
 
@@ -20926,8 +21506,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         am.pos = s.rivalPos;
         am.spawnPos = s.rivalPos; // unused for the Rival (see updateTacticalOpponentAI's leash comment) but kept sane
         am.maxHp = std::max(1.0f, s.rivalLevel * 3.0f);
-        am.hp = am.maxHp;
+        am.hp = std::max(1.0f, am.maxHp * s.rivalMind.hpFrac); // wounds carry over
         s.wildEngaged = am;
+        if (s.rivalMind.cornered) GuildSay(s, -1, 12, true);
         s.logLine = "The " + RivalEpithetName(s) + " turns to face you!";
     };
     auto tryEngageBlade = [&](int bi) {
@@ -20939,8 +21520,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         am.pos = s.blades[bi].pos;
         am.spawnPos = s.blades[bi].pos; // unused for blades, kept sane like the champion's
         am.maxHp = std::max(1.0f, s.blades[bi].level * 3.0f);
-        am.hp = am.maxHp;
+        am.hp = std::max(1.0f, am.maxHp * s.blades[bi].mind.hpFrac); // wounds carry over
         s.wildEngaged = am;
+        if (s.blades[bi].mind.cornered) GuildSay(s, bi, 12, true);
         s.logLine = "The " + BladeName(bi) + " turns to face you!";
     };
     // Walking up to a roaming Innocent NPC and pressing E opens the exact same
@@ -21099,6 +21681,15 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (am.monsterSpecialCooldown > 0) am.monsterSpecialCooldown -= dtF;
         if (am.swingEffectTimer > 0) am.swingEffectTimer -= dtF;
         if (am.castEffectTimer > 0) am.castEffectTimer -= dtF;
+        // The player's own clocks tick in duels too (2026-09-26 fix): without these
+        // you got one swing and one cast per spell against the rival or a blade,
+        // then nothing - the duel was only winnable by a one-hit kill.
+        if (am.playerAttackCooldown > 0) am.playerAttackCooldown -= dtF;
+        if (am.castLockT > 0) am.castLockT -= dtF;
+        for (size_t sci = 0; sci < kSpells.size(); sci++)
+            if (am.spellCooldowns[sci] > 0) am.spellCooldowns[sci] -= dtF;
+        for (int ddi = 0; ddi < 5; ddi++)
+            if (s.hotbarDenyT[ddi] > 0) s.hotbarDenyT[ddi] -= dtF;
 
         // Below ~25% HP: flee directly away from the player for a few seconds instead of
         // fighting on - no existing monster has ever done this (Flee/FleeCombat are
@@ -21115,7 +21706,25 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             if (am.fleeTimer <= 0.0f) am.isFleeing = false; // re-engages normally next frame
             return;
         }
-        if (am.hp / am.maxHp < 0.25f) { am.isFleeing = true; am.fleeTimer = 3.0f; return; }
+        // Living guild (2026-09-26): badly hurt, it breaks off and runs for camp -
+        // a chase you can win (it's a touch slower than you), and once cornered
+        // it fights to the end instead of running again.
+        {
+            int who = am.isRival ? -1 : am.bladeIdx;
+            GameState::GuildMind& gm = GuildMindOf(s, who);
+            // "Could your next hit finish me?" - a player-like read of the fight.
+            bool nextHitKills = am.hp <= (float)CombatPower(s) * 1.15f * (s.vigorT > 0.0f ? 1.25f : 1.0f); // your best swing
+            float frac = am.hp / am.maxHp;
+            if (!gm.cornered && (frac < 0.25f || (frac < 0.6f && nextHitKills))) {
+                gm.cornered = true;
+                if (am.isRival) RivalFightEnded(s, am); else BladeFightEnded(s, am.bladeIdx, am);
+                gm.task = kGtFlee; gm.taskT = 10.0f; gm.working = false;
+                GuildSay(s, who, 9, true);
+                s.logLine = "The " + spot.name + " breaks off and flees, badly wounded!";
+                s.wildEngaged.reset();
+                return;
+            }
+        }
 
         // Not fleeing - chase into range exactly like a normal monster (same chase-then-
         // leash math as updateEngagedMonsterAI), except leashed to its *current* pos
@@ -21136,8 +21745,15 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             if (am.isRival) {
                 // UO red doesn't give up because you ran - it RUNS YOU DOWN. Instead of
                 // resuming patrol, it keeps hunting in the overworld for kRivalPursuitTime.
+                // (Unless it's hurt itself - then it lets you go and licks its wounds.)
                 RivalFightEnded(s, am); // persists its position + growth nudge
                 s.wildEngaged.reset();
+                if (s.rivalMind.hpFrac < 0.5f) {
+                    ClearFlagTarget(s);
+                    s.logLine = "The " + RivalEpithetName(s) + " lets you go - for now.";
+                    s.disengageGraceT = kDisengageGraceSeconds;
+                    return;
+                }
                 s.rivalActivity = GameState::RivalActivity::Hunting;
                 s.rivalActivityTimer = kRivalPursuitTime;
                 s.rivalSprinting = true;
@@ -21202,11 +21818,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                     // Blades beat you up and move on - only the champion loots corpses,
                     // tracks kills, or escalates to murderer-tier losses. Ordinary loss.
                     BladeFightEnded(s, am.bladeIdx, am);
+                    GuildSay(s, am.bladeIdx, 10, true);
                     EndWildMonsterLoss(s, mname);
                     return;
                 }
                 bool wasAlreadyBeaten = s.rivalHasBeatenPlayer;
                 RivalFightEnded(s, am);
+                GuildSay(s, -1, 10, true);
                 s.rivalHasBeatenPlayer = true;
                 if (wasAlreadyBeaten) EndWildMonsterMurdererLoss(s, mname); else EndWildMonsterLoss(s, mname);
                 RivalCorpseLoot(s); // the red loots your corpse - 15% of carried gold + one item
@@ -21898,11 +22516,10 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 }
             } else {
                 bool near = nearestKind == WildNodeKind::Rival && inRange;
-                std::string sub = s.rivalActivity == GameState::RivalActivity::Hunting ? "Hunting..."
-                    : s.rivalActivity == GameState::RivalActivity::Stalking ? "Stalking..." : "Patrolling";
+                std::string sub = GuildActivityText(s.rivalActivity, s.rivalMind);
                 if (sheet.ok) {
                     Vector2 dir = s.rivalActivity == GameState::RivalActivity::Patrol
-                        ? Vector2{ s.rivalPatrolTarget.x - s.rivalPos.x, s.rivalPatrolTarget.y - s.rivalPos.y }
+                        ? Vector2{ cosf(s.rivalMind.yaw), sinf(s.rivalMind.yaw) }
                         : Vector2{ s.wildernessPlayerPos.x - s.rivalPos.x, s.wildernessPlayerPos.y - s.rivalPos.y };
                     float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
                     Vector2 facing = len > 0.001f ? Vector2{ dir.x / len, dir.y / len } : Vector2{ 0, 1 };
@@ -21927,12 +22544,11 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         const auto& b = s.blades[bi];
         Vector2 bScreenPos = WorldToScreen(bladeDying2D ? bladeDying2D->pos : b.pos, camera);
         bool bNear = nearestKind == WildNodeKind::Blade && nearestIdx == bi && inRange;
-        std::string bSub = b.activity == GameState::RivalActivity::Hunting ? "Hunting..."
-            : b.activity == GameState::RivalActivity::Stalking ? "Stalking..." : "Patrolling";
+        std::string bSub = GuildActivityText(b.activity, b.mind);
         const DirSpriteSheet& bSheet = g_assets.rivalAdventurerSheet;
         if (bSheet.ok) {
             Vector2 bDir = b.activity == GameState::RivalActivity::Patrol
-                ? Vector2{ b.patrolTarget.x - b.pos.x, b.patrolTarget.y - b.pos.y }
+                ? Vector2{ cosf(b.mind.yaw), sinf(b.mind.yaw) }
                 : Vector2{ s.wildernessPlayerPos.x - b.pos.x, s.wildernessPlayerPos.y - b.pos.y };
             float bLen = std::sqrt(bDir.x * bDir.x + bDir.y * bDir.y);
             Vector2 bFacing = bLen > 0.001f ? Vector2{ bDir.x / bLen, bDir.y / bLen } : Vector2{ 0, 1 };
@@ -21947,6 +22563,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         } else {
             if (!bladeDying2D) DrawWorldNode(bScreenPos, kNodeRadius * 0.7f, Color{ 96, 28, 34, 255 }, BladeName(bi), bNear, bSub);
         }
+    }
+    for (int who = -1; who < kBladeCount; who++) { // guild speech bubbles (2026-09-26)
+        const GameState::GuildMind& gm = who < 0 ? s.rivalMind : s.blades[who].mind;
+        Vector2 gp = who < 0 ? s.rivalPos : s.blades[who].pos;
+        if (gm.sayT <= 0.0f || GuildAbsent(gp)) continue;
+        Vector2 sp = WorldToScreen(gp, camera);
+        DrawGuildBubble({ sp.x, sp.y - 52.0f }, gm.say, std::min(1.0f, gm.sayT / 0.5f));
     }
     for (size_t i = 0; i < kWildernessInnocentSpots.size(); i++) {
         if (!s.innocentSpots[i].present) continue;
@@ -24730,6 +25353,7 @@ static void UpdateDrawFrame() {
         if (state.disengageGraceT > 0.0f) state.disengageGraceT -= dt; // manual-disengage grace (2026-09-25)
         UpdateCombatAnim(state, dt);
         UpdateDeathAndRespawn(state, dt); // death anims, ghost timer, monster respawns, corpse fades
+        UpdateGuildOffscreen(state, dt);  // the rival and Murder Inc. keep living while you're elsewhere
 
         // JS: autosave every 2 seconds (setInterval(() => { render(); save(); }, 2000)).
         autosaveTimer += dt;
