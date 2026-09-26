@@ -9216,7 +9216,7 @@ static int g_t3dCamScreen = -1; // which screen the smoothed camera last served 
 static const float kT3DPitchMin = 0.22f; // polar clamp: camera can never dip below the ground
 static const float kT3DPitchMax = 1.35f; // ~77 deg: near-top-down is as far as it goes
 static const float kT3DDistMin = 260.0f; // closest zoom: building fills the view
-static const float kT3DDistMax = 1500.0f;// farthest zoom: whole town in frame
+static const float kT3DDistMax = 1100.0f; // 2026-09-26: was 1500 - past this the town shrank to a hazy diorama// farthest zoom: whole town in frame
 static const float kT3DCamDamp = 9.0f;   // orbit smoothing speed (per second; higher = snappier)
 static const float kT3DZoomDamp = 7.0f;  // zoom smoothing speed (per second)
 static const float kT3DTargetDamp = 6.0f;// how fast the camera follows the walking player
@@ -9486,7 +9486,7 @@ static void Town3DApplyShadowShader(Model& m) {
 struct Town3DLit {
     bool ready = false, tried = false;
     Shader shader{};
-    int viewPosLoc = -1;
+    int viewPosLoc = -1, fogRangeLoc = -1;
 };
 static Town3DLit g_t3dLit;
 static void Town3DEnsureLit() {
@@ -9497,6 +9497,7 @@ static void Town3DEnsureLit() {
     if (L.shader.id == 0) return; // missing shader files: stay on flat lighting
     L.shader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(L.shader, "viewPos");
     L.viewPosLoc = L.shader.locs[SHADER_LOC_VECTOR_VIEW];
+    L.fogRangeLoc = GetShaderLocation(L.shader, "fogRange");
     Vector3 sunDir = kT3DSunDir;
     SetShaderValue(L.shader, GetShaderLocation(L.shader, "lightDir"), &sunDir, SHADER_UNIFORM_VEC3);
     Vector4 sunCol = ColorNormalize(Color{ 255, 242, 220, 255 }); // warm afternoon sun
@@ -9734,10 +9735,16 @@ static void Town3DSkyBand(Vector3 base, Vector3 top, float radius, int sides, Co
         }
     rlEnd();
 }
+// The sky is pure background (2026-09-26): drawn first with depth writes off,
+// so nothing drawn after it can ever be hidden by it. It used to write depth,
+// and zooming out far enough lifted the camera above the dome's zenith cap,
+// whose blue disc then covered the whole scene ("zooming out goes blue").
+static void T3DSkyBegin() { rlDrawRenderBatchActive(); rlDisableDepthMask(); rlDisableBackfaceCulling(); }
+static void T3DSkyEnd() { rlDrawRenderBatchActive(); rlEnableBackfaceCulling(); rlEnableDepthMask(); }
 static void Town3DDrawSky(Vector3 camPos) {
     const float R = 950.0f, bandH = 60.0f;
     const int bands = 16;
-    rlDisableBackfaceCulling(); // we see the inside of the cylinder wall
+    T3DSkyBegin(); // we see the inside of the cylinder wall
     for (int i = 0; i < bands; i++) {
         float t = (float)i / (float)(bands - 1);
         Color col = ColorLerp(kT3DSkyHorizon, kT3DSkyZenith, t * t * 0.92f);
@@ -9746,7 +9753,7 @@ static void Town3DDrawSky(Vector3 camPos) {
     }
     // Zenith cap overhead - the one real cap, sealing the top of the dome.
     DrawCylinder({ camPos.x, 931.0f, camPos.z }, R, R, 2.0f, 24, kT3DSkyZenith);
-    rlEnableBackfaceCulling();
+    T3DSkyEnd();
 }
 
 // ---- Real 3D building models (2026-09-24) ----
@@ -10576,6 +10583,19 @@ static void Town3DDrawGroundRing(float x, float z, float y, float rIn, float rOu
 // Grass tufts (defined with the wilderness view below): per-frame shader
 // update + main-pass draws. Skipped in the shadow pass by construction.
 static void T3DGrassFrameUpdate(const Vector3& camPos);
+static float Wild3DRoadDist(Vector2 p); // wilderness dirt-path distance (defined with the dressing)
+// Distance fog follows the zoom (2026-09-26): haze starts a little past the
+// point the camera looks at, so zooming out never fogs the area around the
+// player (it used to be a fixed 900..2600 from the camera, and a far zoom put
+// the whole scene inside the fog band). Only the horizon softens.
+static float g_t3dFogRange[2] = { 900.0f, 2600.0f };
+static void T3DUpdateViewFog(const Town3DCam& c) {
+    float dx = c.pos.x - c.target.x, dy = c.pos.y - c.target.y, dz = c.pos.z - c.target.z;
+    float d = sqrtf(dx * dx + dy * dy + dz * dz);
+    g_t3dFogRange[0] = d + 350.0f;
+    g_t3dFogRange[1] = d + 1900.0f;
+    if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.fogRangeLoc, g_t3dFogRange, SHADER_UNIFORM_VEC2);
+}
 static void T3DGrassDrawTown();
 static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     Vector2 mouse = GetMousePosition();
@@ -10637,6 +10657,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     // bind, so no texture-slot dance or shader restore needed afterward).
     Town3DEnsureLit();
     if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
+    T3DUpdateViewFog(c);
     T3DGrassFrameUpdate(c.pos); // sway clock for the grass shader
     Town3DDrawSceneContents(s, false);
     if (s.selectedTown != 2) T3DGrassDrawTown(); // no grass in snowy Frostmere
@@ -10749,7 +10770,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
 static const int kWild3DGroundPx = 2048; // 3200-unit world => ~1.56 units/px. 4096px
                                         // would be 64MB of texture for mostly grass.
 static const float kWild3DDistMin = 300.0f;
-static const float kWild3DDistMax = 2600.0f;
+static const float kWild3DDistMax = 1600.0f; // 2026-09-26: was 2600 - props turned to specks
 
 static float Wild3DSmooth(float a, float b, float x) {
     float t = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
@@ -10921,12 +10942,12 @@ static bool Wild3DInView(const Town3DCam& c, float x, float z, float radius) {
 static const float kT3DGrassTuftH = 26.0f;
 static const float kT3DGrassTuftW = 15.0f;
 static const int kT3DGrassTownMax = 200;
-static const int kT3DGrassWildMax = 260;
+static const int kT3DGrassWildMax = 1800; // 2026-09-26: was 260 (paths only); meadow pass below
 
 struct T3DGrassShader {
     bool ready = false, tried = false;
     Shader shader{};
-    int timeLoc = -1, viewPosLoc = -1;
+    int timeLoc = -1, viewPosLoc = -1, fogRangeLoc = -1;
 };
 static T3DGrassShader g_t3dGrassShader;
 
@@ -10987,6 +11008,7 @@ static void T3DGrassEnsureShader() {
     if (G.shader.id == 0) return;
     G.timeLoc = GetShaderLocation(G.shader, "time");
     G.viewPosLoc = GetShaderLocation(G.shader, "viewPos");
+    G.fogRangeLoc = GetShaderLocation(G.shader, "fogRange");
     // Static uniforms mirror Town3DEnsureLit's values.
     Vector3 sunDir = kT3DSunDir;
     SetShaderValue(G.shader, GetShaderLocation(G.shader, "lightDir"), &sunDir, SHADER_UNIFORM_VEC3);
@@ -11008,6 +11030,7 @@ static void T3DGrassFrameUpdate(const Vector3& camPos) {
     T3DGrassShader& G = g_t3dGrassShader;
     if (!G.ready) return;
     SetShaderValue(G.shader, G.viewPosLoc, &camPos, SHADER_UNIFORM_VEC3);
+    SetShaderValue(G.shader, G.fogRangeLoc, g_t3dFogRange, SHADER_UNIFORM_VEC2);
     float t = (float)GetTime();
     SetShaderValue(G.shader, G.timeLoc, &t, SHADER_UNIFORM_FLOAT);
 }
@@ -11133,6 +11156,21 @@ static void T3DGrassBuildWild() {
             float an = Town3DHash01(e.pos.x + (float)j, e.pos.y) * 6.2831853f;
             float rr = 48.0f + 26.0f * Town3DHash01(e.pos.y + (float)j * 3.0f, e.pos.x);
             addTuft(e.pos.x + cosf(an) * rr, e.pos.y + sinf(an) * rr);
+        }
+    }
+    // Meadow pass (2026-09-26): open-field tufts on a jittered 62-unit grid,
+    // densest in the Whisperwood heartland, sparse on the coast and peaks, none
+    // in the snow. Kept off the dirt paths.
+    for (float gx = 31.0f; gx < 3200.0f; gx += 62.0f) {
+        for (float gz = 31.0f; gz < 3200.0f; gz += 62.0f) {
+            float jx = gx + (Town3DHash01(gx * 0.71f, gz * 0.37f) - 0.5f) * 56.0f;
+            float jz = gz + (Town3DHash01(gz * 0.59f, gx * 0.83f + 2.0f) - 0.5f) * 56.0f;
+            RegionId rg = RegionAt({ jx, jz });
+            float dens = (rg == RegionId::Whisperwood) ? 0.46f : (rg == RegionId::SaltCoast) ? 0.20f
+                       : (rg == RegionId::Stonepeaks) ? 0.16f : 0.0f;
+            if (Town3DHash01(jx * 0.97f, jz * 1.21f) > dens) continue;
+            if (Wild3DRoadDist({ jx, jz }) < 34.0f || !isClear(jx, jz)) continue;
+            addTuft(jx, jz);
         }
     }
     Color cDark = { 80, 122, 62, 255 }, cLight = { 144, 188, 106, 255 };
@@ -11350,6 +11388,250 @@ static void Wild3DDrawScatterOne(const Wild3DScatterItem& it, bool shadowPass) {
     }
 }
 
+// ---- Wilderness dressing (2026-09-26) ----
+// The 3200-unit wilderness read as a flat green field with a few trees. This
+// layer adds KayKit Medieval Hexagon Pack models (assets/wild_props, CC0),
+// themed per region (RegionAt):
+//   - Whisperwood: tree clusters, lone trees, felled stumps, a few rocks
+//   - Stonepeaks: boulders and stone piles, sparse trees
+//   - Frostwastes: frost-tinted trees and rocks
+//   - Salt Coast: sparse rocks and trees, washed-up crates and barrels
+// plus a handful of roadside camps (tent, crates, barrels, flag, weapon rack)
+// and a horizon ring of mountains and wooded hills just OUTSIDE the map edges,
+// where the player can never walk into them. Everything inside the map is
+// walk-through scenery like the existing trees, so it keeps clear of roads,
+// gameplay spots, house plots, shrines and the Fields of Sorrow. Built once,
+// deterministic (hash of position), culled per item with Wild3DInView.
+enum WildPropId {
+    kWPTreesASmall, kWPTreesAMedium, kWPTreesALarge, kWPTreesBSmall, kWPTreesBMedium, kWPTreesBLarge,
+    kWPTreeA, kWPTreeB, kWPCutA, kWPCutB,
+    kWPRockA, kWPRockB, kWPRockC, kWPRockD, kWPRockE,
+    kWPHillsATrees, kWPHillsBTrees, kWPHillsCTrees, kWPHillsA,
+    kWPMountainA, kWPMountainB, kWPMountainC, kWPMountainAGreen, kWPMountainBGreen, kWPMountainCGreen,
+    kWPTent, kWPBarrel, kWPCrateBig, kWPCrateSmall, kWPCrateLong, kWPSack, kWPWeaponRack,
+    kWPFlagRed, kWPFlagBlue, kWPLumber, kWPStonePile, kWPWheelbarrow, kWPBucket,
+    kWPCount
+};
+static const char* const kWildPropFiles[kWPCount] = {
+    "trees_A_small", "trees_A_medium", "trees_A_large", "trees_B_small", "trees_B_medium", "trees_B_large",
+    "tree_single_A", "tree_single_B", "trees_A_cut", "trees_B_cut",
+    "rock_single_A", "rock_single_B", "rock_single_C", "rock_single_D", "rock_single_E",
+    "hills_A_trees", "hills_B_trees", "hills_C_trees", "hills_A",
+    "mountain_A", "mountain_B", "mountain_C", "mountain_A_grass_trees", "mountain_B_grass_trees", "mountain_C_grass_trees",
+    "tent", "barrel", "crate_A_big", "crate_B_small", "crate_long_A", "sack", "weaponrack",
+    "flag_red", "flag_blue", "resource_lumber", "resource_stone", "wheelbarrow", "bucket_water",
+};
+// The pack is authored for a 2-unit hex board, so scales are per group, picked
+// to sit with the Kenney trees and the ~60-unit characters.
+static const float kWPScaleTrees = 85.0f;  // clusters/lone trees ~95 tall
+static const float kWPScaleRock = 190.0f;  // single rocks ~35 tall, ~80 across
+static const float kWPScaleProp = 135.0f;  // camp props (tent ~70 tall)
+static const float kWPScaleRing = 260.0f;  // horizon mountains/hills
+
+struct WildDressItem { int id; float x, z, rot, scale; Color tint; float cullR; };
+struct Wild3DDressing {
+    bool built = false;
+    Model models[kWPCount]{};
+    bool ok[kWPCount]{};
+    Texture2D atlas{};
+    std::vector<WildDressItem> items;
+};
+static Wild3DDressing g_wild3dDress;
+
+static void Wild3DLoadDressModels(Wild3DDressing& D) {
+    // Every model uses the same palette PNG. The .gltf files ship with their
+    // image reference stripped (see assets/wild_props/README.md): letting
+    // raylib decode a private 4MB copy per model was slow, wasteful, and
+    // overflowed the web build's stack mid-frame. Load it once, share it.
+    const char* atlasPath = "assets/wild_props/hexagons_medieval.png";
+    if (FileExists(atlasPath)) D.atlas = LoadTexture(atlasPath);
+    for (int i = 0; i < kWPCount; i++) {
+        const char* path = TextFormat("assets/wild_props/%s.gltf", kWildPropFiles[i]);
+        if (!FileExists(path)) continue; // missing file: that prop is skipped
+        D.models[i] = LoadModel(path);
+        D.ok[i] = D.models[i].meshCount > 0;
+        if (!D.ok[i]) continue;
+        for (int m = 0; m < D.models[i].materialCount; m++) {
+            Texture2D& t = D.models[i].materials[m].maps[MATERIAL_MAP_DIFFUSE].texture;
+            if (D.atlas.id > 0) {
+                if (t.id > 0 && t.id != D.atlas.id && t.id != rlGetTextureIdDefault()) UnloadTexture(t);
+                t = D.atlas;
+            }
+        }
+        Town3DApplyLitShader(D.models[i]);
+    }
+}
+
+static float Wild3DSegDist(Vector2 p, Vector2 a, Vector2 b) {
+    float vx = b.x - a.x, vz = b.y - a.y, wx = p.x - a.x, wz = p.y - a.y;
+    float L = vx * vx + vz * vz;
+    float t = L > 0.0f ? std::clamp((wx * vx + wz * vz) / L, 0.0f, 1.0f) : 0.0f;
+    float dx = wx - vx * t, dz = wz - vz * t;
+    return sqrtf(dx * dx + dz * dz);
+}
+// Distance to the nearest baked dirt path (same segments Wild3DEnsureGround paints).
+static float Wild3DRoadDist(Vector2 p) {
+    float d = 1e9f;
+    for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances)
+        d = fminf(d, Wild3DSegDist(p, kWildernessReturnGatePos, e.pos));
+    for (size_t i = 0; i + 1 < kKingsRoadWaypoints.size(); i++)
+        d = fminf(d, Wild3DSegDist(p, kKingsRoadWaypoints[i], kKingsRoadWaypoints[i + 1]));
+    return d;
+}
+
+static void Wild3DBuildDressing() {
+    Wild3DDressing& D = g_wild3dDress;
+    if (D.built) return;
+    D.built = true;
+    Wild3DLoadDressModels(D);
+    const float WS = kWildernessWorldSize;
+    struct Keep { Vector2 p; float r; };
+    std::vector<Keep> keep;
+    for (const auto& n : kWildernessGatherNodes) keep.push_back({ n.pos, 85.0f });
+    for (const auto& sp : kWildernessCreatureSpots) keep.push_back({ sp.pos, 100.0f });
+    for (const auto& m : kWildernessMonsterSpots) keep.push_back({ m.pos, 110.0f });
+    for (const auto& e : kWildernessDungeonEntrances) keep.push_back({ e.pos, 120.0f });
+    for (const auto& f : kWildernessFoliage) keep.push_back({ f.pos, 40.0f });
+    for (const auto& ip : kWildernessInnocentSpots) keep.push_back({ ip.pos, 80.0f });
+    for (const auto& hp : kHousePlots) keep.push_back({ hp.pos, 40.0f + hp.cells * kHouseCellSize * 0.5f });
+    for (const auto& sh : kShrines) keep.push_back({ sh.pos, 100.0f });
+    for (const auto& d : kSaltDocks) keep.push_back({ d.pos, 130.0f });
+    keep.push_back({ kFieldsOfSorrow, kFieldsOfSorrowRadius + 40.0f });
+    keep.push_back({ kWildernessReturnGatePos, 140.0f });
+    keep.push_back({ kWildernessTown2GatePos, 140.0f });
+    keep.push_back({ kWildernessTown3GatePos, 140.0f });
+    auto clearOf = [&](Vector2 p, float extra) {
+        for (const Keep& k : keep) {
+            float dx = p.x - k.p.x, dz = p.y - k.p.y, r = k.r + extra;
+            if (dx * dx + dz * dz < r * r) return false;
+        }
+        return true;
+    };
+    auto add = [&](int id, float x, float z, float rot, float sc, Color tint, float cullR) {
+        if (id < 0 || id >= kWPCount || !D.ok[id]) return;
+        D.items.push_back({ id, x, z, rot, sc, tint, cullR });
+    };
+    const Color frost = { 205, 222, 240, 255 };
+
+    // 1) Region scatter on a jittered 80-unit grid.
+    const float step = 80.0f;
+    for (float gx = step * 0.5f; gx < WS; gx += step) {
+        for (float gz = step * 0.5f; gz < WS; gz += step) {
+            float jx = gx + (Town3DHash01(gx * 0.37f, gz * 0.53f) - 0.5f) * step * 0.9f;
+            float jz = gz + (Town3DHash01(gz * 0.41f, gx * 0.29f + 7.0f) - 0.5f) * step * 0.9f;
+            if (jx < 50.0f || jz < 50.0f || jx > WS - 50.0f || jz > WS - 50.0f) continue;
+            Vector2 p = { jx, jz };
+            RegionId rg = RegionAt(p);
+            float roll = Town3DHash01(jx * 1.31f, jz * 0.77f);
+            float pick = Town3DHash01(jz * 1.13f + 3.0f, jx * 0.91f);
+            float rot = Town3DHash01(jx, jz * 1.7f) * 360.0f;
+            float vs = 0.8f + 0.45f * Town3DHash01(jz * 0.63f, jx + 11.0f);
+            float density = (rg == RegionId::Whisperwood) ? 0.34f : (rg == RegionId::Stonepeaks) ? 0.40f
+                          : (rg == RegionId::Frostwastes) ? 0.30f : 0.16f;
+            if (roll > density) continue;
+            bool big = false;
+            int id = -1;
+            float sc = kWPScaleTrees;
+            Color tint = WHITE;
+            switch (rg) {
+                case RegionId::Whisperwood:
+                    if (pick < 0.45f) { id = kWPTreesASmall + (int)(pick / 0.45f * 6.0f) % 6; big = true; }
+                    else if (pick < 0.68f) id = (pick < 0.56f) ? kWPTreeA : kWPTreeB;
+                    else if (pick < 0.80f) id = (pick < 0.74f) ? kWPCutA : kWPCutB;
+                    else { id = kWPRockA + (int)((pick - 0.80f) / 0.20f * 5.0f) % 5; sc = kWPScaleRock; }
+                    break;
+                case RegionId::Stonepeaks:
+                    if (pick < 0.60f) { id = kWPRockA + (int)(pick / 0.60f * 5.0f) % 5; sc = kWPScaleRock * 1.4f; }
+                    else if (pick < 0.75f) { id = kWPStonePile; sc = kWPScaleProp; }
+                    else id = (pick < 0.88f) ? kWPTreeB : kWPTreesBSmall;
+                    break;
+                case RegionId::Frostwastes:
+                    tint = frost;
+                    if (pick < 0.50f) { id = (pick < 0.25f) ? kWPTreeB : kWPTreesBSmall + (int)(pick * 12.0f) % 3; big = pick >= 0.25f; }
+                    else if (pick < 0.85f) { id = kWPRockA + (int)((pick - 0.5f) / 0.35f * 5.0f) % 5; sc = kWPScaleRock * 1.2f; }
+                    else id = kWPCutB;
+                    break;
+                case RegionId::SaltCoast:
+                    if (pick < 0.45f) { id = kWPRockA + (int)(pick / 0.45f * 5.0f) % 5; sc = kWPScaleRock; }
+                    else if (pick < 0.75f) id = (pick < 0.6f) ? kWPTreeA : kWPTreesASmall;
+                    else { id = (pick < 0.85f) ? kWPBarrel : (pick < 0.93f) ? kWPCrateBig : kWPCrateLong; sc = kWPScaleProp; }
+                    break;
+            }
+            float footprint = big ? 70.0f : 35.0f;
+            if (Wild3DRoadDist(p) < 28.0f + footprint) continue;
+            if (!clearOf(p, footprint * 0.5f)) continue;
+            add(id, jx, jz, rot, sc * vs, tint, big ? 110.0f : 60.0f);
+        }
+    }
+
+    // 2) Roadside camps: one per region-ish slice of the map, the first hashed
+    //    candidate that sits 70-260 units off a road and clear of everything.
+    static const Rectangle kCampAreas[] = {
+        { 600, 900, 700, 700 }, { 1300, 2000, 600, 700 }, { 2100, 900, 900, 700 },
+        { 150, 1400, 300, 900 }, { 700, 150, 900, 450 }, { 2100, 2200, 900, 800 },
+    };
+    int campIdx = 0;
+    for (const Rectangle& area : kCampAreas) {
+        campIdx++;
+        for (int tries = 0; tries < 160; tries++) {
+            float cx = area.x + Town3DHash01((float)campIdx * 17.0f, (float)tries * 3.1f) * area.width;
+            float cz = area.y + Town3DHash01((float)tries * 5.7f, (float)campIdx * 11.0f) * area.height;
+            Vector2 c = { cx, cz };
+            float rd = Wild3DRoadDist(c);
+            if (rd < 70.0f || rd > 260.0f || !clearOf(c, 70.0f)) continue;
+            float face = Town3DHash01(cx, cz) * 360.0f;
+            float fr = face * DEG2RAD;
+            auto at = [&](float lx, float lz, int id, float rotOff, float sc) {
+                float x = cx + lx * cosf(fr) - lz * sinf(fr), z = cz + lx * sinf(fr) + lz * cosf(fr);
+                add(id, x, z, face + rotOff, sc, WHITE, 60.0f);
+            };
+            at(0, 0, kWPTent, 0, kWPScaleProp);
+            at(62, 18, kWPCrateBig, 20, kWPScaleProp);
+            at(70, -14, kWPCrateSmall, -15, kWPScaleProp);
+            at(-58, 22, kWPBarrel, 0, kWPScaleProp);
+            at(-50, -30, kWPSack, 40, kWPScaleProp * 1.3f);
+            at(30, 62, (campIdx % 2) ? kWPWeaponRack : kWPWheelbarrow, 90, kWPScaleProp);
+            at(-30, 64, (campIdx % 3 == 0) ? kWPLumber : kWPBucket, 10, kWPScaleProp);
+            at(0, -58, (campIdx % 2) ? kWPFlagRed : kWPFlagBlue, 0, kWPScaleProp * 1.2f);
+            keep.push_back({ c, 110.0f });
+            break;
+        }
+    }
+
+    // 3) Horizon ring just outside the map: mountains to the west (Stonepeaks)
+    //    and north (snow-capped Frostwastes), wooded hills south and east.
+    auto ring = [&](float x, float z, int side, int i) {
+        float h = Town3DHash01(x * 0.13f, z * 0.17f + (float)side);
+        float rot = h * 360.0f;
+        int id;
+        Color tint = WHITE;
+        float sc = kWPScaleRing * (0.85f + 0.5f * Town3DHash01(z * 0.3f, x * 0.2f));
+        if (side == 0) id = kWPMountainA + (int)(h * 6.0f) % 6;                    // west
+        else if (side == 1) { id = kWPMountainA + (int)(h * 3.0f) % 3; tint = Color{ 225, 235, 248, 255 }; } // north
+        else id = (i % 3 == 0) ? kWPTreesALarge + (int)(h * 2.0f) % 2 * 3 : kWPHillsATrees + (int)(h * 4.0f) % 4;
+        add(id, x, z, rot, sc, tint, 420.0f);
+    };
+    int i = 0;
+    for (float t = -300.0f; t <= WS + 300.0f; t += 330.0f, i++) {
+        float o1 = 260.0f + 160.0f * Town3DHash01(t, 1.0f), o2 = 260.0f + 160.0f * Town3DHash01(t, 2.0f);
+        float o3 = 260.0f + 160.0f * Town3DHash01(t, 3.0f), o4 = 260.0f + 160.0f * Town3DHash01(t, 4.0f);
+        ring(-o1, t, 0, i);                 // west edge
+        ring(t, -o2, 1, i);                 // north edge
+        ring(t, WS + o3, 2, i);             // south edge
+        ring(WS + o4, t, 3, i);             // east edge
+    }
+}
+
+static void Wild3DDrawDressing(const Town3DCam* cull) {
+    Wild3DBuildDressing();
+    const Wild3DDressing& D = g_wild3dDress;
+    for (const WildDressItem& it : D.items) {
+        if (cull && !Wild3DInView(*cull, it.x, it.z, it.cullR)) continue;
+        DrawModelEx(D.models[it.id], { it.x, 0.0f, it.z }, { 0.0f, 1.0f, 0.0f }, it.rot,
+                    { it.scale, it.scale, it.scale }, it.tint);
+    }
+}
+
 // Dungeon entrance: stone arch + glowing portal disc in the entrance's own color.
 static void Wild3DDrawEntrance(const WildernessDungeonEntrance& e) {
     Color stone = { 150, 148, 142, 255 }, dark = { 110, 108, 102, 255 };
@@ -11421,6 +11703,8 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     DrawModel(g_wild3dGround.model, { 1600, 0, 1600 }, 1.0f, WHITE);
     DrawPlane({ 1600, -15.0f, 1600 }, { 8000, 8000 }, Color{ 92, 132, 70, 255 });
 
+    // Region dressing: tree clusters, rocks, camps, horizon ring (main pass only).
+    if (!shadowPass) Wild3DDrawDressing(cull);
     // Extra scatter (3D-only filler; see Wild3DBuildScatter).
     for (const Wild3DScatterItem& it : g_wild3dScatter) {
         if (!vis(it.x, it.z, 80.0f)) continue;
@@ -11751,7 +12035,7 @@ static void Wild3DShadowPass(GameState& s, const Town3DCam* cull) {
 static void Wild3DDrawSky(Vector3 camPos) {
     const float R = 4200.0f, bandH = 120.0f;
     const int bands = 16;
-    rlDisableBackfaceCulling();
+    T3DSkyBegin(); // pure background, see Town3DDrawSky
     for (int i = 0; i < bands; i++) {
         float t = (float)i / (float)(bands - 1);
         Color col = ColorLerp(kT3DSkyHorizon, kT3DSkyZenith, t * t * 0.92f);
@@ -11759,7 +12043,7 @@ static void Wild3DDrawSky(Vector3 camPos) {
         Town3DSkyBand({ camPos.x, y0, camPos.z }, { camPos.x, y1, camPos.z }, R, 24, col);
     }
     DrawCylinder({ camPos.x, 1861.0f, camPos.z }, R, R, 2.0f, 24, kT3DSkyZenith);
-    rlEnableBackfaceCulling();
+    T3DSkyEnd();
 }
 
 // Circling birds over the wilderness - the town's batched rlgl bird tech
@@ -11920,6 +12204,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     // for specular/fog (see Town3DEnsureLit - no shadow map in this system).
     Town3DEnsureLit();
     if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
+    T3DUpdateViewFog(c);
     T3DGrassFrameUpdate(c.pos); // sway clock for the grass shader
     Wild3DDrawSceneContents(s, false, &c);
     Wild3DDrawAmbience(c); // birds, unlit, one batched draw call, main pass only

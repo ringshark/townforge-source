@@ -22,6 +22,21 @@ g++ -O1 -std=c++17 -I <path to raylib includes> main.cpp -L <path to raylib libs
 
 Run `townforge.exe` from a folder that has `assets/` next to it.
 
+## Building it (web)
+
+With [Emscripten](https://emscripten.org/) and raylib built for `PLATFORM_WEB`
+(`libraylib.web.a`):
+
+```
+em++ -O1 -std=c++17 -DPLATFORM_WEB main.cpp -I <raylib>/src <raylib>/src/libraylib.web.a \
+  -sUSE_GLFW=3 -sINITIAL_MEMORY=536870912 -sSTACK_SIZE=1048576 -lidbfs.js \
+  --preload-file assets --shell-file shell_3d.html -o townforge.html
+```
+
+Rename `townforge.html` to `index.html` when deploying. Flags that matter:
+`-lidbfs.js` (saves), the 512MB heap (the wilderness OOMs at 128MB), and the
+1MB stack (Emscripten's 64KB default overflows while loading 3D assets mid-frame).
+
 ## Notes for reference
 
 - Sprite sheets follow a common convention: 4 directions (Down/Left/Right/Up)
