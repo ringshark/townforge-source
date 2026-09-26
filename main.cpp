@@ -912,6 +912,7 @@ struct Spell {
     int minSkill, maxSkill; // Magery range for success-chance scaling
     int manaCost, reagentCost;
     int baseDamage; // also doubles as heal amount for Utility (heal) spells
+    bool necro = false; // (2026-09-27) Necromancy school: trained/cast off Necromancy, mana only
 };
 
 // Copied verbatim from SPELLS in the JS (all 16, across 8 circles), plus Recall
@@ -921,7 +922,7 @@ struct Spell {
 // gate (added 2026-09-21, see its comment) doesn't lock a starting Magery-0
 // character out of practicing anything at all - a deliberate deviation from the
 // port, not a formula mismatch.
-static const std::array<Spell, 17> kSpells = {{
+static const std::array<Spell, 25> kSpells = {{
     {"Spark Dart", 1, SpellType::Offensive, 0, 50, 4, 1, 4},
     {"Mending Word", 1, SpellType::Utility, 0, 50, 4, 1, 4},
     {"Sap Strength", 1, SpellType::Debuff, 0, 50, 4, 1, 4},
@@ -943,7 +944,21 @@ static const std::array<Spell, 17> kSpells = {{
     // special-cased wherever travel needs different handling (costs, picker).
     // Circle 4 conventions: minSkill 40, 12 mana, 2 reagents.
     {"Recall", 4, SpellType::Utility, 40, 80, 12, 2, 0},
+    // Necromancy (2026-09-27) - a Diablo-style dark school, trained by the
+    // Necromancy skill and paid for in mana alone: bone magic, curses, and the
+    // dead raised from the corpses you leave behind. Indices 17-24.
+    {"Teeth", 1, SpellType::Offensive, 0, 50, 4, 0, 5, true},
+    {"Raise Skeleton", 1, SpellType::Summon, 0, 60, 9, 0, 0, true},
+    {"Amplify Damage", 2, SpellType::Debuff, 15, 70, 7, 0, 0, true},
+    {"Bone Armor", 3, SpellType::Buff, 25, 75, 10, 0, 0, true},
+    {"Bone Spear", 4, SpellType::Offensive, 35, 85, 12, 0, 16, true},
+    {"Corpse Explosion", 5, SpellType::Offensive, 45, 95, 14, 0, 0, true},
+    {"Raise Skeletal Mage", 6, SpellType::Summon, 55, 100, 16, 0, 0, true},
+    {"Life Tap", 7, SpellType::Debuff, 65, 100, 16, 0, 0, true},
 }};
+static const int kSpTeeth = 17, kSpRaiseSkeleton = 18, kSpAmplify = 19, kSpBoneArmor = 20,
+                 kSpBoneSpear = 21, kSpCorpseExplosion = 22, kSpSkeletalMage = 23, kSpLifeTap = 24;
+static bool SpellNeedsCorpse(int idx) { return idx == kSpRaiseSkeleton || idx == kSpSkeletalMage || idx == kSpCorpseExplosion; }
 // kSpells index of Recall - keep last in the array.
 static const int kRecallSpellIdx = 16;
 // Leave-dungeon (2026-09-25): Magery-gated escape from any dungeon. A 3s cast
@@ -1538,6 +1553,8 @@ struct GameState {
     float swordsmanship = 0, fencing = 0, macing = 0, archery = 0, wrestling = 0;
     float tactics = 0, anatomy = 0, magicResist = 0, healing = 0; // capped at 100 each
     float parrying = 0; // (2026-09-26) blocking blows - best with a shield; capped at 100
+    float tracking = 0;   // (2026-09-27) sensing who hunts you - Murder Inc. warnings need it; capped at 100
+    float necromancy = 0; // (2026-09-27) the dark school: bone, blood and the risen dead; capped at 100
 
     // --- Bandages - mirrors state.bandages. A plain consumable count, not a backpack
     // item; crafted by the Tailor or bought from the Provisioner stand-in (see
@@ -1547,8 +1564,8 @@ struct GameState {
     // --- The Echo system - mirrors state.skillActive. true = contributing to
     // gameplay right now; false = benched (still fully trained, just inactive).
     // Indexed by WeeklyGoalIdx... no - indexed by position in kCappedSkills below. ---
-    std::array<bool, 19> skillActive = { true, true, true, true, true, true, true, true,
-                                          true, true, true, true, true, true, true, true, true, true, true };
+    std::array<bool, 21> skillActive = { true, true, true, true, true, true, true, true,
+                                          true, true, true, true, true, true, true, true, true, true, true, true, true };
 
     // --- The Bloodstained Road - mirrors state.bloodstainedProgress/bloodstainedLoop/
     // bloodstainedBossDefeated/grayEncounter. Tier index 0-4 = current rung; reaching
@@ -1745,6 +1762,10 @@ struct GameState {
     float fiendTickT = 0.0f;
     int fiendZone = 0;           // zone the fiend was summoned in (0 wilderness, 1 dungeon)
     Vector2 fiendPos = { 0, 0 }; // follows the player while active
+    // Necromancy (2026-09-27) - transient, gone on any zone change.
+    struct NecroMinion { int kind = 0; int zone = 0; Vector2 pos{}; float hp = 1, maxHp = 1, atkT = 1.0f, riseT = 0.0f, ttl = 240.0f, yaw = 0.0f; };
+    std::vector<NecroMinion> minions; // raised dead: kind 0 skeleton warrior, 1 skeletal mage
+    float boneArmor = 0.0f;           // Bone Armor: damage it still soaks
 };
 
 // ---------------------------------------------------------------------
@@ -3011,7 +3032,88 @@ static const Texture2D* SpellTypeIcon(SpellType type) {
 }
 // Real per-spell icon (see GameAssets.spellIconPerSpell) with a graceful fallback to
 // the old shared type icon if the specific one didn't load - never a hard failure.
+// Necromancy spell icons (2026-09-27): painted once into small textures - bone and
+// blood on a grave-dark ground, one motif per spell.
+static Texture2D g_necroIcons[8];
+static bool g_necroIconsReady = false;
+static const Texture2D* NecroIcon(int spellIdx) {
+    int k = spellIdx - 17;
+    if (k < 0 || k >= 8) return nullptr;
+    if (!g_necroIconsReady) {
+        g_necroIconsReady = true;
+        const Color bone = { 236, 230, 208, 255 }, boneDk = { 170, 160, 136, 255 }, eye = { 26, 18, 22, 255 };
+        const Color blood = { 170, 20, 36, 255 }, green = { 120, 255, 150, 255 }, violet = { 120, 70, 170, 255 };
+        for (int i = 0; i < 8; i++) {
+            const int N = 64;
+            Image im = GenImageGradientRadial(N, N, 0.0f, Color{ 58, 40, 70, 255 }, Color{ 14, 10, 18, 255 });
+            auto skull = [&](int cx, int cy, int r) {
+                ImageDrawCircle(&im, cx, cy, r, bone);
+                ImageDrawRectangle(&im, cx - r * 6 / 10, cy + r * 6 / 10, r * 12 / 10, r * 6 / 10, bone);
+                ImageDrawCircle(&im, cx - r * 4 / 10, cy + r / 10, r * 3 / 10, eye);
+                ImageDrawCircle(&im, cx + r * 4 / 10, cy + r / 10, r * 3 / 10, eye);
+                ImageDrawTriangle(&im, { (float)cx, (float)cy + r * 0.35f }, { (float)cx - r * 0.12f, (float)cy + r * 0.6f }, { (float)cx + r * 0.12f, (float)cy + r * 0.6f }, eye);
+            };
+            switch (i) {
+                case 0: // Teeth: a volley of fangs
+                    for (int f = 0; f < 5; f++) {
+                        float x = 12.0f + f * 10.0f, y = 16.0f + (f % 2) * 10.0f;
+                        ImageDrawTriangle(&im, { x - 4, y }, { x, y + 22 }, { x + 4, y }, bone);
+                    }
+                    break;
+                case 1: // Raise Skeleton: a skull over a grave mound, grave-light in its eyes
+                    ImageDrawCircle(&im, 32, 60, 22, Color{ 80, 62, 44, 255 });
+                    skull(32, 28, 16);
+                    ImageDrawCircle(&im, 26, 30, 2, green); ImageDrawCircle(&im, 38, 30, 2, green);
+                    break;
+                case 2: // Amplify Damage: a red curse sigil
+                    ImageDrawCircle(&im, 32, 32, 22, blood); ImageDrawCircle(&im, 32, 32, 17, Color{ 30, 14, 20, 255 });
+                    ImageDrawLineEx(&im, { 18, 18 }, { 46, 46 }, 5, blood); ImageDrawLineEx(&im, { 46, 18 }, { 18, 46 }, 5, blood);
+                    ImageDrawCircle(&im, 32, 32, 5, Color{ 255, 90, 80, 255 });
+                    break;
+                case 3: // Bone Armor: a ribcage
+                    ImageDrawRectangle(&im, 30, 10, 4, 44, bone);
+                    for (int r = 0; r < 4; r++) {
+                        int y = 16 + r * 9;
+                        ImageDrawLineEx(&im, { 32, (float)y }, { 12, (float)y + 6 }, 4, bone);
+                        ImageDrawLineEx(&im, { 32, (float)y }, { 52, (float)y + 6 }, 4, bone);
+                    }
+                    break;
+                case 4: // Bone Spear
+                    ImageDrawLineEx(&im, { 10, 54 }, { 50, 14 }, 6, bone);
+                    ImageDrawTriangle(&im, { 44, 12 }, { 58, 6 }, { 52, 20 }, bone);
+                    ImageDrawCircle(&im, 10, 54, 5, boneDk);
+                    ImageDrawLineEx(&im, { 14, 50 }, { 40, 24 }, 1, boneDk);
+                    break;
+                case 5: // Corpse Explosion: a burst behind a skull
+                    for (int r = 0; r < 12; r++) {
+                        float a = r * 0.5236f;
+                        ImageDrawTriangle(&im, { 32 + cosf(a) * 28, 32 + sinf(a) * 28 }, { 32 + cosf(a + 0.25f) * 10, 32 + sinf(a + 0.25f) * 10 },
+                                          { 32 + cosf(a - 0.25f) * 10, 32 + sinf(a - 0.25f) * 10 }, Color{ 240, 120, 50, 255 });
+                    }
+                    skull(32, 30, 11);
+                    break;
+                case 6: // Skeletal Mage: a hooded skull and a staff
+                    ImageDrawCircle(&im, 30, 30, 20, violet);
+                    skull(30, 32, 12);
+                    ImageDrawLineEx(&im, { 52, 8 }, { 52, 58 }, 3, Color{ 120, 90, 60, 255 });
+                    ImageDrawCircle(&im, 52, 8, 5, green);
+                    break;
+                case 7: // Life Tap: a drop of blood
+                    ImageDrawCircle(&im, 32, 40, 14, blood);
+                    ImageDrawTriangle(&im, { 32, 8 }, { 19, 36 }, { 45, 36 }, blood);
+                    ImageDrawCircle(&im, 27, 38, 4, Color{ 255, 120, 130, 255 });
+                    break;
+            }
+            ImageDrawRectangleLines(&im, { 0, 0, (float)N, (float)N }, 2, Color{ 20, 12, 18, 255 });
+            g_necroIcons[i] = LoadTextureFromImage(im);
+            SetTextureFilter(g_necroIcons[i], TEXTURE_FILTER_BILINEAR);
+            UnloadImage(im);
+        }
+    }
+    return &g_necroIcons[k];
+}
 static const Texture2D* SpellIcon(int spellIdx) {
+    if (const Texture2D* ni = NecroIcon(spellIdx)) return ni;
     if (spellIdx >= 0 && spellIdx < (int)g_assets.spellIconPerSpell.size() && g_assets.spellIconPerSpellOk[spellIdx])
         return &g_assets.spellIconPerSpell[spellIdx];
     if (spellIdx >= 0 && spellIdx < (int)kSpells.size()) return SpellTypeIcon(kSpells[spellIdx].type);
@@ -3899,7 +4001,7 @@ static bool HasWeeklyBlessing(const GameState& s) {
 // ---------------------------------------------------------------------
 
 struct CappedSkillDef { const char* label; float GameState::* field; };
-static const std::array<CappedSkillDef, 19> kCappedSkills = {{
+static const std::array<CappedSkillDef, 21> kCappedSkills = {{
     {"Swordsmanship", &GameState::swordsmanship}, {"Fencing", &GameState::fencing},
     {"Macing", &GameState::macing}, {"Archery", &GameState::archery}, {"Wrestling", &GameState::wrestling},
     {"Tactics", &GameState::tactics}, {"Anatomy", &GameState::anatomy},
@@ -3909,6 +4011,8 @@ static const std::array<CappedSkillDef, 19> kCappedSkills = {{
     {"Veterinary", &GameState::veterinary},
     {"Stealing", &GameState::stealing}, {"Snooping", &GameState::snooping}, {"Poisoning", &GameState::poisoning},
     {"Parrying", &GameState::parrying}, // (2026-09-26) appended so saved indices 0-17 keep their meaning
+    {"Tracking", &GameState::tracking},     // (2026-09-27) appended, same reason
+    {"Necromancy", &GameState::necromancy}, // (2026-09-27)
 }};
 static const float kTotalSkillCap = 700.0f;
 
@@ -3989,7 +4093,7 @@ static float OverallSkill(const GameState& s) {
     float best = std::max({ s.lumberjacking, s.mining, s.skinning, s.fishing,
                               s.buildingSkill[0], s.buildingSkill[1], s.buildingSkill[2], s.buildingSkill[3] });
     for (int i = 0; i < 15; i++) best = std::max(best, s.*(kCappedSkills[i].field)); // 0-14 excludes Stealing/Snooping/Poisoning (15-17)
-    best = std::max(best, s.parrying);
+    best = std::max({ best, s.parrying, s.tracking, s.necromancy });
     return best;
 }
 static std::string KarmaAdjective(const GameState& s) {
@@ -4011,6 +4115,7 @@ static std::string TopVocationTitle(const GameState& s) {
     for (int i = 9; i < 12; i++) entries.push_back({ s.*(kCappedSkills[i].field), 3 });  // Magery/EvalInt/Meditation
     for (int i = 12; i < 15; i++) entries.push_back({ s.*(kCappedSkills[i].field), 4 }); // Taming/Lore/Vet
     entries.push_back({ s.parrying, 2 }); // Parrying - a warrior's skill
+    entries.push_back({ s.necromancy, 3 }); // Necromancy - a (dark) mage's
     static const char* kVocationNames[5] = { "Gatherer", "Craftsman", "Warrior", "Mage", "Tamer" };
     float bestVal = 0.0f; int bestVocation = -1;
     for (auto& e : entries) if (e.val > bestVal) { bestVal = e.val; bestVocation = e.vocation; }
@@ -5660,14 +5765,21 @@ static void UseBandageInCombat(GameState& s) {
 // specifically - Mark's explicit ask, a deliberate simplification "for now" rather than
 // scaling reagent cost by spell circle the way the turn-based panel does.
 static const int kLiveCombatReagentCost = 1;
+// Live reagent cost for a spell - the dark school needs none (2026-09-27).
+static int LiveReagentCost(int spellIdx) { return (spellIdx >= 0 && spellIdx < (int)kSpells.size() && kSpells[spellIdx].necro) ? 0 : kLiveCombatReagentCost; }
 static float MaxMana(const GameState& s) { return (float)s.intStat; } // JS currentMaxMana()
 static float EvalIntMultiplier(const GameState& s) { return (EffectiveSkill(s, &GameState::evalInt) * 3.0f / 100.0f) + 1.0f; }
+// The skill a spell is cast (and trained) with: Necromancy for the dark school.
+static float SpellSkill(const GameState& s, const Spell& spell) {
+    return EffectiveSkill(s, spell.necro ? &GameState::necromancy : &GameState::magery);
+}
 static int SpellPowerFor(const GameState& s, const Spell& spell) {
-    return (int)std::round(spell.baseDamage * EvalIntMultiplier(s));
+    float mul = spell.necro ? 1.0f + SpellSkill(s, spell) * 3.0f / 100.0f : EvalIntMultiplier(s); // necromancers scale with their art
+    return (int)std::round(spell.baseDamage * mul);
 }
 // JS spellSuccessChance(): 1% below minSkill, then scales 2%-100% across [minSkill,maxSkill].
 static float SpellSuccessChance(const GameState& s, const Spell& spell) {
-    float magery = EffectiveSkill(s, &GameState::magery);
+    float magery = SpellSkill(s, spell);
     if (magery < spell.minSkill) return 1.0f;
     float pct = 2.0f + (magery - spell.minSkill) / (float)(spell.maxSkill - spell.minSkill) * 98.0f;
     return std::clamp(pct, 1.0f, 100.0f);
@@ -5689,6 +5801,18 @@ static void RegenMana(GameState& s, float dt) {
 // JS applySpellTraining(): every cast (combat or practice) trains Magery (with the
 // same overshoot taper crafting uses), plus a small Eval Int and Meditation roll.
 static void ApplySpellTraining(GameState& s, const Spell& spell, std::string& logOut) {
+    if (spell.necro) { // Necromancy trains itself (and a little Meditation), never Magery
+        float over = std::max(0.0f, s.necromancy - spell.minSkill);
+        float base = std::max(0.05f, 0.6f - over * 0.03f + (RandUnit() * 0.2f - 0.1f));
+        float g = GainSkillCapped(s.necromancy, CraftGainTaper(s.necromancy, base), 100.0f);
+        float med = GainSkillCapped(s.meditation, RollGatherSkillGain(s.meditation) * 0.5f, 100.0f);
+        std::vector<std::string> notes;
+        if (g > 0) notes.push_back("Necromancy +" + std::to_string(g).substr(0, 4));
+        if (med > 0) notes.push_back("Meditation +" + std::to_string(med).substr(0, 4));
+        if (MaybeGainStat(s, &GameState::intStat, 0.05f)) notes.push_back("INT +1");
+        for (size_t i = 0; i < notes.size(); i++) logOut += (i == 0 ? " (" : ", ") + notes[i] + (i + 1 == notes.size() ? ")" : "");
+        return;
+    }
     float overshoot = std::max(0.0f, s.magery - spell.minSkill);
     float mageryBase = std::max(0.05f, 0.6f - overshoot * 0.03f + (RandUnit() * 0.2f - 0.1f));
     // All skill caps are 100 (Mark's call, 2026-09-25): kSpells maxSkill entries are
@@ -5800,12 +5924,12 @@ static void CastHealSpell(GameState& s, int spellIdx) {
 // below (a starting-Magery-0 character could never practice ANYTHING otherwise -
 // found and flagged before implementing, not discovered after).
 static bool CanPracticeSpell(const GameState& s, const Spell& spell) {
-    return EffectiveSkill(s, &GameState::magery) >= (float)spell.minSkill;
+    return SpellSkill(s, spell) >= (float)spell.minSkill;
 }
 static void TryPracticeSpell(GameState& s, int spellIdx) {
     const Spell& spell = kSpells[spellIdx];
     if (!CanPracticeSpell(s, spell)) {
-        s.logLine = "Magery too low to attempt " + spell.name + " (needs " + std::to_string(spell.minSkill) + ").";
+        s.logLine = std::string(spell.necro ? "Necromancy" : "Magery") + " too low to attempt " + spell.name + " (needs " + std::to_string(spell.minSkill) + ").";
         return;
     }
     if (s.mana < spell.manaCost) {
@@ -6265,6 +6389,7 @@ static void SaveGame(const GameState& s) {
     out << "swordsmanship=" << s.swordsmanship << "\nfencing=" << s.fencing << "\nmacing=" << s.macing <<
            "\narchery=" << s.archery << "\nwrestling=" << s.wrestling << "\n";
     out << "parrying=" << s.parrying << "\n";
+    out << "tracking=" << s.tracking << "\nnecromancy=" << s.necromancy << "\n";
     out << "tactics=" << s.tactics << "\nanatomy=" << s.anatomy << "\nmagicResist=" << s.magicResist <<
            "\nhealing=" << s.healing << "\n";
     out << "skillActive=";
@@ -6497,6 +6622,8 @@ static bool LoadGame(GameState& s) {
         else if (key == "tactics") s.tactics = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "anatomy") s.anatomy = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "parrying") s.parrying = std::min(100.0f, (float)std::atof(val.c_str()));
+        else if (key == "tracking") s.tracking = std::min(100.0f, (float)std::atof(val.c_str()));
+        else if (key == "necromancy") s.necromancy = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "magicResist") s.magicResist = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "healing") s.healing = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "skillActive") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < s.skillActive.size(); i++) s.skillActive[i] = std::atoi(p[i].c_str()) != 0; }
@@ -7401,6 +7528,23 @@ static bool GuildThreatActive(const GameState& s, int exceptBlade = -1) {
     }
     return false;
 }
+// Tracking (2026-09-27): Murder Inc.'s hunts and stalks only announce themselves to
+// someone who can read the signs. Every warning is a roll on effective Tracking
+// (none at 0 - they simply arrive); being hunted teaches it, so even a novice
+// slowly learns. At 40+ the warning also says which way the tracks lead.
+static std::string CompassWord(Vector2 from, Vector2 to) {
+    float a = atan2f(to.y - from.y, to.x - from.x) * RAD2DEG; // +y is south
+    static const char* dirs[8] = { "east", "southeast", "south", "southwest", "west", "northwest", "north", "northeast" };
+    int i = ((int)floorf((a + 22.5f + 360.0f) / 45.0f)) % 8;
+    return dirs[i];
+}
+static bool TrackingSenses(GameState& s, Vector2 hunterPos, std::string* dirNote) {
+    if (RandUnit() < 0.6f) GainSkillCapped(s.tracking, std::max(0.05f, RollGatherSkillGain(s.tracking)), 100.0f);
+    float t = EffectiveSkill(s, &GameState::tracking);
+    if (t <= 0.0f || RandUnit() > 0.3f + t / 100.0f * 0.7f) return false;
+    if (dirNote) *dirNote = t >= 40.0f ? " (tracks from the " + CompassWord(s.wildernessPlayerPos, hunterPos) + ")" : "";
+    return true;
+}
 static void BladeStartHunt(GameState& s, int bi, int partner) {
     auto& b = s.blades[bi];
     b.activity = GameState::RivalActivity::Hunting;
@@ -7409,21 +7553,23 @@ static void BladeStartHunt(GameState& s, int bi, int partner) {
         auto& p = s.blades[partner];
         p.activity = GameState::RivalActivity::Hunting;
         p.activityTimer = kBladeHuntGiveUpTime;
-        s.rivalBanner = "Murder Inc. is hunting you!";
-    } else {
-        s.rivalBanner = "The " + BladeName(bi) + " is hunting you!";
     }
+    std::string dir;
+    if (!TrackingSenses(s, b.pos, &dir)) return; // no Tracking: no warning - they just come
+    s.rivalBanner = partner >= 0 && partner < kBladeCount && partner != bi ? "Murder Inc. is hunting you!" : "The " + BladeName(bi) + " is hunting you!";
     s.rivalBannerTimer = kRivalBannerTime;
-    s.logLine = s.rivalBanner;
+    s.logLine = s.rivalBanner + dir;
     PlaySfx(SfxId::Hunt);
 }
 static void BladeStartStalk(GameState& s, int bi) {
     auto& b = s.blades[bi];
     b.activity = GameState::RivalActivity::Stalking;
     b.stalkTimer = kRivalStalkMin + RandUnit() * (kRivalStalkMax - kRivalStalkMin);
+    std::string dir;
+    if (!TrackingSenses(s, b.pos, &dir)) return;
     s.rivalBanner = "You feel watched...";
     s.rivalBannerTimer = kRivalBannerTime * 0.75f;
-    s.logLine = "You feel watched...";
+    s.logLine = "You feel watched..." + dir;
     PlaySfx(SfxId::Hunt);
 }
 
@@ -7435,17 +7581,21 @@ static void RivalStartHunt(GameState& s) {
     s.rivalSprintStartDist = Dist(s.rivalPos, s.wildernessPlayerPos);
     s.rivalSprintStartVel = s.rivalPlayerVel;
     std::string nm = RivalEpithetName(s);
+    std::string dir;
+    if (!TrackingSenses(s, s.rivalPos, &dir)) return;
     s.rivalBanner = s.rivalGrudge >= 1.0f ? "The " + nm + " wants revenge!" : "The " + nm + " is hunting you!";
     s.rivalBannerTimer = kRivalBannerTime;
-    s.logLine = "The " + nm + " is hunting you!";
+    s.logLine = "The " + nm + " is hunting you!" + dir;
     PlaySfx(SfxId::Hunt);
 }
 static void RivalStartStalk(GameState& s) {
     s.rivalActivity = GameState::RivalActivity::Stalking;
     s.rivalStalkTimer = kRivalStalkMin + RandUnit() * (kRivalStalkMax - kRivalStalkMin);
+    std::string dir;
+    if (!TrackingSenses(s, s.rivalPos, &dir)) return;
     s.rivalBanner = "You feel watched...";
     s.rivalBannerTimer = kRivalBannerTime * 0.75f;
-    s.logLine = "You feel watched...";
+    s.logLine = "You feel watched..." + dir;
     PlaySfx(SfxId::Hunt);
 }
 // UO red loots your corpse: 15% of carried gold on every rival kill (bank gold is
@@ -7862,6 +8012,36 @@ static void GuildPickTask(GameState& s, int who, float level) {
 }
 
 // Walk toward a point, sliding along water/ridges. 0 walking, 1 arrived, 2 stuck.
+static bool GuildPathClear(Vector2 from, Vector2 dir, float look); // (with the wilderness solids)
+// Chased home: the others in camp come out to meet you (two blades if they're
+// there, else the champion). Seen with your own eyes - no Tracking roll.
+static void GuildCampRally(GameState& s, int who) {
+    Vector2 camp = kRivalCampSpots[s.rivalCampIdx];
+    if (s.playerIsGhost || Dist(s.wildernessPlayerPos, camp) > 520.0f) return;
+    int first = -1, second = -1;
+    for (int bi = 0; bi < kBladeCount; bi++) {
+        if (bi == who) continue;
+        auto& b = s.blades[bi];
+        if (b.mind.downT > 0.0f || GuildAbsent(b.pos) || b.mind.hpFrac < 0.4f ||
+            b.activity != GameState::RivalActivity::Patrol || Dist(b.pos, camp) > 420.0f) continue;
+        if (first < 0) first = bi; else if (second < 0) second = bi;
+    }
+    if (first >= 0) {
+        s.blades[first].mind.task = kGtNone;
+        if (second >= 0) s.blades[second].mind.task = kGtNone;
+        BladeStartHunt(s, first, second);
+        GuildSay(s, first, 11, true);
+    } else if (who >= 0 && s.rivalMind.downT <= 0.0f && !GuildAbsent(s.rivalPos) && s.rivalMind.hpFrac >= 0.4f &&
+               s.rivalActivity == GameState::RivalActivity::Patrol && Dist(s.rivalPos, camp) < 420.0f) {
+        s.rivalMind.task = kGtNone;
+        RivalStartHunt(s);
+        GuildSay(s, -1, 11, true);
+    } else return;
+    s.rivalBanner = "You followed it into Murder Inc.'s camp!";
+    s.rivalBannerTimer = kRivalBannerTime;
+    s.logLine = "You chased it right into Murder Inc.'s camp - they pour out to meet you!";
+    PlaySfx(SfxId::Hunt);
+}
 static int GuildWalk(GameState::GuildMind& m, Vector2& pos, Vector2 target, float speed, float dt, float arrive) {
     Vector2 d = { target.x - pos.x, target.y - pos.y };
     float l = std::sqrt(d.x * d.x + d.y * d.y);
@@ -7995,11 +8175,34 @@ static void GuildLive(GameState& s, int who, float& level, float dt) {
             break;
         }
         case kGtFlee: {
-            Vector2 camp = GuildCampPos(s, who);
-            GuildWalk(m, pos, camp, kGuildFleeSpeed, dt, 30.0f);
+            // Fleeing (2026-09-27): it runs for camp but never back past you, steers
+            // round trees, ridges and water instead of pinning itself against them,
+            // opens with a sprint, binds its wounds as it goes - and if you chase it
+            // all the way home, whoever is in camp comes out to meet you.
+            Vector2 camp = GuildCampPos(s, who), me = s.wildernessPlayerPos;
+            Vector2 toCamp = { camp.x - pos.x, camp.y - pos.y }, away = { pos.x - me.x, pos.y - me.y };
+            float lc = std::max(1e-3f, hypotf(toCamp.x, toCamp.y)), la = std::max(1e-3f, hypotf(away.x, away.y));
+            toCamp = { toCamp.x / lc, toCamp.y / lc }; away = { away.x / la, away.y / la };
+            float k = (toCamp.x * away.x + toCamp.y * away.y) < 0.2f ? 1.6f : 0.35f;
+            Vector2 want = { toCamp.x + away.x * k, toCamp.y + away.y * k };
+            float lw = std::max(1e-3f, hypotf(want.x, want.y));
+            want = { want.x / lw, want.y / lw };
+            Vector2 dir = want;
+            static const float kOffs[] = { 0.0f, 0.45f, -0.45f, 0.9f, -0.9f, 1.4f, -1.4f, 2.0f, -2.0f, 2.6f, -2.6f };
+            for (float o : kOffs) {
+                Vector2 d = { want.x * cosf(o) - want.y * sinf(o), want.x * sinf(o) + want.y * cosf(o) };
+                if (GuildPathClear(pos, d, 64.0f)) { dir = d; break; }
+            }
+            float spd = m.taskT > 7.0f ? kPlayerSpeed * 1.1f : kGuildFleeSpeed; // an adrenaline burst first
+            Vector2 prev = pos;
+            pos.x += dir.x * spd * dt; pos.y += dir.y * spd * dt;
+            if (!WildBlocked(prev)) WildTerrainResolve(pos, prev);
+            m.hpFrac = std::min(1.0f, m.hpFrac + 0.012f * dt); // bandaging on the run
             m.taskT -= dt;
-            if (m.taskT <= 0.0f || Dist(pos, s.wildernessPlayerPos) > 750.0f || s.screen != Screen::Wilderness) {
-                m.task = kGtRest; m.target = camp; m.working = false;
+            bool home = Dist(pos, camp) < 70.0f;
+            if (home) GuildCampRally(s, who);
+            if (home || m.taskT <= 0.0f || Dist(pos, me) > 750.0f || s.screen != Screen::Wilderness) {
+                m.task = kGtRest; m.target = camp; m.working = home;
             }
             break;
         }
@@ -8934,7 +9137,7 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
         if (has) {
             const Spell& sp = kSpells[spellIdx];
             if (inCombat) {
-                affordable = s.mana >= sp.manaCost && s.reagents >= kLiveCombatReagentCost;
+                affordable = s.mana >= sp.manaCost && s.reagents >= LiveReagentCost(spellIdx);
                 if (spellCds != nullptr) {
                     cdLeft = std::max(spellCds[spellIdx], castLockT);
                     cdFrac = std::max(spellCds[spellIdx] / kSpellCooldown, castLockT / kCastLockTime);
@@ -8953,7 +9156,8 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
         if (has) {
             const Spell& sp = kSpells[spellIdx];
             const Texture2D* icon = nullptr;
-            if (spellIdx < 16 && g_assets.spellIconPerSpellOk[spellIdx]) icon = &g_assets.spellIconPerSpell[spellIdx];
+            if (sp.necro) icon = NecroIcon(spellIdx);
+            else if (spellIdx < 16 && g_assets.spellIconPerSpellOk[spellIdx]) icon = &g_assets.spellIconPerSpell[spellIdx];
             else if (sp.type == SpellType::Utility && g_assets.spellIconUtilityOk) icon = &g_assets.spellIconUtility;
             else if (g_assets.spellIconOffensiveOk) icon = &g_assets.spellIconOffensive;
             float inset = down ? 5.0f : 4.0f;
@@ -9028,11 +9232,16 @@ static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppre
     // suppressPress: the tap that opened the picker is still "pressed" this frame -
     // ignore it here so it can't instantly fire a picker button under the finger.
     std::vector<int> known;
-    for (size_t i = 0; i < kSpells.size(); i++) {
-        const Spell& sp = kSpells[i];
-        if ((sp.type == SpellType::Offensive || sp.type == SpellType::Utility) && EffectiveSkill(s, &GameState::magery) >= sp.minSkill)
-            known.push_back((int)i);
-    }
+    // Necromancy (2026-09-27): every dark-school spell can go on the bar; the
+    // school you're better at is listed first (the list truncates when long).
+    bool necroFirst = s.necromancy > s.magery;
+    for (int pass = 0; pass < 2; pass++)
+        for (size_t i = 0; i < kSpells.size(); i++) {
+            const Spell& sp = kSpells[i];
+            if (sp.necro != (pass == 0 ? necroFirst : !necroFirst)) continue;
+            if ((sp.necro || sp.type == SpellType::Offensive || sp.type == SpellType::Utility) && SpellSkill(s, sp) >= sp.minSkill)
+                known.push_back((int)i);
+        }
     float listBottom = overlay.y + overlay.height - 52;
     if (known.empty()) DrawUIText("No spells known yet - practice below to learn some.", (int)overlay.x + 20, (int)y + 8, 13, Color{ 90, 60, 34, 255 });
     Vector2 m = GetMousePosition();
@@ -9045,11 +9254,14 @@ static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppre
         DrawRectangleRec(row, Fade(current ? Color{ 255, 214, 110, 255 } : Color{ 90, 60, 34, 255 }, hover ? 0.28f : (current ? 0.22f : 0.10f)));
         DrawRectangleLinesEx(row, 1.0f, Fade(kUoBronze, 0.7f));
         Rectangle ir = { row.x + 4, row.y + 4, 34, 34 };
-        if (idx < 16 && g_assets.spellIconPerSpellOk[idx])
+        if (const Texture2D* ni = NecroIcon(idx)) DrawTexturePro(*ni, { 0, 0, (float)ni->width, (float)ni->height }, ir, { 0, 0 }, 0.0f, WHITE);
+        else if (idx < 16 && g_assets.spellIconPerSpellOk[idx])
             DrawTexturePro(g_assets.spellIconPerSpell[idx], { 0, 0, (float)g_assets.spellIconPerSpell[idx].width, (float)g_assets.spellIconPerSpell[idx].height }, ir, { 0, 0 }, 0.0f, WHITE);
         else DrawRectangleRec(ir, Color{ 60, 44, 30, 255 });
         DrawRectangleLinesEx(ir, 1.5f, kUoBronze);
-        const char* tag = sp.type == SpellType::Offensive ? "Attack" : (idx == kRecallSpellIdx ? "Travel" : "Heal / Aid");
+        const char* tag = sp.necro ? (sp.type == SpellType::Summon ? "Necromancy - Raise" : sp.type == SpellType::Debuff ? "Necromancy - Curse"
+                                      : sp.type == SpellType::Buff ? "Necromancy - Ward" : "Necromancy - Attack")
+                        : sp.type == SpellType::Offensive ? "Attack" : (idx == kRecallSpellIdx ? "Travel" : "Heal / Aid");
         DrawUIText(sp.name.c_str(), (int)row.x + 48, (int)row.y + 5, 15, Color{ 70, 40, 20, 255 });
         DrawUIText(TextFormat("%s  -  Circle %d  -  %d mana", tag, sp.circle, sp.manaCost), (int)row.x + 48, (int)row.y + 24, 11, Color{ 110, 80, 50, 255 });
         if (!suppressPress && UOTapped(row)) {
@@ -9093,14 +9305,47 @@ static void DrawLiveCombatHud(const GameState& s, float x, float y) {
 // monster to hit). UseBandageOutOfCombat's own `!s.combat.has_value()` guard is
 // harmless here since a live engagement and the old panel's s.combat are never both
 // active at once.
-static void DrawLiveCombatQuickItems(GameState& s) {
+static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone);
+static GameState::WorldCorpse* NecroFindCorpse(GameState& s, int zone, Vector2 near, float range);
+// Best self-heal spell you can cast right now (Greater Mending once Magery allows), or -1.
+static int BestHealSpell(const GameState& s) {
+    float mag = EffectiveSkill(s, &GameState::magery);
+    if (mag >= (float)kSpells[9].minSkill) return 9; // Greater Mending
+    return 1;                                        // Mending Word (circle 1, anyone may try)
+}
+static float g_oocHealCd = 0.0f; // out-of-combat heal spell recast delay
+// Out-of-combat self-heal (2026-09-27): the heal spell away from a fight - same
+// cast path and costs as in combat, with a short recast delay.
+static void CastHealOutOfCombat(GameState& s, int zone) {
+    int sp = BestHealSpell(s);
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    if (s.hp >= s.maxHp) { s.logLine = "You're already at full health."; return; }
+    if (g_oocHealCd > 0.0f) return;
+    if (s.mana < kSpells[sp].manaCost) { s.logLine = "Not enough mana for " + kSpells[sp].name + "."; return; }
+    if (s.reagents < kLiveCombatReagentCost) { s.logLine = "No reagents for " + kSpells[sp].name + "."; return; }
+    g_oocHealCd = 1.5f;
+    CastLiveUtilitySpell(s, sp, zone);
+}
+static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     // Belt pouch (2026-09-26): bandages and heal potions as framed slots in the
-    // spell bar's style, stack counts in the corner.
+    // spell bar's style, stack counts in the corner. Out of combat (oocZone >= 0,
+    // 2026-09-27) it also carries your heal spell, and only shows while you're hurt.
     float y = kViewport.y + kViewport.height - 146.0f;
     std::vector<int> potions;
     for (size_t i = 0; i < s.potions.size() && potions.size() < 2; i++)
         if (s.potions[i].effect == "heal") potions.push_back((int)i);
-    int n = 1 + (int)potions.size();
+    const bool ooc = oocZone >= 0;
+    g_oocHealCd = std::max(0.0f, g_oocHealCd - GetFrameTime());
+    // Necromancy (2026-09-27): with a Raise spell on your bar and a body close by,
+    // the belt offers to raise it between fights - kill, raise, move on.
+    int raiseIdx = -1;
+    if (ooc && !s.playerIsGhost) {
+        for (int sp : s.combatHotbar)
+            if ((sp == kSpRaiseSkeleton || sp == kSpSkeletalMage) && CanPracticeSpell(s, kSpells[sp])) { raiseIdx = sp; break; }
+        if (raiseIdx >= 0 && !NecroFindCorpse(s, oocZone, oocZone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos, 280.0f)) raiseIdx = -1;
+    }
+    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
+    int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0);
     const float sz = 42.0f, gap = 8.0f;
     Rectangle bar = { 166.0f, y - 6.0f, n * sz + (n - 1) * gap + 18.0f, sz + 12.0f };
     UODrawGump(bar, kUoDarkWood);
@@ -9130,6 +9375,34 @@ static void DrawLiveCombatQuickItems(GameState& s) {
             PlaySfx(SfxId::Click);
             DrinkPotion(s, pi);
             break; // the list may have shifted
+        }
+    }
+    if (ooc) { // the heal spell, with its mana cost under the icon
+        int sp = BestHealSpell(s);
+        bool can = s.mana >= kSpells[sp].manaCost && s.reagents >= kLiveCombatReagentCost && g_oocHealCd <= 0.0f;
+        if (slot(1 + (int)potions.size(), can, 0, [&](Rectangle r) {
+                float cx = r.x + r.width / 2, cy = r.y + r.height / 2 - 3;
+                DrawCircleV({ cx, cy }, 14.0f, Fade(Color{ 120, 255, 150, 255 }, 0.25f));
+                DrawRectangleRec({ cx - 3.5f, cy - 11, 7, 22 }, Color{ 120, 235, 140, 255 });
+                DrawRectangleRec({ cx - 11, cy - 3.5f, 22, 7 }, Color{ 120, 235, 140, 255 });
+                DrawUIText(TextFormat("%d", kSpells[sp].manaCost), (int)r.x + 3, (int)(r.y + r.height - 14), 11, Color{ 140, 190, 255, 255 }); })) {
+            PlaySfx(SfxId::Click);
+            CastHealOutOfCombat(s, oocZone);
+        }
+    }
+    if (raiseIdx >= 0) { // a skull: raise the dead
+        bool can = s.mana >= kSpells[raiseIdx].manaCost && g_oocHealCd <= 0.0f;
+        if (slot(2 + (int)potions.size(), can, 0, [&](Rectangle r) {
+                float cx = r.x + r.width / 2, cy = r.y + r.height / 2 - 2;
+                DrawCircleV({ cx, cy }, 15.0f, Fade(Color{ 120, 255, 150, 255 }, 0.22f));
+                DrawCircleV({ cx, cy - 2 }, 10.0f, Color{ 230, 224, 200, 255 });
+                DrawRectangleRec({ cx - 6, cy + 5, 12, 7 }, Color{ 230, 224, 200, 255 });
+                DrawCircleV({ cx - 4, cy - 2 }, 2.6f, Color{ 30, 24, 24, 255 });
+                DrawCircleV({ cx + 4, cy - 2 }, 2.6f, Color{ 30, 24, 24, 255 });
+                DrawUIText(TextFormat("%d", kSpells[raiseIdx].manaCost), (int)r.x + 3, (int)(r.y + r.height - 14), 11, Color{ 140, 190, 255, 255 }); })) {
+            PlaySfx(SfxId::Click);
+            g_oocHealCd = 1.0f;
+            CastLiveUtilitySpell(s, raiseIdx, oocZone);
         }
     }
 }
@@ -12714,6 +12987,180 @@ static void Town3DDrawHouse(float cx, float cz, const Model& wall, const Model& 
 
 // One town building -> its MegaKit assembly. Footprints match the old box layout
 // (picking boxes in Town3DPick are unchanged).
+// ---- Shop signs (2026-09-27) ----------------------------------------------------------
+// UO-style trade signs: a painted plank board hung on an iron bracket by each
+// shop's door, so the trade reads from the street - anvil and hammer for the
+// smith, a saw for the carpenter, shears for the tailor, a flask for the
+// alchemist, a horseshoe, an ankh, a coin stack... with the trade's name lettered
+// underneath. Painted once per trade into a small texture (CPU image drawing).
+static float SurfRand(int x, int y, int k); // (room surfaces, further down)
+static Color SurfMul(Color c, float f);
+static const char* ShopSignWord(const std::string& k) {
+    if (k == "smith") return "BLACKSMITH";
+    if (k == "carpenter") return "CARPENTER";
+    if (k == "tailor") return "TAILOR";
+    if (k == "alchemy") return "ALCHEMIST";
+    if (k == "townhall") return "TOWN HALL";
+    if (k == "stable") return "STABLES";
+    if (k == "healer") return "HEALER";
+    if (k == "bank") return "BANK";
+    if (k == "provisioner") return "PROVISIONS";
+    if (k == "furtrader") return "FURRIER";
+    if (k == "minersguild") return "MINERS' GUILD";
+    return nullptr;
+}
+static void SignLine(Image& im, float x0, float y0, float x1, float y1, int th, Color c) {
+    ImageDrawLineEx(&im, { x0, y0 }, { x1, y1 }, th, c);
+}
+static void ShopSignPaintIcon(Image& im, const std::string& k, Color board) {
+    const Color iron = { 58, 58, 66, 255 }, ironHi = { 120, 122, 132, 255 }, gold = { 222, 176, 60, 255 }, goldDk = { 150, 108, 30, 255 };
+    const Color wood = { 150, 100, 56, 255 }, woodDk = { 96, 62, 34, 255 }, red = { 170, 40, 36, 255 };
+    const int cx = 64, cy = 36;
+    if (k == "smith") { // anvil with a hammer over it
+        ImageDrawRectangle(&im, 38, 30, 56, 8, iron);               // face
+        ImageDrawTriangle(&im, { 38, 30 }, { 22, 31 }, { 38, 37 }, iron); // horn
+        ImageDrawRectangle(&im, 52, 38, 26, 10, iron);              // waist
+        ImageDrawRectangle(&im, 42, 48, 46, 8, iron);               // foot
+        ImageDrawRectangle(&im, 38, 30, 56, 2, ironHi);
+        SignLine(im, 72, 26, 96, 6, 4, woodDk);                     // hammer handle
+        ImageDrawRectangle(&im, 90, 2, 16, 10, iron);               // hammer head
+        ImageDrawRectangle(&im, 90, 2, 16, 2, ironHi);
+    } else if (k == "carpenter") { // a hand saw
+        ImageDrawTriangle(&im, { 30, 24 }, { 30, 44 }, { 104, 40 }, ironHi);
+        for (int x = 34; x < 100; x += 6) ImageDrawTriangle(&im, { (float)x, 43 }, { (float)x + 3, 49 }, { (float)x + 6, 42 }, iron);
+        ImageDrawRectangle(&im, 14, 20, 18, 28, wood);
+        ImageDrawRectangle(&im, 18, 27, 8, 12, board);
+    } else if (k == "tailor") { // open shears
+        SignLine(im, 40, 54, 96, 12, 5, iron); SignLine(im, 40, 18, 96, 58, 5, iron);
+        SignLine(im, 40, 54, 96, 12, 1, ironHi);
+        ImageDrawCircle(&im, 34, 58, 9, iron); ImageDrawCircle(&im, 34, 58, 5, board);
+        ImageDrawCircle(&im, 34, 14, 9, iron); ImageDrawCircle(&im, 34, 14, 5, board);
+        ImageDrawCircle(&im, 64, 36, 3, gold);
+    } else if (k == "alchemy") { // a round flask, bubbling green
+        ImageDrawCircle(&im, cx, 44, 20, Color{ 200, 220, 210, 255 });
+        ImageDrawCircle(&im, cx, 46, 17, Color{ 70, 170, 90, 255 });
+        ImageDrawRectangle(&im, cx - 20, 30, 40, 12, Color{ 200, 220, 210, 255 });
+        ImageDrawCircle(&im, cx, 44, 17, Color{ 70, 170, 90, 255 });
+        ImageDrawRectangle(&im, cx - 17, 26, 34, 14, Color{ 200, 220, 210, 255 });
+        ImageDrawRectangle(&im, cx - 6, 6, 12, 22, Color{ 200, 220, 210, 255 });
+        ImageDrawRectangle(&im, cx - 7, 2, 14, 6, woodDk);
+        ImageDrawCircle(&im, cx - 6, 44, 3, Color{ 160, 240, 170, 255 }); ImageDrawCircle(&im, cx + 7, 50, 2, Color{ 160, 240, 170, 255 });
+        ImageDrawCircle(&im, cx - 8, 36, 3, Color{ 255, 255, 255, 180 });
+    } else if (k == "townhall") { // a crown
+        ImageDrawRectangle(&im, 34, 42, 60, 14, gold);
+        ImageDrawTriangle(&im, { 34, 42 }, { 44, 42 }, { 36, 14 }, gold);
+        ImageDrawTriangle(&im, { 56, 42 }, { 72, 42 }, { 64, 8 }, gold);
+        ImageDrawTriangle(&im, { 84, 42 }, { 94, 42 }, { 92, 14 }, gold);
+        ImageDrawRectangle(&im, 34, 52, 60, 4, goldDk);
+        ImageDrawCircle(&im, 64, 48, 4, red); ImageDrawCircle(&im, 46, 48, 3, Color{ 50, 90, 170, 255 }); ImageDrawCircle(&im, 82, 48, 3, Color{ 50, 90, 170, 255 });
+    } else if (k == "stable") { // a horseshoe, open end up
+        ImageDrawCircle(&im, cx, 38, 22, iron);
+        ImageDrawCircle(&im, cx, 38, 12, board);
+        ImageDrawRectangle(&im, cx - 12, 14, 24, 26, board);
+        ImageDrawRectangle(&im, cx - 23, 14, 11, 24, iron); ImageDrawRectangle(&im, cx + 12, 14, 11, 24, iron);
+        for (int i = 0; i < 3; i++) { ImageDrawCircle(&im, cx - 17, 22 + i * 10, 2, ironHi); ImageDrawCircle(&im, cx + 17, 22 + i * 10, 2, ironHi); }
+    } else if (k == "healer") { // a golden ankh
+        ImageDrawCircle(&im, cx, 18, 13, gold); ImageDrawCircle(&im, cx, 18, 7, board);
+        ImageDrawRectangle(&im, cx - 22, 30, 44, 7, gold);
+        ImageDrawRectangle(&im, cx - 4, 28, 8, 32, gold);
+        ImageDrawRectangle(&im, cx - 22, 30, 44, 2, Color{ 250, 220, 140, 255 });
+    } else if (k == "bank") { // coin stacks
+        for (int st = 0; st < 3; st++) {
+            int bx = 36 + st * 22, h = 4 + st * 2;
+            for (int j = 0; j < h; j++) {
+                ImageDrawRectangle(&im, bx, 54 - j * 5, 22, 5, j % 2 ? goldDk : gold);
+                ImageDrawRectangle(&im, bx, 54 - j * 5, 22, 1, Color{ 250, 220, 140, 255 });
+            }
+        }
+    } else if (k == "provisioner") { // a loaf and a sack of grain
+        ImageDrawCircle(&im, 46, 42, 14, Color{ 200, 160, 110, 255 });
+        ImageDrawRectangle(&im, 32, 42, 28, 14, Color{ 200, 160, 110, 255 });
+        ImageDrawCircle(&im, 46, 40, 11, Color{ 212, 172, 120, 255 });
+        ImageDrawRectangle(&im, 40, 34, 3, 3, Color{ 226, 190, 130, 255 }); // ties
+        ImageDrawCircle(&im, 84, 42, 13, Color{ 196, 140, 70, 255 });       // loaf
+        ImageDrawRectangle(&im, 71, 42, 26, 12, Color{ 196, 140, 70, 255 });
+        SignLine(im, 78, 34, 82, 44, 2, Color{ 140, 90, 40, 255 }); SignLine(im, 88, 34, 92, 44, 2, Color{ 140, 90, 40, 255 });
+    } else if (k == "furtrader") { // a stretched pelt
+        ImageDrawCircle(&im, cx, 36, 18, Color{ 150, 110, 70, 255 });
+        ImageDrawRectangle(&im, cx - 12, 14, 24, 44, Color{ 150, 110, 70, 255 });
+        ImageDrawTriangle(&im, { (float)cx - 14, 20 }, { (float)cx - 32, 10 }, { (float)cx - 12, 28 }, Color{ 130, 94, 60, 255 });
+        ImageDrawTriangle(&im, { (float)cx + 14, 20 }, { (float)cx + 12, 28 }, { (float)cx + 32, 10 }, Color{ 130, 94, 60, 255 });
+        ImageDrawTriangle(&im, { (float)cx - 14, 48 }, { (float)cx - 12, 56 }, { (float)cx - 32, 62 }, Color{ 130, 94, 60, 255 });
+        ImageDrawTriangle(&im, { (float)cx + 14, 48 }, { (float)cx + 32, 62 }, { (float)cx + 12, 56 }, Color{ 130, 94, 60, 255 });
+        ImageDrawCircle(&im, cx, 36, 8, Color{ 176, 136, 92, 255 });
+    } else if (k == "minersguild") { // crossed picks
+        SignLine(im, 32, 58, 94, 10, 5, wood); SignLine(im, 32, 10, 94, 58, 5, wood);
+        SignLine(im, 80, 4, 106, 26, 5, iron); SignLine(im, 22, 26, 48, 4, 5, iron);
+    }
+}
+struct ShopSignTex { std::string key; Texture2D tex{}; };
+static std::vector<ShopSignTex> g_shopSigns;
+static const Texture2D* ShopSignTexture(const std::string& key) {
+    for (auto& t : g_shopSigns) if (t.key == key) return &t.tex;
+    const char* word = ShopSignWord(key);
+    if (!word) return nullptr;
+    const int W = 128, H = 100;
+    Image im = GenImageColor(W, H, BLANK);
+    Color* px = (Color*)im.data;
+    for (int y = 0; y < H; y++) // planks with grain
+        for (int x = 0; x < W; x++) {
+            int plank = y / 25;
+            float g = sinf(x * 0.18f + plank * 3.1f + sinf(y * 0.5f) * 0.8f) * 0.5f + 0.5f;
+            float n = SurfRand(x, y, 77) * 0.12f;
+            float v = 0.78f + g * 0.14f + n - ((y % 25) < 1 ? 0.25f : 0.0f);
+            px[y * W + x] = SurfMul(Color{ 176, 128, 80, 255 }, v);
+        }
+    Color board = SurfMul(Color{ 176, 128, 80, 255 }, 0.85f);
+    ImageDrawRectangleLines(&im, { 0, 0, (float)W, (float)H }, 4, Color{ 70, 46, 28, 255 });
+    ImageDrawRectangleLines(&im, { 5, 5, (float)W - 10, (float)H - 10 }, 1, Color{ 214, 170, 90, 255 });
+    ShopSignPaintIcon(im, key, board);
+    Font f = g_assets.uiFont.texture.id > 0 ? g_assets.uiFont : GetFontDefault();
+    float fs = 15.0f;
+    Vector2 ts = MeasureTextEx(f, word, fs, 1.0f);
+    if (ts.x > W - 14) { fs *= (W - 14) / ts.x; ts = MeasureTextEx(f, word, fs, 1.0f); }
+    Vector2 tp = { (W - ts.x) * 0.5f, 74.0f + (20.0f - ts.y) * 0.5f };
+    ImageDrawTextEx(&im, f, word, { tp.x + 1, tp.y + 1 }, fs, 1.0f, Color{ 40, 24, 12, 255 });
+    ImageDrawTextEx(&im, f, word, tp, fs, 1.0f, Color{ 240, 206, 120, 255 });
+    ShopSignTex t;
+    t.key = key;
+    t.tex = LoadTextureFromImage(im);
+    UnloadImage(im);
+    GenTextureMipmaps(&t.tex);
+    SetTextureFilter(t.tex, TEXTURE_FILTER_TRILINEAR);
+    g_shopSigns.push_back(t);
+    return &g_shopSigns.back().tex;
+}
+// The sign itself: an iron bar held off the wall on two arms, chains, and the
+// painted board swinging gently beneath it, facing the street.
+static void Town3DDrawShopSign(const std::string& key, float x, float wallZ) {
+    const Texture2D* tex = ShopSignTexture(key);
+    if (!tex) return;
+    const float out = 12.0f, barY = 64.0f, bw = 46.0f, bh = 36.0f, hang = 5.0f;
+    float night = g_t3dNight, lit = 1.0f - 0.55f * night;
+    Color iron = SurfMul(Color{ 44, 42, 46, 255 }, lit), woodC = SurfMul(Color{ 110, 74, 44, 255 }, lit);
+    DrawCube({ x - bw * 0.5f, barY, wallZ + out * 0.5f }, 1.6f, 1.6f, out, iron);
+    DrawCube({ x + bw * 0.5f, barY, wallZ + out * 0.5f }, 1.6f, 1.6f, out, iron);
+    DrawCube({ x, barY, wallZ + out }, bw + 6.0f, 1.8f, 1.8f, iron);
+    float swing = sinf((float)GetTime() * 1.3f + x * 0.01f) * 5.0f;
+    rlPushMatrix();
+    rlTranslatef(x, barY, wallZ + out);
+    rlRotatef(swing, 1, 0, 0);
+    for (int side = -1; side <= 1; side += 2) DrawCube({ side * bw * 0.36f, -hang * 0.5f, 0 }, 0.8f, hang, 0.8f, iron); // chains
+    float top = -hang, bot = -hang - bh;
+    DrawCube({ 0, (top + bot) * 0.5f, -0.9f }, bw + 1.6f, bh + 1.6f, 1.4f, woodC); // board body / back
+    unsigned char c = (unsigned char)(255 * lit);
+    rlSetTexture(tex->id);
+    rlBegin(RL_QUADS);
+    rlColor4ub(c, c, c, 255);
+    rlNormal3f(0, 0, 1);
+    rlTexCoord2f(0, 1); rlVertex3f(-bw * 0.5f, bot, 0.0f);
+    rlTexCoord2f(1, 1); rlVertex3f(bw * 0.5f, bot, 0.0f);
+    rlTexCoord2f(1, 0); rlVertex3f(bw * 0.5f, top, 0.0f);
+    rlTexCoord2f(0, 0); rlVertex3f(-bw * 0.5f, top, 0.0f);
+    rlEnd();
+    rlSetTexture(0);
+    rlPopMatrix();
+}
 static void Town3DDrawBuilding(const std::string& key, float cx, float cz) {
     Town3DModels& M = g_t3dModels;
     bool brick = (key == "smith" || key == "alchemy" || key == "bank");
@@ -12729,14 +13176,17 @@ static void Town3DDrawBuilding(const std::string& key, float cx, float cz) {
         // Two-story, 3x2 modules - the town's landmark. Roof46's long axis runs
         // along z, so it is turned 90 degrees to cover the 6m x-axis span.
         Town3DDrawHouse(cx, cz, w, wd, ww, M.roof46, 90.0f, 3, 2, 2, true, wallTint, roofTint);
+        Town3DDrawShopSign(key, cx - 2.0f * S, cz + 2.0f * S);
     } else if (key == "bank" || key == "stable") {
         Town3DDrawHouse(cx, cz, w, wd, ww, M.roof46, 90.0f, 3, 2, 1, key == "bank", wallTint, roofTint);
+        Town3DDrawShopSign(key, cx - 2.0f * S, cz + 2.0f * S);
         if (key == "stable") // wagon parked on the grass west of the stable
             // (kept clear of the house's footprint and the middle lane)
             Town3DDrawPiece(M.wagon, { cx - 5.2f * S, 0.0f, cz + 5.2f * S }, 90.0f);
     } else {
         Town3DDrawHouse(cx, cz, w, wd, ww, M.roof44, 0.0f, 2, 2, 1,
                         key == "smith" || key == "alchemy", wallTint, roofTint);
+        Town3DDrawShopSign(key, cx - 0.95f * S, cz + 2.0f * S);
         if (key == "carpenter" || key == "provisioner") { // crates of goods by the door
             // (kept just north of the lanes so they never sit on the road)
             Town3DDrawPiece(M.crate, { cx + 3.4f * S, 0.0f, cz + 1.8f * S }, 15.0f);
@@ -13326,6 +13776,14 @@ static void DrawMinimap(GameState& s) {
         int si = s.wildEngaged->spotIdx;
         if (si >= 0 && si < (int)kWildernessMonsterSpots.size())
             DrawCircleV(toMap(s.wildEngaged->pos), 3.5f, Color{ 230, 60, 50, 255 });
+    }
+    // Tracking 30+ (2026-09-27): Murder Inc. members hunting or stalking you show as
+    // pulsing red marks - UO's tracking arrow, minimap style.
+    if (EffectiveSkill(s, &GameState::tracking) >= 30.0f) {
+        float pulse = 0.6f + 0.4f * sinf((float)GetTime() * 6.0f);
+        auto mark = [&](Vector2 w) { Vector2 p = toMap(w); if (inside(p, 2)) { DrawCircleV(p, 5.0f, Fade(Color{ 230, 40, 40, 255 }, 0.35f * pulse)); DrawCircleV(p, 3.0f, Color{ 230, 40, 40, 255 }); } };
+        if (s.rivalActivity != GameState::RivalActivity::Patrol) mark(s.rivalPos);
+        for (int bi = 0; bi < kBladeCount; bi++) if (s.blades[bi].activity != GameState::RivalActivity::Patrol) mark(s.blades[bi].pos);
     }
     MapIconPlayer(toMap(s.wildernessPlayerPos), s.playerFacing, 5.0f);
     EndScissorMode();
@@ -14137,6 +14595,7 @@ static void WildHeightEnsure() {
     for (const auto& e : kWildernessDungeonEntrances) flats.push_back({ e.pos.x, e.pos.y, 130.0f });
     for (const auto& g : kTownGates) flats.push_back({ g.wildernessPos.x, g.wildernessPos.y, 220.0f });
     for (const auto& hp : kHousePlots) flats.push_back({ hp.pos.x, hp.pos.y, 60.0f + hp.cells * kHouseCellSize * 0.75f });
+    for (const auto& cp : kRivalCampSpots) flats.push_back({ cp.x, cp.y, 250.0f }); // Murder Inc.'s war camps (2026-09-27)
     for (const auto& sh : kShrines) flats.push_back({ sh.pos.x, sh.pos.y, 110.0f });
     for (const auto& d : kSaltDocks) flats.push_back({ d.pos.x, d.pos.y, 140.0f });
     flats.push_back({ kFieldsOfSorrow.x, kFieldsOfSorrow.y, kFieldsOfSorrowRadius + 60.0f });
@@ -14755,6 +15214,8 @@ static void Wild3DBuildScatter() {
             float dx = x - p.x, dz = z - p.y;
             if (dx * dx + dz * dz < 110.0f * 110.0f) return false;
         }
+        for (const Vector2& p : kRivalCampSpots) // war camps stand in cleared ground
+            if (Dist({ x, z }, p) < 215.0f) return false;
         return true;
     };
     struct Zone { float x0, x1, z0, z1, step, density; int kind; };
@@ -14946,6 +15407,7 @@ static void Wild3DBuildDressing() {
     for (const auto& f : kWildernessFoliage) keep.push_back({ f.pos, 40.0f });
     for (const auto& ip : kWildernessInnocentSpots) keep.push_back({ ip.pos, 80.0f });
     for (const auto& hp : kHousePlots) keep.push_back({ hp.pos, 40.0f + hp.cells * kHouseCellSize * 0.5f });
+    for (const auto& cp : kRivalCampSpots) keep.push_back({ cp, 215.0f });
     for (const auto& sh : kShrines) keep.push_back({ sh.pos, 100.0f });
     for (const auto& d : kSaltDocks) keep.push_back({ d.pos, 130.0f });
     keep.push_back({ kFieldsOfSorrow, kFieldsOfSorrowRadius + 40.0f });
@@ -15645,6 +16107,17 @@ static void SolidResolve(const SolidGrid& G, Vector2& p, float radius) {
         for (const SolidCircle& c : G.cells[(size_t)gz * G.n + gx])
             ResolveCircleCollision(p, radius, { c.x, c.z }, c.r);
 }
+// Is the way ahead free of trees, rocks, ridges and water? (fleeing guild steering)
+static bool GuildPathClear(Vector2 from, Vector2 dir, float look) {
+    for (float d = 14.0f; d <= look; d += 14.0f) {
+        Vector2 p = { from.x + dir.x * d, from.y + dir.y * d };
+        if (WildBlocked(p)) return false;
+        Vector2 q = p;
+        SolidResolve(g_wildSolids, q, 12.0f);
+        if (fabsf(q.x - p.x) + fabsf(q.y - p.y) > 0.5f) return false;
+    }
+    return true;
+}
 
 static void TownSolidsBuild(int town) {
     SolidGrid& G = g_townSolids;
@@ -16185,6 +16658,226 @@ static void Wild3DDrawCorpse(const GameState::WorldCorpse& c, bool shadowPass) {
     rlPopMatrix();
     if (!shadowPass) CorpseDrawGlint(c);
 }
+// ---- Murder Inc.'s war camp (2026-09-27) --------------------------------------------
+// Where the guild musters between hunts: a ring palisade of sharpened stakes with
+// a gate and two watchtowers, the champion's command tent under banners, a row
+// of soldiers' tents, a central campfire, training dummies, weapon racks and
+// supplies - and a few recruits drilling, standing sentry and warming their
+// hands. The gate faces the middle of the map. Built once per camp site.
+static const Texture2D& GlowTex();                                  // (with the room surfaces)
+static void GlowPool(float x, float z, float y, float r, Color c);
+static const float kCampRadius = 170.0f;
+static float RivalCampGateYaw(Vector2 c) { return atan2f(1600.0f - c.y, 1600.0f - c.x); } // gate direction
+static bool RivalCampInGate(Vector2 c, Vector2 p) {
+    float a = atan2f(p.y - c.y, p.x - c.x) - RivalCampGateYaw(c);
+    a = atan2f(sinf(a), cosf(a));
+    return fabsf(a) < 0.26f;
+}
+// The palisade stops you (and only you - the guild comes and goes through it).
+static void RivalCampResolve(const GameState& s, Vector2& p, float r) {
+    Vector2 c = kRivalCampSpots[s.rivalCampIdx];
+    float d = Dist(p, c);
+    if (d < 1.0f || fabsf(d - kCampRadius) > r + 6.0f || RivalCampInGate(c, p)) return;
+    float want = d < kCampRadius ? kCampRadius - r - 6.0f : kCampRadius + r + 6.0f;
+    p = { c.x + (p.x - c.x) / d * want, c.y + (p.y - c.y) / d * want };
+}
+struct RivalCampModel { bool built = false; Model m{}; };
+static RivalCampModel g_campModels[5];
+static void RivalCampBuild(int idx) {
+    RivalCampModel& cm = g_campModels[idx];
+    if (cm.built) return;
+    cm.built = true;
+    Vector2 c = kRivalCampSpots[idx];
+    float gate = RivalCampGateYaw(c);
+    T3CMeshBuilder b;
+    const Color log = { 112, 80, 52, 255 }, logDk = { 84, 60, 40, 255 }, tip = { 150, 120, 86, 255 }, rope = { 170, 150, 110, 255 };
+    // palisade stakes
+    int n = (int)(6.2832f * kCampRadius / 9.0f);
+    for (int i = 0; i < n; i++) {
+        float a = gate + 6.2832f * i / n;
+        float rel = atan2f(sinf(a - gate), cosf(a - gate));
+        if (fabsf(rel) < 0.2f) continue; // the gateway
+        float h = 44.0f + Town3DHash01((float)i, (float)idx) * 12.0f;
+        float x = cosf(a) * kCampRadius, z = sinf(a) * kCampRadius;
+        T3CCylinder(b, x, 0.0f, z, h, 4.6f, 4.2f, 6, (i % 3) ? log : logDk, false, false);
+        T3CCylinder(b, x, h, z, h + 9.0f, 4.2f, 0.3f, 6, tip, false, false);
+    }
+    // two rope/beam bindings round the wall
+    for (int ring = 0; ring < 2; ring++) {
+        float y = 16.0f + ring * 20.0f;
+        for (int i = 0; i < n; i++) {
+            float a0 = gate + 6.2832f * i / n, a1 = gate + 6.2832f * (i + 1) / n;
+            float rel = atan2f(sinf(a0 - gate), cosf(a0 - gate)), rel1 = atan2f(sinf(a1 - gate), cosf(a1 - gate));
+            if (fabsf(rel) < 0.2f || fabsf(rel1) < 0.2f) continue;
+            float r = kCampRadius + 4.5f;
+            float p0[3] = { cosf(a0) * r, y, sinf(a0) * r }, p1[3] = { cosf(a1) * r, y, sinf(a1) * r };
+            float p2[3] = { p1[0], y + 2.5f, p1[2] }, p3[3] = { p0[0], y + 2.5f, p0[2] };
+            T3CQuad(b, p0, p1, p2, p3, rope);
+        }
+    }
+    // gate towers: four posts, a platform, a railing, a little roof
+    for (int side = -1; side <= 1; side += 2) {
+        float a = gate + side * 0.27f;
+        float tx = cosf(a) * kCampRadius, tz = sinf(a) * kCampRadius;
+        for (int px = -1; px <= 1; px += 2)
+            for (int pz = -1; pz <= 1; pz += 2) T3CBox(b, tx + px * 9.0f, 42.0f, tz + pz * 9.0f, 4.5f, 84.0f, 4.5f, logDk);
+        T3CBox(b, tx, 66.0f, tz, 24.0f, 3.0f, 24.0f, log);
+        for (int k = 0; k < 4; k++) {
+            float ox = (k < 2 ? (k == 0 ? -1 : 1) * 11.0f : 0.0f), oz = (k >= 2 ? (k == 2 ? -1 : 1) * 11.0f : 0.0f);
+            T3CBox(b, tx + ox, 74.0f, tz + oz, k < 2 ? 2.5f : 24.0f, 12.0f, k < 2 ? 24.0f : 2.5f, log);
+        }
+        float r0[3] = { tx - 14, 86, tz - 14 }, r1[3] = { tx + 14, 86, tz - 14 }, r2[3] = { tx + 14, 86, tz + 14 }, r3[3] = { tx - 14, 86, tz + 14 };
+        float apex[3] = { tx, 100, tz };
+        T3CPushTri(b, r0, r1, apex, Color{ 120, 36, 34, 255 }); T3CPushTri(b, r1, r2, apex, Color{ 104, 30, 30, 255 });
+        T3CPushTri(b, r2, r3, apex, Color{ 120, 36, 34, 255 }); T3CPushTri(b, r3, r0, apex, Color{ 104, 30, 30, 255 });
+    }
+    // campfire ring and logs
+    for (int i = 0; i < 9; i++) {
+        float a = 6.2832f * i / 9;
+        T3CSphere(b, cosf(a) * 14.0f, 2.0f, sinf(a) * 14.0f, 4.5f, 3.2f, 4.5f, 5, 6, Color{ 110, 106, 100, 255 });
+    }
+    for (int i = 0; i < 3; i++) {
+        float a = 1.0f + i * 2.1f;
+        float p0[3] = { cosf(a) * 10.0f, 2.0f, sinf(a) * 10.0f }, dir[3] = { -cosf(a), 0.45f, -sinf(a) };
+        (void)p0; (void)dir;
+        T3CBox(b, cosf(a) * 5.0f, 3.0f, sinf(a) * 5.0f, 12.0f, 3.0f, 3.0f, logDk);
+    }
+    // log benches round the fire
+    for (int i = 0; i < 3; i++) {
+        float a = 0.6f + i * 2.1f;
+        float x = cosf(a) * 36.0f, z = sinf(a) * 36.0f;
+        T3CBox(b, x, 4.0f, z, 26.0f, 7.0f, 7.0f, log);
+    }
+    // training dummies: post, arms, straw body, sack head
+    for (int i = 0; i < 2; i++) {
+        float a = gate + 0.85f + i * 0.35f;
+        float x = cosf(a) * 105.0f, z = sinf(a) * 105.0f;
+        T3CBox(b, x, 22.0f, z, 4.0f, 44.0f, 4.0f, logDk);
+        T3CBox(b, x, 34.0f, z, 26.0f, 3.5f, 3.5f, logDk);
+        T3CCylinder(b, x, 18.0f, z, 36.0f, 7.0f, 6.0f, 8, Color{ 196, 170, 100, 255 });
+        T3CSphere(b, x, 43.0f, z, 6.0f, 6.5f, 6.0f, 6, 8, Color{ 180, 160, 120, 255 });
+    }
+    // the muster ground: a trampled earth disc
+    for (int i = 0; i < 24; i++) {
+        float a0 = 6.2832f * i / 24, a1 = 6.2832f * (i + 1) / 24, r = kCampRadius - 12.0f;
+        float o[3] = { 0, 0.35f, 0 }, p0[3] = { cosf(a0) * r, 0.35f, sinf(a0) * r }, p1[3] = { cosf(a1) * r, 0.35f, sinf(a1) * r };
+        T3CPushTri(b, o, p1, p0, Color{ 122, 104, 78, 255 });
+    }
+    cm.m = T3CFinish(b);
+    Town3DApplyLitShader(cm.m);
+}
+
+static void Wild3DDrawRivalCamp(GameState& s, bool shadowPass, const Town3DCam* cull) {
+    Vector2 c = kRivalCampSpots[s.rivalCampIdx];
+    if (cull && !Wild3DInView(*cull, c.x, c.y, kCampRadius + 60.0f)) return;
+    RivalCampBuild(s.rivalCampIdx);
+    float gate = RivalCampGateYaw(c);
+    float gy = GroundY(c.x, c.y);
+    DrawModel(g_campModels[s.rivalCampIdx].m, { c.x, gy, c.y }, 1.0f, WHITE);
+    // KayKit camp props (the same pack as the roadside camps)
+    Wild3DBuildDressing();
+    const Wild3DDressing& D = g_wild3dDress;
+    auto prop = [&](int id, float ang, float rad, float faceDeg, float sc, Color tint = WHITE) {
+        if (!D.ok[id]) return;
+        float x = c.x + cosf(gate + ang) * rad, z = c.y + sinf(gate + ang) * rad;
+        DrawModelEx(D.models[id], { x, GroundY(x, z), z }, { 0, 1, 0 }, faceDeg, { sc, sc, sc }, tint);
+    };
+    float gateDeg = -gate * RAD2DEG;
+    // command tent at the back under the banners, soldiers' tents in two rows
+    prop(kWPTent, 3.1416f, 118.0f, gateDeg + 90.0f, kWPScaleProp * 1.2f, Color{ 200, 120, 110, 255 });
+    prop(kWPFlagRed, 3.1416f - 0.42f, 118.0f, gateDeg, kWPScaleProp * 1.3f);
+    prop(kWPFlagRed, 3.1416f + 0.42f, 118.0f, gateDeg, kWPScaleProp * 1.3f);
+    const float tentA[6] = { 2.05f, 2.45f, -2.05f, -2.45f, 1.6f, -1.6f };
+    for (int i = 0; i < 6; i++) prop(kWPTent, tentA[i], 120.0f, gateDeg + 90.0f - tentA[i] * RAD2DEG, kWPScaleProp * 0.8f, Color{ 170, 150, 140, 255 });
+    prop(kWPFlagRed, 0.36f, kCampRadius + 2.0f, gateDeg, kWPScaleProp * 1.1f);
+    prop(kWPFlagRed, -0.36f, kCampRadius + 2.0f, gateDeg, kWPScaleProp * 1.1f);
+    // arms and supplies
+    prop(kWPWeaponRack, 0.95f, 60.0f, gateDeg + 60.0f, kWPScaleProp);
+    prop(kWPWeaponRack, -0.95f, 60.0f, gateDeg - 60.0f, kWPScaleProp);
+    prop(kWPCrateBig, 2.75f, 70.0f, 20.0f, kWPScaleProp);
+    prop(kWPCrateSmall, 2.9f, 58.0f, 60.0f, kWPScaleProp);
+    prop(kWPBarrel, -2.8f, 66.0f, 0.0f, kWPScaleProp);
+    prop(kWPBarrel, -2.95f, 56.0f, 40.0f, kWPScaleProp);
+    prop(kWPSack, -2.6f, 74.0f, 10.0f, kWPScaleProp);
+    prop(kWPCrateLong, 1.2f, 140.0f, gateDeg, kWPScaleProp);
+    prop(kWPLumber, -1.25f, 140.0f, gateDeg, kWPScaleProp);
+    // recruits: two gate sentries, one drilling at a dummy, one warming by the fire
+    if (!shadowPass || true) {
+        float t = (float)GetTime();
+        HumanOutfit o = HumanOutfitBlade();
+        o.helm = kHhPlate; o.helmCol = Color{ 110, 104, 100, 255 };
+        for (int side = -1; side <= 1; side += 2) {
+            float a = gate + side * 0.12f, r = kCampRadius + 14.0f;
+            HumanOutfit g = o;
+            HumanGive(g, kHwHalberd, kHsPolearm);
+            HumanPose hp; hp.engaged = true;
+            float x = c.x + cosf(a) * r, z = c.y + sinf(a) * r;
+            DrawHuman(200 + (side > 0), x, z, gate, 1.0f, WHITE, g, hp, shadowPass);
+        }
+        {
+            float a = gate + 0.85f;
+            float dx = c.x + cosf(a) * 80.0f, dz = c.y + sinf(a) * 80.0f;
+            float face = atan2f(sinf(a) * 105.0f - sinf(a) * 80.0f, cosf(a) * 105.0f - cosf(a) * 80.0f);
+            HumanOutfit d = HumanOutfitBlade();
+            HumanPose hp; hp.engaged = true;
+            float ph = fmodf(t, 1.6f);
+            hp.attackT = ph < 0.8f ? ph / 0.8f : -1.0f;
+            DrawHuman(202, dx, dz, face, 1.0f, WHITE, d, hp, shadowPass);
+        }
+        {
+            float a = 0.6f + 2.1f;
+            float x = c.x + cosf(a) * 30.0f, z = c.y + sinf(a) * 30.0f;
+            HumanOutfit f = HumanOutfitBlade();
+            f.cloakCol = Color{ 70, 30, 30, 255 };
+            HumanPose hp;
+            DrawHuman(203, x, z, atan2f(c.y - z, c.x - x), 1.0f, WHITE, f, hp, shadowPass);
+        }
+    }
+    if (shadowPass) return;
+    // fire, torch flames at the towers, smoke
+    float t = (float)GetTime(), night = g_t3dNight;
+    BeginBlendMode(BLEND_ADDITIVE);
+    rlDisableDepthMask();
+    auto flame = [&](float x, float y, float z, float r, float k) {
+        float fl = 0.8f + 0.2f * sinf(t * 11.0f + x) * sinf(t * 4.3f + z);
+        rlSetTexture(GlowTex().id);
+        rlBegin(RL_QUADS);
+        float rr = r * fl;
+        rlColor4ub((unsigned char)(255 * k), (unsigned char)(150 * k), (unsigned char)(60 * k), 255);
+        rlTexCoord2f(0, 0); rlVertex3f(x - rr, y - rr, z); rlTexCoord2f(1, 0); rlVertex3f(x + rr, y - rr, z);
+        rlTexCoord2f(1, 1); rlVertex3f(x + rr, y + rr, z); rlTexCoord2f(0, 1); rlVertex3f(x - rr, y + rr, z);
+        rlTexCoord2f(0, 0); rlVertex3f(x, y - rr, z - rr); rlTexCoord2f(1, 0); rlVertex3f(x, y - rr, z + rr);
+        rlTexCoord2f(1, 1); rlVertex3f(x, y + rr, z + rr); rlTexCoord2f(0, 1); rlVertex3f(x, y + rr, z - rr);
+        rlEnd();
+        rlSetTexture(0);
+    };
+    flame(c.x, gy + 12.0f, c.y, 16.0f, 1.0f);
+    flame(c.x, gy + 7.0f, c.y, 26.0f, 0.55f);
+    GlowPool(c.x, c.y, gy + 0.8f, 60.0f + 50.0f * night, Color{ (unsigned char)(120 + 100 * night), (unsigned char)(70 + 50 * night), 30, 255 });
+    for (int side = -1; side <= 1; side += 2) {
+        float a = gate + side * 0.27f;
+        float tx = c.x + cosf(a) * (kCampRadius + 16.0f), tz = c.y + sinf(a) * (kCampRadius + 16.0f);
+        flame(tx, gy + 66.0f, tz, 8.0f, 0.5f + 0.5f * night);
+    }
+    rlEnableDepthMask();
+    EndBlendMode();
+    BeginBlendMode(BLEND_ALPHA);
+    rlSetTexture(GlowTex().id);
+    rlBegin(RL_QUADS);
+    for (int i = 0; i < 7; i++) {
+        float ph = fmodf(t * 0.2f + i / 7.0f, 1.0f);
+        Vector3 p = { c.x + ph * 30.0f + sinf(t + i) * 4.0f, gy + 20.0f + ph * 110.0f, c.y + ph * 12.0f };
+        float r = 7.0f + ph * 22.0f;
+        unsigned char a = (unsigned char)(100 * (1.0f - ph) * std::min(1.0f, ph * 8.0f));
+        unsigned char v = (unsigned char)(150 - 60 * night);
+        rlColor4ub(v, v, v, a);
+        rlTexCoord2f(0, 0); rlVertex3f(p.x - r, p.y - r, p.z); rlTexCoord2f(1, 0); rlVertex3f(p.x + r, p.y - r, p.z);
+        rlTexCoord2f(1, 1); rlVertex3f(p.x + r, p.y + r, p.z); rlTexCoord2f(0, 1); rlVertex3f(p.x - r, p.y + r, p.z);
+    }
+    rlEnd();
+    rlSetTexture(0);
+    EndBlendMode();
+}
 static void Wild3DDrawHouse(GameState& s, bool shadowPass); // Housing 2.0 (below, with the room surfaces)
 static Vector3 g_houseSignPos = { 0, -1, 0 };                // the homestead's sign post (y < 0: none built)
 static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DCam* cull) {
@@ -16251,15 +16944,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             }
         }
     }
-    { // Murder Inc.'s camp: tent + campfire
-        Vector2 campPos = kRivalCampSpots[s.rivalCampIdx];
-        if (vis(campPos.x, campPos.y, 90.0f)) {
-            T3DLiftScope lift_(campPos.x, campPos.y);
-            DrawCylinder({ campPos.x, 14, campPos.y }, 2, 18, 28, 4, Color{ 120, 60, 45, 255 }); // tent
-            DrawCylinder({ campPos.x + 22, 4, campPos.y + 10 }, 8, 10, 3, 10, Color{ 90, 85, 80, 255 }); // fire ring
-            DrawCylinder({ campPos.x + 22, 10, campPos.y + 10 }, 1, 5, 12, 8, Color{ 255, 140, 40, 200 }); // flame
-        }
-    }
+    Wild3DDrawRivalCamp(s, shadowPass, cull); // Murder Inc.'s war camp (2026-09-27)
     if (s.notoriety > 1.0f || s.refugeKnown) { // the outlaw refuge: dark tent + red lantern
         if (vis(kOutlawRefuge.x, kOutlawRefuge.y, 90.0f)) {
             T3DLiftScope lift_(kOutlawRefuge.x, kOutlawRefuge.y);
@@ -20675,6 +21360,7 @@ static void BeginPlayerDeath(GameState& s) {
     s.healGlowT = -1.0f;
     s.vigorT = 0.0f;
     s.fiendT = 0.0f;
+    s.minions.clear(); s.boneArmor = 0.0f; // the raised dead don't follow you out (2026-09-27)
     s.fiendTickT = 0.0f;
     // The ghost walks where it died. Panel-combat deaths (ambush panel over town,
     // the Hunt picker, etc.) manifest in the wilderness at the last wilderness
@@ -20742,6 +21428,7 @@ static const float kSpellAoeDetonation = 220.0f;  // Detonation splash radius
 static float SpellAoeRadius(const Spell& spell) {
     if (spell.name == "Ember Burst") return kSpellAoeEmberBurst;
     if (spell.name == "Detonation") return kSpellAoeDetonation;
+    if (spell.name == "Bone Spear") return 75.0f; // (2026-09-27) the spear drives on through the pack
     return 0.0f;
 }
 
@@ -21188,6 +21875,15 @@ static SpellFX SpellFXFor(int spellIdx) {
         case -11: return { Color{255,220,130,255}, 0, 1200, Color{255,220,130,255}, 60 }; // vigor burst
         case -12: return { Color{255,140,70,255},  0, 1200, Color{255,120,50,255},  80 }; // summoning burst
         case -4:  return { Color{255,255,255,255},  0,    0, Color{255,236,170,255},  40 }; // melee hit burst
+        // Necromancy (2026-09-27)
+        case 17: return { Color{236,230,210,255},  7, 1500, Color{220,214,190,255},  36 }; // Teeth
+        case 18: return { Color{120,255,150,255},  0, 1000, Color{120,255,150,255},  64 }; // Raise (grave light)
+        case 19: return { Color{220,60,60,255},    8,  700, Color{200,40,40,255},    46 }; // Amplify Damage wisp
+        case 21: return { Color{242,238,218,255}, 12, 1900, Color{230,225,200,255},  72 }; // Bone Spear
+        case 22: return { Color{210,70,50,255},    0, 1400, Color{200,60,40,255},    60 }; // Corpse Explosion
+        case 23: return { Color{170,120,255,255},  0, 1000, Color{160,110,240,255},  64 }; // Raise mage
+        case 24: return { Color{180,20,50,255},    8,  700, Color{160,10,40,255},    46 }; // Life Tap wisp
+        case -13: return { Color{236,230,205,255}, 0, 1200, Color{236,230,205,255},  60 }; // bone burst
         default: return { Color{255,255,255,255},  9, 1200, Color{255,255,255,255}, 44 };
     }
 }
@@ -21372,6 +22068,7 @@ static void TeleportToTown(GameState& s, int townIdx, const std::string& why) {
     for (auto& p : s.spellProjectiles) p.active = false;
     for (auto& im : s.spellImpacts) im.active = false;
     s.fiendT = 0.0f;
+    s.minions.clear(); s.boneArmor = 0.0f; // the raised dead don't follow you out (2026-09-27)
     s.vigorT = 0.0f;
     s.leaveDungT = -1.0f; // a recall out cancels a leave-dungeon cast
     s.recallPickerOpen = false;
@@ -21457,6 +22154,7 @@ static void ExitDungeonToWilderness(GameState& s) {
     for (auto& p : s.spellProjectiles) p.active = false;
     for (auto& im : s.spellImpacts) im.active = false;
     s.fiendT = 0.0f;
+    s.minions.clear(); s.boneArmor = 0.0f; // the raised dead don't follow you out (2026-09-27)
     s.vigorT = 0.0f;
     s.leaveDungT = -1.0f;
 }
@@ -21538,8 +22236,190 @@ static Color CombatHitTint(float hurtT, Color base, Color tail) {
 // --- Mechanical resolution on projectile arrival ---
 // These are the bodies that used to run instantly inside the cast lambdas -
 // moved here verbatim so the only change is the visible flight time.
+// ---- Necromancy runtime (2026-09-27) -------------------------------------------------
+// Diablo's necromancer, in this game's live combat: skeletons raised from the
+// corpses you leave (warriors that wade in and soak blows, mages that sling bone),
+// Bone Armor that eats hits before your health does, Amplify Damage and Life Tap
+// curses, Bone Spear through a pack, and Corpse Explosion to turn the fallen on
+// their friends. Minions and armor are transient - they don't survive a zone change.
+static bool CorpseHere(const GameState& s, const GameState::WorldCorpse& c, int zone);
+static void LootAllCorpse(GameState& s, GameState::WorldCorpse& c);
+static void SummonStrikeLive(GameState& s, int zone, float base, const std::string& verb);
+template <typename AM> static int NecroOnHit(GameState& s, AM& am, int dmg) {
+    if (am.debuffKind == 4) dmg = std::max(1, (int)std::round(dmg * 1.5f));          // Amplify Damage
+    else if (am.debuffKind == 5) s.hp = std::min(s.maxHp, s.hp + std::max(1, dmg * 2 / 5)); // Life Tap
+    return dmg;
+}
+static int NecroMaxMinions(const GameState& s, int kind) {
+    float n = EffectiveSkill(s, &GameState::necromancy);
+    return kind == 0 ? std::min(5, 1 + (int)(n / 25.0f)) : std::min(3, 1 + (int)(n / 40.0f));
+}
+static GameState::WorldCorpse* NecroFindCorpse(GameState& s, int zone, Vector2 near, float range) {
+    GameState::WorldCorpse* best = nullptr;
+    float bd = range;
+    for (auto& c : s.worldCorpses) {
+        if (!CorpseHere(s, c, zone) || c.timer <= 0.5f) continue;
+        float d = Dist(c.pos, near);
+        if (d < bd) { bd = d; best = &c; }
+    }
+    return best;
+}
+static void NecroConsumeCorpse(GameState& s, GameState::WorldCorpse& c) {
+    LootAllCorpse(s, c); // whatever it carried drops into your pack as it's used up
+    c.timer = 0.0f;
+    if (s.openCorpseId == c.id) s.openCorpseId = -1;
+}
+// Who takes a monster's blow: a skeleton standing guard, then Bone Armor, then you.
+static int NecroShield(GameState& s, int zone, int dmg) {
+    Vector2 me = zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    std::vector<int> guards;
+    for (size_t i = 0; i < s.minions.size(); i++) {
+        const auto& m = s.minions[i];
+        if (m.zone == zone && m.kind == 0 && m.riseT >= 1.0f && m.hp > 0 && Dist(m.pos, me) < 170.0f) guards.push_back((int)i);
+    }
+    if (!guards.empty() && RandUnit() < std::min(0.6f, 0.22f * guards.size())) {
+        auto& m = s.minions[(size_t)guards[(size_t)(RandUnit() * guards.size()) % guards.size()]];
+        m.hp -= dmg;
+        SpawnFloatText(s, zone, m.pos, std::to_string(dmg), Color{ 220, 220, 200, 255 });
+        return 0;
+    }
+    if (s.boneArmor > 0.0f) {
+        float a = std::min(s.boneArmor, (float)dmg);
+        s.boneArmor -= a;
+        dmg -= (int)std::round(a);
+        SpawnFloatText(s, zone, me, "Bone Armor", Color{ 230, 226, 205, 255 });
+        if (s.boneArmor <= 0.0f) { s.boneArmor = 0.0f; Journal(s, "Your bone armor shatters."); }
+    }
+    return std::max(0, dmg);
+}
+static void NecroRaise(GameState& s, int zone, int kind, const std::string& note) {
+    Vector2 me = zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    GameState::WorldCorpse* c = NecroFindCorpse(s, zone, me, 280.0f);
+    if (!c) { s.logLine = "There is no corpse near enough to raise." + note; return; }
+    int have = 0, oldest = -1;
+    for (size_t i = 0; i < s.minions.size(); i++)
+        if (s.minions[i].zone == zone && s.minions[i].kind == kind) {
+            have++;
+            if (oldest < 0 || s.minions[i].ttl < s.minions[(size_t)oldest].ttl) oldest = (int)i;
+        }
+    if (have >= NecroMaxMinions(s, kind) && oldest >= 0) s.minions.erase(s.minions.begin() + oldest); // the oldest crumbles
+    float n = EffectiveSkill(s, &GameState::necromancy);
+    GameState::NecroMinion m;
+    m.kind = kind; m.zone = zone; m.pos = c->pos;
+    m.maxHp = kind == 0 ? 22.0f + n * 0.9f : 14.0f + n * 0.5f;
+    m.hp = m.maxHp;
+    m.atkT = 1.0f; m.riseT = 0.0f; m.ttl = 240.0f;
+    m.yaw = atan2f(me.y - c->pos.y, me.x - c->pos.x);
+    std::string what = c->name;
+    SpawnSpellImpact(s, zone, c->pos, kSpRaiseSkeleton, 1.3f);
+    NecroConsumeCorpse(s, *c);
+    s.minions.push_back(m);
+    s.logLine = std::string(kind == 0 ? "A skeleton" : "A skeletal mage") + " claws its way out of the " + what + "!" + note;
+    Journal(s, s.logLine);
+}
+// Corpse Explosion: the body nearest your target bursts, hurting everything round it.
+static void NecroCorpseExplosion(GameState& s, int zone, const std::string& note) {
+    Vector2 me = zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    Vector2 tgt = me;
+    if (zone == 0 && s.wildEngaged.has_value()) tgt = s.wildEngaged->pos;
+    if (zone == 1 && s.dungeonEngaged.has_value()) tgt = s.dungeonEngaged->pos;
+    GameState::WorldCorpse* c = NecroFindCorpse(s, zone, tgt, 260.0f);
+    if (!c) c = NecroFindCorpse(s, zone, me, 260.0f);
+    if (!c) { s.logLine = "There is no corpse to detonate." + note; return; }
+    Vector2 at = c->pos;
+    std::string what = c->name;
+    NecroConsumeCorpse(s, *c);
+    SpawnSpellImpact(s, zone, at, kSpCorpseExplosion, 2.2f);
+    PlaySfx(SfxId::Fireball);
+    const float R = 130.0f;
+    float base = 18.0f + EffectiveSkill(s, &GameState::necromancy) * 0.55f;
+    int hits = 0;
+    auto roll = [&]() { return std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f))); };
+    if (zone == 0) {
+        for (size_t ei = 0; ei < s.wildExtraAttackers.size();) {
+            auto& ex = s.wildExtraAttackers[ei];
+            if (Dist(ex.pos, at) > R) { ei++; continue; }
+            int d = NecroOnHit(s, ex, roll());
+            ex.hp -= d; ex.monsterHurtT = 0.0f; hits++;
+            SpawnFloatText(s, 0, ex.pos, std::to_string(d), kFloatDmgColor);
+            if (ex.hp <= 0) { BeginWildExtraDeath(s, ex); s.wildExtraAttackers.erase(s.wildExtraAttackers.begin() + ei); continue; }
+            ei++;
+        }
+        if (s.wildEngaged.has_value() && Dist(s.wildEngaged->pos, at) <= R) { SummonStrikeLive(s, 0, base, "corpse explosion rips into"); hits++; }
+    } else {
+        for (size_t ei = 0; ei < s.dungeonExtraAttackers.size();) {
+            auto& ex = s.dungeonExtraAttackers[ei];
+            if (Dist(ex.pos, at) > R) { ei++; continue; }
+            int d = NecroOnHit(s, ex, roll());
+            ex.hp -= d; ex.monsterHurtT = 0.0f; hits++;
+            SpawnFloatText(s, 1, ex.pos, std::to_string(d), kFloatDmgColor);
+            if (ex.hp <= 0 && s.selectedDungeon.has_value()) {
+                BeginDungeonExtraDeath(s, *s.selectedDungeon, ex);
+                s.dungeonExtraAttackers.erase(s.dungeonExtraAttackers.begin() + ei);
+                continue;
+            }
+            ei++;
+        }
+        if (s.dungeonEngaged.has_value() && Dist(s.dungeonEngaged->pos, at) <= R) { SummonStrikeLive(s, 1, base, "corpse explosion rips into"); hits++; }
+    }
+    s.logLine = "The " + what + " corpse bursts apart" + (hits ? " - " + std::to_string(hits) + (hits == 1 ? " foe" : " foes") + " caught!" : "!") + note;
+    Journal(s, s.logLine);
+}
+// Raised dead: rise out of the ground, then guard you or go for your target.
+static void NecroUpdateMinions(GameState& s, float dt) {
+    int zone = s.screen == Screen::Wilderness ? 0 : (s.screen == Screen::Hunt ? 1 : -1);
+    float n = EffectiveSkill(s, &GameState::necromancy);
+    for (size_t i = 0; i < s.minions.size();) {
+        auto& m = s.minions[i];
+        if (m.zone != zone) { i++; continue; }
+        m.riseT = std::min(1.0f, m.riseT + dt * 1.1f);
+        m.ttl -= dt;
+        if (m.hp <= 0.0f || m.ttl <= 0.0f) {
+            SpawnSpellImpact(s, zone, m.pos, -13, 0.9f);
+            Journal(s, std::string(m.kind == 0 ? "Your skeleton" : "Your skeletal mage") + " collapses into bones.");
+            s.minions.erase(s.minions.begin() + (long)i);
+            continue;
+        }
+        if (m.riseT < 1.0f) { i++; continue; }
+        Vector2 me = zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+        bool has = false; Vector2 tp = { 0, 0 };
+        if (zone == 0 && s.wildEngaged.has_value()) { has = true; tp = s.wildEngaged->pos; }
+        if (zone == 1 && s.dungeonEngaged.has_value()) { has = true; tp = s.dungeonEngaged->pos; }
+        Vector2 goal;
+        float keep;
+        if (has) { goal = tp; keep = m.kind == 0 ? 26.0f : 150.0f; }
+        else { // fall in behind you
+            float a = atan2f(s.playerFacing.y, s.playerFacing.x) + 3.1416f + ((int)i - (int)s.minions.size() / 2) * 0.55f;
+            goal = { me.x + cosf(a) * 55.0f, me.y + sinf(a) * 55.0f };
+            keep = 8.0f;
+        }
+        Vector2 d = { goal.x - m.pos.x, goal.y - m.pos.y };
+        float l = hypotf(d.x, d.y);
+        if (l > keep) {
+            float step = std::min(l - keep, (has ? 185.0f : 230.0f) * dt);
+            Vector2 prev = m.pos;
+            m.pos.x += d.x / l * step; m.pos.y += d.y / l * step;
+            if (zone == 0 && WildBlocked(m.pos)) m.pos = prev;
+            m.yaw = atan2f(d.y, d.x);
+        } else if (has) m.yaw = atan2f(tp.y - m.pos.y, tp.x - m.pos.x);
+        if (Dist(m.pos, me) > 700.0f) { m.pos = { me.x - 40.0f, me.y + 30.0f }; } // never left behind
+        m.atkT -= dt;
+        if (has && m.atkT <= 0.0f) {
+            float dist = Dist(m.pos, tp);
+            if (m.kind == 0 && dist <= 36.0f) {
+                m.atkT = 1.4f;
+                SummonStrikeLive(s, zone, 3.0f + n * 0.12f, "skeleton hacks at");
+            } else if (m.kind == 1 && dist <= 260.0f) {
+                m.atkT = 2.4f;
+                SpawnSpellProjectile(s, zone, m.pos, tp, kSpTeeth, true, "");
+            }
+        }
+        i++;
+    }
+}
 static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::string& trainNote, int zone) {
     const Spell& spell = kSpells[spellIdx];
+    if (spellIdx == kSpCorpseExplosion) { NecroCorpseExplosion(s, zone, trainNote); return; }
     if (zone == 0) {
         if (!s.wildEngaged.has_value()) return;
         auto& am = *s.wildEngaged;
@@ -21549,6 +22429,7 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
             float base = (float)SpellPowerFor(s, spell);
             if (s.vigorT > 0.0f) base *= 1.25f; // Blessing of Vigor
             int dmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
+            dmg = NecroOnHit(s, am, dmg); // Amplify Damage / Life Tap
             am.hp -= dmg;
             am.monsterHurtT = 0.0f;
             PlaySfx(SfxId::Hit);
@@ -21625,6 +22506,7 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
             float base = (float)SpellPowerFor(s, spell);
             if (s.vigorT > 0.0f) base *= 1.25f;
             int dmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
+            dmg = NecroOnHit(s, am, dmg); // Amplify Damage / Life Tap
             am.hp -= dmg;
             am.monsterHurtT = 0.0f;
             PlaySfx(SfxId::Hit);
@@ -21688,7 +22570,7 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
 // disclosed per the task brief.)
 static void ResolvePlayerDebuffImpact(GameState& s, int spellIdx, const std::string& trainNote, int zone) {
     const Spell& spell = kSpells[spellIdx];
-    int kind = spellIdx - 1; // 2->1 Sap, 3->2 Cloud Mind, 4->3 Fumbling
+    int kind = spellIdx == kSpAmplify ? 4 : spellIdx == kSpLifeTap ? 5 : spellIdx - 1; // 2->1 Sap, 3->2 Cloud Mind, 4->3 Fumbling; necro curses 4/5
     auto applyTo = [&](auto& am, const std::string& mname) {
         if (RandUnit() * 100.0f < SpellSuccessChance(s, spell)) {
             am.debuffKind = kind;
@@ -21727,7 +22609,7 @@ static void ResolveEnemyRangedImpact(GameState& s, bool castByRival, int castByB
         float raw = spot.level * (0.9f + RandUnit() * 0.5f);
         if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
         int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
-        s.hp -= dmg;
+        s.hp -= (dmg = NecroShield(s, 0, dmg)); // skeletons / Bone Armor take it first
         s.playerHurtT = 0.0f;
         PlaySfx(SfxId::Hurt);
         s.logLine = "The " + mname + " strikes you from range for " + std::to_string(dmg) + " damage!";
@@ -21749,20 +22631,20 @@ static void ResolveEnemyRangedImpact(GameState& s, bool castByRival, int castByB
 // Summon Fiend's combat effect (new mechanics, disclosed): while active the
 // fiend follows the player and lashes the engaged enemy every 2s for
 // (4 + magery*0.1) damage. 25s duration.
-static void FiendStrikeLive(GameState& s, int zone) {
+static void SummonStrikeLive(GameState& s, int zone, float base, const std::string& verb) {
     if (zone == 0) {
         if (!s.wildEngaged.has_value()) return;
         auto& am = *s.wildEngaged;
         EngagedMonsterStats spot = EngagedWildMonsterStats(s, am);
         std::string mname = spot.name;
-        float base = 4.0f + s.magery * 0.1f;
         if (s.vigorT > 0.0f) base *= 1.25f;
         int dmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
+        dmg = NecroOnHit(s, am, dmg);
         am.hp -= dmg;
         am.monsterHurtT = 0.0f;
         SpawnSpellImpact(s, 0, am.pos, 14, 0.55f);
         PlaySfx(SfxId::Hit);
-        s.logLine = "Your fiend lashes the " + mname + " for " + std::to_string(dmg) + " damage!";
+        s.logLine = "Your " + verb + " the " + mname + " for " + std::to_string(dmg) + " damage!";
         if (am.hp > 0 && !am.isRival && am.bladeIdx < 0)
             WildPackAggro(s, am.spotIdx, am.pos); // the fiend's damage pulls the pack in too (2026-09-25)
         if (am.hp <= 0) {
@@ -21784,14 +22666,14 @@ static void FiendStrikeLive(GameState& s, int zone) {
         auto& am = *s.dungeonEngaged;
         const DungeonDef& dungeon = kDungeons[*s.selectedDungeon];
         const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
-        float base = 4.0f + s.magery * 0.1f;
         if (s.vigorT > 0.0f) base *= 1.25f;
         int dmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
+        dmg = NecroOnHit(s, am, dmg);
         am.hp -= dmg;
         am.monsterHurtT = 0.0f;
         SpawnSpellImpact(s, 1, am.pos, 14, 0.55f);
         PlaySfx(SfxId::Hit);
-        s.logLine = "Your fiend lashes the " + m.name + " for " + std::to_string(dmg) + " damage!";
+        s.logLine = "Your " + verb + " the " + m.name + " for " + std::to_string(dmg) + " damage!";
         if (am.hp > 0 && !am.isBoss)
             DungeonPackAggro(s, *s.selectedDungeon, am.monsterIdx, false, am.pos); // the fiend's damage pulls the pack in too (2026-09-25)
         if (am.hp <= 0) {
@@ -21800,6 +22682,7 @@ static void FiendStrikeLive(GameState& s, int zone) {
         }
     }
 }
+static void FiendStrikeLive(GameState& s, int zone) { SummonStrikeLive(s, zone, 4.0f + s.magery * 0.1f, "fiend lashes"); }
 
 // Ticks every frame from both wilderness and dungeon updates: combat anim
 // timers, debuff expiry, spell projectiles/impacts, vigor, and the fiend.
@@ -21842,6 +22725,7 @@ static void UpdateLiveSpellFX(GameState& s, float dt) {
         }
     }
 
+    NecroUpdateMinions(s, dt); // raised dead (2026-09-27)
     // Summoned fiend: follows the player, lashes the engaged enemy every 2s.
     if (s.fiendT > 0.0f) {
         s.fiendT -= dt;
@@ -22703,7 +23587,78 @@ static void DrawFiend2D(GameState& s, Vector2 camera) {
     }
 }
 
+// Raised dead and Bone Armor, 3D (2026-09-27): bone-white bodies with a sword and
+// shield (warriors) or a staff and a violet shroud (mages), rising out of the
+// ground; a ring of bone shards circling you while Bone Armor holds.
+static HumanOutfit HumanOutfitSkeleton(int kind) {
+    Color bone = { 240, 236, 220, 255 }, boneDk = { 200, 192, 168, 255 };
+    HumanOutfit o = HumanOutfitPlain(bone, boneDk, bone, boneDk, bone);
+    o.hairStyle = 3; o.beard = false;
+    o.region[kHrBelt] = Color{ 90, 70, 50, 255 }; // a rotted belt is all that's left
+    if (kind == 0) { HumanGive(o, kHwSword, kHsOneHand); o.shield = true; }
+    else { HumanGive(o, kHwStaff, kHsMagic); o.cloak = true; o.cloakCol = Color{ 64, 34, 84, 255 }; }
+    return o;
+}
+static void DrawNecro3D(GameState& s, int zone) {
+    bool fighting = zone == 0 ? s.wildEngaged.has_value() : s.dungeonEngaged.has_value();
+    float t = (float)GetTime();
+    for (size_t i = 0; i < s.minions.size() && i < 8; i++) {
+        const auto& m = s.minions[i];
+        if (m.zone != zone) continue;
+        int track = 205 + (int)i;
+        T3CAnim a = T3CMakeAnim(track, m.pos.x, m.pos.y, true);
+        HumanPose hp;
+        hp.move = a.move;
+        hp.engaged = fighting;
+        if (m.kind == 0 && m.atkT > 0.9f && fighting) hp.attackT = std::clamp((1.4f - m.atkT) / 0.5f, 0.0f, 1.0f);
+        if (m.kind == 1 && m.atkT > 1.8f && fighting) hp.castT = std::clamp((2.4f - m.atkT) / 0.6f, 0.0f, 1.0f);
+        rlPushMatrix();
+        rlTranslatef(0.0f, -(1.0f - m.riseT) * 58.0f, 0.0f);
+        DrawHuman(track, m.pos.x, m.pos.y, m.yaw, 0.95f, WHITE, HumanOutfitSkeleton(m.kind), hp, false);
+        rlPopMatrix();
+        // grave-light glow and a small health bar
+        DrawSphereEx({ m.pos.x, 52.0f, m.pos.y }, 5.0f, 6, 5, Fade(Color{ 120, 255, 150, 255 }, 0.25f + 0.15f * sinf(t * 3.0f + i))); // grave-light
+        if (m.riseT >= 1.0f && m.hp < m.maxHp) {
+            float f = std::clamp(m.hp / m.maxHp, 0.0f, 1.0f);
+            DrawCube({ m.pos.x, 74.0f, m.pos.y }, 24.0f, 2.2f, 1.0f, Color{ 30, 20, 20, 220 });
+            DrawCube({ m.pos.x - 12.0f + 12.0f * f, 74.0f, m.pos.y + 0.6f }, 24.0f * f, 2.2f, 1.0f, Color{ 180, 220, 150, 255 });
+        }
+    }
+    if (s.boneArmor > 0.0f) {
+        Vector2 me = zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+        int n = 3 + std::min(5, (int)(s.boneArmor / 12.0f));
+        for (int k = 0; k < n; k++) {
+            float a = t * 2.2f + k * 6.2832f / n, y = 30.0f + sinf(t * 3.0f + k) * 6.0f;
+            Vector3 c = { me.x + cosf(a) * 24.0f, y, me.y + sinf(a) * 24.0f };
+            Vector3 d = { -sinf(a) * 6.0f, 3.0f, cosf(a) * 6.0f };
+            DrawCylinderEx({ c.x - d.x, c.y - d.y, c.z - d.z }, { c.x + d.x, c.y + d.y, c.z + d.z }, 1.6f, 0.4f, 5, Color{ 236, 230, 208, 255 });
+        }
+    }
+}
+static void DrawNecro2D(GameState& s, Vector2 camera, int zone) {
+    for (const auto& m : s.minions) {
+        if (m.zone != zone) continue;
+        Vector2 p = WorldToScreen(m.pos, camera);
+        float r = 13.0f * (0.3f + 0.7f * m.riseT);
+        DrawCircleV(p, r + 6.0f, Fade(Color{ 120, 255, 150, 255 }, 0.15f));
+        DrawCircleV(p, r, Color{ 224, 218, 194, 255 });
+        DrawCircleLinesV(p, r, Color{ 70, 64, 56, 255 });
+        DrawCircleV({ p.x - 4, p.y - 3 }, 2.2f, Color{ 40, 30, 30, 255 });
+        DrawCircleV({ p.x + 4, p.y - 3 }, 2.2f, Color{ 40, 30, 30, 255 });
+        if (m.kind == 0) DrawLineEx({ p.x + r, p.y - r }, { p.x + r + 10, p.y - r - 14 }, 3.0f, Color{ 190, 194, 202, 255 });
+        else DrawLineEx({ p.x + r, p.y + r }, { p.x + r + 4, p.y - r - 16 }, 3.0f, Color{ 110, 70, 140, 255 });
+    }
+    if (s.boneArmor > 0.0f) {
+        Vector2 me = WorldToScreen(zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos, camera);
+        float t = (float)GetTime();
+        for (int k = 0; k < 6; k++) {
+            float a = t * 2.2f + k * 1.047f;
+            DrawCircleV({ me.x + cosf(a) * 26.0f, me.y + sinf(a) * 20.0f }, 3.0f, Color{ 236, 230, 208, 255 });
+        }
+    }
+}
 static void DrawSpellFX2D(GameState& s, Vector2 camera, int zone) {
+    DrawNecro2D(s, camera, zone); // raised dead + bone armor (2026-09-27)
     Vector2 ppos = (zone == 0) ? s.wildernessPlayerPos : s.dungeonPlayerPos;
     for (auto& p : s.spellProjectiles) {
         if (!p.active || p.zone != zone) continue;
@@ -22824,6 +23779,7 @@ static void DrawSpellFX3D(GameState& s, int zone) {
         ? Vector3{ s.wildernessPlayerPos.x, 0.0f, s.wildernessPlayerPos.y }
         : Vector3{ s.dungeonPlayerPos.x, 0.0f, s.dungeonPlayerPos.y };
     T3DLiftScope lift_(ppos.x, ppos.z); // hills: effects ride the ground at the fight
+    DrawNecro3D(s, zone); // raised dead + bone armor (2026-09-27)
     for (auto& p : s.spellProjectiles) {
         if (!p.active || p.zone != zone) continue;
         SpellFX fx = SpellFXFor(p.spellIdx);
@@ -23204,12 +24160,12 @@ static void CastLiveDebuffSpell(GameState& s, int spellIdx, int zone) {
         const auto& am = *s.dungeonEngaged;
         if (am.castLockT > 0 || am.spellCooldowns[spellIdx] > 0) return;
     }
-    if (s.mana < spell.manaCost || s.reagents < kLiveCombatReagentCost) {
+    if (s.mana < spell.manaCost || s.reagents < LiveReagentCost(spellIdx)) {
         s.logLine = "Not enough mana or reagents for " + spell.name + ".";
         return;
     }
     s.mana -= spell.manaCost;
-    s.reagents -= kLiveCombatReagentCost;
+    s.reagents -= LiveReagentCost(spellIdx);
     std::string note;
     ApplySpellTraining(s, spell, note);
     PlaySfx(SfxId::Cast);
@@ -23255,13 +24211,13 @@ static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
         const auto& am = *s.dungeonEngaged;
         if (am.castLockT > 0 || am.spellCooldowns[spellIdx] > 0) return;
     }
-    if (s.mana < spell.manaCost || s.reagents < kLiveCombatReagentCost) {
+    if (s.mana < spell.manaCost || s.reagents < LiveReagentCost(spellIdx)) {
         s.logLine = "Not enough mana or reagents for " + spell.name + ".";
         return;
     }
     if (spell.type == SpellType::Debuff) { CastLiveDebuffSpell(s, spellIdx, zone); return; }
     s.mana -= spell.manaCost;
-    s.reagents -= kLiveCombatReagentCost;
+    s.reagents -= LiveReagentCost(spellIdx);
     std::string note;
     bool success = RandUnit() * 100.0f < SpellSuccessChance(s, spell);
     ApplySpellTraining(s, spell, note);
@@ -23277,6 +24233,22 @@ static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
             s.dungeonEngaged->castLockT = kCastLockTime;
         }
     };
+    if (spellIdx == kSpBoneArmor) {
+        setCastPose();
+        if (success) {
+            s.boneArmor = 15.0f + EffectiveSkill(s, &GameState::necromancy) * 0.6f;
+            Vector2 ppos = (zone == 0) ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+            SpawnSpellImpact(s, zone, ppos, -13, 1.0f);
+            s.logLine = "Bone plates knit around you (absorbs " + std::to_string((int)s.boneArmor) + ")" + note;
+        } else s.logLine = spell.name + " fizzles!" + note;
+        return;
+    }
+    if (spellIdx == kSpRaiseSkeleton || spellIdx == kSpSkeletalMage) {
+        setCastPose();
+        if (success) NecroRaise(s, zone, spellIdx == kSpRaiseSkeleton ? 0 : 1, note);
+        else s.logLine = spell.name + " fizzles!" + note;
+        return;
+    }
     if (spell.type == SpellType::Buff) {
         setCastPose();
         if (success) {
@@ -24227,7 +25199,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 float raw = spot.level * (0.8f + RandUnit() * 0.6f);
                 if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
-                s.hp -= dmg;
+                s.hp -= (dmg = NecroShield(s, 0, dmg)); // skeletons / Bone Armor take it first
                 s.playerHurtT = 0.0f; // hit-flash + knockback
                 CombatShake(7.0f);
                 PlaySfx(SfxId::Hurt);
@@ -24397,7 +25369,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 float raw = spot.level * (0.8f + RandUnit() * 0.6f);
                 if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
-                s.hp -= dmg;
+                s.hp -= (dmg = NecroShield(s, 0, dmg)); // skeletons / Bone Armor take it first
                 s.playerHurtT = 0.0f; // hit-flash + knockback
                 CombatShake(7.0f);
                 PlaySfx(SfxId::Hurt);
@@ -24511,7 +25483,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                         float raw = spot.level * (0.8f + RandUnit() * 0.6f);
                         if (ex.debuffKind == 1) raw *= 0.7f; // Sap Strength
                         int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
-                        s.hp -= dmg;
+                        s.hp -= (dmg = NecroShield(s, 0, dmg)); // skeletons / Bone Armor take it first
                         s.playerHurtT = 0.0f; // hit-flash + knockback
                         CombatShake(7.0f);
                         PlaySfx(SfxId::Hurt);
@@ -24549,6 +25521,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (RandUnit() * 100.0f < hitChance && !(foeBlocked = FoeShieldBlock(s, am))) {
             int dmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
             if (s.vigorT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.25f)); // Blessing of Vigor
+            dmg = NecroOnHit(s, am, dmg); // Amplify Damage / Life Tap
             am.hp -= dmg;
             am.monsterHurtT = 0.0f; // hit-flash on the monster
             PlaySfx(SfxId::Hit);
@@ -24627,7 +25600,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (am.castLockT > 0 || am.spellCooldowns[spellIdx] > 0) return;
         const Spell& spell = kSpells[spellIdx];
         if (spell.type != SpellType::Offensive) return;
-        if (s.mana < spell.manaCost || s.reagents < kLiveCombatReagentCost) {
+        if (s.mana < spell.manaCost || s.reagents < LiveReagentCost(spellIdx)) {
             s.logLine = "Not enough mana or reagents for " + spell.name + ".";
             return;
         }
@@ -24635,7 +25608,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         am.castLockT = kCastLockTime;
         am.castEffectTimer = kCastEffectDuration;
         s.mana -= spell.manaCost;
-        s.reagents -= kLiveCombatReagentCost;
+        s.reagents -= LiveReagentCost(spellIdx);
         Journal(s, "You cast " + spell.name + ".");
         std::string note;
         ApplySpellTraining(s, spell, note);
@@ -24664,6 +25637,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         for (auto& p : s.spellProjectiles) p.active = false;
         for (auto& im : s.spellImpacts) im.active = false;
         s.fiendT = 0.0f;
+        s.minions.clear(); s.boneArmor = 0.0f; // the raised dead don't follow you out (2026-09-27)
         s.vigorT = 0.0f;
     };
     auto tryInteract = [&]() {
@@ -24832,6 +25806,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                     }
         }
     }
+    RivalCampResolve(s, s.wildernessPlayerPos, kPlayerRadius); // the war camp's palisade (in through the gate)
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessReturnGatePos, kNodeRadius);
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown2GatePos, kNodeRadius);
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown3GatePos, kNodeRadius); // Phase 3
@@ -25294,8 +26269,11 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // anything drawn here earlier in the frame.
         DrawLiveCombatHud(s, 20, 116);
         DrawLiveCombatQuickItems(s);
-    } else if (inRange && !prompt.empty() && DrawInteractButton(prompt)) {
-        tryInteract();
+    } else {
+        DrawLiveCombatQuickItems(s, 0); // hurt and out of a fight: bandage / potion / heal spell
+        if (IsKeyPressed(KEY_B)) UseBandageOutOfCombat(s);
+        if (IsKeyPressed(KEY_H)) CastHealOutOfCombat(s, 0);
+        if (inRange && !prompt.empty() && DrawInteractButton(prompt)) tryInteract();
     }
     DrawGhostStatus(s); // death animation / ghost walk banner
     DrawCorpseUI(s, 0); // UO corpse window / Loot button (2026-09-26)
@@ -25331,11 +26309,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 std::string deny;
                 // UO-style travel: Recall pays its own spell costs (2 reagents),
                 // not the flat live-combat 1, and needs 40 Magery to attempt.
-                int needReag = (spellIdx == kRecallSpellIdx) ? sp.reagentCost : kLiveCombatReagentCost;
+                int needReag = (spellIdx == kRecallSpellIdx) ? sp.reagentCost : LiveReagentCost(spellIdx);
                 if (wam.castLockT > 0 || wam.spellCooldowns[spellIdx] > 0) deny = "Not ready";
                 else if (spellIdx == kRecallSpellIdx && EffectiveSkill(s, &GameState::magery) < (float)sp.minSkill) deny = "Need 40 Magery";
                 else if (s.mana < sp.manaCost) deny = "No mana!";
                 else if (s.reagents < needReag) deny = "No reagents!";
+                else if (SpellNeedsCorpse(spellIdx) && !NecroFindCorpse(s, 0, spellIdx == kSpCorpseExplosion ? wam.pos : s.wildernessPlayerPos, 280.0f) &&
+                         !NecroFindCorpse(s, 0, s.wildernessPlayerPos, 280.0f)) deny = "No corpse nearby"; // necromancy needs the dead
                 if (!deny.empty()) {
                     if (tapped < 5) s.hotbarDenyT[tapped] = kHotbarDenyTime;
                     SpawnFloatText(s, 0, s.wildernessPlayerPos, deny, kFloatDenyColor);
@@ -25853,6 +26833,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             for (auto& p : s.spellProjectiles) p.active = false;
             for (auto& im : s.spellImpacts) im.active = false;
             s.fiendT = 0.0f;
+            s.minions.clear(); s.boneArmor = 0.0f; // the raised dead don't follow you out (2026-09-27)
             s.vigorT = 0.0f;
         }
         else if (nearestIsBoss) tryEngageDungeonMonster(kDungeonBossSlot, true);
@@ -25913,7 +26894,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                 float raw = m.level * (0.8f + RandUnit() * 0.6f);
                 if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
-                s.hp -= dmg;
+                s.hp -= (dmg = NecroShield(s, 1, dmg)); // skeletons / Bone Armor take it first
                 s.playerHurtT = 0.0f; // hit-flash + knockback
                 CombatShake(7.0f);
                 PlaySfx(SfxId::Hurt);
@@ -25997,7 +26978,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                         float raw = exM.level * (0.8f + RandUnit() * 0.6f);
                         if (ex.debuffKind == 1) raw *= 0.7f; // Sap Strength
                         int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
-                        s.hp -= dmg;
+                        s.hp -= (dmg = NecroShield(s, 1, dmg)); // skeletons / Bone Armor take it first
                         s.playerHurtT = 0.0f; // hit-flash + knockback
                         CombatShake(7.0f);
                         PlaySfx(SfxId::Hurt);
@@ -26031,6 +27012,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (RandUnit() * 100.0f < hitChance) {
             int dmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
             if (s.vigorT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.25f)); // Blessing of Vigor
+            dmg = NecroOnHit(s, am, dmg); // Amplify Damage / Life Tap
             am.hp -= dmg;
             am.monsterHurtT = 0.0f; // hit-flash on the monster
             PlaySfx(SfxId::Hit);
@@ -26089,7 +27071,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (am.castLockT > 0 || am.spellCooldowns[spellIdx] > 0) return;
         const Spell& spell = kSpells[spellIdx];
         if (spell.type != SpellType::Offensive) return;
-        if (s.mana < spell.manaCost || s.reagents < kLiveCombatReagentCost) {
+        if (s.mana < spell.manaCost || s.reagents < LiveReagentCost(spellIdx)) {
             s.logLine = "Not enough mana or reagents for " + spell.name + ".";
             return;
         }
@@ -26097,7 +27079,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         am.castLockT = kCastLockTime;
         am.castEffectTimer = kCastEffectDuration;
         s.mana -= spell.manaCost;
-        s.reagents -= kLiveCombatReagentCost;
+        s.reagents -= LiveReagentCost(spellIdx);
         Journal(s, "You cast " + spell.name + ".");
         std::string note;
         ApplySpellTraining(s, spell, note);
@@ -26420,8 +27402,11 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     if (s.dungeonEngaged.has_value()) {
         // Melee is fully automatic now - no interact button needed here anymore for it.
         DrawLiveCombatQuickItems(s);
-    } else if (inRange && !prompt.empty() && DrawInteractButton(prompt)) {
-        tryDungeonInteract();
+    } else {
+        DrawLiveCombatQuickItems(s, 1);
+        if (IsKeyPressed(KEY_B)) UseBandageOutOfCombat(s);
+        if (IsKeyPressed(KEY_H)) CastHealOutOfCombat(s, 1);
+        if (inRange && !prompt.empty() && DrawInteractButton(prompt)) tryDungeonInteract();
     }
     DrawGhostStatus(s); // death animation / ghost walk banner
     DrawCorpseUI(s, 1); // UO corpse window / Loot button (2026-09-26)
@@ -26453,11 +27438,13 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                 std::string deny;
                 // UO-style travel: Recall pays its own spell costs (2 reagents),
                 // not the flat live-combat 1, and needs 40 Magery to attempt.
-                int needReag = (spellIdx == kRecallSpellIdx) ? sp.reagentCost : kLiveCombatReagentCost;
+                int needReag = (spellIdx == kRecallSpellIdx) ? sp.reagentCost : LiveReagentCost(spellIdx);
                 if (dam.castLockT > 0 || dam.spellCooldowns[spellIdx] > 0) deny = "Not ready";
                 else if (spellIdx == kRecallSpellIdx && EffectiveSkill(s, &GameState::magery) < (float)sp.minSkill) deny = "Need 40 Magery";
-                else if (s.mana < sp.manaCost) deny = "No mana!";
+                else if (s.mana < sp.manaCost) deny = "No mana!"; 
                 else if (s.reagents < needReag) deny = "No reagents!";
+                else if (SpellNeedsCorpse(spellIdx) && !NecroFindCorpse(s, 1, spellIdx == kSpCorpseExplosion ? dam.pos : s.dungeonPlayerPos, 280.0f) &&
+                         !NecroFindCorpse(s, 1, s.dungeonPlayerPos, 280.0f)) deny = "No corpse nearby"; // necromancy needs the dead
                 if (!deny.empty()) {
                     if (tapped < 5) s.hotbarDenyT[tapped] = kHotbarDenyTime;
                     SpawnFloatText(s, 1, s.dungeonPlayerPos, deny, kFloatDenyColor);
@@ -26974,7 +27961,7 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
     DrawUIText(TextFormat("Mana: %.1f / %.0f   Reagents: %d", s.mana, MaxMana(s), s.reagents),
                20, y, 15, kColorText);
     y += 22;
-    DrawUIText(TextFormat("Magery: %.1f   Eval Int: %.1f   Meditation: %.1f", s.magery, s.evalInt, s.meditation),
+    DrawUIText(TextFormat("Magery: %.1f   Eval Int: %.1f   Meditation: %.1f   Necromancy: %.1f", s.magery, s.evalInt, s.meditation, s.necromancy),
                20, y, 13, DARKGRAY);
     y += 24;
 
@@ -27043,19 +28030,23 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
     int listHeight = screenH - listTop - 40;
     Rectangle listArea = { 0, (float)listTop, (float)screenW, (float)listHeight };
     s.magicScroll -= ScrollDelta(listArea);
-    float maxScroll = std::max(0.0f, (float)kSpells.size() * 30.0f - listHeight);
+    float maxScroll = std::max(0.0f, (float)kSpells.size() * 30.0f + 34.0f - listHeight);
     s.magicScroll = std::clamp(s.magicScroll, 0.0f, maxScroll);
 
     BeginScissorMode(0, listTop, screenW, listHeight);
     for (size_t i = 0; i < kSpells.size(); i++) {
         const Spell& sp = kSpells[i];
-        float rowY = listTop + (float)i * 30 - s.magicScroll;
+        float rowY = listTop + (float)i * 30 + (sp.necro ? 34.0f : 0.0f) - s.magicScroll;
+        if ((int)i == kSpTeeth) { // Necromancy section header (2026-09-27)
+            float hy = rowY - 32;
+            DrawRectangle(14, (int)hy + 4, screenW - 28, 26, Fade(Color{ 60, 30, 70, 255 }, 0.85f));
+            DrawUIText("Necromancy - bone, blood and the risen dead (mana only; some need a corpse)", 22, (int)hy + 11, 12, Color{ 220, 200, 240, 255 });
+        }
         if (rowY < listTop - 30 || rowY > listTop + listHeight) continue;
 
-        bool castableType = sp.type == SpellType::Offensive || sp.type == SpellType::Utility;
-        std::string typeNote = castableType ? "" : " [not usable in combat yet]";
-        std::string line = TextFormat("Circle %d: %s (%dmp, needs %d magery)%s", sp.circle, sp.name.c_str(),
-                                        sp.manaCost, sp.minSkill, typeNote.c_str());
+        std::string line = TextFormat("Circle %d: %s (%dmp, needs %d %s)%s", sp.circle, sp.name.c_str(),
+                                        sp.manaCost, sp.minSkill, sp.necro ? "necromancy" : "magery",
+                                        SpellNeedsCorpse((int)i) ? " - corpse" : "");
         if (const Texture2D* icon = SpellIcon((int)i))
             DrawIconCentered(*icon, { 32, rowY + 12 }, 26.0f, WHITE);
         DrawUIText(line.c_str(), 50, (int)rowY + 6, 12, kColorText);
