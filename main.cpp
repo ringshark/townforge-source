@@ -8113,6 +8113,30 @@ static void DrawLiveCombatQuickItems(GameState& s) {
 // ---------------------------------------------------------------------
 #include "rlgl.h"
 
+// ---- Terrain height hook (2026-09-26 rolling hills) ----
+// The wilderness has hills; the town, dungeons and interiors stay flat. While
+// the wilderness is being drawn, g_groundHeightFn points at its height field;
+// everywhere else it's null and GroundY is 0. Draw helpers that place a thing
+// at a world (x, z) open a T3DLiftScope, which translates everything drawn
+// inside it up onto the ground - once, however deeply helpers nest.
+static float (*g_groundHeightFn)(float x, float z) = nullptr;
+static float GroundY(float x, float z) { return g_groundHeightFn ? g_groundHeightFn(x, z) : 0.0f; }
+static int g_liftDepth = 0;
+struct T3DLiftScope {
+    bool on;
+    T3DLiftScope(float x, float z) {
+        on = g_groundHeightFn != nullptr && g_liftDepth == 0;
+        if (on) { rlPushMatrix(); rlTranslatef(0.0f, g_groundHeightFn(x, z), 0.0f); }
+        g_liftDepth++;
+    }
+    ~T3DLiftScope() { g_liftDepth--; if (on) rlPopMatrix(); }
+};
+// Turns the height hook on for a scope (the wilderness draw), off again after.
+struct T3DGroundHook {
+    explicit T3DGroundHook(float (*fn)(float, float)) { g_groundHeightFn = fn; }
+    ~T3DGroundHook() { g_groundHeightFn = nullptr; }
+};
+
 // Tiny Vector3 helpers (this file doesn't pull in raymath.h).
 static Vector3 T3VSub(Vector3 a, Vector3 b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
 static Vector3 T3VAdd(Vector3 a, Vector3 b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
@@ -8850,6 +8874,7 @@ static const T3CBlobFootprint& T3CBlobFootprintFor(const Model& m) {
 }
 static void T3CDrawBlobShadow(const Model& merged, float x, float z, float yawRad, float scale,
                               float hoverY = 0.0f) {
+    T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
     if (merged.meshCount <= 0 || !T3CBlobEnsure()) return;
     const T3CBlobFootprint& f = T3CBlobFootprintFor(merged);
     // Same rotation DrawModelEx applies to the body (-yaw about +Y).
@@ -8870,6 +8895,7 @@ static void T3CDrawBlobShadow(const Model& merged, float x, float z, float yawRa
 static void T3CDrawQuad(const T3CQuadParts& P, float x, float z, float yawRad, float scale,
                         Color coat, T3CAnim a, float distToPlayer, bool shadowPass,
                         float attackT = -1.0f) {
+    T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
     Color coatV = T3CTintVar(coat, a.seed);
     Color darkV = T3CTintVar(ColorBrightness(coat, -0.35f), a.seed);
     if (!shadowPass) T3CDrawBlobShadow(P.merged, x, z, yawRad, scale, P.hover ? 6.0f : 0.0f);
@@ -8950,6 +8976,7 @@ static void T3CDrawQuad(const T3CQuadParts& P, float x, float z, float yawRad, f
 // leading the wave. Dungeons have few entities so per-segment draws are fine.
 static void T3CDrawSerpent(const T3CQuadParts& P, float x, float z, float yawRad, float scale,
                            Color coat, T3CAnim a, bool shadowPass, float attackT = -1.0f) {
+    T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
     Color coatV = T3CTintVar(coat, a.seed);
     if (shadowPass) {
         DrawModelEx(P.merged, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f },
@@ -8997,6 +9024,7 @@ static void T3CDrawSerpent(const T3CQuadParts& P, float x, float z, float yawRad
 static void T3CDrawHumanoid(const T3CHumanParts& P, float x, float z, float yawRad, float scale,
                             Color shirt, Color pants, Color skin, T3CAnim a, bool shadowPass,
                             float attackT = -1.0f, float castT = -1.0f) {
+    T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
     if (shadowPass) { // shadow pass: one merged rest-pose draw
         DrawModelEx(P.merged, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f },
                     -yawRad * kT3CDeg, { scale, scale, scale }, shirt);
@@ -9282,6 +9310,7 @@ struct AnimalPose {
 // the same convention as the kit. Returns false if the model isn't available.
 static bool DrawAnimal(int id, float x, float z, float yawRad, float scaleMul, Color tint, const AnimalPose& p,
                        bool shadowPass) {
+    T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
     AnimalsEnsure();
     if (id < 0 || id >= kAnCount || !g_animals[id].ok) return false;
     if (shadowPass) return true; // no shadow-map pass for skinned meshes (blob shadow below)
@@ -9387,6 +9416,8 @@ struct HumanOutfit {
     float weaponScale = 1.0f;
     bool shield = false;
     bool staffCaster = false; // casts by raising the staff
+    int hairStyle = 0;        // 0 short crop, 1 long, 2 ponytail/bun, 3 bald
+    bool beard = false;
     int helm = kHhNone;
     Color helmCol = { 190, 194, 202, 255 };
     bool cloak = true;
@@ -9422,6 +9453,8 @@ struct HumanRig {
     Model gear[kHwGearCount]{};
     bool gearOk[kHwGearCount]{};
     Model helm[4]{};   // procedural, head-bone space (index = HumanHelm)
+    Model face{};      // eyes (baked colors) - head-bone space
+    Model brows{}, beard{}, hair[3]{}; // tinted with the hair color
     Model cloak{};     // procedural, chest-bone space
     Color painted[kHrCount]{};
     bool paintedOnce = false;
@@ -9521,6 +9554,46 @@ static Model HumanBuildWeapon(int kind) {
         default:
             T3CCylinder(b, 0.0f, -0.12f, 0.0f, 0.62f, 0.026f, 0.06f, 7, wood);
             break;
+    }
+    return T3CFinish(b);
+}
+
+// Face and hair (2026-09-26), head-bone space in metres like the helms: the
+// mannequin's head spans ~0.03..0.26 above the bone, face toward +Z. Features
+// are a little oversized so they still read from the game camera.
+static Model HumanBuildFace() {
+    T3CMeshBuilder b;
+    for (int s = -1; s <= 1; s += 2) {
+        T3CSphere(b, s * 0.036f, 0.132f, 0.098f, 0.019f, 0.015f, 0.010f, 4, 6, Color{ 245, 242, 236, 255 }); // eye white
+        T3CSphere(b, s * 0.036f, 0.132f, 0.106f, 0.010f, 0.011f, 0.006f, 3, 5, Color{ 40, 32, 30, 255 });   // iris
+    }
+    T3CBox(b, 0.0f, 0.100f, 0.116f, 0.018f, 0.030f, 0.020f, Color{ 214, 170, 136, 255 }); // nose
+    T3CBox(b, 0.0f, 0.062f, 0.104f, 0.034f, 0.006f, 0.008f, Color{ 150, 80, 70, 255 });  // mouth
+    return T3CFinish(b);
+}
+static Model HumanBuildBrows() {
+    T3CMeshBuilder b;
+    for (int s = -1; s <= 1; s += 2) T3CBox(b, s * 0.037f, 0.158f, 0.104f, 0.036f, 0.010f, 0.010f, WHITE);
+    return T3CFinish(b);
+}
+static Model HumanBuildBeard() {
+    T3CMeshBuilder b;
+    T3CSphere(b, 0.0f, 0.040f, 0.080f, 0.058f, 0.040f, 0.036f, 4, 8, WHITE); // chin and jaw line
+    T3CBox(b, 0.0f, 0.078f, 0.110f, 0.046f, 0.010f, 0.010f, WHITE);        // moustache
+    return T3CFinish(b);
+}
+static Model HumanBuildHair(int style) {
+    T3CMeshBuilder b;
+    // shared crown: a cap over the top and back of the skull
+    T3CSphere(b, 0.0f, 0.180f, -0.012f, 0.100f, 0.100f, 0.118f, 5, 10, WHITE);
+    T3CBox(b, 0.0f, 0.205f, 0.080f, 0.150f, 0.040f, 0.050f, WHITE); // fringe line above the brow
+    if (style == 1) { // long: falls to the shoulders at the back and sides
+        T3CBox(b, 0.0f, 0.075f, -0.075f, 0.190f, 0.190f, 0.070f, WHITE);
+        T3CBox(b, -0.088f, 0.100f, -0.010f, 0.030f, 0.150f, 0.120f, WHITE);
+        T3CBox(b, 0.088f, 0.100f, -0.010f, 0.030f, 0.150f, 0.120f, WHITE);
+    } else if (style == 2) { // tied back: a bun / tail
+        T3CSphere(b, 0.0f, 0.170f, -0.135f, 0.045f, 0.045f, 0.045f, 4, 6, WHITE);
+        T3CBox(b, 0.0f, 0.090f, -0.150f, 0.035f, 0.120f, 0.030f, WHITE);
     }
     return T3CFinish(b);
 }
@@ -9654,6 +9727,10 @@ static void HumanEnsure() {
     for (int g = kHwBow; g < kHwGearCount; g++) { H.gear[g] = HumanBuildWeapon(g); H.gearOk[g] = true; }
     for (int k = kHhLeather; k <= kHhPlate; k++) H.helm[k] = HumanBuildHelm(k);
     H.cloak = HumanBuildCloak();
+    H.face = HumanBuildFace();
+    H.brows = HumanBuildBrows();
+    H.beard = HumanBuildBeard();
+    for (int k = 0; k < 3; k++) H.hair[k] = HumanBuildHair(k);
     H.ok = true;
 }
 
@@ -10004,6 +10081,7 @@ static void HumanCastMove(HumanRig& H, const HumanOutfit& o, float t) {
 // dungeons). Returns false when the model isn't available (caller draws the kit).
 static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMul, Color tint,
                       const HumanOutfit& o, const HumanPose& p, bool shadowPass) {
+    T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
     HumanEnsure();
     HumanRig& H = g_human;
     if (!H.ok) return false;
@@ -10163,6 +10241,14 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
         HumanDrawAttached(H.gear[kHwShield], nullptr, local, HumanBoneMatrix(H, H.boneForearmL), world, tint);
     }
     Matrix metres = MatrixScale(u, u, u);
+    if (H.boneHead >= 0) {
+        Matrix hb = HumanBoneMatrix(H, H.boneHead);
+        Color hairT = HumanMul(o.region[kHrHair], tint);
+        HumanDrawAttached(H.face, &flat, metres, hb, world, tint);
+        HumanDrawAttached(H.brows, &flat, metres, hb, world, HumanMul(ColorBrightness(o.region[kHrHair], -0.15f), tint));
+        if (o.beard) HumanDrawAttached(H.beard, &flat, metres, hb, world, hairT);
+        if (o.helm == kHhNone && o.hairStyle >= 0 && o.hairStyle <= 2) HumanDrawAttached(H.hair[o.hairStyle], &flat, metres, hb, world, hairT);
+    }
     if (o.helm != kHhNone && H.boneHead >= 0)
         HumanDrawAttached(H.helm[o.helm], &flat, metres, HumanBoneMatrix(H, H.boneHead), world, HumanMul(o.helmCol, tint));
     if (o.cloak && H.boneChest >= 0) {
@@ -10328,6 +10414,11 @@ static HumanOutfit HumanOutfitForTownsfolk(const std::string& name, Color shirt,
     if (has("Old") || has("Widow") || has("Harbormaster") || has("Guildmaster")) hair = Color{ 196, 196, 190, 255 };
     *scale = 1.0f;
     HumanOutfit o = HumanOutfitPlain(skin, shirt, pants, boots, hair);
+    static const char* kWomen[] = { "Petra", "Aelith", "Meraude", "Sella", "Nessa", "Ysolde", "Anka", "Halla", "Corva", "Liora", "Widow", "Sister" };
+    bool woman = false;
+    for (const char* w : kWomen) if (has(w)) woman = true;
+    if (woman) { o.hairStyle = ((unsigned)h % 2) ? 1 : 2; o.beard = false; }
+    else { o.hairStyle = ((unsigned)h % 5 == 0) ? 3 : 0; o.beard = ((unsigned)h % 3) == 0 || has("Old") || has("Salty") || has("Smith"); }
     if (has("Young") || has("Little") || has("Pip")) *scale = 0.78f;
     if (has("Sister")) { o = HumanOutfitPlain(skin, Color{ 236, 232, 222, 255 }, Color{ 226, 222, 212, 255 }, Color{ 90, 80, 70, 255 }, Color{ 236, 232, 222, 255 });
                          o.region[kHrBelt] = Color{ 120, 90, 60, 255 }; }
@@ -10456,7 +10547,7 @@ static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, in
     float dt = GameDt();
     if (!g_t3dCamInit || g_t3dCamScreen != screenId) {
         g_t3dYawSm = g_t3dYaw; g_t3dPitchSm = g_t3dPitch; g_t3dDistSm = g_t3dDist;
-        g_t3dTargetSm = { playerPos.x, 0.0f, playerPos.y };
+        g_t3dTargetSm = { playerPos.x, GroundY(playerPos.x, playerPos.y), playerPos.y };
         g_t3dCamInit = true; g_t3dCamScreen = screenId;
         // Entering a world with tighter zoom limits never starts out of range.
         g_t3dDist = std::clamp(g_t3dDist, distMin, distMax);
@@ -10500,7 +10591,7 @@ static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, in
     g_t3dYawSm += (g_t3dYaw - g_t3dYawSm) * ty;
     g_t3dPitchSm += (g_t3dPitch - g_t3dPitchSm) * ty;
     g_t3dDistSm += (g_t3dDist - g_t3dDistSm) * tz;
-    Vector3 pw = { playerPos.x + look.x, 0.0f, playerPos.y + look.y };
+    Vector3 pw = { playerPos.x + look.x, GroundY(playerPos.x, playerPos.y), playerPos.y + look.y };
     g_t3dTargetSm = T3VAdd(g_t3dTargetSm, T3VScale(T3VSub(pw, g_t3dTargetSm), tt));
     Town3DCam c;
     c.target = g_t3dTargetSm;
@@ -10716,9 +10807,12 @@ static void Town3DApplyLitShader(Model& m) {
 struct T3DGroundShader {
     bool ready = false, tried = false;
     Shader shader{};
-    int viewPosLoc = -1, fogRangeLoc = -1;
+    int viewPosLoc = -1, fogRangeLoc = -1, timeLoc = -1, skyLoc = -1;
     Texture2D grassDetail{}, soilDetail{};
 };
+// Foliage sway shader (assets/shaders/foliage.vs + lit.fs): trees and bushes.
+struct T3DFoliageShader { bool ready = false, tried = false; Shader shader{}; int viewPosLoc = -1, fogRangeLoc = -1, timeLoc = -1; };
+static T3DFoliageShader g_t3dFoliageSh;
 static T3DGroundShader g_t3dGroundSh;
 
 // Tileable value noise on a period-P lattice (wraps at the texture edge).
@@ -10824,18 +10918,108 @@ static Texture2D T3DMakeSoilDetail() {
 }
 
 // Sun, sky fill and fog shared by every lit shader (lit, grass, ground).
+static float g_t3dNight = 0.0f; // 0 day .. 1 night (day/night cycle); drives stars, fireflies, lamps
 static const Color kT3DSunColor = { 255, 238, 210, 255 };
 static const float kT3DAmbient[4] = { 0.42f, 0.41f, 0.40f, 1.0f };
+static void T3DPushLightGrass(); // with the grass shader
+// ---- Day/night cycle (2026-09-26) ----
+// A 22-minute day on the game clock: golden sunrise, bright day, amber dusk
+// and a short blue night. Only colors change - the sun keeps its direction,
+// so the baked ground shadows stay right. Every lit shader (lit, grass,
+// ground, foliage) takes the same sun/fill/fog; the sky dome, stars, lamp
+// glow and fireflies follow g_t3dNight. Interiors stay at noon.
+struct T3DLightState { Vector3 sun; float amb[4]; Color horizon, zenith; float sunI; };
+static T3DLightState g_t3dLightNow;
+static Color g_t3dSkyHorizon = kT3DSkyHorizon, g_t3dSkyZenith = kT3DSkyZenith;
+static const float kT3DDayLength = 22.0f * 60.0f; // seconds of game clock per full day
+
+static T3DLightState T3DLightAt(float tod) { // tod 0..1: 0 midnight, 0.25 sunrise, 0.5 noon, 0.8 dusk
+    struct Key { float t; Color sun; float i; float amb[3]; Color hor, zen; };
+    static const Key keys[] = {
+        { 0.00f, { 130, 150, 210, 255 }, 0.22f, { 0.10f, 0.12f, 0.22f }, { 34, 42, 76, 255 },   { 12, 18, 44, 255 } },
+        { 0.18f, { 130, 150, 210, 255 }, 0.22f, { 0.10f, 0.12f, 0.22f }, { 34, 42, 76, 255 },   { 12, 18, 44, 255 } },
+        { 0.24f, { 255, 170, 120, 255 }, 0.62f, { 0.30f, 0.26f, 0.30f }, { 244, 170, 128, 255 }, { 92, 112, 172, 255 } },
+        { 0.32f, kT3DSunColor,           1.00f, { 0.42f, 0.41f, 0.40f }, kT3DSkyHorizon,         kT3DSkyZenith },
+        { 0.70f, kT3DSunColor,           1.00f, { 0.42f, 0.41f, 0.40f }, kT3DSkyHorizon,         kT3DSkyZenith },
+        { 0.78f, { 255, 150, 92, 255 },  0.66f, { 0.32f, 0.25f, 0.27f }, { 250, 150, 100, 255 }, { 74, 82, 152, 255 } },
+        { 0.85f, { 130, 150, 210, 255 }, 0.22f, { 0.10f, 0.12f, 0.22f }, { 34, 42, 76, 255 },   { 12, 18, 44, 255 } },
+        { 1.00f, { 130, 150, 210, 255 }, 0.22f, { 0.10f, 0.12f, 0.22f }, { 34, 42, 76, 255 },   { 12, 18, 44, 255 } },
+    };
+    const int n = (int)(sizeof(keys) / sizeof(keys[0]));
+    int k = 0;
+    while (k < n - 2 && tod > keys[k + 1].t) k++;
+    const Key& a = keys[k];
+    const Key& b = keys[k + 1];
+    float f = std::clamp((tod - a.t) / std::max(1e-4f, b.t - a.t), 0.0f, 1.0f);
+    f = f * f * (3.0f - 2.0f * f);
+    T3DLightState L;
+    L.sunI = a.i + (b.i - a.i) * f;
+    Color sc = ColorLerp(a.sun, b.sun, f);
+    L.sun = { sc.r / 255.0f * L.sunI, sc.g / 255.0f * L.sunI, sc.b / 255.0f * L.sunI };
+    for (int i = 0; i < 3; i++) L.amb[i] = a.amb[i] + (b.amb[i] - a.amb[i]) * f;
+    L.amb[3] = 1.0f;
+    L.horizon = ColorLerp(a.hor, b.hor, f);
+    L.zenith = ColorLerp(a.zen, b.zen, f);
+    return L;
+}
+static void T3DPushLight(Shader sh) {
+    if (sh.id == 0) return;
+    Vector4 sunCol = { g_t3dLightNow.sun.x, g_t3dLightNow.sun.y, g_t3dLightNow.sun.z, 1.0f };
+    SetShaderValue(sh, GetShaderLocation(sh, "lightColor"), &sunCol, SHADER_UNIFORM_VEC4);
+    SetShaderValue(sh, GetShaderLocation(sh, "ambient"), g_t3dLightNow.amb, SHADER_UNIFORM_VEC4);
+    Vector3 fogCol = { g_t3dSkyHorizon.r / 255.0f, g_t3dSkyHorizon.g / 255.0f, g_t3dSkyHorizon.b / 255.0f };
+    SetShaderValue(sh, GetShaderLocation(sh, "fogColor"), &fogCol, SHADER_UNIFORM_VEC3);
+}
+// Called at the top of each outdoor 3D view (and with noon for interiors).
+static void T3DUpdateDayNight(float worldTime, bool indoors) {
+    float tod = indoors ? 0.5f : fmodf(worldTime / kT3DDayLength + 0.35f, 1.0f); // new games start mid-morning
+    g_t3dLightNow = T3DLightAt(tod);
+    g_t3dSkyHorizon = g_t3dLightNow.horizon;
+    g_t3dSkyZenith = g_t3dLightNow.zenith;
+    g_t3dNight = std::clamp((0.62f - g_t3dLightNow.sunI) / 0.34f, 0.0f, 1.0f);
+    static float lastPushed = -1.0f;
+    float sig = g_t3dLightNow.sun.x + g_t3dLightNow.amb[0] * 3.0f + g_t3dLightNow.horizon.r / 255.0f * 7.0f;
+    if (fabsf(sig - lastPushed) < 1e-4f) return; // unchanged: skip the uniform uploads
+    lastPushed = sig;
+    Town3DEnsureLit();
+    if (g_t3dLit.ready) T3DPushLight(g_t3dLit.shader);
+    if (g_t3dGroundSh.ready) {
+        T3DPushLight(g_t3dGroundSh.shader);
+        Vector3 sky = { g_t3dSkyZenith.r / 255.0f, g_t3dSkyZenith.g / 255.0f, g_t3dSkyZenith.b / 255.0f };
+        SetShaderValue(g_t3dGroundSh.shader, g_t3dGroundSh.skyLoc, &sky, SHADER_UNIFORM_VEC3);
+    }
+    if (g_t3dFoliageSh.ready) T3DPushLight(g_t3dFoliageSh.shader);
+    T3DPushLightGrass();
+}
+// Stars on the sky dome at night (inside T3DSkyBegin/End).
+static void T3DDrawStars(Vector3 camPos, float R) {
+    if (g_t3dNight <= 0.02f) return;
+    float tt = (float)GetTime();
+    rlBegin(RL_TRIANGLES);
+    for (int i = 0; i < 220; i++) {
+        float h1 = T3CHash01((float)i, 1.3f), h2 = T3CHash01((float)i, 7.9f), h3 = T3CHash01((float)i, 4.4f);
+        float az = h1 * 6.2831853f, el = 0.12f + h2 * 1.3f;
+        Vector3 d = { cosf(el) * cosf(az), sinf(el), cosf(el) * sinf(az) };
+        Vector3 p = { camPos.x + d.x * R * 0.96f, d.y * R * 0.96f, camPos.z + d.z * R * 0.96f };
+        float s = R * (0.0022f + 0.003f * h3);
+        Vector3 u = T3VNorm({ -d.z, 0.0f, d.x });          // across the sky
+        Vector3 v = T3VCross(u, d);                         // up the sky
+        float tw = 0.7f + 0.3f * sinf(tt * (1.0f + h3 * 3.0f) + h1 * 30.0f);
+        rlColor4ub(235, 240, 255, (unsigned char)(255.0f * g_t3dNight * tw));
+        Vector3 a0 = T3VSub(p, T3VScale(u, s)), a1 = T3VAdd(p, T3VScale(v, s)), a2 = T3VAdd(p, T3VScale(u, s)), a3 = T3VSub(p, T3VScale(v, s));
+        rlVertex3f(a0.x, a0.y, a0.z); rlVertex3f(a1.x, a1.y, a1.z); rlVertex3f(a2.x, a2.y, a2.z);
+        rlVertex3f(a0.x, a0.y, a0.z); rlVertex3f(a2.x, a2.y, a2.z); rlVertex3f(a3.x, a3.y, a3.z);
+    }
+    rlEnd();
+}
 static void T3DSetLightUniforms(Shader sh) {
+    static bool init = false;
+    if (!init) { init = true; g_t3dLightNow = T3DLightAt(0.5f); } // noon until the first frame's update
     Vector3 sunDir = kT3DSunDir;
     SetShaderValue(sh, GetShaderLocation(sh, "lightDir"), &sunDir, SHADER_UNIFORM_VEC3);
-    Vector4 sunCol = ColorNormalize(kT3DSunColor);
-    SetShaderValue(sh, GetShaderLocation(sh, "lightColor"), &sunCol, SHADER_UNIFORM_VEC4);
-    SetShaderValue(sh, GetShaderLocation(sh, "ambient"), kT3DAmbient, SHADER_UNIFORM_VEC4);
-    Vector3 fogCol = { kT3DSkyHorizon.r / 255.0f, kT3DSkyHorizon.g / 255.0f, kT3DSkyHorizon.b / 255.0f };
-    SetShaderValue(sh, GetShaderLocation(sh, "fogColor"), &fogCol, SHADER_UNIFORM_VEC3);
     float fogRange[2] = { 900.0f, 2600.0f };
     SetShaderValue(sh, GetShaderLocation(sh, "fogRange"), fogRange, SHADER_UNIFORM_VEC2);
+    T3DPushLight(sh); // current time of day
 }
 
 static void T3DGroundShaderEnsure() {
@@ -10849,7 +11033,11 @@ static void T3DGroundShaderEnsure() {
     G.shader.locs[SHADER_LOC_MAP_NORMAL] = GetShaderLocation(G.shader, "texture2");
     G.viewPosLoc = G.shader.locs[SHADER_LOC_VECTOR_VIEW];
     G.fogRangeLoc = GetShaderLocation(G.shader, "fogRange");
+    G.timeLoc = GetShaderLocation(G.shader, "time");
+    G.skyLoc = GetShaderLocation(G.shader, "skyColor");
     T3DSetLightUniforms(G.shader);
+    Vector3 sky = { kT3DSkyZenith.r / 255.0f, kT3DSkyZenith.g / 255.0f, kT3DSkyZenith.b / 255.0f };
+    SetShaderValue(G.shader, G.skyLoc, &sky, SHADER_UNIFORM_VEC3);
     G.grassDetail = T3DMakeGrassDetail();
     G.soilDetail = T3DMakeSoilDetail();
     G.ready = true;
@@ -10864,10 +11052,36 @@ static void T3DApplyGroundShader(Model& m) {
         m.materials[i].maps[MATERIAL_MAP_NORMAL].texture = g_t3dGroundSh.soilDetail;
     }
 }
+static void T3DFoliageShaderEnsure() {
+    T3DFoliageShader& F = g_t3dFoliageSh;
+    if (F.ready || F.tried) return;
+    F.tried = true;
+    F.shader = LoadShader("assets/shaders/foliage.vs", "assets/shaders/lit.fs");
+    if (F.shader.id == 0) return;
+    F.shader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(F.shader, "viewPos");
+    F.viewPosLoc = F.shader.locs[SHADER_LOC_VECTOR_VIEW];
+    F.fogRangeLoc = GetShaderLocation(F.shader, "fogRange");
+    F.timeLoc = GetShaderLocation(F.shader, "time");
+    T3DSetLightUniforms(F.shader);
+    F.ready = true;
+}
+// Trees and bushes sway in the wind; falls back to the plain lit shader.
+static void T3DApplyFoliageShader(Model& m) {
+    T3DFoliageShaderEnsure();
+    if (!g_t3dFoliageSh.ready || m.meshCount <= 0) { Town3DApplyLitShader(m); return; }
+    for (int i = 0; i < m.materialCount; i++) m.materials[i].shader = g_t3dFoliageSh.shader;
+}
 static void T3DGroundShaderSync(const Vector3* camPos, const float* fogRange) {
+    float t = (float)fmod(GetTime(), 3600.0);
+    if (g_t3dFoliageSh.ready) {
+        if (camPos) SetShaderValue(g_t3dFoliageSh.shader, g_t3dFoliageSh.viewPosLoc, camPos, SHADER_UNIFORM_VEC3);
+        if (fogRange) SetShaderValue(g_t3dFoliageSh.shader, g_t3dFoliageSh.fogRangeLoc, fogRange, SHADER_UNIFORM_VEC2);
+        SetShaderValue(g_t3dFoliageSh.shader, g_t3dFoliageSh.timeLoc, &t, SHADER_UNIFORM_FLOAT);
+    }
     if (!g_t3dGroundSh.ready) return;
     if (camPos) SetShaderValue(g_t3dGroundSh.shader, g_t3dGroundSh.viewPosLoc, camPos, SHADER_UNIFORM_VEC3);
     if (fogRange) SetShaderValue(g_t3dGroundSh.shader, g_t3dGroundSh.fogRangeLoc, fogRange, SHADER_UNIFORM_VEC2);
+    SetShaderValue(g_t3dGroundSh.shader, g_t3dGroundSh.timeLoc, &t, SHADER_UNIFORM_FLOAT);
 }
 
 // Soft sun shadows painted into a ground map (the realtime shadow map stays
@@ -11160,12 +11374,13 @@ static void Town3DDrawSky(Vector3 camPos) {
     T3DSkyBegin(); // we see the inside of the cylinder wall
     for (int i = 0; i < bands; i++) {
         float t = (float)i / (float)(bands - 1);
-        Color col = ColorLerp(kT3DSkyHorizon, kT3DSkyZenith, t * t * 0.92f);
+        Color col = ColorLerp(g_t3dSkyHorizon, g_t3dSkyZenith, t * t * 0.92f);
         float y0 = -30.0f + i * bandH, y1 = y0 + bandH;
         Town3DSkyBand({ camPos.x, y0, camPos.z }, { camPos.x, y1, camPos.z }, R, 24, col);
     }
     // Zenith cap overhead - the one real cap, sealing the top of the dome.
-    DrawCylinder({ camPos.x, 931.0f, camPos.z }, R, R, 2.0f, 24, kT3DSkyZenith);
+    DrawCylinder({ camPos.x, 931.0f, camPos.z }, R, R, 2.0f, 24, g_t3dSkyZenith);
+    T3DDrawStars(camPos, R);
     T3DSkyEnd();
 }
 
@@ -11233,12 +11448,12 @@ static void Town3DLoadModels() {
     Town3DApplyLitShader(M.crate);
     Town3DApplyLitShader(M.wagon);
     Town3DApplyLitShader(M.vine);
-    Town3DApplyLitShader(M.treeOak);
-    Town3DApplyLitShader(M.treePine);
-    Town3DApplyLitShader(M.treeDetailed);
-    Town3DApplyLitShader(M.treeDefault);
-    Town3DApplyLitShader(M.treeFat);
-    Town3DApplyLitShader(M.bush);
+    T3DApplyFoliageShader(M.treeOak); // trees and bushes sway in the wind (2026-09-26)
+    T3DApplyFoliageShader(M.treePine);
+    T3DApplyFoliageShader(M.treeDetailed);
+    T3DApplyFoliageShader(M.treeDefault);
+    T3DApplyFoliageShader(M.treeFat);
+    T3DApplyFoliageShader(M.bush);
     Town3DApplyLitShader(M.barrel);
     Town3DApplyLitShader(M.chest);
     Town3DApplyLitShader(M.fenceSingle);
@@ -11252,6 +11467,7 @@ static void Town3DLoadModels() {
 // shadow shader honors via colDiffuse.
 static void Town3DDrawPiece(Model m, Vector3 pos, float rotYDeg,
                             float scaleMul = 1.0f, Color tint = WHITE) {
+    T3DLiftScope lift_(pos.x, pos.z); // onto the terrain (wilderness hills)
     if (m.meshCount <= 0) return;
     float s = kT3DModScale * scaleMul;
     DrawModelEx(m, pos, { 0, 1, 0 }, rotYDeg, { s, s, s }, tint);
@@ -12421,15 +12637,15 @@ static void Town3DDrawAmbience(const Town3DCam& c, int townIdx) {
         float ang = t * 0.22f + (float)i * 1.5708f;
         float rad = 720.0f + (float)i * 110.0f;
         Vector3 ctr = { 500.0f * kTS + cosf(ang) * rad,
-                        470.0f + (float)i * 32.0f + sinf(t * 0.6f + (float)i) * 24.0f,
+                        320.0f + (float)i * 26.0f + sinf(t * 0.6f + (float)i) * 20.0f, // well below a zoomed-out camera
                         500.0f * kTS + sinf(ang) * rad };
         Vector3 fwd = { -sinf(ang), 0.0f, cosf(ang) };  // direction of travel
         Vector3 side = { cosf(ang), 0.0f, -sinf(ang) };  // wing axis
         Vector3 nose = T3VAdd(ctr, T3VScale(fwd, 16.0f));
         Vector3 tail = T3VSub(ctr, T3VScale(fwd, 12.0f));
         float tipY = 6.0f + sinf(t * 8.0f + (float)i * 2.1f) * 18.0f; // flap
-        Vector3 lw = { ctr.x + side.x * 38.0f, ctr.y + tipY, ctr.z + side.z * 38.0f };
-        Vector3 rw = { ctr.x - side.x * 38.0f, ctr.y + tipY, ctr.z - side.z * 38.0f };
+        Vector3 lw = { ctr.x + side.x * 26.0f, ctr.y + tipY, ctr.z + side.z * 26.0f };
+        Vector3 rw = { ctr.x - side.x * 26.0f, ctr.y + tipY, ctr.z - side.z * 26.0f };
         rlColor4ub(42, 38, 46, 255);
         rlVertex3f(nose.x, nose.y, nose.z); rlVertex3f(tail.x, tail.y, tail.z); rlVertex3f(lw.x, lw.y, lw.z);
         rlVertex3f(nose.x, nose.y, nose.z); rlVertex3f(rw.x, rw.y, rw.z); rlVertex3f(tail.x, tail.y, tail.z);
@@ -12441,6 +12657,7 @@ static void Town3DDrawAmbience(const Town3DCam& c, int townIdx) {
 // Flat ground ring at (x, z), drawn unlit via immediate-mode triangles
 // (this raylib's DrawRing is 2D-only).
 static void Town3DDrawGroundRing(float x, float z, float y, float rIn, float rOut, int segs, Color col) {
+    T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
     rlDisableBackfaceCulling();
     rlBegin(RL_TRIANGLES);
     rlColor4ub(col.r, col.g, col.b, col.a);
@@ -12475,11 +12692,13 @@ static void T3DUpdateViewFog(const Town3DCam& c) {
     if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.fogRangeLoc, g_t3dFogRange, SHADER_UNIFORM_VEC2);
     T3DGroundShaderSync(&c.pos, g_t3dFogRange);
 }
+static void T3DDrawLife(const Town3DCam& c, Vector2 player, int zone, int town, float night, bool snowy); // ambient life
+static void T3DDrawNightGlows(const Town3DCam& c, int town);
 // Soft vignette over the 3D viewport (2026-09-26): darkens the edges a touch so
 // the eye settles on the middle of the scene; drawn right after EndMode3D, under the HUD.
 static void T3DDrawVignette() {
     const Rectangle v = kViewport;
-    const Color edge = { 18, 16, 24, 70 }, clear = { 18, 16, 24, 0 };
+    const Color edge = { 10, 12, 30, (unsigned char)(70 + 70 * g_t3dNight) }, clear = { 10, 12, 30, 0 };
     DrawRectangleGradientV((int)v.x, (int)v.y, (int)v.width, 110, edge, clear);
     DrawRectangleGradientV((int)v.x, (int)(v.y + v.height - 150), (int)v.width, 150, clear, edge);
     DrawRectangleGradientH((int)v.x, (int)v.y, 70, (int)v.height, edge, clear);
@@ -12540,6 +12759,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
         hasHover = !hoverKey.empty() || hoverGate;
     }
     Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
+    T3DUpdateDayNight(s.worldTime, false); // time of day: sun, sky, fog colors
     BeginMode3D(cam3d);
     Town3DDrawSky(c.pos); // gradient sky, default shader (unlit, unfogged)
     // Per-frame shader state: just the camera position, for the specular
@@ -12555,6 +12775,8 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     // Ambience (smoke + birds): unlit, one batched draw call, main pass only.
     Town3DUpdateAmbience(GameDt());
     Town3DDrawAmbience(c, s.selectedTown);
+    T3DDrawLife(c, s.townPlayerPos, 0, s.selectedTown, g_t3dNight, s.selectedTown == 2);
+    T3DDrawNightGlows(c, s.selectedTown); // lanterns and braziers after dusk
     // Hover / selection ring: warm outline at the building's base. While a
     // detail panel is open the tapped building keeps its ring (touch feedback).
     {
@@ -12694,6 +12916,151 @@ static void Wild3DGroundPath(Image* img, Vector2 a, Vector2 b, Color col) {
         Wild3DGroundDisc(img, a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, 13.0f, col);
     }
 }
+// ---- Wilderness height field (2026-09-26 rolling hills) ----
+// Gentle hills from smooth noise on the terrain grid (8 units/cell), taller in
+// the Stonepeaks and the snowy north, lower on the coast, with rocky crests
+// along the ridges. Water, fords and the shore sit at 0 and the land eases up
+// from them; it is flattened again around every town (the whole town
+// footprint - towns are flat), dungeon entrance, gate, house plot, shrine and
+// dock, so nothing gameplay-relevant ever stands on a slope.
+static std::vector<float> g_wildH; // kWTN x kWTN, cell centres
+static bool g_wildHBuilt = false;
+static float WildValueNoise(float x, float z, int seed) {
+    int x0 = (int)floorf(x), z0 = (int)floorf(z);
+    float fx = x - x0, fz = z - z0;
+    fx = fx * fx * (3 - 2 * fx); fz = fz * fz * (3 - 2 * fz);
+    auto H = [&](int i, int j) { return T3DTileHash(i, j, seed); };
+    float a = H(x0, z0), b = H(x0 + 1, z0), c = H(x0, z0 + 1), d = H(x0 + 1, z0 + 1);
+    return (a + (b - a) * fx) + ((c + (d - c) * fx) - (a + (b - a) * fx)) * fz;
+}
+static void WildHeightEnsure() {
+    if (g_wildHBuilt) return;
+    g_wildHBuilt = true;
+    WildTerrainEnsure();
+    const int N = kWTN;
+    g_wildH.assign((size_t)N * N, 0.0f);
+    // distance (in cells) to water - multi-source BFS, capped
+    std::vector<int> dW((size_t)N * N, 9999);
+    std::vector<int> q;
+    q.reserve((size_t)N * N);
+    for (int i = 0; i < N * N; i++)
+        if (g_wt[i] & (kWTWater | kWTRiver | kWTFord | kWTSea)) { dW[(size_t)i] = 0; q.push_back(i); }
+    for (size_t h = 0; h < q.size(); h++) {
+        int i = q[h], gx = i % N, gz = i / N;
+        if (dW[(size_t)i] >= 40) continue;
+        const int nx[4] = { gx + 1, gx - 1, gx, gx }, nz[4] = { gz, gz, gz + 1, gz - 1 };
+        for (int k = 0; k < 4; k++) {
+            if (nx[k] < 0 || nz[k] < 0 || nx[k] >= N || nz[k] >= N) continue;
+            int j = nz[k] * N + nx[k];
+            if (dW[(size_t)j] > dW[(size_t)i] + 1) { dW[(size_t)j] = dW[(size_t)i] + 1; q.push_back(j); }
+        }
+    }
+    struct Flat { float x, z, r; };
+    std::vector<Flat> flats;
+    for (const auto& e : kWildernessDungeonEntrances) flats.push_back({ e.pos.x, e.pos.y, 130.0f });
+    for (const auto& g : kTownGates) flats.push_back({ g.wildernessPos.x, g.wildernessPos.y, 220.0f });
+    for (const auto& hp : kHousePlots) flats.push_back({ hp.pos.x, hp.pos.y, 60.0f + hp.cells * kHouseCellSize * 0.75f });
+    for (const auto& sh : kShrines) flats.push_back({ sh.pos.x, sh.pos.y, 110.0f });
+    for (const auto& d : kSaltDocks) flats.push_back({ d.pos.x, d.pos.y, 140.0f });
+    flats.push_back({ kFieldsOfSorrow.x, kFieldsOfSorrow.y, kFieldsOfSorrowRadius + 60.0f });
+    WildField ridge = WildTerrainField(kWTRidge, 3);
+    for (int gz = 0; gz < N; gz++)
+        for (int gx = 0; gx < N; gx++) {
+            float x = (gx + 0.5f) * kWTCell, z = (gz + 0.5f) * kWTCell;
+            float n = 0.6f * WildValueNoise(x / 620.0f, z / 620.0f, 71) + 0.3f * WildValueNoise(x / 260.0f, z / 260.0f, 72) +
+                      0.1f * WildValueNoise(x / 110.0f, z / 110.0f, 73);
+            float h = 105.0f * std::clamp((n - 0.40f) / 0.45f, 0.0f, 1.0f);
+            h = h * h / 105.0f * 1.4f;                                  // rounded tops, long flat meadows
+            RegionId rg = RegionAt({ x, z });
+            if (rg == RegionId::Stonepeaks) h *= 1.6f;
+            else if (rg == RegionId::Frostwastes) h *= 1.25f;
+            else if (rg == RegionId::SaltCoast) h *= 0.55f;
+            h += 34.0f * WildFieldAt(ridge, x, z);                     // rocky crests on the ridges
+            float dw = dW[(size_t)gz * N + gx] * kWTCell;
+            h *= std::clamp((dw - 24.0f) / 170.0f, 0.0f, 1.0f);        // water level at the shore
+            for (const Flat& f : flats) {
+                float d = hypotf(x - f.x, z - f.z);
+                if (d < f.r + 160.0f) h *= std::clamp((d - f.r) / 160.0f, 0.0f, 1.0f);
+            }
+            for (const auto& g : kTownGates) { // whole town footprint + margin stays at 0
+                float ox = g.wildernessPos.x - kWildernessGatePos.x, oz = g.wildernessPos.y - kWildernessGatePos.y;
+                float ex = fmaxf(fmaxf(ox - x, x - (ox + kTownWorldSize)), 0.0f);
+                float ez = fmaxf(fmaxf(oz - z, z - (oz + kTownWorldSize)), 0.0f);
+                float d = sqrtf(ex * ex + ez * ez);
+                if (d < 260.0f) h *= std::clamp((d - 60.0f) / 200.0f, 0.0f, 1.0f);
+            }
+            g_wildH[(size_t)gz * N + gx] = h;
+        }
+    // soften: two 3x3 box passes
+    std::vector<float> tmp((size_t)N * N);
+    for (int pass = 0; pass < 2; pass++) {
+        for (int gz = 0; gz < N; gz++)
+            for (int gx = 0; gx < N; gx++) {
+                float s = 0; int c = 0;
+                for (int dz = -1; dz <= 1; dz++)
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int x = gx + dx, z = gz + dz;
+                        if (x < 0 || z < 0 || x >= N || z >= N) continue;
+                        s += g_wildH[(size_t)z * N + x]; c++;
+                    }
+                tmp[(size_t)gz * N + gx] = s / c;
+            }
+        g_wildH.swap(tmp);
+    }
+    for (int i = 0; i < N * N; i++) if (g_wt[i] & (kWTWater | kWTSea)) g_wildH[(size_t)i] = 0.0f; // flat water
+}
+static float WildGroundY(float x, float z) {
+    if (!g_wildHBuilt) WildHeightEnsure();
+    float fx = x / kWTCell - 0.5f, fz = z / kWTCell - 0.5f;
+    int x0 = (int)floorf(fx), z0 = (int)floorf(fz);
+    float tx = fx - x0, tz = fz - z0;
+    auto at = [&](int gx, int gz) {
+        gx = std::clamp(gx, 0, kWTN - 1); gz = std::clamp(gz, 0, kWTN - 1);
+        return g_wildH[(size_t)gz * kWTN + gx];
+    };
+    float a = at(x0, z0), b = at(x0 + 1, z0), c = at(x0, z0 + 1), d = at(x0 + 1, z0 + 1);
+    return (a + (b - a) * tx) + ((c + (d - c) * tx) - (a + (b - a) * tx)) * tz;
+}
+// The wilderness drawn around a town: same heights, shifted by the town's offset.
+static Vector2 g_groundOffset = { 0.0f, 0.0f };
+static float WildGroundYOffset(float x, float z) { return WildGroundY(x + g_groundOffset.x, z + g_groundOffset.y); }
+
+// Hilly ground mesh in world coordinates (0..WS), UVs matching the ground map.
+static Mesh WildBuildGroundMesh(float WS) {
+    const int R = 200;             // cells per side (16 world units each)
+    const int V = R + 1;
+    Mesh mesh{};
+    mesh.vertexCount = V * V;
+    mesh.triangleCount = R * R * 2;
+    mesh.vertices = (float*)MemAlloc((unsigned int)(V * V * 3 * sizeof(float)));
+    mesh.normals = (float*)MemAlloc((unsigned int)(V * V * 3 * sizeof(float)));
+    mesh.texcoords = (float*)MemAlloc((unsigned int)(V * V * 2 * sizeof(float)));
+    mesh.indices = (unsigned short*)MemAlloc((unsigned int)(R * R * 6 * sizeof(unsigned short)));
+    const float step = WS / R;
+    for (int j = 0; j < V; j++)
+        for (int i = 0; i < V; i++) {
+            float x = i * step, z = j * step;
+            int v = j * V + i;
+            float y = WildGroundY(x, z);
+            mesh.vertices[v * 3] = x; mesh.vertices[v * 3 + 1] = y; mesh.vertices[v * 3 + 2] = z;
+            float hx = WildGroundY(x + step, z) - WildGroundY(x - step, z);
+            float hz = WildGroundY(x, z + step) - WildGroundY(x, z - step);
+            Vector3 n = T3VNorm({ -hx, 2.0f * step, -hz });
+            mesh.normals[v * 3] = n.x; mesh.normals[v * 3 + 1] = n.y; mesh.normals[v * 3 + 2] = n.z;
+            mesh.texcoords[v * 2] = x / WS; mesh.texcoords[v * 2 + 1] = z / WS;
+        }
+    int k = 0;
+    for (int j = 0; j < R; j++)
+        for (int i = 0; i < R; i++) {
+            unsigned short a = (unsigned short)(j * V + i), b = (unsigned short)(j * V + i + 1);
+            unsigned short c = (unsigned short)((j + 1) * V + i), d = (unsigned short)((j + 1) * V + i + 1);
+            mesh.indices[k++] = a; mesh.indices[k++] = c; mesh.indices[k++] = b; // CCW seen from above
+            mesh.indices[k++] = b; mesh.indices[k++] = c; mesh.indices[k++] = d;
+        }
+    UploadMesh(&mesh, false);
+    return mesh;
+}
+
 static void Wild3DEnsureGround() {
     Wild3DGround& G = g_wild3dGround;
     if (G.loaded) return;
@@ -12778,7 +13145,8 @@ static void Wild3DEnsureGround() {
                 r += (198 - r) * t; g += (182 - g) * t; b += (140 - b) * t;
             }
             if (w >= 0.54f && w < 0.62f) { r = 214; g = 222; b = 206; } // wet foam edge
-            if (w > 0.10f) px[i].a = (unsigned char)fminf(px[i].a, 128.0f); // shore, foam and water: dirt/sand detail
+            if (w > 0.10f) px[i].a = (unsigned char)fminf(px[i].a, 128.0f); // shore, foam: dirt/sand detail
+            if (w >= 0.62f) px[i].a = 64;                                    // open water: animated in ground.fs
             if (w >= 0.62f) {
                 float depth = std::clamp((w - 0.62f) / 0.35f, 0.0f, 1.0f);
                 float fr = WildFieldAt(ff, wx, wz);
@@ -12801,7 +13169,8 @@ static void Wild3DEnsureGround() {
     UnloadImage(ground);
     GenTextureMipmaps(&G.tex);
     SetTextureFilter(G.tex, TEXTURE_FILTER_TRILINEAR);
-    G.model = LoadModelFromMesh(GenMeshPlane(WS, WS, 1, 1));
+    WildHeightEnsure();
+    G.model = LoadModelFromMesh(WildBuildGroundMesh(WS)); // rolling hills, world coordinates (drawn at the origin)
     G.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = G.tex;
     T3DApplyGroundShader(G.model);
     G.loaded = true;
@@ -12901,6 +13270,7 @@ static void T3DGrassFrameUpdate(const Vector3& camPos) {
     SetShaderValue(G.shader, G.timeLoc, &t, SHADER_UNIFORM_FLOAT);
 }
 
+static void T3DPushLightGrass() { if (g_t3dGrassShader.ready) T3DPushLight(g_t3dGrassShader.shader); }
 static void T3DGrassApplyShader(Model& m) {
     T3DGrassEnsureShader();
     if (!g_t3dGrassShader.ready || m.meshCount <= 0) return;
@@ -12923,8 +13293,9 @@ static const int kT3DGrassChunk = 400;
 static const int kT3DGrassChunksPerSide = 8; // 3200 / 400
 static T3DGrassField g_t3dGrassWild[kT3DGrassChunksPerSide * kT3DGrassChunksPerSide];
 
+static float g_grassBaseY = 0.0f; // ground height under the clump being built (wilderness hills)
 static void T3DGrassVert(T3CMeshBuilder& b, float x, float y, float z, Color c) {
-    b.pos.push_back(x); b.pos.push_back(y); b.pos.push_back(z);
+    b.pos.push_back(x); b.pos.push_back(y + g_grassBaseY); b.pos.push_back(z);
     b.nor.push_back(0.0f); b.nor.push_back(1.0f); b.nor.push_back(0.0f);
     b.uv.push_back(0.0f); b.uv.push_back(0.0f);
     b.col.push_back(c.r); b.col.push_back(c.g); b.col.push_back(c.b); b.col.push_back(255);
@@ -13032,7 +13403,9 @@ static void T3DGrassBuildWildChunk(int cx, int cz) {
             if (Wild3DRoadDist({ jx, jz }) < 26.0f) continue;
             Color cd, cl;
             T3DGrassShade(jx, jz, cDark, cLight, cd, cl);
+            g_grassBaseY = WildGroundY(jx, jz);
             T3DGrassClump(b, jx, jz, 0.9f + 0.45f * clump, cd, cl, T3DGrassFlower(jx, jz, 0.035f));
+            g_grassBaseY = 0.0f;
         }
     if (b.pos.empty()) return;
     F.model = T3CFinish(b);
@@ -13077,6 +13450,7 @@ static void T3DGrassDrawWild(const Town3DCam* cull) {
 // beside it. Ore: a gray rock cluster studded with colored ore flecks (tint
 // cycles per node, like the 2D rock art).
 static void Wild3DDrawGatherNode(const WildernessGatherNode& node, int idx, float t) {
+    T3DLiftScope lift_(node.pos.x, node.pos.y); // onto the terrain (wilderness hills)
     Town3DModels& T = g_t3dModels;
     Wild3DModels& W = g_wild3dModels;
     float h1 = Town3DHash01(node.pos.x, node.pos.y);
@@ -13359,7 +13733,8 @@ static void Wild3DLoadDressModels(Wild3DDressing& D) {
                 t = D.atlas;
             }
         }
-        Town3DApplyLitShader(D.models[i]);
+        if (i <= kWPTreeB) T3DApplyFoliageShader(D.models[i]); // KayKit trees sway too
+        else Town3DApplyLitShader(D.models[i]);
     }
 }
 
@@ -13618,7 +13993,7 @@ static void Wild3DDrawDressing(const Town3DCam* cull) {
     const Wild3DDressing& D = g_wild3dDress;
     for (const WildDressItem& it : D.items) {
         if (cull && !Wild3DInView(*cull, it.x, it.z, it.cullR)) continue;
-        DrawModelEx(D.models[it.id], { it.x, 0.0f, it.z }, { 0.0f, 1.0f, 0.0f }, it.rot,
+        DrawModelEx(D.models[it.id], { it.x, GroundY(it.x, it.z), it.z }, { 0.0f, 1.0f, 0.0f }, it.rot,
                     { it.scale, it.scale, it.scale }, it.tint);
     }
 }
@@ -14184,8 +14559,208 @@ static void WildSolidsBuild() {
         if (n.resource == "wood") SolidAdd(G, n.pos.x, n.pos.y, 10.0f);
 }
 
+// ---- Ambient life (2026-09-26): butterflies, falling leaves, ground birds, fireflies ----
+// All world-anchored (hashed onto a coarse grid around the player, so they stay
+// put as you walk past) and drawn unlit in one immediate-mode batch. Birds sit
+// pecking in small flocks and burst into the air when you come close.
+// night: 0 day .. 1 full night (fireflies replace butterflies after dusk).
+static float LifeHash(float x, float z) { return Town3DHash01(x * 0.917f + 3.1f, z * 1.131f + 7.7f); }
+static void LifeTri(Vector3 a, Vector3 b, Vector3 c) {
+    rlVertex3f(a.x, a.y, a.z); rlVertex3f(b.x, b.y, b.z); rlVertex3f(c.x, c.y, c.z);
+}
+static std::map<long long, double> g_lifeTakeoff; // flock cell -> takeoff time (or -1 on the ground)
+
+static void T3DDrawLife(const Town3DCam& c, Vector2 player, int zone, int town, float night, bool snowy) {
+    const double now = g_gameClock;
+    const float t = (float)fmod(now, 3600.0);
+    rlDisableBackfaceCulling();
+    rlBegin(RL_TRIANGLES);
+    // --- butterflies by day, fireflies by night: 2 per 300-unit cell around the player ---
+    const float cell = 300.0f;
+    int pcx = (int)floorf(player.x / cell), pcz = (int)floorf(player.y / cell);
+    static const Color wings[5] = { { 250, 240, 120, 255 }, { 250, 250, 250, 255 }, { 240, 150, 60, 255 },
+                                    { 150, 190, 250, 255 }, { 230, 120, 170, 255 } };
+    for (int dz = -1; dz <= 1; dz++)
+        for (int dx = -1; dx <= 1; dx++) {
+            float cx = (pcx + dx) * cell, cz = (pcz + dz) * cell;
+            for (int k = 0; k < 2; k++) {
+                float h = LifeHash(cx + k * 57.0f, cz - k * 31.0f);
+                if (h > 0.8f) continue;
+                float hx = cx + cell * LifeHash(cx + k, cz + 11.0f), hz = cz + cell * LifeHash(cz + k, cx + 5.0f);
+                if (zone == 1 && (WildTerrainAt(hx, hz) & (kWTWater | kWTRidge))) continue;
+                float ph = h * 40.0f;
+                // lazy figure-eight around its home
+                Vector3 p = { hx + sinf(t * 0.45f + ph) * 45.0f, 14.0f + 8.0f * sinf(t * 1.3f + ph) + night * 10.0f,
+                              hz + sinf(t * 0.9f + ph * 1.3f) * 28.0f };
+                p.y += GroundY(p.x, p.z);
+                if (night > 0.3f) { // firefly: a glowing mote that blinks
+                    float blink = 0.5f + 0.5f * sinf(t * 2.6f + ph * 3.0f);
+                    float a = night * blink;
+                    if (a < 0.05f) continue;
+                    float s = 1.6f + 1.2f * blink;
+                    Vector3 rx = T3VScale(c.right, s), uy = T3VScale(c.up, s);
+                    rlColor4ub(230, 255, 120, (unsigned char)(a * 255.0f));
+                    LifeTri(T3VSub(p, rx), T3VAdd(p, uy), T3VAdd(p, rx));
+                    LifeTri(T3VSub(p, rx), T3VAdd(p, rx), T3VSub(p, uy));
+                    continue;
+                }
+                if (snowy) continue;
+                float dirA = t * 0.45f + ph; // heading follows the path
+                Vector3 fwd = { cosf(dirA) * 0.8f, 0.0f, cosf(t * 0.9f + ph * 1.3f) * 0.6f };
+                float fl = sqrtf(fwd.x * fwd.x + fwd.z * fwd.z) + 1e-4f;
+                fwd = T3VScale(fwd, 1.0f / fl);
+                Vector3 side = { -fwd.z, 0.0f, fwd.x };
+                float flap = sinf(t * 16.0f + ph) * 0.9f; // wing angle
+                float ws = 7.0f;
+                Vector3 up = { 0, 1, 0 };
+                Vector3 wl = T3VAdd(p, T3VAdd(T3VScale(side, ws * cosf(flap)), T3VScale(up, ws * sinf(flap))));
+                Vector3 wr = T3VAdd(p, T3VAdd(T3VScale(side, -ws * cosf(flap)), T3VScale(up, ws * sinf(flap))));
+                Vector3 nose = T3VAdd(p, T3VScale(fwd, 3.5f)), tail = T3VSub(p, T3VScale(fwd, 3.5f));
+                Color wc = wings[(int)(h * 50.0f) % 5];
+                rlColor4ub(wc.r, wc.g, wc.b, 255);
+                LifeTri(nose, wl, tail);
+                LifeTri(nose, tail, wr);
+            }
+        }
+    // --- falling leaves from the trees nearest the player ---
+    if (!snowy) {
+        std::vector<Vector2> near;
+        auto consider = [&](float x, float z) {
+            if (fabsf(x - player.x) < 380.0f && fabsf(z - player.y) < 380.0f && near.size() < 8) near.push_back({ x, z });
+        };
+        if (zone == 0) {
+            for (const Vector2& tp : Town3DTreeSpots(town)) consider(tp.x, tp.y);
+        } else {
+            for (const WildDressItem& it : g_wild3dDress.items)
+                if (it.id <= kWPTreeB) consider(it.x, it.z);
+        }
+        for (size_t i = 0; i < near.size(); i++)
+            for (int k = 0; k < 2; k++) {
+                float h = LifeHash(near[i].x + k * 13.0f, near[i].y);
+                float period = 6.0f + 3.0f * h;
+                float lt = fmodf(t + h * 20.0f, period) / period;          // 0..1: fall, then rest
+                float fallT = std::min(lt / 0.75f, 1.0f);
+                float y = 75.0f * (1.0f - fallT) + 0.6f;
+                float a = (lt < 0.9f) ? 1.0f : (1.0f - (lt - 0.9f) / 0.1f);
+                Vector3 p = { near[i].x + (h - 0.5f) * 60.0f + sinf(t * 1.6f + h * 9.0f) * 14.0f * (1.0f - fallT) + fallT * 20.0f,
+                              y, near[i].y + (LifeHash(h, near[i].x) - 0.5f) * 60.0f + fallT * 12.0f };
+                p.y += GroundY(p.x, p.z);
+                float spin = t * 3.0f + h * 7.0f;
+                Vector3 ax = { cosf(spin) * 3.6f, (fallT < 1.0f) ? sinf(spin) * 2.2f : 0.0f, sinf(spin) * 3.6f };
+                Vector3 az = { -sinf(spin) * 2.4f, 0.0f, cosf(spin) * 2.4f };
+                Color lc = (h < 0.4f) ? Color{ 214, 120, 40, 255 } : (h < 0.7f) ? Color{ 226, 180, 60, 255 } : Color{ 120, 150, 50, 255 };
+                rlColor4ub(lc.r, lc.g, lc.b, (unsigned char)(a * 255.0f));
+                Vector3 v0 = T3VSub(p, ax), v1 = T3VAdd(p, az), v2 = T3VAdd(p, ax), v3 = T3VSub(p, az);
+                LifeTri(v0, v1, v2);
+                LifeTri(v0, v2, v3);
+            }
+    }
+    // --- ground birds: a flock per 400-unit cell (wilderness), bursting up as you approach ---
+    if (zone == 1 && !snowy && night < 0.6f) {
+        const float bc = 400.0f;
+        int bx0 = (int)floorf(player.x / bc), bz0 = (int)floorf(player.y / bc);
+        for (int dz = -1; dz <= 1; dz++)
+            for (int dx = -1; dx <= 1; dx++) {
+                int gx = bx0 + dx, gz = bz0 + dz;
+                float h = LifeHash(gx * 7.0f, gz * 3.0f);
+                if (h > 0.55f) continue;
+                float fx = (gx + 0.2f + 0.6f * LifeHash(gz * 1.0f, gx * 2.0f)) * bc;
+                float fz = (gz + 0.2f + 0.6f * LifeHash(gx * 3.0f, gz * 5.0f)) * bc;
+                if (WildTerrainAt(fx, fz) & (kWTWater | kWTRidge | kWTRoad)) continue;
+                long long key = ((long long)gx << 32) ^ (unsigned)gz;
+                auto it = g_lifeTakeoff.find(key);
+                double take = (it == g_lifeTakeoff.end()) ? -1.0 : it->second;
+                float pd = hypotf(player.x - fx, player.y - fz);
+                if (take < 0.0 && pd < 120.0f) { take = now; g_lifeTakeoff[key] = now; }
+                if (take >= 0.0 && pd > 700.0f && now - take > 6.0) { g_lifeTakeoff.erase(key); take = -1.0; } // settled back
+                float away = atan2f(fz - player.y, fx - player.x);
+                for (int b = 0; b < 5; b++) {
+                    float bh = LifeHash(fx + b * 9.0f, fz);
+                    Vector3 home = { fx + (bh - 0.5f) * 40.0f, 1.0f, fz + (LifeHash(fz, fx + b) - 0.5f) * 40.0f };
+                    Vector3 fwd, p;
+                    float wingY = 0.0f, span = 3.2f;
+                    if (take < 0.0) { // pecking about on the ground
+                        float hop = fmaxf(0.0f, sinf(t * 3.0f + bh * 20.0f)) * 2.0f;
+                        p = { home.x, 2.0f + hop, home.z };
+                        float fa = bh * 6.28f + sinf(t * 0.5f + bh) * 0.8f;
+                        fwd = { cosf(fa), 0.0f, sinf(fa) };
+                    } else {
+                        float ft = (float)(now - take) - bh * 0.25f;
+                        if (ft < 0.0f) ft = 0.0f;
+                        if (ft > 5.0f) continue; // gone
+                        float a2 = away + (bh - 0.5f) * 0.9f;
+                        fwd = { cosf(a2), 0.0f, sinf(a2) };
+                        float dist = ft * 95.0f;
+                        p = { home.x + fwd.x * dist, 2.0f + ft * ft * 14.0f + ft * 22.0f, home.z + fwd.z * dist };
+                        wingY = sinf(t * 22.0f + bh * 10.0f) * 4.0f;
+                        span = 6.0f;
+                    }
+                    p.y += GroundY(home.x, home.z);
+                    Vector3 side = { -fwd.z, 0.0f, fwd.x };
+                    Vector3 nose = T3VAdd(p, T3VScale(fwd, 3.5f)), tail = T3VSub(p, T3VScale(fwd, 3.0f));
+                    Vector3 lw = { p.x + side.x * span, p.y + wingY, p.z + side.z * span };
+                    Vector3 rw = { p.x - side.x * span, p.y + wingY, p.z - side.z * span };
+                    rlColor4ub(70, 58, 50, 255);
+                    LifeTri(nose, lw, tail);
+                    LifeTri(nose, tail, rw);
+                }
+            }
+    }
+    rlEnd();
+    rlEnableBackfaceCulling();
+}
+
+// Night glow (2026-09-26): lanterns and braziers light up after dusk - a soft
+// additive halo at each flame plus a warm pool of light on the ground.
+static void T3DGlowAt(const Town3DCam& c, Vector3 p, float haloR, float poolR, float a) {
+    // halo: camera-facing fan, bright centre fading to nothing
+    const int seg = 12;
+    rlColor4ub(255, 190, 100, (unsigned char)(a * 200.0f));
+    for (int i = 0; i < seg; i++) {
+        float a0 = 6.2831853f * i / seg, a1 = 6.2831853f * (i + 1) / seg;
+        Vector3 e0 = T3VAdd(p, T3VAdd(T3VScale(c.right, cosf(a0) * haloR), T3VScale(c.up, sinf(a0) * haloR)));
+        Vector3 e1 = T3VAdd(p, T3VAdd(T3VScale(c.right, cosf(a1) * haloR), T3VScale(c.up, sinf(a1) * haloR)));
+        rlColor4ub(255, 200, 120, (unsigned char)(a * 210.0f)); rlVertex3f(p.x, p.y, p.z);
+        rlColor4ub(255, 160, 60, 0); rlVertex3f(e0.x, e0.y, e0.z); rlVertex3f(e1.x, e1.y, e1.z);
+    }
+    // pool on the ground
+    for (int i = 0; i < 16; i++) {
+        float a0 = 6.2831853f * i / 16, a1 = 6.2831853f * (i + 1) / 16;
+        rlColor4ub(255, 170, 80, (unsigned char)(a * 90.0f)); rlVertex3f(p.x, 1.2f, p.z);
+        rlColor4ub(255, 150, 60, 0);
+        rlVertex3f(p.x + cosf(a0) * poolR, 1.2f, p.z + sinf(a0) * poolR);
+        rlVertex3f(p.x + cosf(a1) * poolR, 1.2f, p.z + sinf(a1) * poolR);
+    }
+}
+static void T3DDrawNightGlows(const Town3DCam& c, int town) {
+    if (g_t3dNight <= 0.05f) return;
+    float a = g_t3dNight;
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
+    rlDisableBackfaceCulling();
+    BeginBlendMode(BLEND_ADDITIVE);
+    rlBegin(RL_TRIANGLES);
+    TownDressEnsure(town);
+    for (const TownDressItem& it : g_townDress) {
+        if (it.kind != kTPLamp) continue;
+        float r = it.rot * DEG2RAD; // lantern hangs 12 units out along the arm
+        Vector3 lp = { it.x + cosf(r) * 12.0f, 48.0f, it.z - sinf(r) * 12.0f };
+        float flick = 0.9f + 0.1f * sinf((float)GetTime() * 7.0f + it.x);
+        T3DGlowAt(c, lp, 16.0f, 70.0f, a * flick);
+    }
+    if (town == 0)
+        for (const CapitalProp& p : kCapitalProps)
+            if (p.kind == 19) T3DGlowAt(c, { p.pos.x, p.size * 1.1f, p.pos.y }, 22.0f, 90.0f, a);
+    rlEnd();
+    EndBlendMode();
+    rlDrawRenderBatchActive();
+    rlEnableBackfaceCulling();
+    rlEnableDepthMask();
+}
+
 // Dungeon entrance: stone arch + glowing portal disc in the entrance's own color.
 static void Wild3DDrawEntrance(const WildernessDungeonEntrance& e) {
+    T3DLiftScope lift_(e.pos.x, e.pos.y); // onto the terrain (wilderness hills)
     Color stone = { 150, 148, 142, 255 }, dark = { 110, 108, 102, 255 };
     DrawCube({ e.pos.x - 30, 32, e.pos.y }, 18, 64, 18, stone);
     DrawCube({ e.pos.x + 30, 32, e.pos.y }, 18, 64, 18, stone);
@@ -14194,6 +14769,7 @@ static void Wild3DDrawEntrance(const WildernessDungeonEntrance& e) {
 }
 // Travel gate: two posts + beam.
 static void Wild3DDrawGate(float x, float z, Color post, Color beam) {
+    T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
     DrawCube({ x - 42, 32, z }, 20, 64, 20, post);
     DrawCube({ x + 42, 32, z }, 20, 64, 20, post);
     DrawCube({ x, 70, z }, 108, 16, 24, beam);
@@ -14342,7 +14918,7 @@ static void Town3DDrawSurroundings(const GameState& s, const Town3DCam& c) {
     if (!bridgesBuilt && g_wildBridgeModels.empty()) { bridgesBuilt = true; Wild3DBuildBridges(); }
     Vector2 O = TownWildOffset(s.selectedTown);
     // Just under the town's own ground plane (y=0), so the town covers it.
-    DrawModel(g_wild3dGround.model, { 1600.0f - O.x, -0.8f, 1600.0f - O.y }, 1.0f, WHITE);
+    DrawModel(g_wild3dGround.model, { -O.x, -0.8f, -O.y }, 1.0f, WHITE); // world-coordinate mesh, shifted into town space
     DrawPlane({ 5600.0f - O.x, -2.5f, 1600.0f - O.y }, { 4800, 8000 }, Color{ 44, 96, 122, 255 }); // open sea
     auto outsideTown = [](float x, float z, float r) {
         return x < -r || z < -r || x > kTownWorldSize + r || z > kTownWorldSize + r;
@@ -14352,7 +14928,7 @@ static void Town3DDrawSurroundings(const GameState& s, const Town3DCam& c) {
         float x = it.x - O.x, z = it.z - O.y;
         if (!outsideTown(x, z, 40.0f + it.cullR * 0.5f)) continue;
         if (!Wild3DInView(c, x, z, it.cullR)) continue;
-        DrawModelEx(D.models[it.id], { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f }, it.rot, { it.scale, it.scale, it.scale }, it.tint);
+        DrawModelEx(D.models[it.id], { x, WildGroundY(it.x, it.z) - 0.8f, z }, { 0.0f, 1.0f, 0.0f }, it.rot, { it.scale, it.scale, it.scale }, it.tint);
     }
     for (const WildBridgeModel& m : g_wildBridgeModels) {
         float x = m.cx - O.x, z = m.cz - O.y;
@@ -14369,7 +14945,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
 
     // Ground: procedural meadow with baked paths, plus a large flat outer field
     // so the horizon never shows a hard edge.
-    DrawModel(g_wild3dGround.model, { 1600, 0, 1600 }, 1.0f, WHITE);
+    DrawModel(g_wild3dGround.model, { 0, 0, 0 }, 1.0f, WHITE); // hilly mesh is in world coordinates
     DrawPlane({ 1600, -15.0f, 1600 }, { 8000, 8000 }, Color{ 92, 132, 70, 255 });
     DrawPlane({ 5600, -2.0f, 1600 }, { 4800, 8000 }, Color{ 44, 96, 122, 255 }); // open sea past the coast (2026-09-26)
 
@@ -14428,6 +15004,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     { // Murder Inc.'s camp: tent + campfire
         Vector2 campPos = kRivalCampSpots[s.rivalCampIdx];
         if (vis(campPos.x, campPos.y, 90.0f)) {
+            T3DLiftScope lift_(campPos.x, campPos.y);
             DrawCylinder({ campPos.x, 14, campPos.y }, 2, 18, 28, 4, Color{ 120, 60, 45, 255 }); // tent
             DrawCylinder({ campPos.x + 22, 4, campPos.y + 10 }, 8, 10, 3, 10, Color{ 90, 85, 80, 255 }); // fire ring
             DrawCylinder({ campPos.x + 22, 10, campPos.y + 10 }, 1, 5, 12, 8, Color{ 255, 140, 40, 200 }); // flame
@@ -14435,6 +15012,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     }
     if (s.notoriety > 1.0f || s.refugeKnown) { // the outlaw refuge: dark tent + red lantern
         if (vis(kOutlawRefuge.x, kOutlawRefuge.y, 90.0f)) {
+            T3DLiftScope lift_(kOutlawRefuge.x, kOutlawRefuge.y);
             DrawCylinder({ kOutlawRefuge.x, 12, kOutlawRefuge.y }, 2, 16, 24, 4, Color{ 45, 40, 55, 255 });
             DrawSphere({ kOutlawRefuge.x + 18, 16, kOutlawRefuge.y }, 4.0f, Color{ 255, 60, 50, 220 });
         }
@@ -14662,6 +15240,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         if (!vis(c.pos.x, c.pos.y, 70.0f)) continue;
         float cfade = std::clamp(c.timer / c.duration, 0.0f, 1.0f);
         Color mound = Fade(Color{ 55, 45, 42, 255 }, 0.85f * cfade);
+        T3DLiftScope lift_(c.pos.x, c.pos.y);
         DrawSphereEx({ c.pos.x, 6.0f, c.pos.y }, 16.0f, 8, 6, mound);
     }
     // AI companion.
@@ -14756,11 +15335,12 @@ static void Wild3DDrawSky(Vector3 camPos) {
     T3DSkyBegin(); // pure background, see Town3DDrawSky
     for (int i = 0; i < bands; i++) {
         float t = (float)i / (float)(bands - 1);
-        Color col = ColorLerp(kT3DSkyHorizon, kT3DSkyZenith, t * t * 0.92f);
+        Color col = ColorLerp(g_t3dSkyHorizon, g_t3dSkyZenith, t * t * 0.92f);
         float y0 = -60.0f + i * bandH, y1 = y0 + bandH;
         Town3DSkyBand({ camPos.x, y0, camPos.z }, { camPos.x, y1, camPos.z }, R, 24, col);
     }
-    DrawCylinder({ camPos.x, 1861.0f, camPos.z }, R, R, 2.0f, 24, kT3DSkyZenith);
+    DrawCylinder({ camPos.x, 1861.0f, camPos.z }, R, R, 2.0f, 24, g_t3dSkyZenith);
+    T3DDrawStars(camPos, R);
     T3DSkyEnd();
 }
 
@@ -14782,8 +15362,8 @@ static void Wild3DDrawAmbience(const Town3DCam& c) {
         Vector3 nose = T3VAdd(ctr, T3VScale(fwd, 16.0f));
         Vector3 tail = T3VSub(ctr, T3VScale(fwd, 12.0f));
         float tipY = 6.0f + sinf(t * 8.0f + (float)i * 2.1f) * 18.0f;
-        Vector3 lw = { ctr.x + side.x * 38.0f, ctr.y + tipY, ctr.z + side.z * 38.0f };
-        Vector3 rw = { ctr.x - side.x * 38.0f, ctr.y + tipY, ctr.z - side.z * 38.0f };
+        Vector3 lw = { ctr.x + side.x * 26.0f, ctr.y + tipY, ctr.z + side.z * 26.0f };
+        Vector3 rw = { ctr.x - side.x * 26.0f, ctr.y + tipY, ctr.z - side.z * 26.0f };
         rlColor4ub(42, 38, 46, 255);
         rlVertex3f(nose.x, nose.y, nose.z); rlVertex3f(tail.x, tail.y, tail.z); rlVertex3f(lw.x, lw.y, lw.z);
         rlVertex3f(nose.x, nose.y, nose.z); rlVertex3f(rw.x, rw.y, rw.z); rlVertex3f(tail.x, tail.y, tail.z);
@@ -14870,6 +15450,7 @@ static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
 }
 
 static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const std::string& prompt) {
+    T3DGroundHook groundHook_(WildGroundY); // rolling hills: everything drawn here sits on the terrain
     Vector2 mouse = GetMousePosition();
 
     // --- Camera input: follow mode (fixed Diablo-style angle) or free orbit ---
@@ -14918,6 +15499,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     Town3DCam c = Wild3DGetCam(s, screenW, screenH);
     T3DApplyShake(c); // combat camera kick (hit / hurt), zero when idle
     Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
+    T3DUpdateDayNight(s.worldTime, false); // time of day: sun, sky, fog colors
     BeginMode3D(cam3d);
     Wild3DDrawSky(c.pos); // gradient sky, default shader (unlit, unfogged)
     // Per-frame shader state, same as the town pass: just the camera position
@@ -14928,6 +15510,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     T3DGrassFrameUpdate(c.pos); // sway clock for the grass shader
     Wild3DDrawSceneContents(s, false, &c);
     Wild3DDrawAmbience(c); // birds, unlit, one batched draw call, main pass only
+    T3DDrawLife(c, s.wildernessPlayerPos, 1, 0, g_t3dNight, s.wildernessPlayerPos.y < 700.0f); // butterflies, leaves, ground birds
     // Combat FX (2026-09-24): flag marker, spell projectiles/impacts, heal +
     // vigor auras, summoned fiend - world-space, so they sit in the scene.
     DrawFlagMarker3D(s, 0);
@@ -14953,7 +15536,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
         const float fadeNear = 1200.0f, fadeFar = 2400.0f;
         auto label3D = [&](float x, float y, float z, const std::string& text) {
             Vector2 sp;
-            if (!Town3DProject(c, { x, y, z }, &sp)) return;
+            if (!Town3DProject(c, { x, y + GroundY(x, z), z }, &sp)) return; // on the hills
             if (sp.x < -60 || sp.x > screenW + 60 || sp.y < 100 || sp.y > screenH) return;
             float bd = hypotf(c.pos.x - x, c.pos.z - z);
             float a = std::clamp((fadeFar - bd) / (fadeFar - fadeNear), 0.0f, 1.0f);
@@ -15656,6 +16239,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
     Town3DCam c = Dungeon3DGetCam(s, screenW, screenH);
     T3DApplyShake(c); // combat camera kick (hit / hurt), zero when idle
     Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
+    T3DUpdateDayNight(0.0f, true); // indoors / underground: always the noon palette
     BeginMode3D(cam3d);
     bool torchOn = g_dung3dTorch.ready;
     if (torchOn) {
@@ -15738,6 +16322,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         if (c.zone != 1) continue;
         float cfade = std::clamp(c.timer / c.duration, 0.0f, 1.0f);
         Color mound = Fade(Color{ 55, 45, 42, 255 }, 0.85f * cfade);
+        T3DLiftScope lift_(c.pos.x, c.pos.y);
         DrawSphereEx({ c.pos.x, 6.0f, c.pos.y }, 16.0f, 8, 6, mound);
     }
     if (ActivePet(s)) {
@@ -16496,6 +17081,7 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
     Camera3D cam3d = { 0 };
     cam3d.position = c.pos; cam3d.target = c.target; cam3d.up = c.up;
     cam3d.fovy = c.fovY; cam3d.projection = CAMERA_PERSPECTIVE;
+    T3DUpdateDayNight(0.0f, true); // indoors / underground: always the noon palette
     BeginMode3D(cam3d);
 
     float wallH = 70.0f, wallT = 12.0f;
@@ -18862,7 +19448,7 @@ static bool Wild3DConsiderFlag(GameState& s, const Town3DCam& c, Vector2 m, floa
     float bestDist = 1e9f;
     GameState::FlagTarget bestF;
     auto consider3D = [&](Vector2 worldPos, GameState::FlagTarget f) {
-        RayCollision hit = GetRayCollisionSphere(ray, { worldPos.x, 40.0f, worldPos.y }, sphereR);
+        RayCollision hit = GetRayCollisionSphere(ray, { worldPos.x, 40.0f + WildGroundY(worldPos.x, worldPos.y), worldPos.y }, sphereR);
         if (hit.hit && hit.distance < bestDist) { bestDist = hit.distance; bestF = f; found = true; }
     };
     int n = (int)kWildernessMonsterSpots.size();
@@ -18894,7 +19480,7 @@ static bool Wild3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
     GameState::FlagTarget bestF;
     auto considerScreen = [&](Vector2 worldPos, GameState::FlagTarget f) {
         Vector2 sp;
-        if (!Town3DProject(c, { worldPos.x, 40.0f, worldPos.y }, &sp)) return;
+        if (!Town3DProject(c, { worldPos.x, 40.0f + WildGroundY(worldPos.x, worldPos.y), worldPos.y }, &sp)) return;
         float d = Dist(sp, m);
         if (d < best) { best = d; bestF = f; found = true; }
     };
@@ -19262,6 +19848,7 @@ static void T3DApplyShake(Town3DCam& c) {
 // blending, not additive: additive washes to white on the bright daylight
 // grass, while solid warm colors read on both grass and dark dungeon floors.
 static void DrawHitSparks3D(int zone, const Camera3D& cam) {
+    T3DLiftScope lift_(cam.target.x, cam.target.z); // hills: sparks ride the ground at the fight
     static Texture2D dot{};
     static bool tried = false;
     if (!tried) {
@@ -19305,6 +19892,7 @@ static void DrawSpellFX3D(GameState& s, int zone) {
     Vector3 ppos = (zone == 0)
         ? Vector3{ s.wildernessPlayerPos.x, 0.0f, s.wildernessPlayerPos.y }
         : Vector3{ s.dungeonPlayerPos.x, 0.0f, s.dungeonPlayerPos.y };
+    T3DLiftScope lift_(ppos.x, ppos.z); // hills: effects ride the ground at the fight
     for (auto& p : s.spellProjectiles) {
         if (!p.active || p.zone != zone) continue;
         SpellFX fx = SpellFXFor(p.spellIdx);
@@ -19397,7 +19985,7 @@ static void DrawFloatTexts3D(GameState& s, const Town3DCam& c, int zone, int scr
     for (auto& ft : s.floatTexts) {
         if (!ft.active || ft.zone != zone) continue;
         float f = std::clamp(ft.t / ft.dur, 0.0f, 1.0f);
-        Vector3 wp = { ft.pos.x, 95.0f + ft.t * 70.0f, ft.pos.y };
+        Vector3 wp = { ft.pos.x, 95.0f + ft.t * 70.0f + GroundY(ft.pos.x, ft.pos.y), ft.pos.y };
         Vector2 sp;
         if (!Town3DProject(c, wp, &sp)) continue;
         if (sp.x < -40 || sp.x > screenW + 40 || sp.y < -20 || sp.y > screenH + 40) continue;
