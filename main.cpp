@@ -9964,6 +9964,358 @@ static Rectangle TargetButtonRect() {
     return { kViewport.x + kViewport.width - 150.0f, kViewport.y + kViewport.height - 160.0f, 130.0f, 60.0f };
 }
 
+// ---------------------------------------------------------------------
+// Wilderness terrain (2026-09-26): coast, rivers, a lake, rock ridges, and a
+// real road network - the land now has shape instead of being an open field
+// with straight spokes. Water and ridges BLOCK movement (bridges and fords are
+// the crossings); everything is baked once into an 8-unit grid that collision,
+// the 3D ground, the 2D overlay, the minimap and the scenery placement share.
+// ---------------------------------------------------------------------
+struct WildRoadRef { const Vector2* pts; int n; };
+// ---- Generated wilderness terrain data (2026-09-26) ----
+// Produced offline by tools/wild_terrain (see its README): it routes each
+// river/ridge around every gameplay position (spots, entrances, gates, shrines,
+// house plots) and checks that everything stays reachable from the Emberhold
+// gate. Rivers carry a per-point half-width (they narrow where squeezed).
+// Re-run the tool, do not hand-edit, if spots or plots move.
+struct WildPathPt { float x, z, hw; };
+static const WildPathPt kWildRiverSilverrun[] = {
+    {2170,-120,34}, {2176,-106,34}, {2183,-91,34}, {2189,-76,34}, {2196,-62,34}, {2202,-48,34}, {2208,-33,34}, {2215,-19,34},
+    {2221,-4,34}, {2228,10,34}, {2235,25,34}, {2241,39,34}, {2248,54,34}, {2254,68,34}, {2261,84,34}, {2267,103,30},
+    {2269,124,30}, {2269,145,30}, {2269,166,30}, {2269,187,30}, {2269,208,30}, {2269,229,30}, {2269,250,30}, {2269,272,30},
+    {2269,293,30}, {2269,314,30}, {2269,335,30}, {2269,356,30}, {2269,377,30}, {2269,398,30}, {2269,420,30}, {2269,441,30},
+    {2269,462,30}, {2269,483,30}, {2269,504,30}, {2269,526,30}, {2269,547,30}, {2269,568,30}, {2269,589,30}, {2269,610,30},
+    {2269,632,30}, {2269,653,30}, {2268,674,29}, {2264,695,27}, {2254,714,31}, {2241,726,34}, {2228,735,34}, {2215,745,34},
+    {2202,754,34}, {2190,764,34}, {2178,773,34}, {2166,782,34}, {2155,792,34}, {2144,801,34}, {2133,810,34}, {2123,820,34},
+    {2113,829,34}, {2104,838,34}, {2095,847,34}, {2087,856,34}, {2079,864,34}, {2072,873,34}, {2065,881,34}, {2059,889,34},
+    {2053,897,34}, {2048,904,34}, {2042,912,34}, {2038,919,34}, {2034,925,34}, {2030,932,34}, {2026,938,34}, {2023,943,34},
+    {2021,948,34}, {2018,953,34}, {2016,958,34}, {2014,962,34}, {2012,966,34}, {2010,970,34}, {2009,973,34}, {2008,976,34},
+    {2007,978,34}, {2006,980,34}, {2005,983,34}, {2004,984,33}, {2004,986,32}, {2003,987,32}, {2003,989,32}, {2003,990,31},
+    {2002,990,31}, {2002,991,31}, {2002,992,30}, {2002,992,30}, {2002,993,30}, {2002,993,30}, {2001,994,30}, {2000,995,28},
+    {1993,1004,20}, {1978,1028,14}, {1972,1057,14}, {1972,1085,14}, {1972,1113,14}, {1972,1140,14}, {1972,1167,14}, {1972,1194,14},
+    {1972,1221,14}, {1972,1248,14}, {1972,1276,14}, {1972,1305,14}, {1972,1335,14}, {1970,1350,14}, {1968,1365,14}, {1960,1378,14},
+    {1952,1391,19}, {1945,1400,28}, {1944,1402,30}, {1944,1402,31}, {1944,1403,32}, {1944,1404,33}, {1944,1406,34}, {1945,1407,34},
+    {1947,1408,34}, {1949,1410,34}, {1951,1412,34}, {1954,1415,34}, {1957,1418,34}, {1960,1421,34}, {1964,1425,34}, {1968,1429,34},
+    {1972,1434,34}, {1977,1439,34}, {1982,1444,34}, {1987,1451,34}, {1992,1457,34}, {1998,1465,34}, {2004,1473,34}, {2010,1481,34},
+    {2017,1490,34}, {2024,1500,34}, {2030,1510,34}, {2038,1521,34}, {2045,1532,34}, {2052,1544,34}, {2059,1557,34}, {2067,1570,34},
+    {2074,1583,34}, {2082,1597,33}, {2089,1612,33}, {2097,1627,34}, {2104,1643,34}, {2112,1659,34}, {2119,1675,34}, {2127,1692,34},
+    {2134,1709,34}, {2142,1726,34}, {2149,1744,34}, {2156,1762,34}, {2164,1780,34}, {2171,1799,34}, {2179,1818,34}, {2186,1837,33},
+    {2194,1856,30}, {2200,1875,28}, {2202,1896,28}, {2200,1917,28}, {2197,1937,30}, {2193,1957,34}, {2190,1977,34}, {2186,1998,34},
+    {2182,2018,34}, {2178,2038,34}, {2174,2058,34}, {2170,2079,34}, {2166,2099,34}, {2161,2119,34}, {2157,2139,34}, {2152,2160,34},
+    {2148,2180,34}, {2143,2200,34}, {2138,2220,34}, {2134,2240,34}, {2129,2261,34}, {2124,2281,34}, {2119,2301,34}, {2114,2321,34},
+    {2109,2341,34}, {2103,2361,30}, {2099,2382,28}, {2098,2402,28}, {2100,2423,28}, {2107,2443,28}, {2118,2461,28}, {2132,2476,28},
+    {2148,2488,28}, {2167,2497,28}, {2187,2502,29}, {2208,2506,32}, {2228,2510,34}, {2249,2513,34}, {2269,2516,34}, {2290,2519,34},
+    {2310,2522,34}, {2331,2526,34}, {2351,2529,34}, {2372,2532,34}, {2392,2534,34}, {2413,2537,34}, {2433,2540,34}, {2454,2543,34},
+    {2474,2546,34}, {2495,2548,34}, {2515,2551,34}, {2536,2553,34}, {2556,2556,34}, {2577,2558,34}, {2597,2560,34}, {2618,2562,34},
+    {2638,2564,34}, {2659,2566,34}, {2679,2568,34}, {2700,2570,34}, {2720,2572,32}, {2741,2574,31}, {2761,2576,33}, {2782,2578,34},
+    {2802,2580,34}, {2822,2582,34}, {2843,2584,34}, {2863,2586,34}, {2884,2587,34}, {2904,2589,34}, {2925,2591,34}, {2945,2593,34},
+    {2965,2595,34}, {2986,2596,34}, {3006,2598,34}, {3027,2600,34}, {3047,2602,34}, {3067,2604,34}, {3088,2606,34}, {3108,2607,34},
+    {3128,2609,34}, {3149,2611,34}, {3169,2613,34}, {3189,2614,34}, {3209,2616,34}, {3230,2618,34}, {3250,2620,34},
+};
+static const WildPathPt kWildRiverOutflow[] = {
+    {1720,2570,26}, {1738,2576,26}, {1756,2582,26}, {1773,2589,26}, {1791,2595,26}, {1809,2600,26}, {1827,2606,26}, {1845,2611,26},
+    {1863,2616,26}, {1881,2621,26}, {1899,2625,26}, {1917,2629,26}, {1935,2633,26}, {1954,2636,26}, {1972,2638,26}, {1990,2640,26},
+    {2009,2642,26}, {2027,2643,26}, {2046,2643,26}, {2065,2643,26}, {2083,2643,26}, {2102,2642,26}, {2121,2640,26}, {2139,2638,26},
+    {2158,2635,26}, {2177,2632,26}, {2196,2628,26}, {2214,2624,26}, {2233,2620,26}, {2252,2615,26}, {2271,2610,26}, {2289,2604,26},
+    {2308,2598,26}, {2327,2592,26}, {2345,2586,26}, {2364,2580,26}, {2383,2573,26}, {2401,2567,26}, {2420,2560,26},
+};
+static const WildPathPt kWildRiverCreek[] = {
+    {740,2400,20}, {760,2407,20}, {781,2413,20}, {801,2420,20}, {822,2427,20}, {842,2433,20}, {862,2440,20}, {883,2446,20},
+    {903,2453,20}, {924,2459,20}, {944,2465,20}, {965,2471,20}, {985,2478,20}, {1006,2484,20}, {1026,2490,20}, {1047,2495,20},
+    {1067,2501,20}, {1088,2507,20}, {1108,2513,20}, {1129,2519,20}, {1149,2524,20}, {1170,2530,20},
+};
+static const WildPathPt kWildRidge0[] = {
+    {150,1708,32}, {172,1713,32}, {194,1720,32}, {215,1730,32}, {235,1740,32}, {256,1750,32}, {276,1759,32}, {297,1769,32},
+    {317,1779,32}, {338,1789,32}, {358,1798,32}, {379,1806,32}, {400,1813,32}, {420,1820,32},
+};
+static const WildPathPt kWildRidge1[] = {
+    {596,2250,32}, {596,2276,32}, {596,2301,32}, {602,2326,32}, {616,2349,32}, {634,2364,32}, {652,2376,32}, {670,2389,32},
+    {688,2401,32}, {706,2413,32}, {724,2426,32}, {742,2438,32}, {760,2450,32},
+};
+static const WildPathPt kWildRidge2[] = {
+    {700,2860,32}, {721,2862,32}, {743,2864,32}, {764,2866,32}, {786,2869,32}, {807,2871,32}, {829,2873,32}, {850,2875,32},
+    {871,2877,32}, {893,2879,32}, {914,2882,32}, {936,2884,32}, {957,2886,32}, {979,2888,32}, {1000,2890,32},
+};
+static const WildPathPt kWildRidge3[] = {
+    {700,592,32}, {720,588,32}, {739,582,32}, {758,573,32}, {776,564,32}, {794,555,32}, {812,546,32}, {830,536,32},
+    {848,526,32}, {866,517,32}, {886,511,32}, {906,510,32}, {926,513,32}, {946,520,32},
+};
+static const WildPathPt kWildRidge4[] = {
+    {2300,420,32}, {2320,422,32}, {2340,423,32}, {2360,425,32}, {2380,427,32}, {2400,428,32}, {2420,430,32}, {2440,432,32},
+    {2460,433,32}, {2480,435,32}, {2500,437,32}, {2520,438,32}, {2540,440,32},
+};
+static const WildPathPt kWildRidge5[] = {
+    {1150,2950,32}, {1170,2953,32}, {1190,2956,32}, {1210,2959,32}, {1230,2962,32}, {1250,2965,32}, {1270,2968,32}, {1290,2971,32},
+    {1310,2974,32}, {1330,2977,32}, {1350,2980,32},
+};
+static const WildPathPt kWildRidge6[] = {
+    {2350,2900,32}, {2371,2894,32}, {2393,2889,32}, {2414,2883,32}, {2436,2877,32}, {2457,2871,32}, {2479,2866,32}, {2500,2860,32},
+};
+struct WildPathRef { const WildPathPt* pts; int n; };
+static const WildPathRef kWildRivers[] = { {kWildRiverSilverrun, (int)(sizeof(kWildRiverSilverrun)/sizeof(WildPathPt))}, {kWildRiverOutflow, (int)(sizeof(kWildRiverOutflow)/sizeof(WildPathPt))}, {kWildRiverCreek, (int)(sizeof(kWildRiverCreek)/sizeof(WildPathPt))} };
+static const WildPathRef kWildRidges[] = { {kWildRidge0, (int)(sizeof(kWildRidge0)/sizeof(WildPathPt))}, {kWildRidge1, (int)(sizeof(kWildRidge1)/sizeof(WildPathPt))}, {kWildRidge2, (int)(sizeof(kWildRidge2)/sizeof(WildPathPt))}, {kWildRidge3, (int)(sizeof(kWildRidge3)/sizeof(WildPathPt))}, {kWildRidge4, (int)(sizeof(kWildRidge4)/sizeof(WildPathPt))}, {kWildRidge5, (int)(sizeof(kWildRidge5)/sizeof(WildPathPt))}, {kWildRidge6, (int)(sizeof(kWildRidge6)/sizeof(WildPathPt))} };
+// Branch roads (control points, Catmull-Rom smoothed at load). The King's Road
+// itself is kKingsRoadWaypoints, smoothed the same way.
+static const Vector2 kWildBranchRoad0[] = { {1640,1700}, {1650,1660} };
+static const Vector2 kWildBranchRoad1[] = { {1760,826}, {1700,870}, {1650,905} };
+static const Vector2 kWildBranchRoad2[] = { {2280,1135}, {2380,1120}, {2500,1100} };
+static const Vector2 kWildBranchRoad3[] = { {900,1760}, {760,1840}, {560,1930}, {380,2040}, {210,2100} };
+static const Vector2 kWildBranchRoad4[] = { {1395,645}, {1250,520}, {1080,400}, {905,305} };
+static const Vector2 kWildBranchRoad5[] = { {905,1760}, {980,1830}, {1045,1895} };
+static const Vector2 kWildBranchRoad6[] = { {1640,1700}, {1600,1950}, {1520,2150}, {1470,2300} };
+static const WildRoadRef kWildBranchRoads[] = { {kWildBranchRoad0, 2}, {kWildBranchRoad1, 3}, {kWildBranchRoad2, 3}, {kWildBranchRoad3, 5}, {kWildBranchRoad4, 4}, {kWildBranchRoad5, 3}, {kWildBranchRoad6, 4} };
+static const Vector2 kWildFords[] = { {2215,2250} };
+static const float kWildLakeX = 1450, kWildLakeZ = 2540, kWildLakeRX = 300, kWildLakeRZ = 190; // Mirrormere
+
+static const float kWTCell = 8.0f;
+static const int kWTN = 400; // 400 * 8 = 3200 = kWildernessWorldSize
+enum : unsigned char {
+    kWTWater = 1,   // blocks movement (sea, lake, river away from crossings)
+    kWTBridge = 2,  // river under a road: walkable deck
+    kWTRidge = 4,   // rock ridge: blocks movement
+    kWTRoad = 8,    // dirt road surface
+    kWTShore = 16,  // land within ~24 units of water (sand/mud band)
+    kWTRiver = 32,  // any river cell, including bridged/forded ones
+    kWTFord = 64,   // shallow river crossing: walkable
+    kWTSea = 128,   // east coast sea (subset of water)
+};
+static std::vector<unsigned char> g_wt;
+static bool g_wtBuilt = false;
+static std::vector<std::vector<Vector2>> g_wtRoads;           // smoothed: [0] King's Road, then branches
+struct WildBridge { Vector2 a, b; float halfW; };
+static std::vector<WildBridge> g_wtBridges;
+
+static float WildCoastX(float z) {
+    float x = 3080.0f + 40.0f * sinf(z / 260.0f) + 25.0f * sinf(z / 97.0f);
+    float bay = expf(-((z - 1470.0f) / 140.0f) * ((z - 1470.0f) / 140.0f)); // Saltmere bay
+    return x - 190.0f * bay;
+}
+static bool WildInLake(float x, float z) {
+    float dx = (x - kWildLakeX) / kWildLakeRX, dz = (z - kWildLakeZ) / kWildLakeRZ;
+    float a = atan2f(dz, dx);
+    float r = 1.0f + 0.12f * sinf(3.0f * a) + 0.07f * sinf(5.0f * a + 1.0f);
+    return dx * dx + dz * dz < r * r;
+}
+static std::vector<Vector2> WildCatmull(const Vector2* p, int n, float step) {
+    std::vector<Vector2> out;
+    auto at = [&](int i) { return p[std::clamp(i, 0, n - 1)]; };
+    for (int i = 0; i + 1 < n; i++) {
+        Vector2 p0 = at(i - 1), p1 = at(i), p2 = at(i + 1), p3 = at(i + 2);
+        float L = hypotf(p2.x - p1.x, p2.y - p1.y);
+        int m = std::max(2, (int)(L / step));
+        for (int k = 0; k < m; k++) {
+            float t = (float)k / m, t2 = t * t, t3 = t2 * t;
+            auto cr = [&](float a, float b, float c, float d) {
+                return 0.5f * (2 * b + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
+            };
+            out.push_back({ cr(p0.x, p1.x, p2.x, p3.x), cr(p0.y, p1.y, p2.y, p3.y) });
+        }
+    }
+    out.push_back(p[n - 1]);
+    return out;
+}
+static inline int WTIdx(int gx, int gz) { return gz * kWTN + gx; }
+static void WTStamp(float x, float z, float r, unsigned char flag) {
+    int x0 = std::max(0, (int)((x - r) / kWTCell)), x1 = std::min(kWTN - 1, (int)((x + r) / kWTCell));
+    int z0 = std::max(0, (int)((z - r) / kWTCell)), z1 = std::min(kWTN - 1, (int)((z + r) / kWTCell));
+    for (int gz = z0; gz <= z1; gz++)
+        for (int gx = x0; gx <= x1; gx++) {
+            float cx = (gx + 0.5f) * kWTCell - x, cz = (gz + 0.5f) * kWTCell - z;
+            if (cx * cx + cz * cz <= r * r) g_wt[WTIdx(gx, gz)] |= flag;
+        }
+}
+static void WildTerrainEnsure() {
+    if (g_wtBuilt) return;
+    g_wtBuilt = true;
+    g_wt.assign(kWTN * kWTN, 0);
+    // Roads: the King's Road plus the branch roads, smoothed.
+    g_wtRoads.push_back(WildCatmull(kKingsRoadWaypoints.data(), (int)kKingsRoadWaypoints.size(), 20.0f));
+    for (const WildRoadRef& r : kWildBranchRoads) g_wtRoads.push_back(WildCatmull(r.pts, r.n, 20.0f));
+    // Sea and lake, per cell.
+    for (int gz = 0; gz < kWTN; gz++)
+        for (int gx = 0; gx < kWTN; gx++) {
+            float x = (gx + 0.5f) * kWTCell, z = (gz + 0.5f) * kWTCell;
+            if (x > WildCoastX(z)) g_wt[WTIdx(gx, gz)] |= kWTWater | kWTSea;
+            else if (WildInLake(x, z)) g_wt[WTIdx(gx, gz)] |= kWTWater;
+        }
+    // Rivers (per-point half-width) and ridges, stamped along their polylines.
+    auto stampPath = [&](const WildPathRef& r, unsigned char flag) {
+        for (int i = 0; i + 1 < r.n; i++) {
+            const WildPathPt& a = r.pts[i];
+            const WildPathPt& b = r.pts[i + 1];
+            float L = hypotf(b.x - a.x, b.z - a.z);
+            int m = std::max(1, (int)(L / 4.0f));
+            for (int k = 0; k <= m; k++) {
+                float t = (float)k / m;
+                WTStamp(a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t, a.hw + (b.hw - a.hw) * t, flag);
+            }
+        }
+    };
+    for (const WildPathRef& r : kWildRivers) stampPath(r, kWTRiver);
+    for (const WildPathRef& r : kWildRidges) stampPath(r, kWTRidge);
+    // Road surface, plus a wider "bridge zone" where a road meets a river.
+    std::vector<unsigned char> bridgeZone(kWTN * kWTN, 0);
+    for (const auto& road : g_wtRoads)
+        for (size_t i = 0; i + 1 < road.size(); i++) {
+            Vector2 a = road[i], b = road[i + 1];
+            float L = hypotf(b.x - a.x, b.y - a.y);
+            int m = std::max(1, (int)(L / 4.0f));
+            for (int k = 0; k <= m; k++) {
+                float t = (float)k / m, x = a.x + (b.x - a.x) * t, z = a.y + (b.y - a.y) * t;
+                WTStamp(x, z, 22.0f, kWTRoad);
+                int x0 = std::max(0, (int)((x - 38) / kWTCell)), x1 = std::min(kWTN - 1, (int)((x + 38) / kWTCell));
+                int z0 = std::max(0, (int)((z - 38) / kWTCell)), z1 = std::min(kWTN - 1, (int)((z + 38) / kWTCell));
+                for (int gz = z0; gz <= z1; gz++)
+                    for (int gx = x0; gx <= x1; gx++) {
+                        float cx = (gx + 0.5f) * kWTCell - x, cz = (gz + 0.5f) * kWTCell - z;
+                        if (cx * cx + cz * cz <= 38.0f * 38.0f) bridgeZone[WTIdx(gx, gz)] = 1;
+                    }
+            }
+        }
+    for (int i = 0; i < kWTN * kWTN; i++) {
+        unsigned char& f = g_wt[i];
+        if (!(f & kWTRiver) || (f & kWTSea)) continue;
+        int gx = i % kWTN, gz = i / kWTN;
+        float x = (gx + 0.5f) * kWTCell, z = (gz + 0.5f) * kWTCell;
+        bool ford = false;
+        for (const Vector2& fd : kWildFords) if (hypotf(x - fd.x, z - fd.y) < 55.0f) ford = true;
+        if (bridgeZone[i]) f |= kWTBridge;
+        else if (ford) f |= kWTFord;
+        else f |= kWTWater;
+    }
+    for (int i = 0; i < kWTN * kWTN; i++) if (g_wt[i] & kWTBridge) g_wt[i] &= (unsigned char)~kWTWater; // lake/river under a bridge deck
+    // Shore band: land within 3 cells of water.
+    for (int gz = 0; gz < kWTN; gz++)
+        for (int gx = 0; gx < kWTN; gx++) {
+            unsigned char& f = g_wt[WTIdx(gx, gz)];
+            if (f & (kWTWater | kWTBridge)) continue;
+            bool nearWater = false;
+            for (int dz = -3; dz <= 3 && !nearWater; dz++)
+                for (int dx = -3; dx <= 3; dx++) {
+                    int ax = gx + dx, az = gz + dz;
+                    if (ax < 0 || az < 0 || ax >= kWTN || az >= kWTN) continue;
+                    if (g_wt[WTIdx(ax, az)] & kWTWater) { nearWater = true; break; }
+                }
+            if (nearWater) f |= kWTShore;
+        }
+    // Bridge spans: runs of road samples over river cells.
+    for (const auto& road : g_wtRoads) {
+        int runStart = -1;
+        for (size_t i = 0; i <= road.size(); i++) {
+            bool on = false;
+            if (i < road.size()) {
+                int gx = (int)(road[i].x / kWTCell), gz = (int)(road[i].y / kWTCell);
+                if (gx >= 0 && gz >= 0 && gx < kWTN && gz < kWTN) on = (g_wt[WTIdx(gx, gz)] & kWTBridge) != 0;
+            }
+            if (on && runStart < 0) runStart = (int)i;
+            if (!on && runStart >= 0) {
+                Vector2 a = road[std::max(0, runStart - 1)], b = road[std::min(road.size() - 1, i)];
+                g_wtBridges.push_back({ a, b, 24.0f });
+                runStart = -1;
+            }
+        }
+    }
+}
+static unsigned char WildTerrainAt(float x, float z) {
+    WildTerrainEnsure();
+    int gx = (int)(x / kWTCell), gz = (int)(z / kWTCell);
+    if (gx < 0 || gz < 0 || gx >= kWTN || gz >= kWTN) return 0;
+    return g_wt[WTIdx(gx, gz)];
+}
+static bool WildBlocked(Vector2 p) { return (WildTerrainAt(p.x, p.y) & (kWTWater | kWTRidge)) != 0; }
+// Keep a mover out of water/ridges: slide along the edge on one axis if the
+// other axis is clear, else stay put.
+static void WildTerrainResolve(Vector2& pos, Vector2 prev) {
+    if (!WildBlocked(pos)) return;
+    if (!WildBlocked({ pos.x, prev.y })) { pos.y = prev.y; return; }
+    if (!WildBlocked({ prev.x, pos.y })) { pos.x = prev.x; return; }
+    pos = prev;
+}
+// Nearest walkable point (ring search on the terrain grid) - for anyone who
+// finds themselves inside water/a ridge, e.g. a save made before the terrain.
+static Vector2 WildNearestFree(Vector2 p) {
+    if (!WildBlocked(p)) return p;
+    for (float r = kWTCell; r < 600.0f; r += kWTCell)
+        for (int a = 0; a < 32; a++) {
+            float ang = a * (6.2831853f / 32.0f);
+            Vector2 q = { p.x + cosf(ang) * r, p.y + sinf(ang) * r };
+            if (q.x > 40 && q.y > 40 && q.x < kWildernessWorldSize - 40 && q.y < kWildernessWorldSize - 40 && !WildBlocked(q))
+                return q;
+        }
+    return p;
+}
+// Smooth 0..1 coverage field for a flag mask (box-blurred), sampled bilinearly
+// at any world point - lets the baked textures draw soft, curved edges instead
+// of the grid's 8-unit steps.
+struct WildField { std::vector<float> v; };
+static WildField WildTerrainField(unsigned char mask, int passes) {
+    WildTerrainEnsure();
+    WildField F; F.v.resize(kWTN * kWTN);
+    for (int i = 0; i < kWTN * kWTN; i++) F.v[i] = (g_wt[i] & mask) ? 1.0f : 0.0f;
+    std::vector<float> tmp(kWTN * kWTN);
+    for (int p = 0; p < passes; p++) {
+        for (int gz = 0; gz < kWTN; gz++)
+            for (int gx = 0; gx < kWTN; gx++) {
+                float acc = 0; int n = 0;
+                for (int d = -1; d <= 1; d++) { int ax = gx + d; if (ax >= 0 && ax < kWTN) { acc += F.v[WTIdx(ax, gz)]; n++; } }
+                tmp[WTIdx(gx, gz)] = acc / n;
+            }
+        for (int gz = 0; gz < kWTN; gz++)
+            for (int gx = 0; gx < kWTN; gx++) {
+                float acc = 0; int n = 0;
+                for (int d = -1; d <= 1; d++) { int az = gz + d; if (az >= 0 && az < kWTN) { acc += tmp[WTIdx(gx, az)]; n++; } }
+                F.v[WTIdx(gx, gz)] = acc / n;
+            }
+    }
+    return F;
+}
+static float WildFieldAt(const WildField& F, float x, float z);
+// 2D wilderness terrain overlay: one baked 1024px RGBA texture (transparent on
+// plain land) stretched over the world, 3.1 world units per texel.
+static Texture2D g_wild2DOverlay{};
+static bool g_wild2DOverlayBuilt = false;
+static void WildDraw2DTerrainOverlay(Vector2 camera) {
+    if (!g_wild2DOverlayBuilt) {
+        g_wild2DOverlayBuilt = true;
+        const int N = 1024;
+        const float k = N / kWildernessWorldSize;
+        WildField wf = WildTerrainField(kWTWater | kWTRiver, 2), rf = WildTerrainField(kWTRidge, 2);
+        Image img = GenImageColor(N, N, BLANK);
+        Color* px = (Color*)img.data;
+        for (int y = 0; y < N; y++)
+            for (int x = 0; x < N; x++) {
+                float wx = (x + 0.5f) / k, wz = (y + 0.5f) / k;
+                float w = WildFieldAt(wf, wx, wz), r = WildFieldAt(rf, wx, wz);
+                Color c = BLANK;
+                if (r > 0.3f) c = Color{ 112, 104, 94, (unsigned char)std::min(255.0f, (r - 0.3f) * 900.0f) };
+                if (w > 0.1f && w <= 0.42f) c = Color{ 206, 190, 146, (unsigned char)std::min(220.0f, (w - 0.1f) * 900.0f) };
+                if (w > 0.42f && w <= 0.5f) c = Color{ 220, 228, 214, 255 };
+                if (w > 0.5f) {
+                    float d = std::clamp((w - 0.5f) / 0.45f, 0.0f, 1.0f);
+                    c = Color{ (unsigned char)(78 - 44 * d), (unsigned char)(142 - 56 * d), (unsigned char)(150 - 34 * d), 255 };
+                }
+                px[y * N + x] = c;
+            }
+        for (const WildBridge& b : g_wtBridges) // plank decks
+            ImageDrawLineEx(&img, { b.a.x * k, b.a.y * k }, { b.b.x * k, b.b.y * k }, 13, Color{ 140, 100, 62, 255 });
+        g_wild2DOverlay = LoadTextureFromImage(img);
+        UnloadImage(img);
+        SetTextureFilter(g_wild2DOverlay, TEXTURE_FILTER_BILINEAR);
+    }
+    Vector2 tl = WorldToScreen({ 0, 0 }, camera);
+    DrawTexturePro(g_wild2DOverlay, { 0, 0, (float)g_wild2DOverlay.width, (float)g_wild2DOverlay.height },
+                   { tl.x, tl.y, kWildernessWorldSize, kWildernessWorldSize }, { 0, 0 }, 0.0f, WHITE);
+}
+static float WildFieldAt(const WildField& F, float x, float z) {
+    float fx = x / kWTCell - 0.5f, fz = z / kWTCell - 0.5f;
+    int x0 = (int)floorf(fx), z0 = (int)floorf(fz);
+    float tx = fx - x0, tz = fz - z0;
+    auto at = [&](int gx, int gz) { gx = std::clamp(gx, 0, kWTN - 1); gz = std::clamp(gz, 0, kWTN - 1); return F.v[WTIdx(gx, gz)]; };
+    float a = at(x0, z0) + (at(x0 + 1, z0) - at(x0, z0)) * tx;
+    float b = at(x0, z0 + 1) + (at(x0 + 1, z0 + 1) - at(x0, z0 + 1)) * tx;
+    return a + (b - a) * tz;
+}
+
 // --- Wilderness minimap (2026-09-25): display-only v1, top-right of the viewport
 // in both 2D and 3D wilderness views (drawn once from the shared HUD tail of
 // DrawWildernessScreen, which covers both). Toggle with M or the MAP button;
@@ -10024,8 +10376,9 @@ static void WildMapEnsureTexture() {
     auto seg = [&](Vector2 a, Vector2 b) {
         ImageDrawLineEx(&img, { a.x * k, a.y * k }, { b.x * k, b.y * k }, 3, road);
     };
-    for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances) seg(kWildernessReturnGatePos, e.pos);
-    for (size_t i = 0; i + 1 < kKingsRoadWaypoints.size(); i++) seg(kKingsRoadWaypoints[i], kKingsRoadWaypoints[i + 1]);
+    WildTerrainEnsure();
+    for (const auto& road : g_wtRoads)
+        for (size_t i = 0; i + 1 < road.size(); i++) seg(road[i], road[i + 1]);
     g_wildMapTex = LoadTextureFromImage(img);
     UnloadImage(img);
     SetTextureFilter(g_wildMapTex, TEXTURE_FILTER_BILINEAR);
@@ -10990,10 +11343,43 @@ static void Wild3DEnsureGround() {
     for (int i = 0; i < SZ * SZ; i++) dst[i] = gp[i];
     // Dirt paths: Return Gate -> each dungeon entrance, plus the King's Road
     // (waypoint path from kKingsRoadWaypoints) between the two towns.
-    for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances)
-        Wild3DGroundPath(&ground, kWildernessReturnGatePos, e.pos, pathCol);
-    for (size_t i = 0; i + 1 < kKingsRoadWaypoints.size(); i++)
-        Wild3DGroundPath(&ground, kKingsRoadWaypoints[i], kKingsRoadWaypoints[i + 1], pathCol);
+    WildTerrainEnsure();
+    for (const auto& road : g_wtRoads)
+        for (size_t i = 0; i + 1 < road.size(); i++) Wild3DGroundPath(&ground, road[i], road[i + 1], pathCol);
+    // Water, shores and ridges (2026-09-26), painted over the meadow and roads
+    // (roads under a bridge vanish into the river; the deck model covers it).
+    {
+        WildField wf = WildTerrainField(kWTWater | kWTRiver, 2); // rivers incl. bridged/forded stretches
+        WildField ff = WildTerrainField(kWTFord, 2);
+        WildField rf = WildTerrainField(kWTRidge, 2);
+        Color* px = (Color*)ground.data;
+        for (int i = 0; i < SZ * SZ; i++) {
+            float wx = ((float)(i % SZ) + 0.5f) / k, wz = ((float)(i / SZ) + 0.5f) / k;
+            float w = WildFieldAt(wf, wx, wz);
+            float rk = WildFieldAt(rf, wx, wz);
+            float n = np[i].r / 255.0f;
+            float r = px[i].r, g = px[i].g, b = px[i].b;
+            if (rk > 0.05f) { // rocky, broken ground under and around the ridges
+                float t = fminf(1.0f, (rk - 0.05f) / 0.45f) * 0.85f;
+                r += (104 - 10 * n - r) * t; g += (98 - 10 * n - g) * t; b += (90 - 8 * n - b) * t;
+            }
+            if (w > 0.06f && w < 0.42f) { // sand / mud shore band
+                float t = 1.0f - fabsf(w - 0.26f) / 0.20f;
+                t = std::clamp(t, 0.0f, 1.0f) * 0.75f;
+                r += (198 - r) * t; g += (182 - g) * t; b += (140 - b) * t;
+            }
+            if (w >= 0.42f && w < 0.5f) { r = 214; g = 222; b = 206; } // wet foam edge
+            if (w >= 0.5f) {
+                float depth = std::clamp((w - 0.5f) / 0.45f, 0.0f, 1.0f);
+                float fr = WildFieldAt(ff, wx, wz);
+                if (fr > 0.3f) depth *= 0.25f; // fords: shallow, you can see the stones
+                r = 78 - 46 * depth + 10 * n; g = 142 - 58 * depth + 10 * n; b = 150 - 36 * depth + 8 * n;
+            }
+            px[i].r = (unsigned char)std::clamp(r, 0.0f, 255.0f);
+            px[i].g = (unsigned char)std::clamp(g, 0.0f, 255.0f);
+            px[i].b = (unsigned char)std::clamp(b, 0.0f, 255.0f);
+        }
+    }
     UnloadImageColors(gp);
     UnloadImageColors(np);
     UnloadImageColors(bp);
@@ -11257,29 +11643,30 @@ static void T3DGrassBuildWild() {
     auto addTuft = [&](float x, float z) {
         if (total >= kT3DGrassWildMax) return;
         if (x < 40.0f || x > 3160.0f || z < 40.0f || z > 3160.0f) return;
+        if (WildTerrainAt(x, z) & (kWTWater | kWTRidge | kWTRoad | kWTBridge | kWTRiver)) return; // terrain (2026-09-26)
         int q = (x >= 1600.0f ? 1 : 0) + (z >= 1600.0f ? 2 : 0);
         quads[q].push_back({ x, z, 0.8f + 0.6f * Town3DHash01(z, x + 5.0f) });
         total++;
     };
-    std::vector<Vector2> ends;
-    for (auto& e : kWildernessDungeonEntrances) ends.push_back(e.pos);
-    ends.push_back(kWildernessTown2GatePos);
-    ends.push_back(kWildernessTown3GatePos);
-    for (Vector2 end : ends) {
-        Vector2 a = kWildernessReturnGatePos;
-        float len = hypotf(end.x - a.x, end.y - a.y);
-        if (len < 1.0f) continue;
-        float px = -(end.y - a.y) / len, pz = (end.x - a.x) / len; // perpendicular
-        int n = (int)(len / 90.0f);
-        for (int i = 1; i < n; i++) {
-            float t = (float)i / (float)n;
-            float cxp = a.x + (end.x - a.x) * t, czp = a.y + (end.y - a.y) * t;
-            int k = 1 + (Town3DHash01(cxp, czp) > 0.5f ? 1 : 0);
+    // Road-edge tufts (2026-09-26: follows the real road network, which
+    // replaced the straight gate-to-entrance spokes).
+    WildTerrainEnsure();
+    for (const auto& road : g_wtRoads) {
+        float acc = 0.0f;
+        for (size_t i = 0; i + 1 < road.size(); i++) {
+            Vector2 a = road[i], b = road[i + 1];
+            float len = hypotf(b.x - a.x, b.y - a.y);
+            if (len < 1.0f) continue;
+            acc += len;
+            if (acc < 70.0f) continue;
+            acc = 0.0f;
+            float px = -(b.y - a.y) / len, pz = (b.x - a.x) / len; // perpendicular
+            int k = 1 + (Town3DHash01(a.x, a.y) > 0.5f ? 1 : 0);
             for (int j = 0; j < k; j++) {
-                float side = (Town3DHash01(cxp + (float)j * 7.0f, czp) > 0.5f) ? 1.0f : -1.0f;
-                float off = side * (22.0f + 26.0f * Town3DHash01(czp + (float)j * 3.0f, cxp));
-                float jx = cxp + px * off + (Town3DHash01(cxp * 2.0f, czp) - 0.5f) * 20.0f;
-                float jz = czp + pz * off + (Town3DHash01(czp * 2.0f, cxp + 9.0f) - 0.5f) * 20.0f;
+                float side = (Town3DHash01(a.x + (float)j * 7.0f, a.y) > 0.5f) ? 1.0f : -1.0f;
+                float off = side * (30.0f + 22.0f * Town3DHash01(a.y + (float)j * 3.0f, a.x));
+                float jx = a.x + px * off + (Town3DHash01(a.x * 2.0f, a.y) - 0.5f) * 20.0f;
+                float jz = a.y + pz * off + (Town3DHash01(a.y * 2.0f, a.x + 9.0f) - 0.5f) * 20.0f;
                 if (isClear(jx, jz)) addTuft(jx, jz);
             }
         }
@@ -11490,6 +11877,7 @@ static void Wild3DBuildScatter() {
                 if (jx < 40 || jx > 3160 || jz < 40 || jz > 3160) continue;
                 if (Town3DHash01(jx * 1.7f, jz * 2.3f) > zn.density) continue;
                 if (!isClear(jx, jz)) continue;
+                if (WildTerrainAt(jx, jz) & (kWTWater | kWTRidge | kWTRiver | kWTBridge | kWTRoad)) continue; // terrain (2026-09-26)
                 Wild3DScatterItem it;
                 it.x = jx; it.z = jz; it.kind = zn.kind;
                 it.variant = (int)(Town3DHash01(jx + 5.0f, jz + 9.0f) * 3.0f);
@@ -11543,6 +11931,7 @@ enum WildPropId {
     kWPMountainA, kWPMountainB, kWPMountainC, kWPMountainAGreen, kWPMountainBGreen, kWPMountainCGreen,
     kWPTent, kWPBarrel, kWPCrateBig, kWPCrateSmall, kWPCrateLong, kWPSack, kWPWeaponRack,
     kWPFlagRed, kWPFlagBlue, kWPLumber, kWPStonePile, kWPWheelbarrow, kWPBucket,
+    kWPLilyA, kWPLilyB, kWPReedA, kWPReedB, kWPReedC,
     kWPCount
 };
 static const char* const kWildPropFiles[kWPCount] = {
@@ -11553,6 +11942,7 @@ static const char* const kWildPropFiles[kWPCount] = {
     "mountain_A", "mountain_B", "mountain_C", "mountain_A_grass_trees", "mountain_B_grass_trees", "mountain_C_grass_trees",
     "tent", "barrel", "crate_A_big", "crate_B_small", "crate_long_A", "sack", "weaponrack",
     "flag_red", "flag_blue", "resource_lumber", "resource_stone", "wheelbarrow", "bucket_water",
+    "waterlily_A", "waterlily_B", "waterplant_A", "waterplant_B", "waterplant_C",
 };
 // The pack is authored for a 2-unit hex board, so scales are per group, picked
 // to sit with the Kenney trees and the ~60-unit characters.
@@ -11562,6 +11952,40 @@ static const float kWPScaleProp = 135.0f;  // camp props (tent ~70 tall)
 static const float kWPScaleRing = 260.0f;  // horizon mountains/hills
 
 struct WildDressItem { int id; float x, z, rot, scale; Color tint; float cullR; };
+// Wooden bridge where a road crosses a river (2026-09-26): planked deck, side
+// beams, posts and rails, built in local space along +X and placed/rotated
+// onto the span WildTerrainEnsure found.
+struct WildBridgeModel { Model model{}; Vector3 pos{}; float yawDeg = 0.0f; float cx = 0, cz = 0, len = 0; };
+static std::vector<WildBridgeModel> g_wildBridgeModels;
+static void Wild3DBuildBridges() {
+    WildTerrainEnsure();
+    for (const WildBridge& br : g_wtBridges) {
+        float dx = br.b.x - br.a.x, dz = br.b.y - br.a.y;
+        float L = hypotf(dx, dz) + 24.0f;
+        if (L < 30.0f) continue;
+        T3CMeshBuilder b;
+        const float W = br.halfW * 2.0f - 4.0f;
+        const Color wood = { 128, 90, 56, 255 }, woodDk = { 98, 68, 42, 255 }, woodLt = { 150, 108, 68, 255 };
+        for (float x = -L / 2 + 4.0f; x < L / 2 - 3.0f; x += 9.0f) {
+            float h = Town3DHash01(br.a.x + x, br.a.y);
+            T3CBox(b, x, 6.0f + h * 0.8f, 0.0f, 8.0f, 3.0f, W + (h - 0.5f) * 3.0f, h > 0.5f ? wood : woodLt);
+        }
+        for (int side = -1; side <= 1; side += 2) {
+            float zz = side * (W / 2 + 1.0f);
+            T3CBox(b, 0.0f, 3.5f, zz, L, 4.0f, 4.0f, woodDk);           // side beam
+            T3CBox(b, 0.0f, 19.0f, zz, L - 6.0f, 3.0f, 3.0f, wood);      // hand rail
+            for (float x = -L / 2 + 3.0f; x <= L / 2 - 3.0f + 0.1f; x += (L - 6.0f) / std::max(1.0f, floorf((L - 6.0f) / 30.0f)))
+                T3CBox(b, x, 11.0f, zz, 4.0f, 18.0f, 4.0f, woodDk);      // posts
+        }
+        WildBridgeModel m;
+        m.model = T3CFinish(b);
+        Town3DApplyLitShader(m.model);
+        m.cx = (br.a.x + br.b.x) * 0.5f; m.cz = (br.a.y + br.b.y) * 0.5f; m.len = L;
+        m.pos = { m.cx, 0.0f, m.cz };
+        m.yawDeg = atan2f(-dz, dx) * RAD2DEG; // local +X onto the span direction
+        g_wildBridgeModels.push_back(m);
+    }
+}
 struct Wild3DDressing {
     bool built = false;
     Model models[kWPCount]{};
@@ -11604,11 +12028,10 @@ static float Wild3DSegDist(Vector2 p, Vector2 a, Vector2 b) {
 }
 // Distance to the nearest baked dirt path (same segments Wild3DEnsureGround paints).
 static float Wild3DRoadDist(Vector2 p) {
+    WildTerrainEnsure();
     float d = 1e9f;
-    for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances)
-        d = fminf(d, Wild3DSegDist(p, kWildernessReturnGatePos, e.pos));
-    for (size_t i = 0; i + 1 < kKingsRoadWaypoints.size(); i++)
-        d = fminf(d, Wild3DSegDist(p, kKingsRoadWaypoints[i], kKingsRoadWaypoints[i + 1]));
+    for (const auto& road : g_wtRoads)
+        for (size_t i = 0; i + 1 < road.size(); i++) d = fminf(d, Wild3DSegDist(p, road[i], road[i + 1]));
     return d;
 }
 
@@ -11654,14 +12077,25 @@ static void Wild3DBuildDressing() {
             float jz = gz + (Town3DHash01(gz * 0.41f, gx * 0.29f + 7.0f) - 0.5f) * step * 0.9f;
             if (jx < 50.0f || jz < 50.0f || jx > WS - 50.0f || jz > WS - 50.0f) continue;
             Vector2 p = { jx, jz };
+            unsigned char tf = WildTerrainAt(jx, jz);
+            if (tf & (kWTWater | kWTRidge | kWTRiver | kWTBridge | kWTRoad)) continue; // terrain (2026-09-26)
             RegionId rg = RegionAt(p);
             float roll = Town3DHash01(jx * 1.31f, jz * 0.77f);
             float pick = Town3DHash01(jz * 1.13f + 3.0f, jx * 0.91f);
             float rot = Town3DHash01(jx, jz * 1.7f) * 360.0f;
             float vs = 0.8f + 0.45f * Town3DHash01(jz * 0.63f, jx + 11.0f);
-            float density = (rg == RegionId::Whisperwood) ? 0.34f : (rg == RegionId::Stonepeaks) ? 0.40f
-                          : (rg == RegionId::Frostwastes) ? 0.30f : 0.16f;
+            // Organized, not sprinkled (2026-09-26): a low-frequency forest field
+            // makes coherent woods and open meadows, riverbanks get tree lines,
+            // and everything thins out in the open.
+            float fn = 0.5f + 0.25f * sinf(jx * 0.0031f + 1.3f) * cosf(jz * 0.0027f + 0.4f)
+                     + 0.15f * sinf(jx * 0.0071f + jz * 0.0053f + 2.1f)
+                     + 0.10f * sinf(jz * 0.011f - jx * 0.004f);
+            bool forest = fn > 0.62f, bank = (tf & kWTShore) && !(tf & kWTSea);
+            float density = forest ? 0.80f : bank ? 0.45f : 0.10f;
+            if (rg == RegionId::SaltCoast) density *= 0.6f;
+            if (rg == RegionId::Stonepeaks && !forest) density = 0.30f; // boulder fields
             if (roll > density) continue;
+            if (forest && rg == RegionId::Whisperwood) pick *= 0.62f; // woods: clusters and lone trees, few rocks
             bool big = false;
             int id = -1;
             float sc = kWPScaleTrees;
@@ -11697,6 +12131,46 @@ static void Wild3DBuildDressing() {
         }
     }
 
+    // 1b) Terrain dressing (2026-09-26): reeds along river and lake banks,
+    //     lilies on the still water near them, and rock walls along ridges.
+    for (int gz = 1; gz < kWTN - 1; gz++) {
+        for (int gx = 1; gx < kWTN - 1; gx++) {
+            unsigned char f = g_wt[WTIdx(gx, gz)];
+            float x = (gx + 0.5f) * kWTCell, z = (gz + 0.5f) * kWTCell;
+            float h = Town3DHash01(x * 0.93f, z * 1.07f);
+            bool edgeWater = false; // water cell touching land
+            if (f & kWTWater) {
+                for (int d = 0; d < 4 && !edgeWater; d++) {
+                    int ax = gx + (d == 0) - (d == 1), az = gz + (d == 2) - (d == 3);
+                    if (!(g_wt[WTIdx(ax, az)] & kWTWater)) edgeWater = true;
+                }
+            }
+            if ((f & kWTShore) && !(f & (kWTSea | kWTRoad | kWTBridge)) && h < 0.04f && clearOf({ x, z }, 0.0f)) {
+                float jx = x + (Town3DHash01(z, x) - 0.5f) * 6.0f;
+                add(kWPReedA + (int)(h * 1000.0f) % 3, jx, z, h * 3600.0f, 190.0f, WHITE, 30.0f);
+            } else if ((f & kWTWater) && !(f & kWTSea) && !edgeWater && h < 0.022f) {
+                add(kWPLilyA + (int)(h * 1000.0f) % 2, x, z, h * 9000.0f, 95.0f, WHITE, 25.0f);
+            }
+        }
+    }
+    for (const WildPathRef& r : kWildRidges) {
+        float acc = 0.0f;
+        for (int i = 0; i + 1 < r.n; i++) {
+            const WildPathPt& a = r.pts[i];
+            const WildPathPt& b = r.pts[i + 1];
+            acc += hypotf(b.x - a.x, b.z - a.z);
+            if (acc < 22.0f && i > 0) continue;
+            acc = 0.0f;
+            float h = Town3DHash01(a.x * 0.37f, a.z * 0.61f);
+            Color tint = (a.z < 700.0f) ? Color{ 220, 230, 244, 255 } : WHITE;
+            add(kWPMountainA + (int)(h * 3.0f) % 3, a.x + (h - 0.5f) * 10.0f, a.z, h * 360.0f,
+                34.0f + 12.0f * h, tint, 70.0f);
+            if (h > 0.55f) // loose boulders at the foot
+                add(kWPRockA + (int)(h * 50.0f) % 5, a.x + (h - 0.7f) * 70.0f, a.z + (0.6f - h) * 70.0f,
+                    h * 720.0f, kWPScaleRock * 0.8f, tint, 40.0f);
+        }
+    }
+
     // 2) Roadside camps: one per region-ish slice of the map, the first hashed
     //    candidate that sits 70-260 units off a road and clear of everything.
     static const Rectangle kCampAreas[] = {
@@ -11712,6 +12186,7 @@ static void Wild3DBuildDressing() {
             Vector2 c = { cx, cz };
             float rd = Wild3DRoadDist(c);
             if (rd < 70.0f || rd > 260.0f || !clearOf(c, 70.0f)) continue;
+            if (WildTerrainAt(cx, cz) & (kWTWater | kWTRidge | kWTRiver | kWTShore)) continue;
             float face = Town3DHash01(cx, cz) * 360.0f;
             float fr = face * DEG2RAD;
             auto at = [&](float lx, float lz, int id, float rotOff, float sc) {
@@ -11751,7 +12226,7 @@ static void Wild3DBuildDressing() {
         ring(-o1, t, 0, i);                 // west edge
         ring(t, -o2, 1, i);                 // north edge
         ring(t, WS + o3, 2, i);             // south edge
-        ring(WS + o4, t, 3, i);             // east edge
+        (void)o4;                           // east edge: open sea since the coast (2026-09-26)
     }
 }
 
@@ -11768,10 +12243,34 @@ static void WildMapPaintDressing(Image* img, float pxPerUnit) {
         ImageDrawCircleV(img, { it.x * pxPerUnit, it.z * pxPerUnit }, (int)fmaxf(1.0f, r * pxPerUnit), c);
     }
 }
-static void WildMapPaintExtras(Image* img, float pxPerUnit) { (void)img; (void)pxPerUnit; }
+static void WildMapPaintExtras(Image* img, float pxPerUnit) {
+    // Water (with a pale shore), ridges and bridge decks, from the terrain grid.
+    WildField wf = WildTerrainField(kWTWater | kWTRiver, 1);
+    WildField rf = WildTerrainField(kWTRidge, 1);
+    Color* px = (Color*)img->data;
+    const int N = img->width;
+    for (int y = 0; y < N; y++)
+        for (int x = 0; x < N; x++) {
+            float wx = (x + 0.5f) / pxPerUnit, wz = (y + 0.5f) / pxPerUnit;
+            float w = WildFieldAt(wf, wx, wz), r = WildFieldAt(rf, wx, wz);
+            Color& c = px[y * N + x];
+            if (r > 0.35f) c = Color{ 112, 102, 92, 255 };
+            if (w > 0.2f && w <= 0.45f) c = Color{ 214, 204, 160, 255 };
+            if (w > 0.45f) c = Color{ 62, 118, 150, 255 };
+        }
+    for (const WildBridge& b : g_wtBridges)
+        ImageDrawLineEx(img, { b.a.x * pxPerUnit, b.a.y * pxPerUnit }, { b.b.x * pxPerUnit, b.b.y * pxPerUnit }, 4,
+                        Color{ 150, 105, 62, 255 });
+}
 
 static void Wild3DDrawDressing(const Town3DCam* cull) {
     Wild3DBuildDressing();
+    static bool bridgesBuilt = false;
+    if (!bridgesBuilt) { bridgesBuilt = true; Wild3DBuildBridges(); }
+    for (const WildBridgeModel& m : g_wildBridgeModels) {
+        if (cull && !Wild3DInView(*cull, m.cx, m.cz, m.len * 0.6f + 30.0f)) continue;
+        DrawModelEx(m.model, m.pos, { 0.0f, 1.0f, 0.0f }, m.yawDeg, { 1.0f, 1.0f, 1.0f }, WHITE);
+    }
     const Wild3DDressing& D = g_wild3dDress;
     for (const WildDressItem& it : D.items) {
         if (cull && !Wild3DInView(*cull, it.x, it.z, it.cullR)) continue;
@@ -11850,6 +12349,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     // so the horizon never shows a hard edge.
     DrawModel(g_wild3dGround.model, { 1600, 0, 1600 }, 1.0f, WHITE);
     DrawPlane({ 1600, -15.0f, 1600 }, { 8000, 8000 }, Color{ 92, 132, 70, 255 });
+    DrawPlane({ 5600, -2.0f, 1600 }, { 4800, 8000 }, Color{ 44, 96, 122, 255 }); // open sea past the coast (2026-09-26)
 
     // Region dressing: tree clusters, rocks, camps, horizon ring (main pass only).
     if (!shadowPass) Wild3DDrawDressing(cull);
@@ -17496,8 +17996,17 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         }
     }
 
+    // Terrain (2026-09-26): the roaming rival and blades can't wade rivers or
+    // climb ridges either - a river between you and a hunter is a real escape.
+    // (Someone already standing in water, e.g. from an older save, may walk out.)
+    const Vector2 rivalPrev = s.rivalPos;
+    std::array<Vector2, kBladeCount> bladePrev;
+    for (int bi = 0; bi < kBladeCount; bi++) bladePrev[bi] = s.blades[bi].pos;
     UpdateRivalRoaming(s, GameDt()); // before the nearest-search below, so rivalPos is current this frame
     for (int bi = 0; bi < kBladeCount; bi++) UpdateBladeRoaming(s, bi, GameDt()); // the Murder Inc. crew roams too
+    if (!WildBlocked(rivalPrev)) WildTerrainResolve(s.rivalPos, rivalPrev);
+    for (int bi = 0; bi < kBladeCount; bi++)
+        if (!WildBlocked(bladePrev[bi])) WildTerrainResolve(s.blades[bi].pos, bladePrev[bi]);
     UpdateInnocentSpots(s, GameDt());
 
     // Phase 6 - connective tissue updates.
@@ -18279,6 +18788,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     if ((s.playerIsGhost && nearestKind != WildNodeKind::Shrine) || s.playerDeathAnimT > 0.0f) prompt.clear();
 
     // No movement during the death animation - the body isn't going anywhere.
+    const Vector2 wildPrevPos = s.wildernessPlayerPos; // for the terrain check below (2026-09-26)
     if (s.playerDeathAnimT <= 0.0f) {
         bool moved = UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GameDt(), kWildernessWorldSize);
         // UO-style attack flagging (2026-09-24): when the player isn't driving,
@@ -18329,16 +18839,31 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown2GatePos, kNodeRadius);
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown3GatePos, kNodeRadius); // Phase 3
     s.wildernessPlayerPos = ClampToWorld(s.wildernessPlayerPos, kPlayerEdgeMargin, kWildernessWorldSize);
+    // Terrain (2026-09-26): water and rock ridges block; slide along banks.
+    // Ghosts walk where they will - never trap a ghost on its way to a shrine.
+    if (!s.playerIsGhost) {
+        if (WildBlocked(wildPrevPos)) s.wildernessPlayerPos = WildNearestFree(s.wildernessPlayerPos); // stranded: step ashore
+        else WildTerrainResolve(s.wildernessPlayerPos, wildPrevPos);
+    }
 
     // AI reacts to this frame's final (post-collision) player position; the player's
     // own swing is a separate action so it can also be triggered by touch, below. The
     // Rival Adventurer (ActiveMonster::isRival) gets its own AI function instead - see
     // updateTacticalOpponentAI's comment.
+    // Monsters obey the terrain too (2026-09-26): snapshot, move, then undo any
+    // step into water or a ridge (sliding along it where possible).
+    Vector2 engPrev = s.wildEngaged.has_value() ? s.wildEngaged->pos : Vector2{ 0, 0 };
+    std::vector<Vector2> extraPrev;
+    for (const auto& ex : s.wildExtraAttackers) extraPrev.push_back(ex.pos);
     if (s.wildEngaged.has_value() && (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0))
         updateTacticalOpponentAI();
     else
         updateEngagedMonsterAI();
     updateWildExtraAttackers(); // pack members chase/crowd/attack alongside the primary
+    if (s.wildEngaged.has_value() && !WildBlocked(engPrev)) WildTerrainResolve(s.wildEngaged->pos, engPrev);
+    if (s.wildExtraAttackers.size() == extraPrev.size())
+        for (size_t i = 0; i < extraPrev.size(); i++)
+            if (!WildBlocked(extraPrev[i])) WildTerrainResolve(s.wildExtraAttackers[i].pos, extraPrev[i]);
     // Auto-continuous melee: fires on its own cooldown every frame once engaged and in
     // range, no button press needed - mirrors updateEngagedMonsterAI's unconditional
     // per-frame check for the monster's own attack. trySwingAtEngagedMonster already
@@ -18384,25 +18909,25 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     }
 
     // The King's Road (Phase 0): drawn as a proper waypoint polyline in both views.
+    // 2026-09-26: the whole road network (King's Road + curving branch roads,
+    // which replaced the straight gate-to-entrance spokes), then the terrain
+    // overlay - water, shores, ridges, bridge decks - over it, so 2D shows the
+    // same blocking terrain as 3D.
     {
+        WildTerrainEnsure();
         Color roadOuter = { 178, 148, 98, 255 }, roadInner = { 208, 182, 126, 255 };
-        for (size_t i = 0; i + 1 < kKingsRoadWaypoints.size(); i++) {
-            Vector2 a = WorldToScreen(kKingsRoadWaypoints[i], camera);
-            Vector2 b = WorldToScreen(kKingsRoadWaypoints[i + 1], camera);
-            DrawLineEx(a, b, 26.0f, roadOuter);
-            DrawLineEx(a, b, 14.0f, roadInner);
-        }
+        for (int pass = 0; pass < 2; pass++)
+            for (const auto& road : g_wtRoads)
+                for (size_t i = 0; i + 1 < road.size(); i++) {
+                    Vector2 a = WorldToScreen(road[i], camera), b = WorldToScreen(road[i + 1], camera);
+                    if (fmaxf(a.x, b.x) < kViewport.x - 20 || fminf(a.x, b.x) > kViewport.x + kViewport.width + 20 ||
+                        fmaxf(a.y, b.y) < kViewport.y - 20 || fminf(a.y, b.y) > kViewport.y + kViewport.height + 20) continue;
+                    DrawLineEx(a, b, pass == 0 ? 30.0f : 16.0f, pass == 0 ? roadOuter : roadInner);
+                    DrawCircleV(a, pass == 0 ? 15.0f : 8.0f, pass == 0 ? roadOuter : roadInner);
+                }
         Vector2 lbl = WorldToScreen({ 1900, 1630 }, camera);
         DrawUIText("King's Road", (int)lbl.x - 38, (int)lbl.y, 12, Color{ 96, 74, 50, 255 });
-    }
-
-    // Dirt paths from the Return Gate to each dungeon entrance - same DrawWallBand/
-    // outline treatment as Town's roads, so the map reads as a connected place instead
-    // of open grass with icons scattered on it.
-    {
-        const Texture2D* wildDirtTex = g_assets.groundDirtOk ? &g_assets.groundDirt : nullptr;
-        for (const WildernessDungeonEntrance& entrance : kWildernessDungeonEntrances)
-            DrawWildPath(kWildernessReturnGatePos, entrance.pos, camera, wildDirtTex);
+        WildDraw2DTerrainOverlay(camera);
     }
 
     // Decorative bush/fern scatter - drawn first (no collision) so nodes layer on top of
