@@ -427,8 +427,16 @@ static const std::array<HomeModuleLevel, 5> kHomeModuleLevels = {{
 // Custom wilderness housing (2026-09-25): the old town house building is gone
 // (see kTownNodePositions); the player now buys one of 10 fixed wilderness plots
 // and designs the house on a grid, UO-custom-house style. Layouts are encoded as
-// a row-major string of size*size chars: '.'=empty, 'F'=floor, 'W'=wall, 'D'=door.
+// a row-major string of size*size chars: '.'=empty, 'F'=floor, 'W'=wall, 'D'=door,
+// 'N'=window (Housing 2.0).
 // Piece costs are charged at placement time (pay-as-you-build).
+// Room & house surfaces (procedural textures, see SurfTex).
+enum IntSurface {
+    kIsOak = 0, kIsDarkPlank, kIsFlagstone, kIsTile, kIsStraw, kIsMarble, kIsCarpet,      // floors
+    kIsTimber, kIsStoneWall, kIsLogWall, kIsPlankWall, kIsSandstone, kIsWhitewash,          // walls
+    kIsThatch, kIsSlate, kIsRedTile, kIsShingle,                                             // roofs
+    kIsCount
+};
 static const float kHouseCellSize = 45.0f; // world units per designer grid cell
 static const int kHouseFloorCost = 5;
 static const int kHouseWallCost = 15;
@@ -545,7 +553,7 @@ static const std::array<HousePlot, 10> kHousePlots = {{
 static std::string HouseEmptyLayout(int cells) { return std::string((size_t)cells * cells, '.'); }
 static bool HouseLayoutValid(const std::string& layout, int cells) {
     if ((int)layout.size() != cells * cells) return false;
-    for (char c : layout) if (c != '.' && c != 'F' && c != 'W' && c != 'D') return false;
+    for (char c : layout) if (c != '.' && c != 'F' && c != 'W' && c != 'D' && c != 'N') return false;
     return true;
 }
 static char HouseCellAt(const std::string& layout, int cells, int cx, int cy) {
@@ -590,6 +598,131 @@ static std::string HousePlotPrompt(int ownedPlotIdx, const std::string& layout, 
     if (plotIdx == ownedPlotIdx)
         return HouseHasDoor(layout, p.cells) ? "Enter Homestead" : "Design House";
     return "Buy Plot (" + std::to_string(p.price) + "g)";
+}
+
+// ---- Housing 2.0 (2026-09-26) -------------------------------------------------------
+// Loosely after UO's custom housing (the tile-and-tool designer, a house sign,
+// placing and turning furniture where you like - Outlands-style decorating):
+//   * 'N' layout cells are windows: walls with glass that light up at night.
+//   * Every house picks a wall, floor and roof style (IntSurface textures) - the
+//     outside is a textured shell under a real hipped roof, the inside is built
+//     from the same plan.
+//   * Furniture is free-placed inside (GameState::houseDecor) from a catalog:
+//     beds you can rest in, chests that add storage, workshop stations that
+//     open your home wing's crafting, and plenty that's just for looks.
+static const int kHouseWindowCost = 25;
+static const int kHouseRestyleCost = 100;
+static const int kHouseWallSurfs[] = { kIsTimber, kIsStoneWall, kIsLogWall, kIsWhitewash, kIsSandstone, kIsPlankWall };
+static const int kHouseFloorSurfs[] = { kIsOak, kIsDarkPlank, kIsFlagstone, kIsTile, kIsMarble, kIsCarpet };
+static const int kHouseRoofSurfs[] = { kIsThatch, kIsSlate, kIsRedTile, kIsShingle };
+static const int kHouseWallStyleCount = (int)(sizeof(kHouseWallSurfs) / sizeof(int));
+static const int kHouseFloorStyleCount = (int)(sizeof(kHouseFloorSurfs) / sizeof(int));
+static const int kHouseRoofStyleCount = (int)(sizeof(kHouseRoofSurfs) / sizeof(int));
+static const float kHouseIntCell = 96.0f;     // interior room units per layout cell
+static const int kHouseStorageBase = 30;      // storage slots before any chests
+
+enum HouseDecorCat { kHdcFurniture = 0, kHdcStorage, kHdcLighting, kHdcDecor, kHdcWorkshop, kHdcCount };
+static const char* kHouseDecorCatNames[kHdcCount] = { "Furniture", "Storage", "Lighting", "Decor", "Workshop" };
+enum HouseDecorPlace { kHdpFloor = 0, kHdpWall, kHdpTable, kHdpRug };
+struct HouseDecorDef {
+    const char* name; const char* dir; const char* model;
+    int cat, place, gold, wood;
+    float sc, yOff;     // model scale over the interior base; wall height for wall pieces
+    float bw, bh;       // footprint at rotation 0 (0 = walk-through)
+    float topH;         // tabletop height when other pieces can stand on it (0 = no)
+    int storage;        // extra storage slots
+    int module;         // home workshop wing it needs (-1 = none)
+    const char* action; // "" | "chest" | "bed" | "craft"
+    Color c2d;
+};
+static const Color kHdWood = { 132, 94, 60, 255 }, kHdCloth = { 150, 60, 56, 255 }, kHdMetal = { 140, 140, 150, 255 };
+static const HouseDecorDef kHouseDecorDefs[] = {
+    // Furniture
+    { "Straw Cot", "kk", "bed_frame.glb", kHdcFurniture, kHdpFloor, 60, 10, 1, 0, 40, 78, 0, 0, -1, "bed", Color{ 170, 150, 110, 255 } },
+    { "Single Bed", "kf", "bed_single_A.gltf", kHdcFurniture, kHdpFloor, 120, 20, 1, 0, 42, 78, 0, 0, -1, "bed", Color{ 170, 150, 130, 255 } },
+    { "Double Bed", "kf", "bed_double_A.gltf", kHdcFurniture, kHdpFloor, 260, 40, 1, 0, 81, 78, 0, 0, -1, "bed", kHdCloth },
+    { "Canopy Bed", "kk", "bed_decorated.glb", kHdcFurniture, kHdpFloor, 480, 60, 1, 0, 68, 80, 0, 0, -1, "bed", kHdCloth },
+    { "Wooden Chair", "kf", "chair_A_wood.gltf", kHdcFurniture, kHdpFloor, 20, 4, 1, 0, 22, 22, 0, 0, -1, "", kHdWood },
+    { "Ladderback Chair", "kf", "chair_B_wood.gltf", kHdcFurniture, kHdpFloor, 24, 4, 1, 0, 22, 22, 0, 0, -1, "", kHdWood },
+    { "Tavern Chair", "kk", "chair.glb", kHdcFurniture, kHdpFloor, 18, 4, 1, 0, 20, 20, 0, 0, -1, "", kHdWood },
+    { "Stool", "kf", "chair_stool_wood.gltf", kHdcFurniture, kHdpFloor, 12, 2, 1, 0, 18, 18, 0, 0, -1, "", kHdWood },
+    { "Armchair", "kf", "armchair.gltf", kHdcFurniture, kHdpFloor, 90, 10, 0.9f, 0, 38, 42, 0, 0, -1, "", Color{ 150, 110, 60, 255 } },
+    { "Side Table", "kk", "table_small.glb", kHdcFurniture, kHdpFloor, 30, 6, 1, 0, 26, 26, 26, 0, -1, "", kHdWood },
+    { "Low Table", "kf", "table_low.gltf", kHdcFurniture, kHdpFloor, 40, 8, 1, 0, 62, 39, 13, 0, -1, "", kHdWood },
+    { "Square Table", "kf", "table_medium.gltf", kHdcFurniture, kHdpFloor, 60, 12, 1, 0, 52, 52, 26, 0, -1, "", kHdWood },
+    { "Work Table", "kk", "table_medium.glb", kHdcFurniture, kHdpFloor, 55, 12, 1, 0, 52, 52, 26, 0, -1, "", kHdWood },
+    { "Clothed Table", "kk", "table_medium_tablecloth.glb", kHdcFurniture, kHdpFloor, 80, 12, 1, 0, 52, 52, 26, 0, -1, "", kHdCloth },
+    { "Long Table", "kk", "table_long.glb", kHdcFurniture, kHdpFloor, 110, 24, 1, 0, 52, 104, 26, 0, -1, "", kHdWood },
+    { "Banquet Table", "kk", "table_long_tablecloth.glb", kHdcFurniture, kHdpFloor, 170, 24, 1, 0, 52, 104, 26, 0, -1, "", kHdCloth },
+    // Storage (every piece adds to the house's shared storage)
+    { "Chest", "kk", "chest.glb", kHdcStorage, kHdpFloor, 150, 20, 1, 0, 50, 44, 0, 25, -1, "chest", kHdWood },
+    { "Small Trunk", "kk", "trunk_small_A.glb", kHdcStorage, kHdpFloor, 60, 8, 1.5f, 0, 27, 23, 0, 10, -1, "chest", kHdWood },
+    { "Trunk", "kk", "trunk_medium_A.glb", kHdcStorage, kHdpFloor, 90, 14, 1.3f, 0, 32, 30, 0, 15, -1, "chest", kHdWood },
+    { "Large Trunk", "kk", "trunk_large_A.glb", kHdcStorage, kHdpFloor, 130, 20, 1, 0, 39, 34, 0, 20, -1, "chest", kHdWood },
+    { "Cabinet", "kf", "cabinet_small.gltf", kHdcStorage, kHdpFloor, 70, 14, 1, 0, 26, 26, 0, 8, -1, "chest", kHdWood },
+    { "Dresser", "kf", "cabinet_medium_decorated.gltf", kHdcStorage, kHdpFloor, 140, 24, 1, 0, 53, 26, 0, 15, -1, "chest", kHdWood },
+    { "Barrel", "kk", "barrel_large.glb", kHdcStorage, kHdpFloor, 40, 10, 0.8f, 0, 38, 38, 0, 10, -1, "chest", kHdWood },
+    { "Crate Stack", "kk", "crates_stacked.glb", kHdcStorage, kHdpFloor, 50, 14, 1, 0, 54, 58, 0, 15, -1, "chest", kHdWood },
+    { "Shelving", "kk", "shelves.glb", kHdcStorage, kHdpWall, 80, 18, 1, 0, 0, 0, 0, 10, -1, "chest", kHdWood },
+    // Lighting
+    { "Candle", "kk", "candle_lit.glb", kHdcLighting, kHdpTable, 8, 0, 1, 0, 0, 0, 0, 0, -1, "", Color{ 255, 220, 150, 255 } },
+    { "Tall Candle", "kk", "candle_thin_lit.glb", kHdcLighting, kHdpTable, 10, 0, 1, 0, 0, 0, 0, 0, -1, "", Color{ 255, 220, 150, 255 } },
+    { "Candelabra", "kk", "candle_triple.glb", kHdcLighting, kHdpTable, 25, 0, 1, 0, 0, 0, 0, 0, -1, "", Color{ 255, 220, 150, 255 } },
+    { "Wall Torch", "kk", "torch_mounted.glb", kHdcLighting, kHdpWall, 20, 2, 1, 62, 0, 0, 0, 0, -1, "", Color{ 255, 180, 80, 255 } },
+    { "Candle Shelf", "kk", "shelf_small_candles.glb", kHdcLighting, kHdpWall, 40, 6, 1, 56, 0, 0, 0, 0, -1, "", Color{ 255, 220, 150, 255 } },
+    // Decor
+    { "Oval Rug", "kf", "rug_oval_A.gltf", kHdcDecor, kHdpRug, 45, 0, 1.35f, 0, 0, 0, 0, 0, -1, "", kHdCloth },
+    { "Rug", "kf", "rug_rectangle_A.gltf", kHdcDecor, kHdpRug, 40, 0, 1.2f, 0, 0, 0, 0, 0, -1, "", kHdCloth },
+    { "Striped Runner", "kf", "rug_rectangle_stripes_A.gltf", kHdcDecor, kHdpRug, 40, 0, 1.2f, 0, 0, 0, 0, 0, -1, "", kHdCloth },
+    { "Potted Plant", "kf", "cactus_medium_A.gltf", kHdcDecor, kHdpFloor, 25, 0, 1.2f, 0, 22, 22, 0, 0, -1, "", Color{ 90, 150, 80, 255 } },
+    { "Keg", "kk", "keg.glb", kHdcDecor, kHdpFloor, 60, 12, 1, 0, 47, 52, 0, 0, -1, "", kHdWood },
+    { "Weapon Rack", "smith", "WeaponStand.gltf", kHdcDecor, kHdpFloor, 90, 14, 1, 0, 47, 33, 0, 0, -1, "", kHdWood },
+    { "Coin Hoard", "kk", "coin_stack_large.glb", kHdcDecor, kHdpFloor, 500, 0, 1, 0, 38, 40, 0, 0, -1, "", Color{ 220, 180, 90, 255 } },
+    { "Portrait", "kf", "pictureframe_large_A.gltf", kHdcDecor, kHdpWall, 80, 4, 1.4f, 70, 0, 0, 0, 0, -1, "", kHdWood },
+    { "Painting", "kf", "pictureframe_medium.gltf", kHdcDecor, kHdpWall, 50, 2, 1.4f, 70, 0, 0, 0, 0, -1, "", kHdWood },
+    { "Red Banner", "kk", "banner_thin_red.glb", kHdcDecor, kHdpWall, 45, 0, 1, 10, 0, 0, 0, 0, -1, "", kHdCloth },
+    { "Green Banner", "kk", "banner_thin_green.glb", kHdcDecor, kHdpWall, 45, 0, 1, 10, 0, 0, 0, 0, -1, "", Color{ 60, 120, 70, 255 } },
+    { "Tapestry", "kk", "banner_patternA_red.glb", kHdcDecor, kHdpWall, 90, 0, 1, 0, 0, 0, 0, 0, -1, "", kHdCloth },
+    { "Heraldic Crest", "kk", "banner_shield_red.glb", kHdcDecor, kHdpWall, 70, 0, 1, 10, 0, 0, 0, 0, -1, "", kHdCloth },
+    { "Arms Display", "kk", "sword_shield.glb", kHdcDecor, kHdpWall, 120, 4, 1, 64, 0, 0, 0, 0, -1, "", kHdMetal },
+    { "Gilded Arms", "kk", "sword_shield_gold.glb", kHdcDecor, kHdpWall, 300, 4, 1, 64, 0, 0, 0, 0, -1, "", Color{ 220, 180, 90, 255 } },
+    { "Wall Shelf", "kf", "shelf_B_large_decorated.gltf", kHdcDecor, kHdpWall, 60, 10, 1, 56, 0, 0, 0, 0, -1, "", kHdWood },
+    { "Keyring", "kk", "keyring_hanging.glb", kHdcDecor, kHdpWall, 15, 0, 1, 70, 0, 0, 0, 0, -1, "", kHdMetal },
+    { "Book Stack", "kf", "book_set.gltf", kHdcDecor, kHdpTable, 30, 0, 1, 6, 0, 0, 0, 0, -1, "", kHdWood },
+    { "Framed Sketch", "kf", "pictureframe_standing_A.gltf", kHdcDecor, kHdpTable, 25, 0, 1, 0, 0, 0, 0, 0, -1, "", kHdWood },
+    { "Bread & Cheese", "kk", "plate_food_A.glb", kHdcDecor, kHdpTable, 10, 0, 1, 0, 0, 0, 0, 0, -1, "", Color{ 220, 180, 120, 255 } },
+    { "Roast Supper", "kk", "plate_food_B.glb", kHdcDecor, kHdpTable, 14, 0, 1, 0, 0, 0, 0, 0, -1, "", Color{ 220, 160, 110, 255 } },
+    { "Wine Bottle", "kk", "bottle_A_brown.glb", kHdcDecor, kHdpTable, 8, 0, 1, 0, 0, 0, 0, 0, -1, "", Color{ 150, 100, 60, 255 } },
+    { "Coin Stack", "kk", "coin_stack_medium.glb", kHdcDecor, kHdpTable, 100, 0, 0.6f, 0, 0, 0, 0, 0, -1, "", Color{ 220, 180, 90, 255 } },
+    // Workshop - stations for the home wings (House screen); tap one to craft there
+    { "Forge", "smith", "Forge.gltf", kHdcWorkshop, kHdpFloor, 250, 0, 1, 0, 58, 44, 0, 0, 0, "craft", Color{ 122, 62, 40, 255 } },
+    { "Anvil", "smith", "Anvil.gltf", kHdcWorkshop, kHdpFloor, 120, 0, 1.25f, 0, 46, 20, 0, 0, 0, "craft", kHdMetal },
+    { "Carpenter's Bench", "carpenter", "Workbench.gltf", kHdcWorkshop, kHdpFloor, 150, 30, 1, 0, 69, 35, 0, 0, 1, "craft", kHdWood },
+    { "Sawhorse", "carpenter", "Sawhorse.gltf", kHdcWorkshop, kHdpFloor, 40, 10, 1, 0, 41, 23, 0, 0, 1, "craft", kHdWood },
+    { "Dress Form", "tailor", "Mannequin.gltf", kHdcWorkshop, kHdpFloor, 120, 6, 1.2f, 0, 20, 20, 0, 0, 2, "craft", Color{ 170, 130, 150, 255 } },
+    { "Brewing Cauldron", "alchemy", "Cauldron.gltf", kHdcWorkshop, kHdpFloor, 200, 0, 1.45f, 0, 48, 45, 0, 0, 3, "craft", Color{ 110, 70, 50, 255 } },
+    { "Potion Shelf", "alchemy", "Shelf_Small_Bottles.gltf", kHdcWorkshop, kHdpWall, 80, 8, 1.3f, 46, 0, 0, 0, 0, 3, "craft", Color{ 120, 90, 110, 255 } },
+};
+static const int kHouseDecorDefCount = (int)(sizeof(kHouseDecorDefs) / sizeof(kHouseDecorDefs[0]));
+static int HouseDecorFind(const char* name) {
+    for (int i = 0; i < kHouseDecorDefCount; i++) if (std::string(kHouseDecorDefs[i].name) == name) return i;
+    return -1;
+}
+// How many pieces a house may hold (UO-style lockdown limit, by plot size).
+static int HouseDecorLimit(int cells) { return cells >= 12 ? 90 : cells >= 9 ? 60 : 40; }
+// Where a layout's door leads out: the side with open ground ('.' or off-plot).
+static Vector2 HouseDoorOutward(const std::string& layout, int cells) {
+    for (int cy = 0; cy < cells; cy++)
+        for (int cx = 0; cx < cells; cx++) {
+            if (HouseCellAt(layout, cells, cx, cy) != 'D') continue;
+            const int dx[4] = { 0, 0, -1, 1 }, dy[4] = { 1, -1, 0, 0 }; // south first
+            for (int k = 0; k < 4; k++) {
+                int nx = cx + dx[k], ny = cy + dy[k];
+                bool off = nx < 0 || ny < 0 || nx >= cells || ny >= cells;
+                if (off || HouseCellAt(layout, cells, nx, ny) == '.') return { (float)dx[k], (float)dy[k] };
+            }
+        }
+    return { 0, 1 };
 }
 
 
@@ -1128,7 +1261,7 @@ struct GameState {
 
     // --- Custom wilderness housing (2026-09-25) ---
     int housePlotIdx = -1;          // index into kHousePlots; -1 = no plot owned (one house max)
-    std::string houseLayout;        // row-major layout string ('.', 'F', 'W', 'D'); see helpers above
+    std::string houseLayout;        // row-major layout string ('.', 'F', 'W', 'D', 'N'); see helpers above
     std::vector<Item> houseChest;   // persistent storage chest contents
     bool hearthBound = false;       // hearth recall bound to the owned plot
     bool minimapOpen = true;        // wilderness minimap widget (M toggles; transient, not saved)
@@ -1136,9 +1269,15 @@ struct GameState {
     bool wildHouseMigrated = false; // one-time town-house retirement migration ran
     bool interiorFromWild = false;  // ExitInterior returns to the wilderness house plot
     bool houseDesignerOpen = false; // grid designer overlay active on the wilderness screen
-    int houseDesignerTool = 0;      // 0=floor 1=wall 2=door 3=erase
+    int houseDesignerTool = 0;      // 0=floor 1=wall 2=window 3=door 4=erase
     bool houseDemolishArmed = false;// demolish button pressed once - second press confirms
     bool houseChestOpen = false;    // storage chest panel open inside the wilderness house
+    // --- Housing 2.0 (2026-09-26) ---
+    int houseWallStyle = 0, houseFloorStyle = 0, houseRoofStyle = 0; // kHouse*Surfs indexes
+    struct HouseDecor { int kind; float x, y; int rot; };            // kHouseDecorDefs index, interior room coords, degrees
+    std::vector<HouseDecor> houseDecor;
+    bool houseFurnished = false;    // the starter furniture was handed out
+    int houseCraftModule = -1;      // workshop station gump open (transient)
 
 
     // --- Gathering skills / auto-gather - mirrors state.lumberjacking/mining/skinning
@@ -6069,6 +6208,13 @@ static void SaveGame(const GameState& s) {
     out << "houseLayout=" << s.houseLayout << "\n";
     out << "hearthBound=" << (s.hearthBound ? 1 : 0) << "\n";
     out << "wildHouseMigrated=" << (s.wildHouseMigrated ? 1 : 0) << "\n";
+    out << "houseStyle=" << s.houseWallStyle << "," << s.houseFloorStyle << "," << s.houseRoofStyle << "\n";
+    out << "houseFurnished=" << (s.houseFurnished ? 1 : 0) << "\n";
+    out << "houseDecor.count=" << s.houseDecor.size() << "\n";
+    for (size_t i = 0; i < s.houseDecor.size(); i++) { // by name, so the catalog can grow and reorder
+        const auto& d = s.houseDecor[i];
+        out << "houseDecor." << i << "=" << kHouseDecorDefs[d.kind].name << "|" << (int)d.x << "|" << (int)d.y << "|" << d.rot << "\n";
+    }
     out << "houseChest.count=" << s.houseChest.size() << "\n";
     for (size_t i = 0; i < s.houseChest.size(); i++)
         out << "houseChest." << i << "=" << ItemToLine(s.houseChest[i]) << "\n";
@@ -6236,6 +6382,26 @@ static bool LoadGame(GameState& s) {
         else if (key == "houseLayout") s.houseLayout = val;
         else if (key == "hearthBound") s.hearthBound = std::atoi(val.c_str()) != 0;
         else if (key == "wildHouseMigrated") s.wildHouseMigrated = std::atoi(val.c_str()) != 0;
+        else if (key == "houseStyle") {
+            int w = 0, f = 0, r = 0;
+            if (sscanf(val.c_str(), "%d,%d,%d", &w, &f, &r) == 3) {
+                s.houseWallStyle = std::clamp(w, 0, kHouseWallStyleCount - 1);
+                s.houseFloorStyle = std::clamp(f, 0, kHouseFloorStyleCount - 1);
+                s.houseRoofStyle = std::clamp(r, 0, kHouseRoofStyleCount - 1);
+            }
+        }
+        else if (key == "houseFurnished") s.houseFurnished = val == "1";
+        else if (key == "houseDecor.count") s.houseDecor.clear();
+        else if (key.rfind("houseDecor.", 0) == 0) {
+            size_t b1 = val.find('|'), b2 = val.find('|', b1 + 1), b3 = val.find('|', b2 + 1);
+            if (b1 != std::string::npos && b2 != std::string::npos && b3 != std::string::npos) {
+                int kind = HouseDecorFind(val.substr(0, b1).c_str());
+                if (kind >= 0)
+                    s.houseDecor.push_back({ kind, (float)std::atoi(val.substr(b1 + 1, b2 - b1 - 1).c_str()),
+                                             (float)std::atoi(val.substr(b2 + 1, b3 - b2 - 1).c_str()),
+                                             ((std::atoi(val.substr(b3 + 1).c_str()) % 360) + 360) % 360 });
+            }
+        }
         else if (key == "houseChest.count") { s.houseChest.clear(); s.houseChest.reserve(std::atoi(val.c_str())); }
         else if (key.rfind("houseChest.", 0) == 0) { if (auto it = ItemFromLine(val)) s.houseChest.push_back(*it); }
         else if (key.rfind("rivalStash.", 0) == 0) { if (auto it = ItemFromLine(val)) s.rivalStash.push_back(*it); }
@@ -6415,9 +6581,10 @@ static bool LoadGame(GameState& s) {
     }
     if (s.housePlotIdx >= 0 && !HouseLayoutValid(s.houseLayout, kHousePlots[s.housePlotIdx].cells))
         s.houseLayout = HouseEmptyLayout(kHousePlots[s.housePlotIdx].cells);
-    if ((int)s.houseChest.size() > kHouseChestCap) s.houseChest.resize(kHouseChestCap);
+    // (storage is no longer trimmed on load - chests add capacity; an over-full house just can't take more)
     s.houseDesignerOpen = false;
     s.houseChestOpen = false;
+    s.houseCraftModule = -1;
     s.houseDemolishArmed = false;
     s.interiorFromWild = false;
 
@@ -16018,6 +16185,8 @@ static void Wild3DDrawCorpse(const GameState::WorldCorpse& c, bool shadowPass) {
     rlPopMatrix();
     if (!shadowPass) CorpseDrawGlint(c);
 }
+static void Wild3DDrawHouse(GameState& s, bool shadowPass); // Housing 2.0 (below, with the room surfaces)
+static Vector3 g_houseSignPos = { 0, -1, 0 };                // the homestead's sign post (y < 0: none built)
 static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DCam* cull) {
     Wild3DLoadModels();
     Wild3DEnsureGround();
@@ -16116,7 +16285,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
 
     // Custom housing (2026-09-25) - for-sale signs on unowned plots; floor slab +
     // wall/door boxes on owned ones. DrawCube rides the active sun/shadow shader
-    // like the gate/prop boxes above. No roof - open dollhouse view, same as 2D.
+    // like the gate/prop boxes above. Owned plots draw the Housing 2.0 shell.
     for (size_t pi = 0; pi < kHousePlots.size(); pi++) {
         const HousePlot& hp = kHousePlots[pi];
         float pr = hp.cells * kHouseCellSize * 0.6f;
@@ -16129,21 +16298,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             }
             continue;
         }
-        int cells = hp.cells;
-        if (!HouseLayoutValid(s.houseLayout, cells)) continue;
-        for (int cy = 0; cy < cells; cy++) {
-            for (int cx = 0; cx < cells; cx++) {
-                char c = HouseCellAt(s.houseLayout, cells, cx, cy);
-                if (c == '.') continue;
-                Vector2 cc = HouseCellCenter(hp, cx, cy);
-                float cs = kHouseCellSize;
-                DrawCube({ cc.x, 1.5f, cc.y }, cs, 3, cs, Color{ 150, 110, 70, 255 }); // floor slab
-                if (c == 'W')
-                    DrawCube({ cc.x, 38, cc.y }, cs, 70, cs, Color{ 96, 70, 45, 255 }); // wall
-                else if (c == 'D' && !shadowPass)
-                    DrawCube({ cc.x, 30, cc.y }, cs * 0.9f, 54, cs * 0.9f, Color{ 200, 170, 90, 255 }); // door
-            }
-        }
+        Wild3DDrawHouse(s, shadowPass); // textured shell + roof (Housing 2.0)
     }
 
     bool wasEngaged = s.wildEngaged.has_value();
@@ -16654,7 +16809,8 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
             const HousePlot& hp = kHousePlots[pi];
             if ((int)pi == s.housePlotIdx) {
                 std::string hn = s.houseName.empty() ? "Homestead" : s.houseName;
-                label3D(hp.pos.x, 130, hp.pos.y, hn);
+                if (g_houseSignPos.y > 0) label3D(g_houseSignPos.x, 64, g_houseSignPos.z, hn); // over the sign post
+                else label3D(hp.pos.x, 130, hp.pos.y, hn);
             } else {
                 label3D(hp.pos.x, 110, hp.pos.y, "Plot for Sale - " + std::to_string(hp.price) + "g");
             }
@@ -17642,12 +17798,7 @@ struct InteriorPropDef {
 // shop interiors, the homestead interior and the homestead's outside. Made on
 // first use; each is a small pixel program (planks with grain and seams,
 // flagstones from a jittered cell pattern, timber framing, stone courses...).
-enum IntSurface {
-    kIsOak = 0, kIsDarkPlank, kIsFlagstone, kIsTile, kIsStraw, kIsMarble, kIsCarpet,      // floors
-    kIsTimber, kIsStoneWall, kIsLogWall, kIsPlankWall, kIsSandstone, kIsWhitewash,          // walls
-    kIsThatch, kIsSlate, kIsRedTile, kIsShingle,                                             // roofs
-    kIsCount
-};
+// (enum IntSurface lives up with the housing constants - houses pick their styles from it)
 static Texture2D g_isTex[kIsCount];
 static bool g_isReady[kIsCount] = {};
 static unsigned SurfHash(int x, int y, int k) {
@@ -17862,6 +18013,394 @@ static void GlowPool(float x, float z, float y, float r, Color c) { // flat pool
     rlTexCoord2f(1, 0); rlVertex3f(x + r, y, z - r);
     rlEnd();
     rlSetTexture(0);
+}
+
+// ---- Homestead exterior 3D (Housing 2.0, 2026-09-26) -------------------------------
+// The house outline (every non-empty cell) becomes a lit, textured shell: walls
+// along the outside edges in the chosen wall style, window openings with glass
+// on 'N' cells (warm and glowing at night), a plank door with a lantern on the
+// door cell, timber corner posts, a stone plinth, a chimney, a sign post - and
+// a hipped roof over the lot: the roof height at any point is its L-infinity
+// distance to open ground, which gives clean hips over rectangles and proper
+// valleys over L and T shapes. Rebuilt only when the plan or a style changes.
+struct HxMesh { std::vector<float> p, n, t; std::vector<unsigned char> c; };
+static void HxTri(HxMesh& m, Vector3 a, Vector3 b, Vector3 c, Vector2 ta, Vector2 tb, Vector2 tc, Color col, Vector3 want) {
+    Vector3 u = { b.x - a.x, b.y - a.y, b.z - a.z }, v = { c.x - a.x, c.y - a.y, c.z - a.z };
+    Vector3 nn = { u.y * v.z - u.z * v.y, u.z * v.x - u.x * v.z, u.x * v.y - u.y * v.x };
+    float l = sqrtf(nn.x * nn.x + nn.y * nn.y + nn.z * nn.z);
+    if (l < 1e-6f) return;
+    nn = { nn.x / l, nn.y / l, nn.z / l };
+    if (nn.x * want.x + nn.y * want.y + nn.z * want.z < 0.0f) { // keep the face turned the way it should light
+        std::swap(b, c); std::swap(tb, tc);
+        nn = { -nn.x, -nn.y, -nn.z };
+    }
+    const Vector3 P[3] = { a, b, c };
+    const Vector2 T[3] = { ta, tb, tc };
+    for (int i = 0; i < 3; i++) {
+        m.p.insert(m.p.end(), { P[i].x, P[i].y, P[i].z });
+        m.n.insert(m.n.end(), { nn.x, nn.y, nn.z });
+        m.t.insert(m.t.end(), { T[i].x, T[i].y });
+        m.c.insert(m.c.end(), { col.r, col.g, col.b, col.a });
+    }
+}
+static void HxQuad(HxMesh& m, Vector3 a, Vector3 b, Vector3 c, Vector3 d, Vector2 ta, Vector2 tb, Vector2 tc, Vector2 td,
+                   Color col, Vector3 want) {
+    HxTri(m, a, b, c, ta, tb, tc, col, want);
+    HxTri(m, a, c, d, ta, tc, td, col, want);
+}
+static void HxBox(HxMesh& m, float x0, float y0, float z0, float x1, float y1, float z1, Color col) {
+    const Vector2 o = { 0, 0 };
+    HxQuad(m, { x0, y1, z0 }, { x1, y1, z0 }, { x1, y1, z1 }, { x0, y1, z1 }, o, o, o, o, col, { 0, 1, 0 });
+    HxQuad(m, { x0, y0, z1 }, { x1, y0, z1 }, { x1, y1, z1 }, { x0, y1, z1 }, o, o, o, o, col, { 0, 0, 1 });
+    HxQuad(m, { x0, y0, z0 }, { x1, y0, z0 }, { x1, y1, z0 }, { x0, y1, z0 }, o, o, o, o, SurfMul(col, 0.95f), { 0, 0, -1 });
+    HxQuad(m, { x0, y0, z0 }, { x0, y0, z1 }, { x0, y1, z1 }, { x0, y1, z0 }, o, o, o, o, SurfMul(col, 0.97f), { -1, 0, 0 });
+    HxQuad(m, { x1, y0, z0 }, { x1, y0, z1 }, { x1, y1, z1 }, { x1, y1, z0 }, o, o, o, o, col, { 1, 0, 0 });
+}
+static Mesh HxUpload(const HxMesh& m) {
+    Mesh mesh = { 0 };
+    int n = (int)(m.p.size() / 3);
+    if (n <= 0) return mesh;
+    mesh.vertexCount = n;
+    mesh.triangleCount = n / 3;
+    mesh.vertices = (float*)RL_MALLOC(sizeof(float) * 3 * n);
+    mesh.normals = (float*)RL_MALLOC(sizeof(float) * 3 * n);
+    mesh.texcoords = (float*)RL_MALLOC(sizeof(float) * 2 * n);
+    mesh.colors = (unsigned char*)RL_MALLOC(4 * n);
+    memcpy(mesh.vertices, m.p.data(), sizeof(float) * 3 * n);
+    memcpy(mesh.normals, m.n.data(), sizeof(float) * 3 * n);
+    memcpy(mesh.texcoords, m.t.data(), sizeof(float) * 2 * n);
+    memcpy(mesh.colors, m.c.data(), 4 * n);
+    UploadMesh(&mesh, false);
+    return mesh;
+}
+
+enum HxPart { kHxWalls = 0, kHxRoof, kHxTrim, kHxDoor, kHxStone, kHxPartCount };
+struct HxGlass { Vector3 a, b, c, d; Vector3 n; };
+struct HouseExterior {
+    std::string key;
+    Mesh mesh[kHxPartCount] = {};
+    Material mat[kHxPartCount] = {};
+    bool matReady = false;
+    std::vector<HxGlass> glass;       // window panes (drawn unlit: dark by day, lamplit at night)
+    Vector3 lantern = { 0, 0, 0 };    // door lantern flame
+    Vector3 sign = { 0, 0, 0 };       // sign board (name label rides above it)
+    Vector3 smoke = { 0, 0, 0 };      // chimney top
+    bool built = false;
+};
+static HouseExterior g_houseExt;
+
+static void HouseExteriorBuild(const GameState& s) {
+    const HousePlot& hp = kHousePlots[s.housePlotIdx];
+    const int n = hp.cells;
+    const std::string& L = s.houseLayout;
+    std::string key = std::to_string(s.housePlotIdx) + L + char('0' + s.houseWallStyle) + char('0' + s.houseFloorStyle) + char('0' + s.houseRoofStyle);
+    if (g_houseExt.built && g_houseExt.key == key) return;
+    for (int i = 0; i < kHxPartCount; i++)
+        if (g_houseExt.mesh[i].vertexCount > 0) { UnloadMesh(g_houseExt.mesh[i]); g_houseExt.mesh[i] = Mesh{ 0 }; }
+    if (!g_houseExt.matReady) {
+        Town3DEnsureLit();
+        for (int i = 0; i < kHxPartCount; i++) {
+            g_houseExt.mat[i] = LoadMaterialDefault();
+            if (g_t3dLit.ready) g_houseExt.mat[i].shader = g_t3dLit.shader;
+        }
+        g_houseExt.matReady = true;
+    }
+    g_houseExt.mat[kHxWalls].maps[MATERIAL_MAP_DIFFUSE].texture = SurfTex(kHouseWallSurfs[s.houseWallStyle]);
+    g_houseExt.mat[kHxRoof].maps[MATERIAL_MAP_DIFFUSE].texture = SurfTex(kHouseRoofSurfs[s.houseRoofStyle]);
+    g_houseExt.mat[kHxDoor].maps[MATERIAL_MAP_DIFFUSE].texture = SurfTex(kIsDarkPlank);
+    g_houseExt.mat[kHxStone].maps[MATERIAL_MAP_DIFFUSE].texture = SurfTex(kIsFlagstone);
+    g_houseExt.key = key;
+    g_houseExt.built = true;
+    g_houseExt.glass.clear();
+    g_houseSignPos = { 0, -1, 0 };
+
+    const float S = kHouseCellSize, WH = 58.0f, ox = hp.pos.x - n * S * 0.5f, oz = hp.pos.y - n * S * 0.5f;
+    auto foot = [&](int cx, int cy) { return HouseCellAt(L, n, cx, cy) != '.'; }; // off-plot reads '.'
+    HxMesh walls, roof, trim, door, stone;
+    const Color beam = { 74, 50, 32, 255 }, white = WHITE;
+    const float wallU = 64.0f; // world units per wall texture repeat (outside scale)
+    const float hasDoorOnly = L.find('D') != std::string::npos;
+    bool doorDone = false;
+    const int dx4[4] = { 0, 0, -1, 1 }, dy4[4] = { -1, 1, 0, 0 }; // N S W E
+
+    // --- walls, windows, the door ---
+    for (int cy = 0; cy < n; cy++)
+        for (int cx = 0; cx < n; cx++) {
+            if (!foot(cx, cy)) continue;
+            char c = HouseCellAt(L, n, cx, cy);
+            for (int k = 0; k < 4; k++) {
+                if (foot(cx + dx4[k], cy + dy4[k])) continue;
+                // edge endpoints (a -> b) and outward normal
+                float x0 = ox + cx * S, z0 = oz + cy * S, x1 = x0 + S, z1 = z0 + S;
+                Vector3 nrm = { (float)dx4[k], 0, (float)dy4[k] };
+                Vector3 a, b;
+                if (k == 0) { a = { x0, 0, z0 }; b = { x1, 0, z0 }; }
+                else if (k == 1) { a = { x0, 0, z1 }; b = { x1, 0, z1 }; }
+                else if (k == 2) { a = { x0, 0, z0 }; b = { x0, 0, z1 }; }
+                else { a = { x1, 0, z0 }; b = { x1, 0, z1 }; }
+                auto P = [&](float t, float y, float out) {
+                    return Vector3{ a.x + (b.x - a.x) * t + nrm.x * out, y, a.z + (b.z - a.z) * t + nrm.z * out };
+                };
+                float u0 = (k < 2 ? a.x : a.z) / wallU, u1 = u0 + S / wallU;
+                auto face = [&](float t0, float t1, float y0, float y1) { // a piece of the outer face
+                    HxQuad(walls, P(t0, y0, 0), P(t1, y0, 0), P(t1, y1, 0), P(t0, y1, 0),
+                           { u0 + (u1 - u0) * t0, 1.0f - y0 / WH }, { u0 + (u1 - u0) * t1, 1.0f - y0 / WH },
+                           { u0 + (u1 - u0) * t1, 1.0f - y1 / WH }, { u0 + (u1 - u0) * t0, 1.0f - y1 / WH }, white, nrm);
+                };
+                auto reveal = [&](float t0, float t1, float y0, float y1, float depth) { // opening's inner sides
+                    Vector2 o = { 0, 0 };
+                    HxQuad(trim, P(t0, y0, 0), P(t0, y0, -depth), P(t0, y1, -depth), P(t0, y1, 0), o, o, o, o, Color{ 60, 44, 30, 255 },
+                           { (b.x - a.x) / S, 0, (b.z - a.z) / S });
+                    HxQuad(trim, P(t1, y0, 0), P(t1, y0, -depth), P(t1, y1, -depth), P(t1, y1, 0), o, o, o, o, Color{ 60, 44, 30, 255 },
+                           { -(b.x - a.x) / S, 0, -(b.z - a.z) / S });
+                    HxQuad(trim, P(t0, y1, 0), P(t1, y1, 0), P(t1, y1, -depth), P(t0, y1, -depth), o, o, o, o, Color{ 50, 36, 24, 255 }, { 0, -1, 0 });
+                    HxQuad(trim, P(t0, y0, 0), P(t1, y0, 0), P(t1, y0, -depth), P(t0, y0, -depth), o, o, o, o, Color{ 90, 70, 50, 255 }, { 0, 1, 0 });
+                };
+                bool isDoor = c == 'D' && !doorDone;
+                if (isDoor) {
+                    doorDone = true;
+                    const float t0 = 0.24f, t1 = 0.76f, dh = 44.0f;
+                    face(0, t0, 0, WH); face(t1, 1, 0, WH); face(t0, t1, dh, WH);
+                    reveal(t0, t1, 0, dh, 4.0f);
+                    // plank door leaf, recessed, with a frame and iron studs
+                    HxQuad(door, P(t0, 0, -4), P(t1, 0, -4), P(t1, dh, -4), P(t0, dh, -4), { 0, 1 }, { 0.6f, 1 }, { 0.6f, 0 }, { 0, 0 }, white, nrm);
+                    Vector3 f0 = P(t0 - 0.03f, 0, 0.5f), f1 = P(t1 + 0.03f, dh + 4, 2.0f);
+                    Vector3 lo = { std::min(f0.x, f1.x), 0, std::min(f0.z, f1.z) }, hi = { std::max(f0.x, f1.x), dh + 5, std::max(f0.z, f1.z) };
+                    HxBox(trim, lo.x, dh, lo.z, hi.x, dh + 5, hi.z, beam); // lintel
+                    Vector3 k0 = P(t0 - 0.02f, 0, 1.2f), k1 = P(t1 + 0.02f, 0, 1.2f);
+                    HxBox(trim, k0.x - 2, 0, k0.z - 2, k0.x + 2, dh, k0.z + 2, beam);
+                    HxBox(trim, k1.x - 2, 0, k1.z - 2, k1.x + 2, dh, k1.z + 2, beam);
+                    Vector3 knob = P(0.66f, 22, -3.0f);
+                    HxBox(trim, knob.x - 1.2f, 21, knob.z - 1.2f, knob.x + 1.2f, 23.5f, knob.z + 1.2f, Color{ 40, 36, 34, 255 });
+                    // step, lantern bracket, sign post
+                    Vector3 s0 = P(0.18f, 0, 0), s1 = P(0.82f, 0, 9.0f);
+                    HxBox(stone, std::min(s0.x, s1.x), 0, std::min(s0.z, s1.z), std::max(s0.x, s1.x), 3.0f, std::max(s0.z, s1.z), white);
+                    Vector3 lb = P(0.9f, 40, 3.0f);
+                    HxBox(trim, lb.x - 1.5f, 38, lb.z - 1.5f, lb.x + 1.5f, 42, lb.z + 1.5f, Color{ 40, 36, 34, 255 });
+                    g_houseExt.lantern = P(0.9f, 36, 5.0f);
+                    HxBox(trim, g_houseExt.lantern.x - 2.5f, 31, g_houseExt.lantern.z - 2.5f, g_houseExt.lantern.x + 2.5f, 39, g_houseExt.lantern.z + 2.5f,
+                          Color{ 50, 44, 38, 255 });
+                    Vector3 sp = P(-0.25f, 0, 30.0f);
+                    HxBox(trim, sp.x - 2, 0, sp.z - 2, sp.x + 2, 50, sp.z + 2, beam);
+                    Vector3 arm = P(-0.25f, 0, 30.0f), armEnd = P(0.05f, 0, 30.0f);
+                    HxBox(trim, std::min(arm.x, armEnd.x) - 1.5f, 46, std::min(arm.z, armEnd.z) - 1.5f,
+                          std::max(arm.x, armEnd.x) + 1.5f, 49, std::max(arm.z, armEnd.z) + 1.5f, beam);
+                    Vector3 bc = P(-0.1f, 0, 30.0f);
+                    bool alongX = k < 2;
+                    float bw2 = 11.0f, bt = 1.2f;
+                    HxBox(trim, bc.x - (alongX ? bw2 : bt), 30, bc.z - (alongX ? bt : bw2), bc.x + (alongX ? bw2 : bt), 44, bc.z + (alongX ? bt : bw2),
+                          Color{ 150, 108, 64, 255 });
+                    g_houseExt.sign = { bc.x, 44, bc.z };
+                    g_houseSignPos = g_houseExt.sign;
+                } else if (c == 'N') {
+                    const float t0 = 0.3f, t1 = 0.7f, y0 = 22.0f, y1 = 44.0f;
+                    face(0, t0, 0, WH); face(t1, 1, 0, WH); face(t0, t1, 0, y0); face(t0, t1, y1, WH);
+                    reveal(t0, t1, y0, y1, 3.0f);
+                    g_houseExt.glass.push_back({ P(t0, y0, -3), P(t1, y0, -3), P(t1, y1, -3), P(t0, y1, -3), nrm });
+                    // frame, mullions, sill, and shutters folded back on the wall
+                    Vector3 m0 = P(0.5f, 0, -2.0f);
+                    bool alongX = k < 2;
+                    HxBox(trim, m0.x - (alongX ? 0.8f : 1.0f), y0, m0.z - (alongX ? 1.0f : 0.8f), m0.x + (alongX ? 0.8f : 1.0f), y1, m0.z + (alongX ? 1.0f : 0.8f), beam);
+                    Vector3 h0 = P(t0, 0, -2.0f), h1 = P(t1, 0, -1.0f);
+                    HxBox(trim, std::min(h0.x, h1.x), 32.5f, std::min(h0.z, h1.z), std::max(h0.x, h1.x), 34.0f, std::max(h0.z, h1.z), beam);
+                    Vector3 sl0 = P(t0 - 0.05f, 0, 0), sl1 = P(t1 + 0.05f, 0, 4.0f);
+                    HxBox(trim, std::min(sl0.x, sl1.x), y0 - 2.5f, std::min(sl0.z, sl1.z), std::max(sl0.x, sl1.x), y0, std::max(sl0.z, sl1.z), beam);
+                    for (int side = 0; side < 2; side++) {
+                        float ta = side == 0 ? t0 - 0.2f : t1, tb = side == 0 ? t0 : t1 + 0.2f;
+                        Vector3 q0 = P(ta, 0, 0.6f), q1 = P(tb, 0, 1.6f);
+                        HxBox(trim, std::min(q0.x, q1.x), y0 - 1, std::min(q0.z, q1.z), std::max(q0.x, q1.x), y1 + 1, std::max(q0.z, q1.z),
+                              Color{ 70, 96, 70, 255 });
+                    }
+                } else {
+                    face(0, 1, 0, WH);
+                }
+                // stone plinth along the base and a beam along the top
+                Vector3 pb0 = P(0, 0, 0), pb1 = P(1, 0, 3.0f);
+                HxBox(stone, std::min(pb0.x, pb1.x), 0, std::min(pb0.z, pb1.z), std::max(pb0.x, pb1.x), 6.0f, std::max(pb0.z, pb1.z), white);
+                Vector3 tb0 = P(0, 0, 0), tb1 = P(1, 0, 2.0f);
+                HxBox(trim, std::min(tb0.x, tb1.x), WH - 5, std::min(tb0.z, tb1.z), std::max(tb0.x, tb1.x), WH, std::max(tb0.z, tb1.z), beam);
+            }
+        }
+    (void)hasDoorOnly;
+    // corner posts where the outline turns
+    for (int vy = 0; vy <= n; vy++)
+        for (int vx = 0; vx <= n; vx++) {
+            int cnt = foot(vx - 1, vy - 1) + foot(vx, vy - 1) + foot(vx - 1, vy) + foot(vx, vy);
+            bool diag = cnt == 2 && foot(vx - 1, vy - 1) == foot(vx, vy);
+            if (cnt == 0 || cnt == 4 || (cnt == 2 && !diag)) continue;
+            float x = ox + vx * S, z = oz + vy * S;
+            HxBox(trim, x - 3.5f, 0, z - 3.5f, x + 3.5f, WH, z + 3.5f, beam);
+        }
+
+    // --- hipped roof (half-cell heightfield) ---
+    const int R = 2 * n;
+    std::vector<float> dist((size_t)(R + 1) * (R + 1), 0.0f);
+    float dmax = 0.0f;
+    for (int j = 0; j <= R; j++)
+        for (int i = 0; i <= R; i++) {
+            float u = i * 0.5f, v = j * 0.5f, best = 1e9f;
+            for (int b = -1; b <= n; b++)
+                for (int a = -1; a <= n; a++) {
+                    if (foot(a, b)) continue;
+                    float ddx = std::max({ a - u, 0.0f, u - (a + 1) }), ddy = std::max({ b - v, 0.0f, v - (b + 1) });
+                    best = std::min(best, std::max(ddx, ddy));
+                }
+            dist[(size_t)j * (R + 1) + i] = best;
+            dmax = std::max(dmax, best);
+        }
+    const float pitch = std::min(0.95f, 96.0f / std::max(1.0f, dmax * S)), eave = WH - 2.0f, over = 5.0f;
+    const float slopeK = sqrtf(1.0f + pitch * pitch) / std::max(0.05f, pitch);
+    auto H = [&](int i, int j) { return eave + dist[(size_t)j * (R + 1) + i] * S * pitch; };
+    // vertices on the eave are pushed out a little (the overhang) and dropped to match the slope
+    auto V = [&](int i, int j) {
+        float x = ox + i * S * 0.5f, z = oz + j * S * 0.5f, h = H(i, j);
+        if (dist[(size_t)j * (R + 1) + i] <= 0.0f) {
+            float px = 0, pz = 0;
+            for (int b = -1; b <= 0; b++)
+                for (int a = -1; a <= 0; a++) {
+                    int cx = (int)floorf(i * 0.5f + a * 0.5f + 0.01f), cy = (int)floorf(j * 0.5f + b * 0.5f + 0.01f);
+                    if (!foot(cx, cy)) { px += a * 2 + 1; pz += b * 2 + 1; }
+                }
+            float l = sqrtf(px * px + pz * pz);
+            if (l > 0.01f) { x += px / l * over * 1.4f; z += pz / l * over * 1.4f; h -= over * pitch; }
+        }
+        return Vector3{ x, h, z };
+    };
+    const float rt = 60.0f; // world units per roof texture repeat
+    for (int j = 0; j < R; j++)
+        for (int i = 0; i < R; i++) {
+            if (!foot(i / 2, j / 2)) continue;
+            Vector3 p00 = V(i, j), p10 = V(i + 1, j), p01 = V(i, j + 1), p11 = V(i + 1, j + 1);
+            float h00 = H(i, j), h10 = H(i + 1, j), h01 = H(i, j + 1), h11 = H(i + 1, j + 1);
+            bool diagA = fabsf(h00 - h11) >= fabsf(h10 - h01); // split along the hip / valley line
+            auto tri = [&](Vector3 a, Vector3 b, Vector3 c, float ha, float hb, float hc) {
+                // uv: along the contour (u) and up the slope (v), so rows run parallel to the eaves
+                Vector3 e1 = { b.x - a.x, hb - ha, b.z - a.z }, e2 = { c.x - a.x, hc - ha, c.z - a.z };
+                Vector3 nn = { e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x };
+                if (nn.y < 0) nn = { -nn.x, -nn.y, -nn.z };
+                bool ew = fabsf(nn.x) > fabsf(nn.z);
+                bool flat = fabsf(nn.x) + fabsf(nn.z) < 0.02f * fabsf(nn.y);
+                auto uv = [&](Vector3 p, float h) {
+                    if (flat) return Vector2{ p.x / rt, p.z / rt };
+                    return Vector2{ (ew ? p.z : p.x) / rt, -(h - eave) * slopeK / rt };
+                };
+                HxTri(roof, a, b, c, uv(a, ha), uv(b, hb), uv(c, hc), WHITE, { 0, 1, 0 });
+            };
+            if (diagA) { tri(p00, p10, p11, h00, h10, h11); tri(p00, p11, p01, h00, h11, h01); }
+            else { tri(p00, p10, p01, h00, h10, h01); tri(p10, p11, p01, h10, h11, h01); }
+        }
+    // soffit: close the gap between the overhang and the wall top
+    for (int cy = 0; cy < n; cy++)
+        for (int cx = 0; cx < n; cx++) {
+            if (!foot(cx, cy)) continue;
+            for (int k = 0; k < 4; k++) {
+                if (foot(cx + dx4[k], cy + dy4[k])) continue;
+                float x0 = ox + cx * S, z0 = oz + cy * S, x1 = x0 + S, z1 = z0 + S;
+                Vector3 a, b, o = { dx4[k] * over * 1.4f, 0, dy4[k] * over * 1.4f };
+                if (k == 0) { a = { x0, eave, z0 }; b = { x1, eave, z0 }; }
+                else if (k == 1) { a = { x0, eave, z1 }; b = { x1, eave, z1 }; }
+                else if (k == 2) { a = { x0, eave, z0 }; b = { x0, eave, z1 }; }
+                else { a = { x1, eave, z0 }; b = { x1, eave, z1 }; }
+                Vector2 zz = { 0, 0 };
+                float dy = over * pitch;
+                HxQuad(trim, a, b, { b.x + o.x, eave - dy, b.z + o.z }, { a.x + o.x, eave - dy, a.z + o.z }, zz, zz, zz, zz,
+                       Color{ 64, 46, 30, 255 }, { 0, -1, 0 });
+            }
+        }
+    // chimney on the house cell furthest from the door
+    {
+        Vector2 dpos = HouseDoorPos(hp, L);
+        int bx = -1, by = -1; float bd = -1;
+        for (int cy = 0; cy < n; cy++)
+            for (int cx = 0; cx < n; cx++) {
+                if (!foot(cx, cy)) continue;
+                Vector2 cc = HouseCellCenter(hp, cx, cy);
+                float d = Dist(cc, dpos) + (dist[(size_t)(2 * cy + 1) * (R + 1) + 2 * cx + 1] > 0.9f ? 0 : -40.0f);
+                if (d > bd) { bd = d; bx = cx; by = cy; }
+            }
+        if (bx >= 0) {
+            float x = ox + bx * S + S * 0.5f, z = oz + by * S + S * 0.5f;
+            float top = H(2 * bx + 1, 2 * by + 1) + 24.0f;
+            HxBox(stone, x - 7, eave, z - 7, x + 7, top, z + 7, Color{ 150, 140, 130, 255 });
+            HxBox(trim, x - 8.5f, top - 3, z - 8.5f, x + 8.5f, top, z + 8.5f, Color{ 90, 84, 80, 255 });
+            g_houseExt.smoke = { x, top, z };
+        }
+    }
+    g_houseExt.mesh[kHxWalls] = HxUpload(walls);
+    g_houseExt.mesh[kHxRoof] = HxUpload(roof);
+    g_houseExt.mesh[kHxTrim] = HxUpload(trim);
+    g_houseExt.mesh[kHxDoor] = HxUpload(door);
+    g_houseExt.mesh[kHxStone] = HxUpload(stone);
+}
+
+static void Wild3DDrawHouse(GameState& s, bool shadowPass) {
+    if (s.housePlotIdx < 0 || s.housePlotIdx >= (int)kHousePlots.size()) return;
+    const HousePlot& hp = kHousePlots[s.housePlotIdx];
+    if (!HouseLayoutValid(s.houseLayout, hp.cells) || s.houseLayout.find_first_not_of('.') == std::string::npos) return;
+    HouseExteriorBuild(s);
+    T3DLiftScope lift(hp.pos.x, hp.pos.y);
+    rlDisableBackfaceCulling();
+    for (int i = 0; i < kHxPartCount; i++)
+        if (g_houseExt.mesh[i].vertexCount > 0) DrawMesh(g_houseExt.mesh[i], g_houseExt.mat[i], MatrixIdentity());
+    rlEnableBackfaceCulling();
+    if (shadowPass) return;
+    // glass: sky-dark by day, lamplit from within at night; a door lantern and chimney smoke
+    float night = g_t3dNight, t = (float)GetTime();
+    Color day = { 58, 74, 92, 255 }, lit = { 255, 196, 118, 255 };
+    Color g = ColorLerp(day, lit, std::clamp(night * 1.3f, 0.0f, 1.0f));
+    rlBegin(RL_QUADS);
+    for (const HxGlass& w : g_houseExt.glass) {
+        rlColor4ub(g.r, g.g, g.b, 255);
+        rlVertex3f(w.a.x, w.a.y, w.a.z); rlVertex3f(w.b.x, w.b.y, w.b.z); rlVertex3f(w.c.x, w.c.y, w.c.z); rlVertex3f(w.d.x, w.d.y, w.d.z);
+    }
+    rlEnd();
+    BeginBlendMode(BLEND_ADDITIVE);
+    rlDisableDepthMask();
+    if (night > 0.15f) {
+        float k = std::clamp((night - 0.15f) * 1.6f, 0.0f, 1.0f);
+        for (const HxGlass& w : g_houseExt.glass) { // warm spill on the ground under each window
+            Vector3 c = { (w.a.x + w.c.x) * 0.5f + w.n.x * 22, 0.8f, (w.a.z + w.c.z) * 0.5f + w.n.z * 22 };
+            GlowPool(c.x, c.z, c.y, 30.0f, Color{ (unsigned char)(200 * k), (unsigned char)(140 * k), (unsigned char)(70 * k), 255 });
+        }
+        float fl = 0.85f + 0.15f * sinf(t * 9.0f) * sinf(t * 3.7f);
+        Vector3 L = g_houseExt.lantern;
+        GlowPool(L.x, L.z, 0.8f, 42.0f * fl, Color{ (unsigned char)(230 * k), (unsigned char)(150 * k), (unsigned char)(70 * k), 255 });
+        Camera3D cam = { 0 };
+        (void)cam;
+        rlSetTexture(GlowTex().id);
+        rlBegin(RL_QUADS);
+        float r = 9.0f * fl;
+        rlColor4ub((unsigned char)(255 * k), (unsigned char)(190 * k), (unsigned char)(100 * k), 255);
+        rlTexCoord2f(0, 0); rlVertex3f(L.x - r, L.y - r, L.z); rlTexCoord2f(1, 0); rlVertex3f(L.x + r, L.y - r, L.z);
+        rlTexCoord2f(1, 1); rlVertex3f(L.x + r, L.y + r, L.z); rlTexCoord2f(0, 1); rlVertex3f(L.x - r, L.y + r, L.z);
+        rlTexCoord2f(0, 0); rlVertex3f(L.x, L.y - r, L.z - r); rlTexCoord2f(1, 0); rlVertex3f(L.x, L.y - r, L.z + r);
+        rlTexCoord2f(1, 1); rlVertex3f(L.x, L.y + r, L.z + r); rlTexCoord2f(0, 1); rlVertex3f(L.x, L.y + r, L.z - r);
+        rlEnd();
+        rlSetTexture(0);
+    }
+    EndBlendMode();
+    // chimney smoke: a few soft grey puffs drifting up and away
+    if (g_houseExt.smoke.y > 0) {
+        BeginBlendMode(BLEND_ALPHA);
+        rlSetTexture(GlowTex().id);
+        rlBegin(RL_QUADS);
+        for (int i = 0; i < 6; i++) {
+            float ph = fmodf(t * 0.22f + i / 6.0f, 1.0f);
+            Vector3 c = { g_houseExt.smoke.x + ph * 26.0f + sinf(t + i) * 3.0f, g_houseExt.smoke.y + 4 + ph * 70.0f, g_houseExt.smoke.z + ph * 10.0f };
+            float r = 6.0f + ph * 16.0f;
+            unsigned char a = (unsigned char)(110 * (1.0f - ph) * (ph < 0.1f ? ph * 10 : 1.0f));
+            unsigned char v = (unsigned char)(170 - 60 * night);
+            rlColor4ub(v, v, v, a);
+            rlTexCoord2f(0, 0); rlVertex3f(c.x - r, c.y - r, c.z); rlTexCoord2f(1, 0); rlVertex3f(c.x + r, c.y - r, c.z);
+            rlTexCoord2f(1, 1); rlVertex3f(c.x + r, c.y + r, c.z); rlTexCoord2f(0, 1); rlVertex3f(c.x - r, c.y + r, c.z);
+            rlTexCoord2f(0, 0); rlVertex3f(c.x, c.y - r, c.z - r); rlTexCoord2f(1, 0); rlVertex3f(c.x, c.y - r, c.z + r);
+            rlTexCoord2f(1, 1); rlVertex3f(c.x, c.y + r, c.z + r); rlTexCoord2f(0, 1); rlVertex3f(c.x, c.y + r, c.z - r);
+        }
+        rlEnd();
+        rlSetTexture(0);
+        EndBlendMode();
+    }
+    rlEnableDepthMask();
 }
 
 // --- Per-building prop tables (2026-09-26 rework). Rooms are 520x620 (room
@@ -18178,20 +18717,27 @@ static const InteriorHouseModuleProp kInteriorHouseModules[4] = {
     { "smith", "Cauldron.gltf", 470, Color{110,70,50,255}, 36, 36, 36, 36 },
 };
 static std::string s_houseModuleLabels[4];
+// Homestead interior facts (Housing 2.0) - filled in by HouseInteriorBuild.
+struct HouseIntInfo {
+    bool ok = false;
+    int cells = 0;
+    std::vector<char> inside;
+    Vector2 exitPos = { 260, 598 }, doorIn = { 260, 520 }, doorDir = { 0, -1 };
+};
+static HouseIntInfo g_houseInt;
+static void HouseAppendDecorProps(GameState& s, std::vector<InteriorPropDef>& out);
 static std::vector<InteriorPropDef> InteriorPropsFor(GameState& s, const std::string& key) {
     std::vector<InteriorPropDef> out;
     const InteriorRoomDef* room = InteriorRoomFor(key);
     if (!room) return out;
     out.reserve(room->propCount + 4);
     for (int i = 0; i < room->propCount; i++) out.push_back(room->props[i]);
-    if (key == "house" || key == "wildhouse") {
-        for (int i = 0; i < 4; i++) {
-            if (s.houseModuleLevel[i] <= 0) continue;
-            s_houseModuleLabels[i] = kHomeModuleDefs[i].label + " (Tier " + std::to_string(s.houseModuleLevel[i]) + ")";
-            const InteriorHouseModuleProp& mp = kInteriorHouseModules[i];
-            out.push_back({ mp.dir, mp.model, s_houseModuleLabels[i].c_str(), mp.x, 600, 0, 0.8f, 0,
-                            mp.bw, mp.bh, "", mp.c2d, mp.sw, mp.sh });
-        }
+    // Homestead (Housing 2.0): the door sits wherever the plan put it, then the furniture.
+    if (key == "wildhouse") {
+        out.clear();
+        Vector2 ex = g_houseInt.ok ? g_houseInt.exitPos : Vector2{ 260, 598 };
+        out.push_back({ "", "", "Exit", ex.x, ex.y, 0, 1, 0, 0, 0, "exit", Color{ 101, 76, 53, 255 }, 64, 28 });
+        HouseAppendDecorProps(s, out);
     }
     // Phase 2 - Saltmere coastal dressing (town 2 only): primitive-drawn props
     // appended to Saltmere interiors. Model-less ("" dir/model): 2D draws the
@@ -18242,6 +18788,8 @@ static std::vector<InteriorPropDef> InteriorPropsFor(GameState& s, const std::st
 }
 
 static Vector3 g_intCamT = { 1e9f, 0, 0 }; // interior camera's smoothed target (1e9 = snap next frame)
+static Town3DCam g_intTCam = {};             // last interior camera, for taps in decorate mode
+static void HouseDecorDraw3D(const GameState& s); // Housing 2.0 decorate overlay (with the homestead code)
 static void EnterInterior(GameState& s, const std::string& key) {
     if (!InteriorRoomFor(key)) return; // unknown key: stay outside
     s.interiorKey = key;
@@ -18267,7 +18815,9 @@ static void ExitInterior(GameState& s) {
         s.screen = Screen::Wilderness;
         s.wild3DView = s.interior3DView; // keep whatever view was used inside
         Vector2 door = HouseDoorPos(kHousePlots[s.housePlotIdx], s.houseLayout);
-        s.wildernessPlayerPos = { door.x, door.y + kHouseCellSize };
+        Vector2 out = HouseDoorOutward(s.houseLayout, kHousePlots[s.housePlotIdx].cells);
+        s.wildernessPlayerPos = { door.x + out.x * kHouseCellSize * 1.1f, door.y + out.y * kHouseCellSize * 1.1f };
+        s.playerFacing = out;
         s.interiorFromWild = false;
         PlaySfx(SfxId::Door);
         return;
@@ -18299,6 +18849,8 @@ static void ExitInterior(GameState& s) {
 // candles, torches and the forge glow.
 struct IntSeg { float ax, az, bx, bz; float nx, nz; int surf; };   // n: into the room (0,0 = partition)
 struct IntWindow { float x, z, nx, nz; };
+struct IntDoorway { float x, z, nx, nz, w; int surf; };      // opening in a wall (lintel drawn over it)
+static std::vector<IntDoorway> g_intDoors;
 static float g_intW = 520.0f, g_intH = 620.0f;       // current room bounds (room coords)
 static std::vector<Rectangle> g_intFloors;            // walkable floor, room coords
 static std::vector<IntSeg> g_intSegs;
@@ -18328,7 +18880,7 @@ static void IntShopWindows(const std::string& key, float* wz, float* ez) {
 static void IntBuildShopShell(const InteriorRoomDef& room) {
     g_intW = 520.0f; g_intH = 620.0f;
     g_intFloors.assign(1, Rectangle{ 0, 0, g_intW, g_intH });
-    g_intSegs.clear(); g_intWins.clear(); g_intBlocks.clear();
+    g_intSegs.clear(); g_intWins.clear(); g_intBlocks.clear(); g_intDoors.clear();
     g_intFloorSurf = room.floorSurf;
     float h = kIntWallT * 0.5f, W = g_intW, H = g_intH, gap = 34.0f;
     int ws = room.wallSurf;
@@ -18337,6 +18889,7 @@ static void IntBuildShopShell(const InteriorRoomDef& room) {
     g_intSegs.push_back({ W + h, 0, W + h, H, -1, 0, ws });                  // east
     g_intSegs.push_back({ -kIntWallT, H + h, W / 2 - gap, H + h, 0, -1, ws }); // south, left of the door
     g_intSegs.push_back({ W / 2 + gap, H + h, W + kIntWallT, H + h, 0, -1, ws });
+    g_intDoors.push_back({ W / 2, H + h, 0, -1, gap * 2, ws });
     float wz, ez;
     IntShopWindows(room.key, &wz, &ez);
     if (wz > 0) g_intWins.push_back({ 0.0f, wz, 1, 0 });
@@ -18408,6 +18961,20 @@ static void DrawInteriorShell3D(Vector3 camPos, Vector3 camT, float night, float
         }
         float top = cut ? 16.0f : kIntWallH;
         SurfWall(sg.surf, sg.ax - hw, sg.az - hh, sg.bx - hw, sg.bz - hh, kIntWallT, 0.0f, top, kIntWallH, wallT, capT);
+    }
+    // doorways: a lintel over the opening and dark oak jambs (dropped with a cut wall)
+    for (const IntDoorway& d : g_intDoors) {
+        if ((d.nx * v.x + d.nz * v.y) < -0.35f) continue;
+        bool alongX = d.nx == 0;
+        float x = d.x - hw, z = d.z - hh, a = d.w * 0.5f;
+        float ax = alongX ? x - a - 4 : x, az = alongX ? z : z - a - 4, bx = alongX ? x + a + 4 : x, bz = alongX ? z : z + a + 4;
+        SurfWall(d.surf, ax, az, bx, bz, kIntWallT, 92.0f, kIntWallH, kIntWallH, wallT, capT);
+        Color jamb = SurfMul(Color{ 70, 48, 30, 255 }, 1.0f - 0.2f * night);
+        for (int sd = -1; sd <= 1; sd += 2) {
+            float jx = alongX ? x + sd * (a + 1) : x, jz = alongX ? z : z + sd * (a + 1);
+            DrawCube({ jx + d.nx * 1.5f, 46.0f, jz + d.nz * 1.5f }, alongX ? 5.0f : kIntWallT + 3, 92.0f, alongX ? kIntWallT + 3 : 5.0f, jamb);
+        }
+        DrawCube({ x + d.nx * 1.5f, 94.0f, z + d.nz * 1.5f }, alongX ? d.w + 12 : kIntWallT + 3, 5.0f, alongX ? kIntWallT + 3 : d.w + 12, jamb);
     }
     // windows: frame + panes on the inner face, and a shaft of daylight on the floor
     for (const IntWindow& w : g_intWins) {
@@ -18524,13 +19091,26 @@ static void DrawInterior2D(GameState& s, int screenW, int screenH,
     BeginScissorMode(kViewport.x, kViewport.y, kViewport.width, kViewport.height);
     DrawRectangle(kViewport.x, kViewport.y, kViewport.width, kViewport.height, Color{ 22, 18, 16, 255 });
     Vector2 ro = WorldToScreen({ 0, 0 }, cam); // room origin on screen
-    // Floor + plank seams.
-    DrawRectangle((int)ro.x, (int)ro.y, (int)g_intW, (int)g_intH, room.floor);
-    for (float y = 40; y < g_intH; y += 40)
-        DrawLine((int)ro.x, (int)(ro.y + y), (int)(ro.x + g_intW), (int)(ro.y + y), Fade(BLACK, 0.12f));
-    // Walls.
-    DrawRectangleLinesEx({ ro.x, ro.y, g_intW, g_intH }, 12, room.wall);
-    DrawRectangleLinesEx({ ro.x - 6, ro.y - 6, g_intW + 12, g_intH + 12 }, 4, Fade(BLACK, 0.35f));
+    // Floors in the room's own texture, then every wall segment, windows and doorways
+    // (the same shell the 3D view draws - shops and the homestead alike).
+    (void)room;
+    for (const Rectangle& f : g_intFloors)
+        DrawTexturePro(SurfTex(g_intFloorSurf), { f.x * 2.3f, f.y * 2.3f, f.width * 2.3f, f.height * 2.3f },
+                       { ro.x + f.x, ro.y + f.y, f.width, f.height }, { 0, 0 }, 0, Color{ 235, 225, 210, 255 });
+    for (const IntSeg& sg : g_intSegs) {
+        float x0 = std::min(sg.ax, sg.bx), x1 = std::max(sg.ax, sg.bx), z0 = std::min(sg.az, sg.bz), z1 = std::max(sg.az, sg.bz);
+        Rectangle wr = (x1 - x0 >= z1 - z0) ? Rectangle{ ro.x + x0, ro.y + z0 - kIntWallT * 0.5f, x1 - x0, kIntWallT }
+                                            : Rectangle{ ro.x + x0 - kIntWallT * 0.5f, ro.y + z0, kIntWallT, z1 - z0 };
+        DrawRectangleRec({ wr.x + 2, wr.y + 3, wr.width, wr.height }, Fade(BLACK, 0.35f));
+        DrawTexturePro(SurfTex(sg.surf), { wr.x, wr.y, wr.width, wr.height }, wr, { 0, 0 }, 0, Color{ 170, 160, 150, 255 });
+        DrawRectangleLinesEx(wr, 1.0f, Fade(BLACK, 0.5f));
+    }
+    for (const IntWindow& w : g_intWins) {
+        bool alongZ = w.nx != 0;
+        Rectangle gr = alongZ ? Rectangle{ ro.x + w.x - 4, ro.y + w.z - 30, 8, 60 } : Rectangle{ ro.x + w.x - 30, ro.y + w.z - 4, 60, 8 };
+        DrawRectangleRec(gr, Color{ 150, 200, 230, 255 });
+        DrawRectangleLinesEx(gr, 1.5f, Color{ 60, 40, 26, 255 });
+    }
     // Props.
     for (auto& p : props) {
         Vector2 sp = WorldToScreen({ p.x, p.y }, cam);
@@ -18733,6 +19313,12 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
     cam3d.position = { g_intCamT.x + sinf(yaw) * cosf(pitch) * dist, g_intCamT.y + sinf(pitch) * dist,
                        g_intCamT.z + cosf(yaw) * cosf(pitch) * dist };
     cam3d.up = { 0, 1, 0 }; cam3d.fovy = 46.0f; cam3d.projection = CAMERA_PERSPECTIVE;
+    { // the same camera as a Town3DCam, so decorate-mode taps can cast rays into the room
+        Vector3 f = T3VNorm(T3VSub(cam3d.target, cam3d.position));
+        Vector3 r = T3VNorm({ -f.z, 0, f.x });
+        Vector3 u = { r.y * f.z - r.z * f.y, r.z * f.x - r.x * f.z, r.x * f.y - r.y * f.x };
+        g_intTCam = { cam3d.position, cam3d.target, f, r, u, 46.0f, (float)screenW / (float)screenH, (float)screenW, (float)screenH };
+    }
 
     T3DUpdateDayNight(0.0f, false); // the real clock, for the windows
     float night = g_t3dNight, day = std::clamp(1.0f - night * 1.2f, 0.0f, 1.0f);
@@ -18744,6 +19330,7 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
     DrawInteriorShell3D(cam3d.position, g_intCamT, night, day);
     for (auto& p : props) Interior3DDrawProp(p);
     DrawInteriorNPCs3D(npcs);
+    if (s.interiorKey == "wildhouse") HouseDecorDraw3D(s);
     { // player
         float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
         T3CAnim pa = T3CMakeAnim(kT3CTrackPlayerInterior, s.interiorPlayerPos.x, s.interiorPlayerPos.y, true);
@@ -18765,23 +19352,34 @@ static bool InteriorDoInteract(GameState& s, const InteriorPropDef* nearest, boo
     if (a == "exit") { ExitInterior(s); return true; }
     if (a == "panel") { s.selectedTile = s.interiorKey; return false; }
     if (a == "chest") { s.houseChestOpen = true; PlaySfx(SfxId::Click); return false; }
+    if (a == "bed") { // your own bed: a proper rest
+        bool tired = s.hp < s.maxHp || s.mana < MaxMana(s);
+        s.hp = s.maxHp;
+        s.mana = MaxMana(s);
+        s.logLine = tired ? "You rest a while in your own bed and wake fully refreshed."
+                          : "You stretch out for a moment - already well rested.";
+        PlaySfx(SfxId::Heal);
+        return false;
+    }
+    if (a.rfind("craft", 0) == 0 && a.size() == 6) { s.houseCraftModule = a[5] - '0'; PlaySfx(SfxId::Click); return false; }
     return false;
 }
 
 // Storage chest panel - opens from the Chest prop inside the wilderness homestead.
 // Two columns: backpack items with Store buttons, chest items with Take buttons.
+static int HouseStorageCap(const GameState& s); // Housing 2.0: base + every chest/trunk/cabinet placed
 static void DrawHouseChestPanel(GameState& s, int screenW, int screenH) {
     DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, 0.5f));
     float w = 500, h = 480;
     float x = (screenW - w) / 2, y = (screenH - h) / 2;
     Rectangle bg = { x, y, w, h };
-    DrawRectangleRounded(bg, 0.04f, 8, kColorPanelBg);
-    DrawRectangleRoundedLines(bg, 0.04f, 8, kColorHeading);
-    DrawUIText("Storage Chest", (int)x + 16, (int)y + 12, 16, kColorHeading);
-    std::string counts = "Chest " + std::to_string(s.houseChest.size()) + "/" + std::to_string(kHouseChestCap) +
+    UODrawGump(bg, kUoLeather);
+    UODrawTitle(bg, "House Storage", 14);
+    const int kHouseChestCap = HouseStorageCap(s);
+    std::string counts = "Stored " + std::to_string(s.houseChest.size()) + "/" + std::to_string(kHouseChestCap) +
                          "   Backpack " + std::to_string(s.backpack.size()) + "/" + std::to_string(BackpackCap(s));
-    DrawUIText(counts.c_str(), (int)x + 16, (int)y + 36, 13, kColorText);
-    if (Button({ x + w - 76, y + 8, 64, 28 }, "Close", true)) { s.houseChestOpen = false; return; }
+    DrawUIText(counts.c_str(), (int)x + 16, (int)y + 30, 13, kUoGoldText);
+    if (UOCloseButton(bg)) { s.houseChestOpen = false; return; }
     if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_X)) { s.houseChestOpen = false; return; }
 
     const int rows = 11;
@@ -18816,8 +19414,583 @@ static void DrawHouseChestPanel(GameState& s, int screenW, int screenH) {
         DrawUIText(("+" + std::to_string(s.houseChest.size() - rows) + " more").c_str(), (int)x + 262, (int)(listY + rows * rowH), 12, kColorText);
 }
 
-static void HouseInteriorBuild(GameState& s) { // (replaced by the homestead builder below)
-    IntBuildShopShell(*InteriorRoomFor("house")); (void)s;
+// ---- The homestead inside (Housing 2.0, 2026-09-26) -------------------------------
+// Built from the plan the designer paints: each layout cell is kHouseIntCell room
+// units. Floor cells ('F') are the rooms; a wall runs along every edge between a
+// floor cell and anything else - glass where the neighbour is a window ('N'), an
+// open doorway into the door cell ('D'). A plan with no floor tiles at all uses
+// every built cell as floor. Everything that isn't floor is solid.
+static bool HouseIntInsideAt(float x, float y) {
+    if (!g_houseInt.ok) return x >= 0 && y >= 0 && x <= g_intW && y <= g_intH;
+    int cx = (int)floorf(x / kHouseIntCell), cy = (int)floorf(y / kHouseIntCell);
+    if (cx < 0 || cy < 0 || cx >= g_houseInt.cells || cy >= g_houseInt.cells) return false;
+    return g_houseInt.inside[(size_t)cy * g_houseInt.cells + cx] != 0;
+}
+static void HouseInteriorBuild(GameState& s) {
+    g_houseInt.ok = false;
+    const InteriorRoomDef* fallback = InteriorRoomFor("house");
+    if (s.housePlotIdx < 0 || s.housePlotIdx >= (int)kHousePlots.size() ||
+        !HouseLayoutValid(s.houseLayout, kHousePlots[s.housePlotIdx].cells) ||
+        s.houseLayout.find_first_not_of('.') == std::string::npos) {
+        if (fallback) IntBuildShopShell(*fallback);
+        return;
+    }
+    const int n = kHousePlots[s.housePlotIdx].cells;
+    const std::string& L = s.houseLayout;
+    const bool anyF = L.find('F') != std::string::npos;
+    const float C = kHouseIntCell, h = kIntWallT * 0.5f;
+    auto inside = [&](int cx, int cy) {
+        char c = HouseCellAt(L, n, cx, cy);
+        return anyF ? c == 'F' : c != '.';
+    };
+    g_houseInt.cells = n;
+    g_houseInt.inside.assign((size_t)n * n, 0);
+    g_intW = n * C; g_intH = n * C;
+    g_intFloors.clear(); g_intSegs.clear(); g_intWins.clear(); g_intBlocks.clear(); g_intDoors.clear();
+    g_intFloorSurf = kHouseFloorSurfs[s.houseFloorStyle];
+    const int ws = kHouseWallSurfs[s.houseWallStyle];
+    int insideCount = 0;
+    for (int cy = 0; cy < n; cy++) {
+        int run = -1;
+        for (int cx = 0; cx <= n; cx++) {
+            bool in = cx < n && inside(cx, cy);
+            if (in) { g_houseInt.inside[(size_t)cy * n + cx] = 1; insideCount++; }
+            else if (cx < n) g_intBlocks.push_back({ cx * C, cy * C, C, C });
+            if (in && run < 0) run = cx;
+            if (!in && run >= 0) { g_intFloors.push_back({ run * C, cy * C, (cx - run) * C, C }); run = -1; }
+        }
+    }
+    if (insideCount == 0) { if (fallback) IntBuildShopShell(*fallback); return; }
+    bool doorDone = false;
+    const int dx4[4] = { 0, 0, -1, 1 }, dy4[4] = { -1, 1, 0, 0 };
+    for (int cy = 0; cy < n; cy++)
+        for (int cx = 0; cx < n; cx++) {
+            if (!inside(cx, cy)) continue;
+            char self = HouseCellAt(L, n, cx, cy);
+            for (int k = 0; k < 4; k++) {
+                int nx = cx + dx4[k], ny = cy + dy4[k];
+                if (inside(nx, ny)) continue;
+                char nc = HouseCellAt(L, n, nx, ny);
+                float ax, az, bx, bz, rnx = (float)-dx4[k], rnz = (float)-dy4[k]; // normal points into the room
+                if (k == 0) { ax = cx * C; bx = ax + C; az = bz = cy * C; }
+                else if (k == 1) { ax = cx * C; bx = ax + C; az = bz = (cy + 1) * C; }
+                else if (k == 2) { ax = bx = cx * C; az = cy * C; bz = az + C; }
+                else { ax = bx = (cx + 1) * C; az = cy * C; bz = az + C; }
+                bool alongX = k < 2;
+                // stretch each piece half a wall past its ends so corners close
+                auto seg = [&](float t0, float t1, bool extA, bool extB) {
+                    float sx = ax + (bx - ax) * t0, sz = az + (bz - az) * t0, ex = ax + (bx - ax) * t1, ez = az + (bz - az) * t1;
+                    if (alongX) { if (extA) sx -= h; if (extB) ex += h; } else { if (extA) sz -= h; if (extB) ez += h; }
+                    g_intSegs.push_back({ sx, sz, ex, ez, rnx, rnz, ws });
+                };
+                bool doorEdge = !doorDone && (nc == 'D' || (self == 'D' && nc == '.'));
+                float mx = (ax + bx) * 0.5f, mz = (az + bz) * 0.5f;
+                if (doorEdge) {
+                    doorDone = true;
+                    float gap = 30.0f / C;
+                    seg(0.0f, 0.5f - gap, true, false);
+                    seg(0.5f + gap, 1.0f, false, true);
+                    g_intDoors.push_back({ mx, mz, rnx, rnz, 60.0f, ws });
+                    g_houseInt.exitPos = { mx + rnx * 22.0f, mz + rnz * 22.0f };
+                    g_houseInt.doorIn = { mx + rnx * 62.0f, mz + rnz * 62.0f };
+                    g_houseInt.doorDir = { rnx, rnz };
+                } else {
+                    seg(0.0f, 1.0f, true, true);
+                    if (nc == 'N') g_intWins.push_back({ mx + rnx * h, mz + rnz * h, rnx, rnz }); // on the inner face
+                }
+            }
+        }
+    if (!doorDone) { // a door that doesn't touch any room: leave by the first room instead
+        for (int i = 0; i < n * n; i++)
+            if (g_houseInt.inside[(size_t)i]) {
+                g_houseInt.exitPos = { (i % n + 0.5f) * C, (i / n + 0.5f) * C + 20.0f };
+                g_houseInt.doorIn = { (i % n + 0.5f) * C, (i / n + 0.5f) * C - 20.0f };
+                break;
+            }
+    }
+    g_houseInt.ok = true;
+}
+
+// ---- Furnishing (Housing 2.0) -------------------------------------------------------
+static std::deque<std::string> g_hdLabels;          // prop labels built this frame
+static const char* kHdCraftActs[4] = { "craft0", "craft1", "craft2", "craft3" };
+static bool g_hdOn = false;                          // decorate mode
+static int g_hdCat = 0, g_hdGhost = -1, g_hdMove = -1, g_hdSel = -1, g_hdRot = 0;
+static Vector2 g_hdRaw = { 0, 0 };
+static float g_hdScroll = 0.0f;
+static std::string g_hdMsg;
+static void HouseDecorFootprint(const HouseDecorDef& k, int rot, float* bw, float* bh) {
+    bool swap = rot == 90 || rot == 270;
+    *bw = swap ? k.bh : k.bw; *bh = swap ? k.bw : k.bh;
+}
+static Rectangle HouseDecorRect(const GameState::HouseDecor& d) {
+    float bw, bh;
+    HouseDecorFootprint(kHouseDecorDefs[d.kind], d.rot, &bw, &bh);
+    return { d.x - bw * 0.5f, d.y - bh * 0.5f, bw, bh };
+}
+static float HouseDecorYOff(const GameState& s, const HouseDecorDef& k, Vector2 p, int skip) {
+    if (k.place == kHdpWall) return k.yOff;
+    if (k.place != kHdpTable) return 0.0f;
+    for (size_t j = 0; j < s.houseDecor.size(); j++) {
+        if ((int)j == skip || (int)j == g_hdMove) continue;
+        const HouseDecorDef& t = kHouseDecorDefs[s.houseDecor[j].kind];
+        if (t.topH <= 0) continue;
+        Rectangle r = HouseDecorRect(s.houseDecor[j]);
+        if (CheckCollisionPointRec(p, { r.x + 3, r.y + 3, r.width - 6, r.height - 6 })) return t.topH + k.yOff;
+    }
+    return k.yOff;
+}
+static int HouseStorageCap(const GameState& s) {
+    int cap = kHouseStorageBase;
+    for (const auto& d : s.houseDecor) cap += kHouseDecorDefs[d.kind].storage;
+    return cap;
+}
+static void HouseAppendDecorProps(GameState& s, std::vector<InteriorPropDef>& out) {
+    g_hdLabels.clear();
+    for (size_t i = 0; i < s.houseDecor.size(); i++) {
+        if ((int)i == g_hdMove) continue; // being moved: the ghost stands in for it
+        const auto& d = s.houseDecor[i];
+        const HouseDecorDef& k = kHouseDecorDefs[d.kind];
+        float bw, bh;
+        HouseDecorFootprint(k, d.rot, &bw, &bh);
+        std::string act = k.action;
+        const char* action = k.action;
+        std::string label = k.name;
+        if (act == "chest") label = "Open " + label;
+        else if (act == "bed") label = "Rest in " + label;
+        else if (act == "craft") { label = "Work at " + label; action = kHdCraftActs[std::clamp(k.module, 0, 3)]; }
+        g_hdLabels.push_back(label);
+        float sw = bw > 0 ? bw : (k.place == kHdpRug ? 70.0f : 14.0f), sh = bh > 0 ? bh : (k.place == kHdpRug ? 50.0f : 14.0f);
+        out.push_back({ k.dir, k.model, g_hdLabels.back().c_str(), d.x, d.y, (float)d.rot, k.sc,
+                        HouseDecorYOff(s, k, { d.x, d.y }, (int)i), bw, bh, action, k.c2d, sw, sh });
+    }
+}
+
+struct HdPlace { bool ok; Vector2 pos; int rot; float yOff; const char* why; };
+static int HdRotFromNormal(float nx, float nz) { return nz > 0.5f ? 0 : nx > 0.5f ? 90 : nz < -0.5f ? 180 : 270; }
+static HdPlace HouseResolvePlace(const GameState& s, int kind, Vector2 p, int rot, int skip) {
+    const HouseDecorDef& k = kHouseDecorDefs[kind];
+    HdPlace r = { false, p, rot, 0.0f, "" };
+    if (k.place == kHdpWall) { // snap to the nearest wall face, turned to face the room
+        float best = 90.0f;
+        bool found = false;
+        for (const IntSeg& sg : g_intSegs) {
+            if (sg.nx == 0 && sg.nz == 0) continue;
+            float ax = sg.ax + sg.nx * kIntWallT * 0.5f, az = sg.az + sg.nz * kIntWallT * 0.5f;
+            float bx = sg.bx + sg.nx * kIntWallT * 0.5f, bz = sg.bz + sg.nz * kIntWallT * 0.5f;
+            float len = hypotf(bx - ax, bz - az);
+            if (len < 34.0f) continue;
+            float t = ((p.x - ax) * (bx - ax) + (p.y - az) * (bz - az)) / (len * len);
+            float m = 17.0f / len;
+            t = std::clamp(t, m, 1.0f - m);
+            Vector2 c = { ax + (bx - ax) * t, az + (bz - az) * t };
+            float d = Dist(c, p);
+            if (d < best) { best = d; found = true; r.pos = { c.x + sg.nx * 1.0f, c.y + sg.nz * 1.0f }; r.rot = HdRotFromNormal(sg.nx, sg.nz); }
+        }
+        if (!found) { r.why = "Wall pieces hang on a wall - move closer to one."; return r; }
+        r.yOff = k.yOff;
+        for (const IntWindow& w : g_intWins)
+            if (Dist(r.pos, { w.x, w.z }) < 46.0f) { r.why = "That's a window."; return r; }
+        for (const IntDoorway& d : g_intDoors)
+            if (Dist(r.pos, { d.x, d.z }) < 52.0f) { r.why = "Keep the doorway clear."; return r; }
+        for (size_t j = 0; j < s.houseDecor.size(); j++) {
+            if ((int)j == skip) continue;
+            const auto& o = s.houseDecor[j];
+            if (kHouseDecorDefs[o.kind].place == kHdpWall && o.rot == r.rot && Dist(r.pos, { o.x, o.y }) < 28.0f) {
+                r.why = "Something already hangs there."; return r;
+            }
+        }
+        r.ok = true;
+        return r;
+    }
+    if (!HouseIntInsideAt(p.x, p.y)) { r.why = "Place it inside the house."; return r; }
+    if (k.place == kHdpTable) { r.yOff = HouseDecorYOff(s, k, p, skip); r.ok = true; return r; }
+    if (k.place == kHdpRug) { r.ok = true; return r; }
+    float bw, bh;
+    HouseDecorFootprint(k, rot, &bw, &bh);
+    const float in = kIntWallT * 0.5f + 1.0f;
+    float x0 = p.x - bw * 0.5f - in, x1 = p.x + bw * 0.5f + in, y0 = p.y - bh * 0.5f - in, y1 = p.y + bh * 0.5f + in;
+    for (float fx : { 0.0f, 0.5f, 1.0f })
+        for (float fy : { 0.0f, 0.5f, 1.0f })
+            if (!HouseIntInsideAt(x0 + (x1 - x0) * fx, y0 + (y1 - y0) * fy)) { r.why = "It won't fit there."; return r; }
+    // interior walls between two rooms are thin edges, not cells: stop footprints straddling one
+    for (const IntSeg& sg : g_intSegs) {
+        float sx0 = std::min(sg.ax, sg.bx) - in, sx1 = std::max(sg.ax, sg.bx) + in, sz0 = std::min(sg.az, sg.bz) - in, sz1 = std::max(sg.az, sg.bz) + in;
+        if (x0 + in < sx1 && x1 - in > sx0 && y0 + in < sz1 && y1 - in > sz0) { r.why = "It won't fit there."; return r; }
+    }
+    Rectangle me = { p.x - bw * 0.5f + 2, p.y - bh * 0.5f + 2, bw - 4, bh - 4 };
+    Vector2 ex = g_houseInt.ok ? g_houseInt.exitPos : Vector2{ 260, 598 };
+    if (CheckCollisionCircleRec(ex, 36.0f, me)) { r.why = "Keep the door clear."; return r; }
+    for (size_t j = 0; j < s.houseDecor.size(); j++) {
+        if ((int)j == skip) continue;
+        const HouseDecorDef& o = kHouseDecorDefs[s.houseDecor[j].kind];
+        if (o.place != kHdpFloor || o.bw <= 0) continue;
+        if (CheckCollisionRecs(me, HouseDecorRect(s.houseDecor[j]))) { r.why = "Something's in the way."; return r; }
+    }
+    r.ok = true;
+    return r;
+}
+static bool HouseDecorAfford(const GameState& s, const HouseDecorDef& k, std::string* why) {
+    if (k.module >= 0 && s.houseModuleLevel[k.module] <= 0) { if (why) *why = "Needs your " + kHomeModuleDefs[k.module].label + " (House screen)."; return false; }
+    if (s.gold < k.gold) { if (why) *why = "Not enough gold."; return false; }
+    if (s.wood < k.wood) { if (why) *why = "Not enough wood."; return false; }
+    return true;
+}
+
+// Find a good free spot for a piece (starter furniture): beds, storage and
+// stations back onto a wall away from the door; tables take the middle of
+// the biggest room; chairs pull up to a table; small things go on a table.
+static bool HouseAutoPlace(GameState& s, int kind, int nearIdx = -1) {
+    if (kind < 0) return false;
+    const HouseDecorDef& k = kHouseDecorDefs[kind];
+    HdPlace best = { false, { 0, 0 }, 0, 0, "" };
+    float bestScore = -1e9f;
+    auto consider = [&](Vector2 p, int rot, float score) {
+        HdPlace r = HouseResolvePlace(s, kind, p, rot, -1);
+        if (r.ok && score > bestScore) { best = r; bestScore = score; }
+    };
+    Vector2 ex = g_houseInt.exitPos;
+    bool nearTable = nearIdx >= 0 && nearIdx < (int)s.houseDecor.size();
+    Vector2 tp = nearTable ? Vector2{ s.houseDecor[(size_t)nearIdx].x, s.houseDecor[(size_t)nearIdx].y } : Vector2{ 0, 0 };
+    if (k.place == kHdpTable || (k.place == kHdpRug && nearTable)) {
+        if (nearTable) consider(tp, 0, 0);
+    } else if (k.place == kHdpWall) {
+        for (const IntSeg& sg : g_intSegs)
+            for (float t = 0.5f; t > 0.05f; t -= 0.15f)
+                for (float tt : { t, 1.0f - t })
+                    consider({ sg.ax + (sg.bx - sg.ax) * tt + sg.nx * 20, sg.az + (sg.bz - sg.az) * tt + sg.nz * 20 }, 0,
+                             Dist({ sg.ax + (sg.bx - sg.ax) * tt, sg.az + (sg.bz - sg.az) * tt }, ex) * 0.2f - fabsf(tt - 0.5f) * 40.0f
+                             - (float)s.houseDecor.size() * 0.0f);
+    } else if (std::string(k.name).find("Chair") != std::string::npos && nearTable) {
+        float tw, th;
+        HouseDecorFootprint(kHouseDecorDefs[s.houseDecor[(size_t)nearIdx].kind], s.houseDecor[(size_t)nearIdx].rot, &tw, &th);
+        const Vector2 off[4] = { { -(tw * 0.5f + 16), 0 }, { tw * 0.5f + 16, 0 }, { 0, -(th * 0.5f + 16) }, { 0, th * 0.5f + 16 } };
+        const int rots[4] = { 90, 270, 0, 180 };
+        for (int i = 0; i < 4; i++) consider({ tp.x + off[i].x, tp.y + off[i].y }, rots[i], -(float)i);
+    } else if (k.topH > 0 || k.place == kHdpRug || std::string(k.name).find("Chair") != std::string::npos) {
+        // middle of the rooms: nearest free spot to the floor's centre of mass
+        float cx = 0, cy = 0, cnt = 0;
+        for (const Rectangle& f : g_intFloors) { float a = f.width * f.height; cx += (f.x + f.width * 0.5f) * a; cy += (f.y + f.height * 0.5f) * a; cnt += a; }
+        if (cnt > 0) { cx /= cnt; cy /= cnt; }
+        for (float y = 8; y < g_intH; y += 12)
+            for (float x = 8; x < g_intW; x += 12)
+                consider({ x, y }, 0, -Dist({ x, y }, { cx, cy }) + std::min(60.0f, Dist({ x, y }, ex)) * 0.5f);
+    } else { // back against a wall, as far from the door as it can get
+        for (const IntSeg& sg : g_intSegs) {
+            if (sg.nx == 0 && sg.nz == 0) continue;
+            int rot = HdRotFromNormal(sg.nx, sg.nz);
+            float depth = k.bh, len = hypotf(sg.bx - sg.ax, sg.bz - sg.az);
+            for (float d = 0; d <= len; d += 8.0f) {
+                float t = len > 0 ? d / len : 0.0f;
+                Vector2 p = { sg.ax + (sg.bx - sg.ax) * t + sg.nx * (kIntWallT * 0.5f + depth * 0.5f + 2),
+                              sg.az + (sg.bz - sg.az) * t + sg.nz * (kIntWallT * 0.5f + depth * 0.5f + 2) };
+                consider(p, rot, Dist(p, ex));
+            }
+        }
+    }
+    if (!best.ok) return false;
+    s.houseDecor.push_back({ kind, best.pos.x, best.pos.y, best.rot });
+    return true;
+}
+
+// On the way in: pieces the plan no longer fits (after a redesign) are packed up
+// and paid back in full; a brand-new house gets a few simple furnishings.
+static void HouseFurnishOnEnter(GameState& s) {
+    if (!g_houseInt.ok) return;
+    int refunded = 0, gold = 0;
+    for (int i = (int)s.houseDecor.size() - 1; i >= 0; i--) {
+        auto& d = s.houseDecor[(size_t)i];
+        HdPlace r = HouseResolvePlace(s, d.kind, { d.x, d.y }, d.rot, i);
+        bool keep = r.ok && Dist(r.pos, { d.x, d.y }) < 14.0f;
+        if (keep) { d.x = r.pos.x; d.y = r.pos.y; d.rot = r.rot; continue; }
+        gold += kHouseDecorDefs[d.kind].gold;
+        s.wood += kHouseDecorDefs[d.kind].wood;
+        s.houseDecor.erase(s.houseDecor.begin() + i);
+        refunded++;
+    }
+    if (refunded > 0) {
+        s.gold += gold;
+        s.logLine = std::to_string(refunded) + (refunded == 1 ? " furnishing" : " furnishings") +
+                    " didn't fit the new plan - packed up and refunded (" + std::to_string(gold) + "g).";
+    }
+    if (!s.houseFurnished) {
+        s.houseFurnished = true;
+        HouseAutoPlace(s, HouseDecorFind("Single Bed"));
+        HouseAutoPlace(s, HouseDecorFind("Chest"));
+        const int stations[4] = { HouseDecorFind("Anvil"), HouseDecorFind("Carpenter's Bench"), HouseDecorFind("Dress Form"), HouseDecorFind("Brewing Cauldron") };
+        for (int m = 0; m < 4; m++) if (s.houseModuleLevel[m] > 0) HouseAutoPlace(s, stations[m]);
+        if (HouseAutoPlace(s, HouseDecorFind("Square Table"))) {
+            int t = (int)s.houseDecor.size() - 1;
+            HouseAutoPlace(s, HouseDecorFind("Oval Rug"), t);
+            HouseAutoPlace(s, HouseDecorFind("Wooden Chair"), t);
+            HouseAutoPlace(s, HouseDecorFind("Wooden Chair"), t);
+            HouseAutoPlace(s, HouseDecorFind("Candelabra"), t);
+            HouseAutoPlace(s, HouseDecorFind("Bread & Cheese"), t);
+        }
+        HouseAutoPlace(s, HouseDecorFind("Wall Torch"));
+        HouseAutoPlace(s, HouseDecorFind("Wall Torch"));
+        s.logLine = "Your homestead comes simply furnished. Tap Decorate to buy, move and turn furniture.";
+    }
+}
+
+// Decorate mode 3D overlay: the ghost piece being placed (green = fits, red =
+// doesn't) and a gold marker on the selected piece.
+static void HouseDecorDraw3D(const GameState& s) {
+    if (!g_hdOn) return;
+    float hw = g_intW * 0.5f, hh = g_intH * 0.5f, t = (float)GetTime();
+    auto footprint = [&](Vector2 p, float bw, float bh, Color c) {
+        if (bw <= 0 || bh <= 0) { bw = 18; bh = 18; }
+        float x0 = p.x - bw * 0.5f - hw, x1 = p.x + bw * 0.5f - hw, z0 = p.y - bh * 0.5f - hh, z1 = p.y + bh * 0.5f - hh;
+        rlDisableDepthMask();
+        rlBegin(RL_QUADS);
+        rlColor4ub(c.r, c.g, c.b, 70);
+        rlVertex3f(x0, 0.9f, z0); rlVertex3f(x0, 0.9f, z1); rlVertex3f(x1, 0.9f, z1); rlVertex3f(x1, 0.9f, z0);
+        rlEnd();
+        rlEnableDepthMask();
+        for (float e = 0; e < 2.0f; e += 1.0f) {
+            DrawLine3D({ x0 - e, 1.0f, z0 - e }, { x1 + e, 1.0f, z0 - e }, c); DrawLine3D({ x1 + e, 1.0f, z0 - e }, { x1 + e, 1.0f, z1 + e }, c);
+            DrawLine3D({ x1 + e, 1.0f, z1 + e }, { x0 - e, 1.0f, z1 + e }, c); DrawLine3D({ x0 - e, 1.0f, z1 + e }, { x0 - e, 1.0f, z0 - e }, c);
+        }
+    };
+    if (g_hdGhost >= 0) {
+        const HouseDecorDef& k = kHouseDecorDefs[g_hdGhost];
+        HdPlace r = HouseResolvePlace(s, g_hdGhost, g_hdRaw, g_hdRot, g_hdMove);
+        Vector2 p = r.ok ? r.pos : g_hdRaw;
+        int rot = r.ok ? r.rot : g_hdRot;
+        float y = r.ok ? r.yOff : (k.place == kHdpWall ? k.yOff : 0.0f);
+        Color c = r.ok ? Color{ 120, 255, 140, 255 } : Color{ 255, 90, 80, 255 };
+        float bw, bh;
+        HouseDecorFootprint(k, rot, &bw, &bh);
+        footprint(p, k.place == kHdpRug ? 70.0f : bw, k.place == kHdpRug ? 50.0f : bh, c);
+        Model m = Interior3DModel(k.dir, k.model);
+        if (m.meshCount > 0) {
+            std::string d = k.dir;
+            float sc = ((d == "kk" || d == "kf") ? kIntModelScaleKK : kIntModelScaleQ) * k.sc;
+            float pulse = 0.8f + 0.2f * sinf(t * 6.0f);
+            Color tint = r.ok ? Color{ (unsigned char)(170 * pulse), 255, (unsigned char)(180 * pulse), 255 } : Color{ 255, (unsigned char)(120 * pulse), (unsigned char)(110 * pulse), 255 };
+            DrawModelEx(m, { p.x - hw, y, p.y - hh }, { 0, 1, 0 }, (float)rot, { sc, sc, sc }, tint);
+        }
+    } else if (g_hdSel >= 0 && g_hdSel < (int)s.houseDecor.size()) {
+        const auto& d = s.houseDecor[(size_t)g_hdSel];
+        const HouseDecorDef& k = kHouseDecorDefs[d.kind];
+        float bw, bh;
+        HouseDecorFootprint(k, d.rot, &bw, &bh);
+        footprint({ d.x, d.y }, k.place == kHdpRug ? 70.0f : bw, k.place == kHdpRug ? 50.0f : bh, Color{ 255, 200, 90, 255 });
+        float y = HouseDecorYOff(s, k, { d.x, d.y }, g_hdSel) + 48.0f + sinf(t * 4.0f) * 4.0f;
+        DrawCylinderEx({ d.x - hw, y + 10, d.y - hh }, { d.x - hw, y, d.y - hh }, 6.0f, 0.5f, 4, Color{ 255, 200, 90, 255 });
+    }
+}
+
+// Decorate mode UI (UO-style: pick from the catalog, tap the floor to set it
+// down, turn it, place it; tap a placed piece to move, turn or pick it up).
+static Vector2 HouseFloorHit(float y) {
+    Ray ray = Town3DMouseRay(g_intTCam, GetMousePosition());
+    if (fabsf(ray.direction.y) < 1e-4f) return g_hdRaw;
+    float t = (y - ray.position.y) / ray.direction.y;
+    return { ray.position.x + ray.direction.x * t + g_intW * 0.5f, ray.position.z + ray.direction.z * t + g_intH * 0.5f };
+}
+static void HouseDecorEnd() { g_hdOn = false; g_hdGhost = g_hdMove = g_hdSel = -1; g_hdMsg.clear(); }
+static void DrawHouseDecorateUI(GameState& s, int screenW, int screenH) {
+    (void)screenH;
+    if (!g_hdOn) {
+        if (UOButton({ 424, 158, 108, 30 }, "Decorate")) {
+            g_hdOn = true; g_hdGhost = g_hdMove = g_hdSel = -1; g_hdMsg.clear();
+            s.interior3DView = true;
+        }
+        return;
+    }
+    s.interior3DView = true;
+    const int limit = HouseDecorLimit(std::max(7, g_houseInt.cells));
+    const bool bar = g_hdGhost >= 0 || g_hdSel >= 0;
+    const Rectangle G = bar ? Rectangle{ 6, 772, 528, 122 } : Rectangle{ 6, 540, 528, 354 };
+    const float hw = g_intW * 0.5f, hh = g_intH * 0.5f;
+    // --- taps in the room ---
+    Vector2 m = GetMousePosition();
+    bool inRoom = m.y > 196 && m.y < G.y - 14 && m.x >= 0 && m.x < screenW;
+    if (g_hdGhost >= 0) {
+        const HouseDecorDef& k = kHouseDecorDefs[g_hdGhost];
+        if (inRoom && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_hdRaw = HouseFloorHit(k.place == kHdpWall ? k.yOff + 12.0f : 0.0f);
+    } else if (inRoom && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        int best = -1;
+        float bd = 48.0f;
+        for (size_t i = 0; i < s.houseDecor.size(); i++) {
+            const auto& d = s.houseDecor[i];
+            const HouseDecorDef& k = kHouseDecorDefs[d.kind];
+            Vector2 sp;
+            if (!Town3DProject(g_intTCam, { d.x - hw, HouseDecorYOff(s, k, { d.x, d.y }, (int)i) + (k.place == kHdpRug ? 0.0f : 14.0f), d.y - hh }, &sp)) continue;
+            float dd = Dist(sp, m) + (k.place == kHdpRug ? 20.0f : 0.0f); // rugs lose ties to what stands on them
+            if (dd < bd) { bd = dd; best = (int)i; }
+        }
+        g_hdSel = best;
+        g_hdMsg.clear();
+        if (best >= 0) PlaySfx(SfxId::Click);
+    }
+
+    UODrawGump(G, kUoDarkWood);
+    std::string title = "Decorate - " + std::to_string(s.houseDecor.size()) + "/" + std::to_string(limit) + " pieces";
+    UODrawTitle(G, title, 13);
+    if (UOCloseButton(G)) { HouseDecorEnd(); return; }
+    auto msgLine = [&](float y) {
+        if (!g_hdMsg.empty()) DrawUIText(g_hdMsg.c_str(), (int)G.x + 18, (int)y, 12, Color{ 255, 150, 120, 255 });
+    };
+
+    if (g_hdGhost >= 0) { // placing (new or moving)
+        const HouseDecorDef& k = kHouseDecorDefs[g_hdGhost];
+        HdPlace r = HouseResolvePlace(s, g_hdGhost, g_hdRaw, g_hdRot, g_hdMove);
+        std::string head = std::string(g_hdMove >= 0 ? "Moving: " : "Placing: ") + k.name;
+        DrawUIText(head.c_str(), (int)G.x + 18, (int)G.y + 20, 14, kUoGoldText);
+        DrawUIText(r.ok ? (k.place == kHdpWall ? "Tap near a wall to hang it." : "Tap or drag on the floor to position it.") : r.why,
+                   (int)G.x + 18, (int)G.y + 40, 12, r.ok ? Color{ 210, 200, 180, 255 } : Color{ 255, 150, 120, 255 });
+        float by = G.y + 66;
+        bool canTurn = k.place != kHdpWall;
+        if (UOButton({ G.x + 16, by, 110, 38 }, "Turn", canTurn)) g_hdRot = (g_hdRot + 90) % 360;
+        std::string placeLbl = g_hdMove >= 0 ? "Set Down" : ("Place " + std::to_string(k.gold) + "g" + (k.wood > 0 ? " " + std::to_string(k.wood) + "w" : ""));
+        if (UOButton({ G.x + 136, by, 250, 38 }, placeLbl, r.ok)) {
+            if (g_hdMove >= 0) {
+                auto& d = s.houseDecor[(size_t)g_hdMove];
+                d.x = r.pos.x; d.y = r.pos.y; d.rot = r.rot;
+                g_hdSel = g_hdMove; g_hdMove = -1; g_hdGhost = -1;
+                PlaySfx(SfxId::Door);
+            } else {
+                std::string why;
+                if ((int)s.houseDecor.size() >= limit) g_hdMsg = "Your house can't hold any more (" + std::to_string(limit) + " pieces).";
+                else if (!HouseDecorAfford(s, k, &why)) g_hdMsg = why;
+                else {
+                    s.gold -= k.gold; s.wood -= k.wood;
+                    s.houseDecor.push_back({ g_hdGhost, r.pos.x, r.pos.y, r.rot });
+                    s.logLine = "Placed a " + std::string(k.name) + ".";
+                    g_hdGhost = -1; g_hdMsg.clear();
+                    PlaySfx(SfxId::Buy);
+                }
+            }
+        }
+        if (UOButton({ G.x + 396, by, 116, 38 }, "Cancel")) { g_hdGhost = -1; g_hdMove = -1; g_hdMsg.clear(); }
+        return;
+    }
+    if (g_hdSel >= 0 && g_hdSel < (int)s.houseDecor.size()) { // a placed piece
+        auto& d = s.houseDecor[(size_t)g_hdSel];
+        const HouseDecorDef& k = kHouseDecorDefs[d.kind];
+        DrawUIText(k.name, (int)G.x + 18, (int)G.y + 20, 14, kUoGoldText);
+        std::string info = k.storage > 0 ? "+" + std::to_string(k.storage) + " storage" : k.place == kHdpWall ? "Wall piece" : "";
+        if (!info.empty()) DrawUIText(info.c_str(), (int)G.x + 200, (int)G.y + 22, 12, Color{ 210, 200, 180, 255 });
+        msgLine(G.y + 42);
+        float by = G.y + 66;
+        if (UOButton({ G.x + 16, by, 110, 38 }, "Move")) {
+            g_hdMove = g_hdSel; g_hdGhost = d.kind; g_hdRot = d.rot; g_hdRaw = { d.x, d.y }; g_hdMsg.clear();
+        }
+        if (UOButton({ G.x + 134, by, 110, 38 }, "Turn", k.place != kHdpWall)) {
+            HdPlace r = HouseResolvePlace(s, d.kind, { d.x, d.y }, (d.rot + 90) % 360, g_hdSel);
+            if (r.ok) { d.rot = r.rot; g_hdMsg.clear(); } else g_hdMsg = "No room to turn it here.";
+        }
+        int refund = k.gold / 2;
+        if (UOButton({ G.x + 252, by, 150, 38 }, "Pick Up +" + std::to_string(refund) + "g")) {
+            int capAfter = HouseStorageCap(s) - k.storage;
+            if (k.storage > 0 && (int)s.houseChest.size() > capAfter) g_hdMsg = "Empty some storage first (" + std::to_string(s.houseChest.size()) + " items stored).";
+            else {
+                s.gold += refund;
+                s.logLine = "Picked up the " + std::string(k.name) + " (+" + std::to_string(refund) + "g).";
+                s.houseDecor.erase(s.houseDecor.begin() + g_hdSel);
+                g_hdSel = -1; g_hdMsg.clear();
+                PlaySfx(SfxId::Coin);
+            }
+        }
+        if (UOButton({ G.x + 410, by, 102, 38 }, "Done")) { g_hdSel = -1; g_hdMsg.clear(); }
+        return;
+    }
+    // --- the catalog ---
+    char gw[64];
+    snprintf(gw, sizeof(gw), "%d gold   %d wood   storage %d", s.gold, s.wood, HouseStorageCap(s));
+    DrawUIText(gw, (int)G.x + 18, (int)G.y + 18, 12, Color{ 210, 200, 180, 255 });
+    float tabW = (G.width - 32) / kHdcCount;
+    for (int c = 0; c < kHdcCount; c++) {
+        Rectangle t = { G.x + 16 + c * tabW, G.y + 36, tabW - 4, 28 };
+        bool on = g_hdCat == c;
+        DrawRectangleRec(t, on ? Color{ 110, 74, 40, 255 } : Color{ 50, 34, 22, 255 });
+        DrawRectangleLinesEx(t, on ? 2.0f : 1.0f, on ? kUoBronzeHi : kUoBronze);
+        int w = MeasureUIText(kHouseDecorCatNames[c], 12);
+        DrawUIText(kHouseDecorCatNames[c], (int)(t.x + (t.width - w) / 2), (int)t.y + 8, 12, on ? kUoGoldText : Color{ 190, 170, 140, 255 });
+        if (UOTapped(t) && !on) { g_hdCat = c; g_hdScroll = 0; PlaySfx(SfxId::Click); }
+    }
+    std::vector<int> items;
+    for (int i = 0; i < kHouseDecorDefCount; i++) if (kHouseDecorDefs[i].cat == g_hdCat) items.push_back(i);
+    Rectangle area = { G.x + 12, G.y + 72, G.width - 24, G.height - 104 };
+    const float rowH = 44.0f, colW = area.width / 2;
+    int rows = ((int)items.size() + 1) / 2;
+    g_hdScroll -= ScrollDelta(area);
+    g_hdScroll = std::clamp(g_hdScroll, 0.0f, std::max(0.0f, rows * rowH - area.height));
+    BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
+    static Vector2 pressAt = { -1, -1 };
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) pressAt = m;
+    bool tap = IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && Dist(pressAt, m) < 10.0f && CheckCollisionPointRec(m, area);
+    for (size_t i = 0; i < items.size(); i++) {
+        const HouseDecorDef& k = kHouseDecorDefs[items[i]];
+        Rectangle r = { area.x + (i % 2) * colW + 2, area.y + (i / 2) * rowH - g_hdScroll + 2, colW - 4, rowH - 4 };
+        if (r.y > area.y + area.height || r.y + r.height < area.y) continue;
+        std::string why;
+        bool ok = HouseDecorAfford(s, k, &why);
+        UODrawSlot(r, false);
+        DrawRectangleRec({ r.x + 6, r.y + 8, 22, 22 }, k.c2d);
+        DrawRectangleLinesEx({ r.x + 6, r.y + 8, 22, 22 }, 1.0f, Fade(BLACK, 0.5f));
+        DrawUIText(k.name, (int)r.x + 34, (int)r.y + 5, 12, ok ? Color{ 250, 240, 220, 255 } : Color{ 160, 150, 140, 255 });
+        std::string price = std::to_string(k.gold) + "g" + (k.wood > 0 ? " " + std::to_string(k.wood) + "w" : "");
+        if (k.storage > 0) price += "  +" + std::to_string(k.storage) + " slots";
+        if (k.module >= 0 && s.houseModuleLevel[k.module] <= 0) price = "needs " + kHomeModuleDefs[k.module].label;
+        DrawUIText(price.c_str(), (int)r.x + 34, (int)r.y + 22, 11, ok ? kUoGoldText : Color{ 200, 120, 100, 255 });
+        if (tap && CheckCollisionPointRec(m, r)) {
+            if (!ok) g_hdMsg = why;
+            else {
+                g_hdGhost = items[i]; g_hdMove = -1; g_hdRot = 0; g_hdMsg.clear();
+                g_hdRaw = { s.interiorPlayerPos.x + s.playerFacing.x * 60.0f, s.interiorPlayerPos.y + s.playerFacing.y * 60.0f };
+                PlaySfx(SfxId::Click);
+            }
+        }
+    }
+    EndScissorMode();
+    if (!g_hdMsg.empty()) msgLine(G.y + G.height - 28);
+    else DrawUIText("Tap a piece in the room to move, turn or pick it up.", (int)G.x + 18, (int)(G.y + G.height - 28), 12, Color{ 190, 175, 150, 255 });
+}
+
+// Workshop station gump: craft from your home wing right at the bench.
+static float g_hcScroll = 0.0f;
+static void DrawHouseCraftGump(GameState& s) {
+    int mIdx = s.houseCraftModule;
+    if (mIdx < 0 || mIdx > 3) { s.houseCraftModule = -1; return; }
+    Rectangle G = { 20, 190, 500, 520 };
+    UODrawGump(G, kUoParchment);
+    const HomeModuleDef& def = kHomeModuleDefs[mIdx];
+    UODrawTitle(G, def.label, 14);
+    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_X)) { s.houseCraftModule = -1; return; }
+    int level = s.houseModuleLevel[mIdx];
+    Color ink = { 60, 40, 24, 255 };
+    if (level <= 0) {
+        DrawUIText(("Build the " + def.label + " on the House screen").c_str(), (int)G.x + 24, (int)G.y + 40, 14, ink);
+        DrawUIText("to work at this station.", (int)G.x + 24, (int)G.y + 60, 14, ink);
+        return;
+    }
+    int cap = kHomeModuleLevels[level - 1].cap;
+    const BuildingDef& b = kCraftBuildings[def.buildingIdx];
+    float skillVal = s.buildingSkill[def.buildingIdx];
+    DrawUIText(TextFormat("Level %d wing - skill %.1f (works up to %d)", level, skillVal, cap), (int)G.x + 24, (int)G.y + 30, 13, ink);
+    Rectangle area = { G.x + 14, G.y + 56, G.width - 28, G.height - 70 };
+    const float rowH = 40.0f;
+    g_hcScroll -= ScrollDelta(area);
+    g_hcScroll = std::clamp(g_hcScroll, 0.0f, std::max(0.0f, b.recipes.size() * rowH - area.height));
+    BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
+    for (size_t r = 0; r < b.recipes.size(); r++) {
+        const Recipe& recipe = b.recipes[r];
+        float y = area.y + r * rowH - g_hcScroll;
+        if (y + rowH < area.y || y > area.y + area.height) continue;
+        bool skillOk = std::min(skillVal, (float)cap) >= recipe.reqSkill;
+        DrawRectangleRec({ area.x, y + 2, area.width, rowH - 4 }, Fade(r % 2 ? WHITE : BLACK, 0.06f));
+        DrawUIText(recipe.name.c_str(), (int)area.x + 8, (int)y + 6, 14, skillOk ? ink : Fade(ink, 0.45f));
+        DrawUIText(TextFormat("needs %d skill, %d %s", recipe.reqSkill, recipe.cost, def.buildingIdx == 3 ? "reagents" : "materials"),
+                   (int)area.x + 8, (int)y + 22, 11, Fade(ink, 0.7f));
+        if (UOButton({ area.x + area.width - 90, y + 5, 82, 30 }, def.buildingIdx == 3 ? "Brew" : "Craft", skillOk)) {
+            if (def.buildingIdx == 3) TryCraftPotion(s, (int)r, cap);
+            else TryCraftItem(s, def.buildingIdx, (int)r, cap);
+        }
+    }
+    EndScissorMode();
 }
 static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
     const InteriorRoomDef* room = InteriorRoomFor(s.interiorKey);
@@ -18833,8 +20006,10 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
     const InteriorNPCDef* npc = nullptr; // the one you greet
     for (const auto& n : npcs) if (n.greeting && *n.greeting) { npc = &n; break; }
 
-    bool uiOpen = s.selectedTile.has_value() || s.interiorGreeted;
-    if (IsKeyPressed(KEY_X) && uiOpen) {
+    const bool home = s.interiorKey == "wildhouse";
+    if (!home) HouseDecorEnd();
+    bool uiOpen = s.selectedTile.has_value() || s.interiorGreeted || (home && (g_hdOn || s.houseChestOpen || s.houseCraftModule >= 0));
+    if (IsKeyPressed(KEY_X) && (s.selectedTile.has_value() || s.interiorGreeted)) {
         s.selectedTile.reset(); s.interiorGreeted = false; uiOpen = false;
     }
 
@@ -18873,7 +20048,7 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
     if (s.interior3DView) DrawInterior3DWorld(s, *room, props, npcs, screenW, screenH, uiOpen);
     else DrawInterior2D(s, screenW, screenH, *room, props, prompt, nearest, npcNearest, npc);
 
-    DrawVirtualJoystick();
+    if (!(home && g_hdOn)) DrawVirtualJoystick();
     if (inRange && !uiOpen && DrawInteractButton(prompt)) {
         if (InteriorDoInteract(s, nearest, npcNearest)) return;
     }
@@ -18900,8 +20075,12 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
             s.interiorGreeted = false;
     }
 
-    // Storage chest panel (wilderness homestead only).
-    if (s.houseChestOpen && s.interiorKey == "wildhouse") DrawHouseChestPanel(s, screenW, screenH);
+    // Homestead: decorate mode, the storage panel and workshop stations.
+    if (home) {
+        if (!s.houseChestOpen && s.houseCraftModule < 0) DrawHouseDecorateUI(s, screenW, screenH);
+        if (s.houseChestOpen) DrawHouseChestPanel(s, screenW, screenH);
+        if (s.houseCraftModule >= 0) DrawHouseCraftGump(s);
+    }
 }
 
 
@@ -22391,22 +23570,69 @@ static void TryBuyHousePlot(GameState& s, int plotIdx) {
 static void TryEnterHomestead(GameState& s) {
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
     EnterInterior(s, "wildhouse");
+    if (s.screen != Screen::Interior) return;
+    HouseInteriorBuild(s); // lay out the rooms now, so you step in at the right door
+    if (g_houseInt.ok) {
+        s.interiorPlayerPos = g_houseInt.doorIn;
+        s.playerFacing = g_houseInt.doorDir;
+        g_t3dDist = 560.0f;
+    }
+    s.houseCraftModule = -1;
+    HouseDecorEnd();
+    HouseFurnishOnEnter(s);
 }
 
 static int HouseDesignerToolCost(int tool) {
     if (tool == 0) return kHouseFloorCost;
     if (tool == 1) return kHouseWallCost;
-    if (tool == 2) return kHouseDoorCost;
+    if (tool == 2) return kHouseWindowCost;
+    if (tool == 3) return kHouseDoorCost;
     return 0;
 }
 static const char* HouseDesignerToolName(int tool) {
-    if (tool == 0) return "Floor";
-    if (tool == 1) return "Wall";
-    if (tool == 2) return "Door";
-    return "Erase";
+    static const char* names[5] = { "Floor", "Wall", "Window", "Door", "Erase" };
+    return names[std::clamp(tool, 0, 4)];
+}
+static char HouseToolCell(int tool) { return tool == 0 ? 'F' : tool == 1 ? 'W' : tool == 2 ? 'N' : tool == 3 ? 'D' : '.'; }
+static int HouseCellValue(char c) { return c == 'F' ? kHouseFloorCost : c == 'W' ? kHouseWallCost : c == 'N' ? kHouseWindowCost : c == 'D' ? kHouseDoorCost : 0; }
+
+// One designer tile, drawn with the house's own textures.
+static void HouseDrawDesignCell(Rectangle r, char c, const GameState& s) {
+    auto tex = [&](int surf, Color tint) {
+        const Texture2D& t = SurfTex(surf);
+        DrawTexturePro(t, { r.x * 2.2f, r.y * 2.2f, r.width * 2.2f, r.height * 2.2f }, r, { 0, 0 }, 0, tint);
+    };
+    if (c == '.') {
+        DrawRectangleRec(r, Color{ 64, 86, 50, 255 });
+        DrawRectangleLinesEx(r, 1.0f, Fade(BLACK, 0.25f));
+        return;
+    }
+    if (c == 'F') {
+        tex(kHouseFloorSurfs[s.houseFloorStyle], WHITE);
+    } else {
+        tex(kHouseWallSurfs[s.houseWallStyle], Color{ 200, 190, 180, 255 });
+        DrawRectangleLinesEx({ r.x + 1, r.y + 1, r.width - 2, r.height - 2 }, 2.0f, Color{ 60, 40, 26, 255 });
+        if (c == 'N') {
+            Rectangle g = { r.x + r.width * 0.22f, r.y + r.height * 0.22f, r.width * 0.56f, r.height * 0.56f };
+            DrawRectangleRec(g, Color{ 140, 190, 220, 255 });
+            DrawRectangleGradientV((int)g.x, (int)g.y, (int)g.width, (int)(g.height / 2), Fade(WHITE, 0.5f), Fade(WHITE, 0.0f));
+            DrawLineEx({ g.x + g.width / 2, g.y }, { g.x + g.width / 2, g.y + g.height }, 1.5f, Color{ 60, 40, 26, 255 });
+            DrawLineEx({ g.x, g.y + g.height / 2 }, { g.x + g.width, g.y + g.height / 2 }, 1.5f, Color{ 60, 40, 26, 255 });
+            DrawRectangleLinesEx(g, 1.5f, Color{ 60, 40, 26, 255 });
+        } else if (c == 'D') {
+            Rectangle d = { r.x + r.width * 0.25f, r.y + r.height * 0.14f, r.width * 0.5f, r.height * 0.8f };
+            const Texture2D& t = SurfTex(kIsDarkPlank);
+            DrawTexturePro(t, { 0, 0, 90, 140 }, d, { 0, 0 }, 0, WHITE);
+            DrawRectangleLinesEx(d, 1.5f, Color{ 30, 20, 12, 255 });
+            DrawCircleV({ d.x + d.width * 0.75f, d.y + d.height * 0.55f }, std::max(1.5f, r.width * 0.05f), Color{ 230, 190, 90, 255 });
+        }
+    }
+    DrawRectangleLinesEx(r, 1.0f, Fade(BLACK, 0.35f));
 }
 
-// Touch-friendly grid editor overlay. Drawn instead of the world while open.
+// UO-style custom house designer: a parchment gump with the plot grid painted
+// in the house's real textures, a tool strip (floor, wall, window, door,
+// erase - drag to paint), wall/floor/roof style pickers, Done and Demolish.
 static void DrawHouseDesigner(GameState& s, int screenW, int screenH) {
     if (s.housePlotIdx < 0 || s.housePlotIdx >= (int)kHousePlots.size()) {
         s.houseDesignerOpen = false;
@@ -22415,106 +23641,139 @@ static void DrawHouseDesigner(GameState& s, int screenW, int screenH) {
     const HousePlot& p = kHousePlots[s.housePlotIdx];
     int cells = p.cells;
     if (!HouseLayoutValid(s.houseLayout, cells)) s.houseLayout = HouseEmptyLayout(cells);
+    static int lastCell = -1;
 
     if (IsKeyPressed(KEY_ESCAPE)) { s.houseDesignerOpen = false; s.houseDemolishArmed = false; return; }
-    for (int t = 0; t < 4; t++)
+    for (int t = 0; t < 5; t++)
         if (IsKeyPressed(KEY_ONE + t)) { s.houseDesignerTool = t; PlaySfx(SfxId::Click); }
+    s.houseDesignerTool = std::clamp(s.houseDesignerTool, 0, 4);
 
-    DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, 0.65f));
-    DrawUIText(("House Designer - " + std::string(p.name)).c_str(), 20, 116, 16, kColorHeading);
-    DrawUIText(("Gold: " + std::to_string(s.gold) + "g").c_str(), 20, 140, 14, kColorText);
-    DrawUIText("Tap a tile to place it. Keys 1-4 pick a tool.", 20, 162, 12, kColorText);
-    DrawUIText("Place a Door so you can walk in. One door per house -", 20, 178, 12, kColorText);
-    DrawUIText("placing a new one moves it. Erasing gives no refund.", 20, 194, 12, kColorText);
+    DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, 0.7f));
+    Rectangle G = { 8, 116, (float)screenW - 16, (float)screenH - 124 };
+    UODrawGump(G, kUoParchment);
+    UODrawTitle(G, "House Designer - " + std::string(p.name), 14);
+    if (UOCloseButton(G)) { s.houseDesignerOpen = false; s.houseDemolishArmed = false; return; }
+    const Color ink = { 60, 40, 24, 255 };
+    int nF = 0, nW = 0, nN = 0, nD = 0;
+    for (char c : s.houseLayout) { nF += c == 'F'; nW += c == 'W'; nN += c == 'N'; nD += c == 'D'; }
+    UODrawIcon(kUoiGold, G.x + 30, G.y + 34, 22);
+    DrawUIText(TextFormat("%d", s.gold), (int)G.x + 46, (int)G.y + 26, 15, ink);
+    DrawUIText(TextFormat("%d floor  %d wall  %d window  %s", nF, nW, nN, nD ? "door set" : "no door yet"),
+               (int)G.x + 130, (int)G.y + 28, 12, nD ? ink : Color{ 160, 50, 30, 255 });
 
-    // Tool palette - horizontal row above the grid (540x900 portrait screen).
-    float bw = 118.0f, bh = 34.0f;
-    float bx = (screenW - (4 * bw + 3 * 8.0f)) / 2.0f;
-    for (int t = 0; t < 4; t++) {
-        std::string label = std::string(HouseDesignerToolName(t));
+    // tool strip
+    const float tw = (G.width - 40) / 5.0f;
+    for (int t = 0; t < 5; t++) {
+        Rectangle br = { G.x + 16 + t * (tw + 2), G.y + 50, tw - 2, 50 };
+        bool on = s.houseDesignerTool == t;
+        DrawRectangleRec(br, on ? Color{ 110, 74, 40, 255 } : Color{ 70, 48, 30, 255 });
+        DrawRectangleLinesEx(br, on ? 3.0f : 1.5f, on ? kUoBronzeHi : kUoBronze);
+        Rectangle sw = { br.x + 6, br.y + 9, 32, 32 };
+        if (t < 4) HouseDrawDesignCell(sw, HouseToolCell(t), s);
+        else {
+            DrawRectangleRec(sw, Color{ 64, 86, 50, 255 });
+            DrawLineEx({ sw.x + 6, sw.y + 6 }, { sw.x + 26, sw.y + 26 }, 3.0f, Color{ 220, 80, 60, 255 });
+            DrawLineEx({ sw.x + 26, sw.y + 6 }, { sw.x + 6, sw.y + 26 }, 3.0f, Color{ 220, 80, 60, 255 });
+        }
+        DrawUIText(HouseDesignerToolName(t), (int)br.x + 44, (int)br.y + 9, 13, on ? kUoGoldText : Color{ 220, 205, 180, 255 });
         int cost = HouseDesignerToolCost(t);
-        if (cost > 0) label += " " + std::to_string(cost) + "g";
-        Rectangle br = { bx + t * (bw + 8.0f), 216.0f, bw, bh };
-        if (Button(br, label, true)) s.houseDesignerTool = t;
-        if (s.houseDesignerTool == t)
-            DrawRectangleRoundedLines({ br.x - 3, br.y - 3, br.width + 6, br.height + 6 }, 0.25f, 6, GOLD);
+        DrawUIText(cost > 0 ? TextFormat("%dg", cost) : "50% back", (int)br.x + 44, (int)br.y + 27, 11, Color{ 200, 180, 140, 255 });
+        if (UOTapped(br) && !on) { s.houseDesignerTool = t; PlaySfx(SfxId::Click); }
     }
 
-    float cellPx = std::min(38.0f, 460.0f / cells);
+    // the plot grid - tap or drag to paint
+    float cellPx = std::min(36.0f, (G.width - 60) / cells);
     float gw = cells * cellPx, gh = cells * cellPx;
-    float gx = (screenW - gw) / 2.0f;
-    float gy = 262.0f;
-
-    // Grid.
+    float gx = G.x + (G.width - gw) / 2.0f, gy = G.y + 114;
+    DrawRectangleRec({ gx - 6, gy - 6, gw + 12, gh + 12 }, Color{ 90, 70, 44, 255 });
+    DrawRectangleLinesEx({ gx - 6, gy - 6, gw + 12, gh + 12 }, 2.0f, kUoBronze);
     Vector2 m = GetMousePosition();
-    bool clicked = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    bool down = IsMouseButtonDown(MOUSE_BUTTON_LEFT), pressed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (!down) lastCell = -1;
     for (int cy = 0; cy < cells; cy++) {
         for (int cx = 0; cx < cells; cx++) {
             Rectangle r = { gx + cx * cellPx, gy + cy * cellPx, cellPx, cellPx };
             char c = HouseCellAt(s.houseLayout, cells, cx, cy);
-            Color fill = { 40, 36, 30, 255 };
-            if (c == 'F') fill = { 150, 110, 70, 255 };
-            else if (c == 'W') fill = { 96, 70, 45, 255 };
-            else if (c == 'D') fill = { 200, 170, 90, 255 };
-            DrawRectangleRec(r, fill);
-            DrawRectangleLinesEx(r, 1.0f, Fade(BLACK, 0.5f));
-            if (CheckCollisionPointRec(m, r)) {
-                DrawRectangleLinesEx(r, 2.0f, GOLD);
-                if (clicked) {
-                    int tool = s.houseDesignerTool;
-                    if (tool == 3) { // erase - no refund (noted in the House tab)
-                        if (c != '.') { HouseSetCell(s.houseLayout, cells, cx, cy, '.'); PlaySfx(SfxId::Click); }
-                    } else if (tool == 2) { // door - exactly one; the old one becomes wall
-                        if (c != 'D') {
-                            if (s.gold < kHouseDoorCost) s.logLine = "A door costs 50g.";
-                            else {
-                                for (size_t i = 0; i < s.houseLayout.size(); i++)
-                                    if (s.houseLayout[i] == 'D') s.houseLayout[i] = 'W';
-                                HouseSetCell(s.houseLayout, cells, cx, cy, 'D');
-                                s.gold -= kHouseDoorCost;
-                                PlaySfx(SfxId::Door);
-                            }
-                        }
-                    } else {
-                        char want = (tool == 0) ? 'F' : 'W';
-                        int cost = HouseDesignerToolCost(tool);
-                        if (c == want || c == 'D') { /* no-op */ }
-                        else if (s.gold < cost) s.logLine = "Not enough gold.";
-                        else {
-                            HouseSetCell(s.houseLayout, cells, cx, cy, want);
-                            s.gold -= cost;
-                            PlaySfx(SfxId::Click);
-                        }
-                    }
-                    s.houseDemolishArmed = false;
-                }
+            HouseDrawDesignCell(r, c, s);
+            if (!CheckCollisionPointRec(m, r)) continue;
+            DrawRectangleLinesEx(r, 2.0f, GOLD);
+            int idx = cy * cells + cx;
+            int tool = s.houseDesignerTool;
+            bool act = pressed || (down && lastCell >= 0 && lastCell != idx && tool != 3);
+            if (!act) continue;
+            lastCell = idx;
+            s.houseDemolishArmed = false;
+            char want = HouseToolCell(tool);
+            if (c == want) continue;
+            if (tool == 4) { // erase: half the tile's price back
+                s.gold += HouseCellValue(c) / 2;
+                HouseSetCell(s.houseLayout, cells, cx, cy, '.');
+                PlaySfx(SfxId::Click);
+                continue;
             }
+            int cost = HouseDesignerToolCost(tool);
+            if (s.gold < cost) { s.logLine = std::string("A ") + HouseDesignerToolName(tool) + " tile costs " + std::to_string(cost) + "g."; continue; }
+            if (tool == 3) // one door per house: the old one becomes wall
+                for (size_t i = 0; i < s.houseLayout.size(); i++)
+                    if (s.houseLayout[i] == 'D') s.houseLayout[i] = 'W';
+            HouseSetCell(s.houseLayout, cells, cx, cy, want);
+            s.gold -= cost;
+            PlaySfx(tool == 3 ? SfxId::Door : SfxId::Click);
         }
     }
+    DrawUIText("N", (int)(gx + gw / 2 - 4), (int)gy - 22, 13, ink);
+    DrawUIText("front", (int)(gx + gw / 2 - 16), (int)(gy + gh + 6), 11, Fade(ink, 0.7f));
 
-    // Done / Demolish.
-    float by = gy + gh + 14.0f;
-    float btnX = (screenW - 352.0f) / 2.0f;
-    if (Button({ btnX, by, 150.0f, 38.0f }, "Done [ESC]", true)) {
+    // style pickers
+    float sy = gy + gh + 26;
+    auto picker = [&](const char* label, int* idx, const int* surfs, int count, bool inUse) {
+        DrawUIText(label, (int)G.x + 24, (int)sy + 9, 14, ink);
+        Rectangle prev = { G.x + 104, sy, 34, 32 }, next = { G.x + G.width - 146, sy, 34, 32 };
+        Rectangle sw = { G.x + 146, sy, 32, 32 };
+        DrawTexturePro(SurfTex(surfs[*idx]), { 0, 0, 128, 128 }, sw, { 0, 0 }, 0, WHITE);
+        DrawRectangleLinesEx(sw, 2.0f, kUoBronze);
+        DrawUIText(SurfName(surfs[*idx]), (int)sw.x + 42, (int)sy + 9, 14, ink);
+        int cost = inUse ? kHouseRestyleCost : 0;
+        int dir = 0;
+        if (UOButton(prev, "<")) dir = -1;
+        if (UOButton(next, ">")) dir = 1;
+        DrawUIText(cost ? TextFormat("%dg", cost) : "free", (int)(next.x + 42), (int)sy + 9, 12, Fade(ink, 0.7f));
+        if (dir != 0) {
+            if (s.gold < cost) s.logLine = "Restyling costs " + std::to_string(cost) + "g.";
+            else { *idx = (*idx + dir + count) % count; s.gold -= cost; }
+        }
+        sy += 40;
+    };
+    picker("Walls", &s.houseWallStyle, kHouseWallSurfs, kHouseWallStyleCount, nW + nN + nD > 0);
+    picker("Floor", &s.houseFloorStyle, kHouseFloorSurfs, kHouseFloorStyleCount, nF > 0);
+    picker("Roof", &s.houseRoofStyle, kHouseRoofSurfs, kHouseRoofStyleCount, nF + nW + nN + nD > 0);
+
+    // Done / Demolish
+    float by = std::min(sy + 6, G.y + G.height - 52);
+    if (UOButton({ G.x + 24, by, 200, 40 }, "Done [ESC]")) {
         s.houseDesignerOpen = false;
         s.houseDemolishArmed = false;
-        if (!HouseHasDoor(s.houseLayout, cells))
-            s.logLine = "House saved. Place a Door so you can walk inside.";
-        else
-            s.logLine = "House saved. Walk up to the door and press E to go inside.";
+        if (!HouseHasDoor(s.houseLayout, cells)) s.logLine = "House saved. Place a Door so you can walk inside.";
+        else s.logLine = "House saved. Walk up to the door and press E to go inside.";
     }
     std::string demLabel = s.houseDemolishArmed ? "Tap again to confirm" : "Demolish";
-    if (Button({ btnX + 162.0f, by, 190.0f, 38.0f }, demLabel, true)) {
+    if (UOButton({ G.x + G.width - 224, by, 200, 40 }, demLabel)) {
         if (!s.houseDemolishArmed) {
             s.houseDemolishArmed = true;
-            s.logLine = "Demolish clears your whole design (no refund). Tap again to confirm.";
+            s.logLine = "Demolish clears the whole design (furniture is packed up and refunded). Tap again to confirm.";
         } else {
+            int refund = 0;
+            for (const auto& d : s.houseDecor) { refund += kHouseDecorDefs[d.kind].gold; s.wood += kHouseDecorDefs[d.kind].wood; }
+            s.gold += refund;
+            s.houseDecor.clear();
+            s.houseFurnished = false;
             s.houseLayout = HouseEmptyLayout(cells);
             s.houseDemolishArmed = false;
             PlaySfx(SfxId::Click);
-            s.logLine = "House demolished. The plot is still yours.";
+            s.logLine = "House demolished (" + std::to_string(refund) + "g of furniture refunded). The plot is still yours.";
         }
     }
+    (void)screenH;
 }
 
 // 2D wilderness rendering of plots and custom houses.
@@ -22552,15 +23811,19 @@ static void DrawWildernessHousePlots2D(const GameState& s, Vector2 camera, bool 
                 Vector2 cp = WorldToScreen(cc, camera);
                 float cs = kHouseCellSize; // 2D wilderness is 1:1 world->screen (no zoom)
                 Rectangle r = { cp.x - cs / 2, cp.y - cs / 2, cs, cs };
-                if (c == 'F') DrawRectangleRec(r, Color{ 150, 110, 70, 255 });
-                else if (c == 'W') {
-                    DrawRectangleRec(r, Color{ 150, 110, 70, 255 });
-                    DrawRectangleRec({ r.x + cs * 0.12f, r.y + cs * 0.12f, cs * 0.76f, cs * 0.76f },
-                                     Color{ 96, 70, 45, 255 });
-                } else if (c == 'D') {
-                    DrawRectangleRec(r, Color{ 150, 110, 70, 255 });
-                    DrawRectangleRec({ r.x + cs * 0.12f, r.y + cs * 0.12f, cs * 0.76f, cs * 0.76f },
-                                     Color{ 200, 170, 90, 255 });
+                // Housing 2.0: seen from above it's the roof, walls along the outline,
+                // glass on window cells and the door on its outward side.
+                DrawTexturePro(SurfTex(kHouseRoofSurfs[s.houseRoofStyle]), { cc.x * 2.0f, cc.y * 2.0f, cs * 2.0f, cs * 2.0f }, r, { 0, 0 }, 0, WHITE);
+                const int dx4[4] = { 0, 0, -1, 1 }, dy4[4] = { -1, 1, 0, 0 };
+                for (int k = 0; k < 4; k++) {
+                    if (HouseCellAt(s.houseLayout, cells, cx + dx4[k], cy + dy4[k]) != '.') continue;
+                    Rectangle e = k == 0 ? Rectangle{ r.x, r.y, cs, 5 } : k == 1 ? Rectangle{ r.x, r.y + cs - 5, cs, 5 }
+                                : k == 2 ? Rectangle{ r.x, r.y, 5, cs } : Rectangle{ r.x + cs - 5, r.y, 5, cs };
+                    DrawRectangleRec(e, Color{ 70, 50, 34, 255 });
+                    Rectangle mid = k < 2 ? Rectangle{ e.x + cs * 0.3f, e.y, cs * 0.4f, e.height } : Rectangle{ e.x, e.y + cs * 0.3f, e.width, cs * 0.4f };
+                    if (c == 'N') DrawRectangleRec(mid, Color{ 150, 200, 230, 255 });
+                    else if (c == 'D') DrawRectangleRec(k < 2 ? Rectangle{ mid.x, mid.y - 2, mid.width, mid.height + 4 } : Rectangle{ mid.x - 2, mid.y, mid.width + 4, mid.height },
+                                                        Color{ 200, 150, 80, 255 });
                 }
             }
         }
@@ -23555,15 +24818,18 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, s.wildEngaged->pos, kNodeRadius * 0.6f);
     for (auto& entrance : kWildernessDungeonEntrances)
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, entrance.pos, kNodeRadius * 0.8f);
-    // Custom house walls block movement (2026-09-25) - floors and the door are walkable.
+    // Custom house blocks movement (2026-09-25; Housing 2.0: roofed, so every cell is solid -
+    // the door is used from the step outside it).
     if (s.housePlotIdx >= 0 && s.housePlotIdx < (int)kHousePlots.size()) {
         const HousePlot& hp = kHousePlots[s.housePlotIdx];
         if (HouseLayoutValid(s.houseLayout, hp.cells)) {
             for (int cy = 0; cy < hp.cells; cy++)
                 for (int cx = 0; cx < hp.cells; cx++)
-                    if (HouseCellAt(s.houseLayout, hp.cells, cx, cy) == 'W')
-                        ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius,
-                                               HouseCellCenter(hp, cx, cy), kHouseCellSize * 0.45f);
+                    if (HouseCellAt(s.houseLayout, hp.cells, cx, cy) != '.') { // Housing 2.0: the whole house is solid
+                        Vector2 cc = HouseCellCenter(hp, cx, cy);
+                        ResolveCircleRectCollision(s.wildernessPlayerPos, kPlayerRadius,
+                                                   { cc.x - kHouseCellSize * 0.5f, cc.y - kHouseCellSize * 0.5f, kHouseCellSize, kHouseCellSize });
+                    }
         }
     }
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessReturnGatePos, kNodeRadius);
