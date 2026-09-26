@@ -12268,6 +12268,209 @@ static void Dungeon3DBuildWalls(int dungeonIdx) {
     W.loaded = true;
 }
 
+// ---- Dungeon dressing: KayKit props along the walls (2026-09-26) ----
+// The 3D dungeons were bare extruded boxes. This places KayKit Dungeon
+// Remastered props (assets/dungeon_props, CC0) against the wall faces, themed
+// per dungeon: crates and kegs in the raider nest, pillars/candles/broken arms
+// in the crypts, banners in each dungeon's color. Purely visual - nothing here
+// touches collision (DungeonIsFloor stays the only walkability test), so props
+// are kept tight to the walls, out of corridors and doorways, and clear of the
+// torch poles and the entrance/exit, where the player and monsters actually
+// move. Placement runs on the same 45-unit grid the wall mesh is extruded
+// from, so every prop sits against a real wall face. It is deterministic per
+// dungeon (hash of cell + side), built once like the walls, and costs one
+// DrawModelEx per prop (a few dozen per dungeon).
+enum DungeonPropId {
+    kDPBarrel, kDPBarrelStack, kDPBox, kDPBoxStack, kDPCrates, kDPKeg, kDPTrunk,
+    kDPTableBroken, kDPBedroll, kDPRubbleHalf, kDPRubbleLarge, kDPCandles, kDPPillar,
+    kDPShelves, kDPShelfCandles, kDPSwordShield,
+    kDPBannerWhite, kDPBannerGreen, kDPBannerBlue, kDPBannerRed, kDPBannerBrown, kDPBannerYellow,
+    kDPCount
+};
+struct DungeonPropDef {
+    const char* file;
+    bool wall;      // wall-mounted: back pressed to the wall face, lifted to mountY
+    float scaleMul; // on top of kDung3DPropScale
+    float mountY;   // wall props: lift in kit units
+};
+static const DungeonPropDef kDungeonPropDefs[kDPCount] = {
+    { "barrel_large", false, 0.85f, 0.0f },
+    { "barrel_small_stack", false, 1.0f, 0.0f },
+    { "box_large", false, 1.0f, 0.0f },
+    { "box_stacked", false, 0.55f, 0.0f },
+    { "crates_stacked", false, 0.75f, 0.0f },
+    { "keg", false, 0.85f, 0.0f },
+    { "trunk_medium_A", false, 1.1f, 0.0f },
+    { "table_medium_broken", false, 0.85f, 0.0f },
+    { "bed_floor", false, 1.0f, 0.0f },
+    { "rubble_half", false, 0.45f, 0.0f },
+    { "rubble_large", false, 0.30f, 0.0f },
+    { "candle_triple", false, 1.3f, 0.0f },
+    { "pillar_decorated", false, 0.7f, 0.0f },
+    { "shelves", true, 1.0f, 0.0f },
+    { "shelf_small_candles", true, 1.3f, 1.6f },
+    { "sword_shield_broken", true, 1.2f, 1.7f },
+    { "banner_patternA_white", true, 1.0f, 0.0f },
+    { "banner_patternA_green", true, 1.0f, 0.0f },
+    { "banner_patternA_blue", true, 1.0f, 0.0f },
+    { "banner_patternA_red", true, 1.0f, 0.0f },
+    { "banner_patternA_brown", true, 1.0f, 0.0f },
+    { "banner_patternA_yellow", true, 1.0f, 0.0f },
+};
+// KayKit walls are 4 kit units tall; ours are kDung3DWallH (100), so 25 keeps
+// the pack's own proportions against our walls and the ~60-unit characters.
+static const float kDung3DPropScale = 25.0f;
+
+// Per-dungeon theme: floor clutter pool, wall-mounted pool, banner color.
+struct DungeonPropTheme { std::vector<int> floor; std::vector<int> wall; int banner; };
+static const DungeonPropTheme kDungeonPropThemes[6] = {
+    // [0] Whisper Crypt: old tomb - rubble, candles, fallen arms, white banners
+    { { kDPRubbleHalf, kDPRubbleLarge, kDPCandles, kDPCandles, kDPTrunk, kDPBarrel },
+      { kDPSwordShield, kDPShelfCandles, kDPShelves }, kDPBannerWhite },
+    // [1] Weavers' Nest: raider stronghold - supplies, bedrolls, broken tables
+    { { kDPCrates, kDPBoxStack, kDPBarrel, kDPKeg, kDPBedroll, kDPTableBroken, kDPBox, kDPBarrelStack },
+      { kDPShelves, kDPSwordShield }, kDPBannerGreen },
+    // [2] Sunken Vault: flooded cave vault - washed-up cargo and collapse
+    { { kDPBarrelStack, kDPBox, kDPRubbleHalf, kDPTrunk, kDPBarrel, kDPRubbleLarge },
+      { kDPShelves }, kDPBannerBlue },
+    // [3] Ember Depths: volcanic forge - kegs, crates, slag rubble, spent arms
+    { { kDPKeg, kDPBarrel, kDPCrates, kDPRubbleHalf, kDPBox, kDPRubbleLarge },
+      { kDPSwordShield, kDPShelves }, kDPBannerRed },
+    // [4] Frostbound Tomb: frozen royal crypt - candles, fallen arms, rubble
+    { { kDPCandles, kDPRubbleHalf, kDPCandles, kDPTrunk, kDPRubbleLarge },
+      { kDPSwordShield, kDPShelfCandles }, kDPBannerBlue },
+    // [5] The Hollow: lightless abyss - collapse and a few old candles
+    { { kDPRubbleHalf, kDPRubbleLarge, kDPCandles, kDPBarrel, kDPTrunk },
+      { kDPShelfCandles, kDPShelves }, kDPBannerYellow },
+};
+
+struct DungeonPropInst { int id; Vector3 pos; float yawDeg; float scale; };
+struct Dungeon3DProps {
+    bool modelsTried = false;
+    Model models[kDPCount]{};
+    bool ok[kDPCount]{};
+    BoundingBox bb[kDPCount]{};
+    int dungeon = -1;
+    std::vector<DungeonPropInst> inst;
+};
+static Dungeon3DProps g_dung3dProps;
+
+static float Dungeon3DPropHash(int a, int b, int c) {
+    unsigned int h = (unsigned int)a * 73856093u ^ (unsigned int)b * 19349663u ^ (unsigned int)c * 83492791u;
+    h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+    return (h & 0xFFFFu) / 65535.0f;
+}
+
+static void Dungeon3DBuildProps(int dungeonIdx) {
+    Dungeon3DProps& P = g_dung3dProps;
+    if (!P.modelsTried) {
+        P.modelsTried = true;
+        for (int i = 0; i < kDPCount; i++) {
+            const char* path = TextFormat("assets/dungeon_props/%s.glb", kDungeonPropDefs[i].file);
+            if (!FileExists(path)) continue; // missing asset: that prop is simply skipped
+            P.models[i] = LoadModel(path);
+            P.ok[i] = P.models[i].meshCount > 0;
+            if (!P.ok[i]) continue;
+            P.bb[i] = GetModelBoundingBox(P.models[i]);
+            Dungeon3DApplyTorchShader(P.models[i]);
+        }
+    }
+    if (P.dungeon == dungeonIdx) return;
+    P.dungeon = dungeonIdx;
+    P.inst.clear();
+    if (dungeonIdx < 0 || dungeonIdx >= 6) return;
+    const DungeonPropTheme& theme = kDungeonPropThemes[dungeonIdx];
+    const int N = kDung3DGridN;
+    const float cell = kDung3DCell, half = kDung3DCell * 0.5f;
+    auto floorAt = [&](int gx, int gz) -> bool {
+        if (gx < 0 || gz < 0 || gx >= N || gz >= N) return false;
+        return DungeonIsFloor(dungeonIdx, { (gx + 0.5f) * cell, (gz + 0.5f) * cell });
+    };
+    // Rooms only: a cell inside any corridor rect (the small connectors) stays
+    // bare, so passages never get narrower than they look in 2D.
+    auto inRoom = [&](Vector2 p) -> bool {
+        bool room = false;
+        for (const Rectangle& r : kDungeonRoomLayouts[dungeonIdx]) {
+            if (p.x < r.x || p.x > r.x + r.width || p.y < r.y || p.y > r.y + r.height) continue;
+            if (r.width * r.height < 50000.0f) return false;
+            room = true;
+        }
+        return room;
+    };
+    Vector3 torches[kDung3DMaxTorches];
+    int torchCount = 0;
+    Dungeon3DTorchSpots(dungeonIdx, torches, &torchCount);
+    auto dist = [](Vector2 a, Vector2 b) { return sqrtf((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y)); };
+    auto clearOf = [&](Vector2 p) -> bool {
+        if (dist(p, kDung3DExitPos) < 120.0f) return false; // entrance/exit + spawn
+        for (int i = 0; i < torchCount; i++)
+            if (dist(p, { torches[i].x, torches[i].z }) < 75.0f) return false;
+        return true;
+    };
+    // face: point on the wall face; n: unit normal pointing into the room.
+    auto addProp = [&](int id, Vector2 face, Vector2 n, float jitterDeg) {
+        if (!P.ok[id]) return;
+        const DungeonPropDef& d = kDungeonPropDefs[id];
+        float sc = kDung3DPropScale * d.scaleMul;
+        float yaw = atan2f(n.x, n.y) * RAD2DEG + jitterDeg; // model +Z faces into the room
+        float off;
+        if (d.wall) {
+            // Back of the model (its min Z) pressed against the face, 0.5 off it.
+            off = 0.5f - P.bb[id].min.z * sc;
+        } else {
+            // Pull the footprint's radius off the wall so nothing clips into it.
+            const BoundingBox& b = P.bb[id];
+            float r = fmaxf(fmaxf(fabsf(b.min.x), fabsf(b.max.x)), fmaxf(fabsf(b.min.z), fabsf(b.max.z))) * sc;
+            off = fminf(r, 34.0f) + 2.0f;
+        }
+        P.inst.push_back({ id, { face.x + n.x * off, d.mountY * sc, face.y + n.y * off }, yaw, sc });
+    };
+    const int dx[4] = { 1, -1, 0, 0 }, dz[4] = { 0, 0, 1, -1 };
+    for (int gz = 0; gz < N; gz++) {
+        for (int gx = 0; gx < N; gx++) {
+            if (!floorAt(gx, gz)) continue;
+            Vector2 c = { (gx + 0.5f) * cell, (gz + 0.5f) * cell };
+            if (!inRoom(c) || !clearOf(c)) continue;
+            // Inner corner: walls on two perpendicular sides -> a pillar.
+            for (int a = 0; a < 2; a++) {
+                for (int b = 2; b < 4; b++) {
+                    if (floorAt(gx + dx[a], gz + dz[a]) || floorAt(gx + dx[b], gz + dz[b])) continue;
+                    if (Dungeon3DPropHash(gx, gz, dungeonIdx * 7 + a * 2 + b) > 0.75f) continue;
+                    Vector2 corner = { c.x + (dx[a] + dx[b]) * half, c.y + (dz[a] + dz[b]) * half };
+                    Vector2 n = { -(float)(dx[a] + dx[b]) * 0.70711f, -(float)(dz[a] + dz[b]) * 0.70711f };
+                    addProp(kDPPillar, { corner.x + n.x * 4.0f, corner.y + n.y * 4.0f }, n, 0.0f);
+                }
+            }
+            // Straight wall runs: wall on side k here and on both lateral
+            // neighbors (so never at a doorway or a corner).
+            for (int k = 0; k < 4; k++) {
+                if (floorAt(gx + dx[k], gz + dz[k])) continue;
+                int px = dz[k], pz = dx[k]; // perpendicular
+                if (!floorAt(gx + px, gz + pz) || !floorAt(gx - px, gz - pz)) continue;
+                if (floorAt(gx + px + dx[k], gz + pz + dz[k]) || floorAt(gx - px + dx[k], gz - pz + dz[k])) continue;
+                float h = Dungeon3DPropHash(gx, gz, dungeonIdx * 13 + k);
+                float h2 = Dungeon3DPropHash(gz, gx, dungeonIdx * 31 + k + 5);
+                Vector2 face = { c.x + dx[k] * half, c.y + dz[k] * half };
+                Vector2 n = { -(float)dx[k], -(float)dz[k] };
+                if (h < 0.18f) {
+                    int id = (h2 < 0.6f || theme.wall.empty()) ? theme.banner
+                                                               : theme.wall[(int)(h2 * 97.0f) % theme.wall.size()];
+                    addProp(id, face, n, 0.0f);
+                } else if (h < 0.60f && !theme.floor.empty()) {
+                    int id = theme.floor[(int)(h2 * 97.0f) % theme.floor.size()];
+                    addProp(id, face, n, (h2 - 0.5f) * 50.0f);
+                }
+            }
+        }
+    }
+}
+
+static void Dungeon3DDrawProps() {
+    const Dungeon3DProps& P = g_dung3dProps;
+    for (const DungeonPropInst& d : P.inst)
+        DrawModelEx(P.models[d.id], d.pos, { 0.0f, 1.0f, 0.0f }, d.yawDeg, { d.scale, d.scale, d.scale }, WHITE);
+}
+
 // Interior camera: the shared damped orbit/follow rig with tighter zoom
 // limits, clamped inside the dungeon so it can't leave through the outer rock.
 // (Room walls can still occlude at very low zoom - the tight limits keep that
@@ -12424,6 +12627,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
     Dungeon3DEnsureTorch();
     Dungeon3DEnsureGround(di);
     Dungeon3DBuildWalls(di);
+    Dungeon3DBuildProps(di);
     Vector3 torchSpots[kDung3DMaxTorches];
     int torchCount = 0;
     Dungeon3DTorchSpots(di, torchSpots, &torchCount);
@@ -12448,6 +12652,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
     }
     DrawModel(g_dung3dGround.model, { 900, 0, 900 }, 1.0f, WHITE);
     if (g_dung3dWalls.loaded) DrawModel(g_dung3dWalls.model, { 0, 0, 0 }, 1.0f, WHITE);
+    Dungeon3DDrawProps(); // KayKit wall dressing, same torch lighting as the walls
     // Phase 3 creatures use the same torch shader as the dungeon geometry
     // (falling back to the default shader when torch lighting is off).
     T3CKitUseShader(torchOn ? g_dung3dTorch.shader : T3CKitDefaultShader());
