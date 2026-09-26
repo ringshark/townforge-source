@@ -1217,6 +1217,8 @@ struct GameState {
 
     // Newbie guide (2026-09-25): first-launch walkthrough overlay + Guide tab.
     bool guideSeen = false;       // persisted: the walkthrough already showed
+    // First steps (2026-09-27): one goal at a time for new players. -1 = done/skipped.
+    int starterStep = 0; float starterT = 0.0f, starterWalked = 0.0f; int starterBase = 0;
     bool guideOpen = false;       // transient: overlay currently showing
     int guidePage = 0;            // transient: current walkthrough page
     bool guideNoShowAgain = true; // transient: overlay checkbox, default checked
@@ -1231,7 +1233,7 @@ struct GameState {
     float leaveDungHurtSnap = -1.0f; // transient: playerHurtT captured at cast start
 
     // --- Combat/dungeon state (see the section above for what's simplified) ---
-    Screen screen = Screen::Character; // matches the HTML's default/first tab
+    Screen screen = Screen::Town; // (2026-09-27) straight into the game - was the Character tab
     int str = 50, dex = 20;                 // starting defaults (Mark's own numbers, not the
                                                // JS's 10/10/10 - a "finished" character is meant
                                                // to land around 100/100/60 or 100/90/70); grow via
@@ -4157,18 +4159,6 @@ static float RandUnit() { return (float)std::rand() / (float)RAND_MAX; } // [0,1
 // JS rollGatherSkillGain(): full range below 80, tapering chance+size from 80-100,
 // rare fixed +0.1 past 100. This is the "manual gather" gain roll; auto-gather uses
 // a flat 0.1 instead (see UpdateGathering below), matching the JS's autoGather branch.
-static float RollGatherSkillGain(float skill) {
-    if (skill >= 100.0f) return (RandUnit() < 0.15f) ? 0.1f : 0.0f;
-    if (skill >= 80.0f) {
-        float t = (skill - 80.0f) / 20.0f;
-        float chance = 1.0f - t * 0.75f;
-        if (RandUnit() >= chance) return 0.0f;
-        float gainMax = std::max(0.1f, 1.1f - t * 1.0f);
-        float gainMin = std::max(0.1f, 0.3f - t * 0.2f);
-        return gainMin + RandUnit() * (gainMax - gainMin);
-    }
-    return 0.3f + RandUnit() * 0.8f;
-}
 
 // JS gainSkill(): clamps the raw gain so the skill never exceeds `cap`, returns the
 // actual amount applied (0 if already at cap).
@@ -4177,6 +4167,37 @@ static float GainSkillCapped(float& skill, float amount, float cap = 100.0f) {
     float actual = std::min(amount, std::max(0.0f, cap - skill));
     skill += actual;
     return actual;
+}
+
+// ---- Skill gain, modern-shard style (2026-09-27) ----------------------------------
+// One rule for every skill, after how newer UO shards pace things:
+//   * gains come in 0.1 steps;
+//   * a novice learns fast, and each band above gets slower - 0-30 flies,
+//     30-50 is quick, 50-70 steady, 70-90 a real effort, 90-100 the long grind;
+//   * you learn most from actions that are a fair challenge (~50% success) -
+//     trivial ones teach little, and so do hopeless ones;
+//   * `weight` evens out how often each action happens (a sword swing every
+//     second vs. a craft that costs materials vs. a rare tame), so every skill
+//     takes a similar amount of real play.
+// Expected 0.1-steps per ideal use (weight 1) at each band anchor:
+static float SkillGainRate(float skill) {
+    static const float x[] = { 0.0f, 30.0f, 50.0f, 70.0f, 90.0f, 100.0f };
+    static const float y[] = { 2.0f, 1.0f, 0.45f, 0.20f, 0.09f, 0.05f };
+    if (skill <= 0.0f) return y[0];
+    for (int i = 0; i < 5; i++)
+        if (skill < x[i + 1]) return y[i] + (y[i + 1] - y[i]) * (skill - x[i]) / (x[i + 1] - x[i]);
+    return y[5];
+}
+// successChance: 0..1 odds the action succeeds (pass 0.5 when there's no real roll).
+// Returns the amount gained (0, 0.1, 0.2...). ~4000 ideal uses take weight 1 to GM.
+static float SkillUseGain(float& skill, float successChance, float weight, float cap = 100.0f) {
+    if (skill >= cap || weight <= 0.0f) return 0.0f;
+    float c = std::clamp(successChance, 0.0f, 1.0f);
+    float challenge = 0.35f + 0.65f * (1.0f - fabsf(c - 0.5f) * 2.0f);
+    float e = SkillGainRate(skill) * challenge * weight;
+    int steps = (int)e;
+    if (RandUnit() < e - (float)steps) steps++;
+    return GainSkillCapped(skill, steps * 0.1f, cap);
 }
 
 // STR/DEX/INT growth (2026-09-20, Mark's own design - the JS prototype's live stat-gain
@@ -4220,17 +4241,6 @@ static bool MaybeGainStat(GameState& s, int GameState::*statField, float chance)
 // JS applyCraftGainTaper(): full skill (0-100) gains freely; 80-100 gains taper off in
 // both chance and size; 100+ gains rarely, fixed at +0.1 when it happens. Shared by
 // crafting (TryCraftItem) and Magery training (ApplySpellTraining below).
-static float CraftGainTaper(float skill, float baseGain) {
-    if (skill >= 100.0f) return (RandUnit() < 0.15f) ? 0.1f : 0.0f;
-    if (skill >= 80.0f) {
-        float t = (skill - 80.0f) / 20.0f;
-        float chance = 1.0f - t * 0.75f;
-        if (RandUnit() >= chance) return 0.0f;
-        float gainMax = std::max(0.1f, 1.1f - t * 1.0f);
-        return std::min(baseGain, gainMax);
-    }
-    return baseGain;
-}
 
 // JS nextAutoGatherType(): mining first, then wood, then nothing once both hit 100.
 static std::string NextAutoGatherType(const GameState& s) {
@@ -4275,31 +4285,32 @@ static void UpdateGathering(GameState& s, float dt) {
         const std::string type = *s.gatheringResource;
         // Phase 4: rich ore veins yield 5-8 instead of the normal 3-5.
         int gained = (type == "richore") ? (5 + (std::rand() % 4)) : (3 + (std::rand() % 3)); // JS: 3 + Math.floor(Math.random()*3)
-        float rawGain = s.autoGather ? 0.1f : RollGatherSkillGain(type == "wood" ? s.lumberjacking : (type == "fish" ? s.fishing : s.mining));
+        // each gather is a few seconds of work; auto-gather learns at under half the pace
+        const float gatherW = s.autoGather ? 1.0f : 2.5f;
 
         std::string gainNote;
         if (type == "wood") {
-            float gain = GainSkillCapped(s.lumberjacking, rawGain, 100.0f);
+            float gain = SkillUseGain(s.lumberjacking, 0.6f, gatherW);
             s.wood += gained;
             gainNote = gain > 0 ? " (Lumberjacking +" + std::to_string(gain).substr(0, 4) + ")" : "";
             s.logLine = "Gathered " + std::to_string(gained) + " wood." + gainNote;
         } else if (type == "fish") { // Phase 2: Salt Coast fishery - tidal pools
-            float gain = GainSkillCapped(s.fishing, rawGain, 100.0f);
+            float gain = SkillUseGain(s.fishing, 0.6f, gatherW);
             s.fish += gained;
             gainNote = gain > 0 ? " (Fishing +" + std::to_string(gain).substr(0, 4) + ")" : "";
             s.logLine = "Caught " + std::to_string(gained) + " fish." + gainNote;
         } else if (type == "ice") { // Phase 3: Frostwastes ice crystals - Mining skill
-            float gain = GainSkillCapped(s.mining, rawGain, 100.0f);
+            float gain = SkillUseGain(s.mining, 0.6f, gatherW);
             s.ice += gained;
             gainNote = gain > 0 ? " (Mining +" + std::to_string(gain).substr(0, 4) + ")" : "";
             s.logLine = "Chipped " + std::to_string(gained) + " ice crystals free." + gainNote;
         } else if (type == "richore") { // Phase 4: Stonepeaks rich ore vein - ore at a richer rate
-            float gain = GainSkillCapped(s.mining, rawGain, 100.0f);
+            float gain = SkillUseGain(s.mining, 0.6f, gatherW);
             s.ore += gained;
             gainNote = gain > 0 ? " (Mining +" + std::to_string(gain).substr(0, 4) + ")" : "";
             s.logLine = "Mined " + std::to_string(gained) + " ore from the rich vein." + gainNote;
         } else { // "ore"
-            float gain = GainSkillCapped(s.mining, rawGain, 100.0f);
+            float gain = SkillUseGain(s.mining, 0.6f, gatherW);
             s.ore += gained;
             gainNote = gain > 0 ? " (Mining +" + std::to_string(gain).substr(0, 4) + ")" : "";
             s.logLine = "Gathered " + std::to_string(gained) + " ore." + gainNote;
@@ -4394,9 +4405,9 @@ static void ResolvePetTurn(GameState& s) {
             } else {
                 c.Log(pet->name + "'s spell fizzles");
             }
-            GainSkillCapped(pet->magery, RollGatherSkillGain(pet->magery), 100.0f);
-            GainSkillCapped(pet->evalInt, RollGatherSkillGain(pet->evalInt), 100.0f);
-            GainSkillCapped(pet->meditation, RollGatherSkillGain(pet->meditation), 100.0f);
+            SkillUseGain(pet->magery, 0.5f, 1.2f);
+            SkillUseGain(pet->evalInt, 0.5f, 1.0f);
+            SkillUseGain(pet->meditation, 0.5f, 0.6f);
             return;
         }
         // falls through to a physical bite if no affordable spell known
@@ -4410,9 +4421,9 @@ static void ResolvePetTurn(GameState& s) {
     } else {
         c.Log(pet->name + " misses");
     }
-    GainSkillCapped(pet->wrestling, RollGatherSkillGain(pet->wrestling), 100.0f);
-    GainSkillCapped(pet->tactics, RollGatherSkillGain(pet->tactics), 100.0f);
-    GainSkillCapped(pet->anatomy, RollGatherSkillGain(pet->anatomy), 100.0f);
+    SkillUseGain(pet->wrestling, 0.5f, 1.2f);
+    SkillUseGain(pet->tactics, 0.5f, 1.0f);
+    SkillUseGain(pet->anatomy, 0.5f, 0.8f);
 }
 
 // Live-combat counterpart of ResolvePetTurn above (2026-09-22, AI companion - "AI
@@ -4445,9 +4456,9 @@ static void ResolvePetTurnLive(GameState& s, float& targetHp, int targetLevel) {
             } else {
                 Journal(s, pet->name + "'s spell fizzles");
             }
-            GainSkillCapped(pet->magery, RollGatherSkillGain(pet->magery), 100.0f);
-            GainSkillCapped(pet->evalInt, RollGatherSkillGain(pet->evalInt), 100.0f);
-            GainSkillCapped(pet->meditation, RollGatherSkillGain(pet->meditation), 100.0f);
+            SkillUseGain(pet->magery, 0.5f, 1.2f);
+            SkillUseGain(pet->evalInt, 0.5f, 1.0f);
+            SkillUseGain(pet->meditation, 0.5f, 0.6f);
             return;
         }
         // falls through to a physical bite if no affordable spell known
@@ -4461,9 +4472,9 @@ static void ResolvePetTurnLive(GameState& s, float& targetHp, int targetLevel) {
     } else {
         Journal(s, pet->name + " misses");
     }
-    GainSkillCapped(pet->wrestling, RollGatherSkillGain(pet->wrestling), 100.0f);
-    GainSkillCapped(pet->tactics, RollGatherSkillGain(pet->tactics), 100.0f);
-    GainSkillCapped(pet->anatomy, RollGatherSkillGain(pet->anatomy), 100.0f);
+    SkillUseGain(pet->wrestling, 0.5f, 1.2f);
+    SkillUseGain(pet->tactics, 0.5f, 1.0f);
+    SkillUseGain(pet->anatomy, 0.5f, 0.8f);
 }
 
 // Follows the player continuously on the Wilderness/dungeon screens - no leash-to-spawn
@@ -5235,7 +5246,7 @@ static void SnoopInnocent(GameState& s) {
     GameState::InnocentEncounter enc = *s.innocentEncounter;
     int id = enc.identity;
     bool succeeded = RandUnit() * 100.0f < SnoopChance(s);
-    float gain = GainSkillCapped(s.snooping, RollGatherSkillGain(s.snooping), 100.0f);
+    float gain = SkillUseGain(s.snooping, SnoopChance(s) / 100.0f, 7.0f);
     std::string gainNote = gain > 0 ? " (Snooping +" + std::to_string(gain).substr(0, 4) + ")" : "";
     if (succeeded) {
         s.innocentMem[id].snooped++;
@@ -5261,7 +5272,7 @@ static void StealFromInnocent(GameState& s) {
     GameState::InnocentEncounter enc = *s.innocentEncounter;
     int id = enc.identity;
     bool succeeded = RandUnit() * 100.0f < StealChance(s);
-    float gain = GainSkillCapped(s.stealing, RollGatherSkillGain(s.stealing), 100.0f);
+    float gain = SkillUseGain(s.stealing, StealChance(s) / 100.0f, 7.0f);
     std::string gainNote = gain > 0 ? " (Stealing +" + std::to_string(gain).substr(0, 4) + ")" : "";
     s.innocentEncounter.reset();
     if (succeeded) {
@@ -5363,7 +5374,7 @@ static void GraySnoopChoice(GameState& s) {
     if (!s.grayEncounter.has_value()) return;
     GameState::GrayEncounter enc = *s.grayEncounter;
     bool success = RandUnit() * 100.0f < SnoopChance(s);
-    float gain = GainSkillCapped(s.snooping, RollGatherSkillGain(s.snooping), 100.0f);
+    float gain = SkillUseGain(s.snooping, SnoopChance(s) / 100.0f, 7.0f);
     std::string gainNote = gain > 0 ? " (Snooping +" + std::to_string(gain).substr(0, 4) + ")" : "";
     if (success) {
         s.grayEncounter->canSteal = true;
@@ -5393,7 +5404,7 @@ static void GrayStealChoice(GameState& s) {
     if (!s.grayEncounter.has_value() || !s.grayEncounter->canSteal) return;
     GameState::GrayEncounter enc = *s.grayEncounter;
     bool success = RandUnit() * 100.0f < StealChance(s);
-    float gain = GainSkillCapped(s.stealing, RollGatherSkillGain(s.stealing), 100.0f);
+    float gain = SkillUseGain(s.stealing, StealChance(s) / 100.0f, 7.0f);
     std::string gainNote = gain > 0 ? " (Stealing +" + std::to_string(gain).substr(0, 4) + ")" : "";
     s.grayEncounter.reset();
     if (success) {
@@ -5413,8 +5424,7 @@ static void GrayStealChoice(GameState& s) {
 // JS: both endCombatWin() and endCombatLoss() give a 25% chance at a small Magic
 // Resistance gain, regardless of whether you were even casting.
 static void MaybeGainMagicResist(GameState& s, CombatState& c) {
-    if (RandUnit() >= 0.25f) return;
-    float gain = GainSkillCapped(s.magicResist, RollGatherSkillGain(s.magicResist), 100.0f);
+    float gain = SkillUseGain(s.magicResist, 0.5f, 1.5f); // (2026-09-27) every fight, modest
     if (gain > 0) c.Log("Magic Resistance +" + std::to_string(gain).substr(0, 4));
 }
 
@@ -5510,17 +5520,17 @@ static void MonsterCounterAndMaybeEnd(GameState& s) {
 // Same 25% chance / same formula as MaybeGainMagicResist, just with no combat-log line
 // to write to.
 static void LiveMaybeGainMagicResist(GameState& s) {
-    if (RandUnit() >= 0.25f) return;
-    GainSkillCapped(s.magicResist, RollGatherSkillGain(s.magicResist), 100.0f);
+    SkillUseGain(s.magicResist, 0.5f, 1.5f); // (2026-09-27) every fight, modest
 }
 
 // Same three skill-gain rolls as ApplyWeaponTraining (active weapon category, Tactics,
 // Anatomy), minus the combat-log lines - there's no scrolling log panel out on the map.
-static void LiveApplyWeaponTraining(GameState& s) {
+static void LiveApplyWeaponTraining(GameState& s, float hitChance01 = 0.5f) {
+    // a swing lands every second or so: small weights, and a fair fight teaches most
     float GameState::* skillField = ActiveWeaponSkillField(s);
-    GainSkillCapped(s.*skillField, RollGatherSkillGain(s.*skillField), 100.0f);
-    GainSkillCapped(s.tactics, RollGatherSkillGain(s.tactics), 100.0f);
-    GainSkillCapped(s.anatomy, RollGatherSkillGain(s.anatomy), 100.0f);
+    SkillUseGain(s.*skillField, hitChance01, 0.7f);
+    SkillUseGain(s.tactics, hitChance01, 0.55f);
+    SkillUseGain(s.anatomy, hitChance01, 0.45f);
     MaybeGainStat(s, &GameState::str, 0.06f);
     MaybeGainStat(s, &GameState::dex, 0.06f);
 }
@@ -5591,11 +5601,11 @@ static void EndDungeonMonsterLoss(GameState& s, const std::string& name) {
 // Echo-gated, matching the JS where benching never blocks training.
 static void ApplyWeaponTraining(GameState& s, CombatState& c) {
     float GameState::* skillField = ActiveWeaponSkillField(s);
-    float gain = GainSkillCapped(s.*skillField, RollGatherSkillGain(s.*skillField), 100.0f);
+    float gain = SkillUseGain(s.*skillField, 0.5f, 1.5f); // turn-based rounds come slower than live swings
     if (gain > 0) c.Log(ActiveWeaponCategoryLabel(s) + " +" + std::to_string(gain).substr(0, 4));
-    float tGain = GainSkillCapped(s.tactics, RollGatherSkillGain(s.tactics), 100.0f);
+    float tGain = SkillUseGain(s.tactics, 0.5f, 1.2f);
     if (tGain > 0) c.Log("Tactics +" + std::to_string(tGain).substr(0, 4));
-    float aGain = GainSkillCapped(s.anatomy, RollGatherSkillGain(s.anatomy), 100.0f);
+    float aGain = SkillUseGain(s.anatomy, 0.5f, 1.0f);
     if (aGain > 0) c.Log("Anatomy +" + std::to_string(aGain).substr(0, 4));
     if (MaybeGainStat(s, &GameState::str, 0.06f)) c.Log("STR +1");
     if (MaybeGainStat(s, &GameState::dex, 0.06f)) c.Log("DEX +1");
@@ -5719,11 +5729,12 @@ static int BandageHealAmount(const GameState& s) {
 // only if it succeeded) uses the value *after* - quirky, but faithful to the original.
 static std::string ApplyBandage(GameState& s) {
     s.bandages -= 1;
-    bool succeeded = RandUnit() * 100.0f < BandageSuccessChance(s);
-    float healGain = GainSkillCapped(s.healing, RollGatherSkillGain(s.healing), 100.0f);
+    float bandageOdds = BandageSuccessChance(s);
+    bool succeeded = RandUnit() * 100.0f < bandageOdds;
+    float healGain = SkillUseGain(s.healing, bandageOdds / 100.0f, 4.5f); // bandages are used up
     std::string note = healGain > 0 ? " (Healing +" + std::to_string(healGain).substr(0, 4) + ")" : "";
-    if (RandUnit() < 0.3f) {
-        float aGain = GainSkillCapped(s.anatomy, RollGatherSkillGain(s.anatomy), 100.0f);
+    {
+        float aGain = SkillUseGain(s.anatomy, 0.5f, 0.8f);
         if (aGain > 0) note += " (Anatomy +" + std::to_string(aGain).substr(0, 4) + ")";
     }
     if (succeeded) {
@@ -5802,10 +5813,9 @@ static void RegenMana(GameState& s, float dt) {
 // same overshoot taper crafting uses), plus a small Eval Int and Meditation roll.
 static void ApplySpellTraining(GameState& s, const Spell& spell, std::string& logOut) {
     if (spell.necro) { // Necromancy trains itself (and a little Meditation), never Magery
-        float over = std::max(0.0f, s.necromancy - spell.minSkill);
-        float base = std::max(0.05f, 0.6f - over * 0.03f + (RandUnit() * 0.2f - 0.1f));
-        float g = GainSkillCapped(s.necromancy, CraftGainTaper(s.necromancy, base), 100.0f);
-        float med = GainSkillCapped(s.meditation, RollGatherSkillGain(s.meditation) * 0.5f, 100.0f);
+        float odds = SpellSuccessChance(s, spell) / 100.0f; // a spell at the edge of your ability teaches most
+        float g = SkillUseGain(s.necromancy, odds, 2.0f);
+        float med = SkillUseGain(s.meditation, 0.5f, 0.3f);
         std::vector<std::string> notes;
         if (g > 0) notes.push_back("Necromancy +" + std::to_string(g).substr(0, 4));
         if (med > 0) notes.push_back("Meditation +" + std::to_string(med).substr(0, 4));
@@ -5813,13 +5823,12 @@ static void ApplySpellTraining(GameState& s, const Spell& spell, std::string& lo
         for (size_t i = 0; i < notes.size(); i++) logOut += (i == 0 ? " (" : ", ") + notes[i] + (i + 1 == notes.size() ? ")" : "");
         return;
     }
-    float overshoot = std::max(0.0f, s.magery - spell.minSkill);
-    float mageryBase = std::max(0.05f, 0.6f - overshoot * 0.03f + (RandUnit() * 0.2f - 0.1f));
-    // All skill caps are 100 (Mark's call, 2026-09-25): kSpells maxSkill entries are
-    // capped at 100 as well so every spell can reach 100% success chance at max skill.
-    float mageryGain = GainSkillCapped(s.magery, CraftGainTaper(s.magery, mageryBase), 100.0f);
-    float evalGain = GainSkillCapped(s.evalInt, RollGatherSkillGain(s.evalInt), 100.0f);
-    float medGain = GainSkillCapped(s.meditation, RollGatherSkillGain(s.meditation), 100.0f);
+    // A spell at the edge of your ability (~50% success) teaches most; spamming a
+    // circle you've long mastered teaches little (2026-09-27 modern-shard gains).
+    float odds = SpellSuccessChance(s, spell) / 100.0f;
+    float mageryGain = SkillUseGain(s.magery, odds, 2.0f);
+    float evalGain = SkillUseGain(s.evalInt, 0.5f, spell.type == SpellType::Offensive ? 1.2f : 0.5f);
+    float medGain = SkillUseGain(s.meditation, 0.5f, 0.3f);
     std::vector<std::string> notes;
     if (mageryGain > 0) notes.push_back("Magery +" + std::to_string(mageryGain).substr(0, 4));
     if (evalGain > 0) notes.push_back("Eval Int +" + std::to_string(evalGain).substr(0, 4));
@@ -5997,7 +6006,7 @@ static void Meditate(GameState& s) {
         s.logLine = "Already at full mana.";
         return;
     }
-    float gain = GainSkillCapped(s.meditation, RollGatherSkillGain(s.meditation), 100.0f);
+    float gain = SkillUseGain(s.meditation, 0.5f, 3.0f); // a full meditation
     float restoreAmt = std::round(8.0f + s.meditation * 0.3f);
     s.mana = std::min(MaxMana(s), s.mana + restoreAmt);
     std::string msg = "You meditate, restoring " + std::to_string((int)restoreAmt) + " mana";
@@ -6069,10 +6078,8 @@ static void ResolveTameAttempt(GameState& s) {
     float chance = TameChance(s, creature);
     bool succeeded = RandUnit() * 100.0f < chance;
 
-    float overshoot = std::max(0.0f, s.animalTaming - creature.difficulty);
-    float tameBase = std::max(0.05f, 0.6f - overshoot * 0.03f + (RandUnit() * 0.2f - 0.1f));
-    float gain = GainSkillCapped(s.animalTaming, CraftGainTaper(s.animalTaming, tameBase), 100.0f);
-    float loreGain = GainSkillCapped(s.animalLore, RollGatherSkillGain(s.animalLore) * 0.5f, 100.0f);
+    float gain = SkillUseGain(s.animalTaming, chance / 100.0f, 6.0f); // tames are slow: each attempt counts
+    float loreGain = SkillUseGain(s.animalLore, 0.5f, 3.0f);
     std::string gainNote;
     if (gain > 0) gainNote += " (Taming +" + std::to_string(gain).substr(0, 4) + ")";
     if (loreGain > 0) gainNote += " (Lore +" + std::to_string(loreGain).substr(0, 4) + ")";
@@ -6141,8 +6148,8 @@ static void HealPet(GameState& s, int petId) {
     if (it == s.pets.end() || it->hp >= it->maxHp) return;
     float successChance = std::clamp(20.0f + s.veterinary * 0.8f, 10.0f, 99.0f);
     bool succeeded = RandUnit() * 100.0f < successChance;
-    float gain = GainSkillCapped(s.veterinary, RollGatherSkillGain(s.veterinary), 100.0f);
-    float loreGain = GainSkillCapped(s.animalLore, RollGatherSkillGain(s.animalLore) * 0.5f, 100.0f);
+    float gain = SkillUseGain(s.veterinary, successChance / 100.0f, 3.0f);
+    float loreGain = SkillUseGain(s.animalLore, 0.5f, 1.5f);
     std::string note;
     if (gain > 0) note += " (Vet +" + std::to_string(gain).substr(0, 4) + ")";
     if (loreGain > 0) note += " (Lore +" + std::to_string(loreGain).substr(0, 4) + ")";
@@ -6411,7 +6418,8 @@ static void SaveGame(const GameState& s) {
 
     out << "combatHotbar=";
     for (size_t i = 0; i < s.combatHotbar.size(); i++) out << s.combatHotbar[i] << (i + 1 < s.combatHotbar.size() ? "," : "\n");
-    out << "guideSeen=" << (s.guideSeen ? 1 : 0) << "\n"; // newbie walkthrough already shown (2026-09-25)
+    out << "guideSeen=" << (s.guideSeen ? 1 : 0) << "\n";
+    out << "starterStep=" << s.starterStep << "\nstarterBase=" << s.starterBase << "\n"; // newbie walkthrough already shown (2026-09-25)
     out << "markedTowns=" << s.markedTowns << "\n"; // UO-style travel: recall destinations bitmask (2026-09-25)
 
     WriteEquipSlot(out, "equipped.leftHand", s.equipped.leftHand);
@@ -6499,6 +6507,7 @@ static bool LoadGame(GameState& s) {
     long long lastActiveEpoch = 0;
     int saveVersion = 1; // missing = pre-ladder seven-slot format
     bool sawMarkedTowns = false; // UO-style travel (2026-09-25): pre-marking saves lack the key
+    bool sawStarter = false;     // (2026-09-27) saves from before "first steps" are veterans: skip it
     std::string line;
     while (std::getline(in, line)) {
         size_t eq = line.find('=');
@@ -6641,6 +6650,8 @@ static bool LoadGame(GameState& s) {
         else if (key == "bloodstainedBossDefeated") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 3; i++) s.bloodstainedBossDefeated[i] = std::atoi(p[i].c_str()) != 0; }
         else if (key == "combatHotbar") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < s.combatHotbar.size(); i++) s.combatHotbar[i] = std::atoi(p[i].c_str()); }
         else if (key == "guideSeen") { s.guideSeen = (val == "1"); }
+        else if (key == "starterStep") { s.starterStep = std::clamp(std::atoi(val.c_str()), -1, 7); sawStarter = true; }
+        else if (key == "starterBase") s.starterBase = std::atoi(val.c_str());
         else if (key == "markedTowns") { s.markedTowns = std::atoi(val.c_str()); sawMarkedTowns = true; }
         else if (key == "equipped.leftHand") ReadEquipSlot(val, s.equipped.leftHand);
         else if (key == "equipped.rightHand") ReadEquipSlot(val, s.equipped.rightHand);
@@ -6700,6 +6711,7 @@ static bool LoadGame(GameState& s) {
     // starts in Emberhold, so mark just it - the other towns mark themselves the
     // next time the player walks through their gates.
     if (!sawMarkedTowns) s.markedTowns = (1 << 0);
+    if (!sawStarter) s.starterStep = -1; // an existing adventurer doesn't need the first steps
 
     // Custom housing migration (2026-09-25): the town house building is retired.
     // Tier, hue, name, and workshop wings carry over untouched (same fields); the
@@ -6834,10 +6846,10 @@ static void TryCraftItem(GameState& s, int buildingIdx, int recipeIdx, int capOv
     }
     if (resourcePool) *resourcePool -= r.cost;
 
-    float overshoot = std::max(0.0f, skillVal - r.reqSkill);
-    float baseGain = std::max(0.05f, 0.6f - overshoot * 0.03f + (RandUnit() * 0.2f - 0.1f));
-    float gain = CraftGainTaper(skillVal, baseGain);
-    s.buildingSkill[buildingIdx] = std::min((float)buildingCap, skillVal + gain);
+    // Craft gains (2026-09-27): a recipe right at your skill is a fair challenge and
+    // teaches most; one 20+ points below you is routine work and teaches little.
+    float craftOdds = std::clamp(0.5f + (skillVal - r.reqSkill) / 40.0f, 0.05f, 1.0f);
+    float gain = SkillUseGain(s.buildingSkill[buildingIdx], craftOdds, 4.0f, (float)buildingCap);
 
     auto [qualityLabel, qualityMult] = QualityFor(effectiveSkill);
     int finalPower = std::max(1, (int)std::round(r.power * qualityMult));
@@ -6877,9 +6889,8 @@ static void TryCraftPotion(GameState& s, int recipeIdx, int capOverride = -1) {
     if (s.reagents < r.cost) { s.logLine = "Not enough reagents to brew a " + r.name + "."; return; }
     s.reagents -= r.cost;
 
-    float overshoot = std::max(0.0f, skillVal - r.reqSkill);
-    float baseGain = std::max(0.05f, 0.6f - overshoot * 0.03f + (RandUnit() * 0.2f - 0.1f));
-    float gain = GainSkillCapped(s.buildingSkill[3], CraftGainTaper(skillVal, baseGain), (float)buildingCap);
+    float brewOdds = std::clamp(0.5f + (skillVal - r.reqSkill) / 40.0f, 0.05f, 1.0f);
+    float gain = SkillUseGain(s.buildingSkill[3], brewOdds, 4.0f, (float)buildingCap);
 
     auto stack = std::find_if(s.potions.begin(), s.potions.end(), [&](const PotionStack& p) { return p.name == r.name; });
     if (stack == s.potions.end()) {
@@ -6974,7 +6985,7 @@ static void PoisonWeapon(GameState& s, int potionIdx) {
     if (p.effect != "poison") return;
     s.weaponPoisonCharges = p.potency;
     s.weaponPoisonPotency = p.potency;
-    float gain = GainSkillCapped(s.poisoning, RollGatherSkillGain(s.poisoning), 100.0f);
+    float gain = SkillUseGain(s.poisoning, 0.5f, 5.0f);
     std::string gainNote = gain > 0 ? " (Poisoning +" + std::to_string(gain).substr(0, 4) + ")" : "";
     s.logLine = "You coat your weapon in poison - " + std::to_string(p.potency) + " charges." + gainNote;
     p.count -= 1;
@@ -7062,7 +7073,7 @@ static void SkinCorpse(GameState& s, int corpseIdx) {
     if (isIceWolf) s.furs += yieldGained; else s.leather += yieldGained;
     s.gold += c.gold;
     PlaySfx(SfxId::Coin);
-    float gain = GainSkillCapped(s.skinning, RollGatherSkillGain(s.skinning), 100.0f);
+    float gain = SkillUseGain(s.skinning, 0.5f, 12.0f); // one per corpse, so each counts
     std::string gainNote = gain > 0 ? " (Skinning +" + std::to_string(gain).substr(0, 4) + ")" : "";
     if (MaybeGainStat(s, &GameState::dex, 0.06f)) gainNote += " (DEX +1)";
     Journal(s, "Skinned the " + c.monsterName + " corpse for " + std::to_string(yieldGained) +
@@ -7548,7 +7559,7 @@ static std::string CompassWord(Vector2 from, Vector2 to) {
     return dirs[i];
 }
 static bool TrackingSenses(GameState& s, Vector2 hunterPos, std::string* dirNote) {
-    if (RandUnit() < 0.6f) GainSkillCapped(s.tracking, std::max(0.05f, RollGatherSkillGain(s.tracking)), 100.0f);
+    SkillUseGain(s.tracking, 0.5f, 15.0f); // being hunted is a hard lesson (plus a slow passive gain while roaming)
     float t = EffectiveSkill(s, &GameState::tracking);
     if (t <= 0.0f || RandUnit() > 0.3f + t / 100.0f * 0.7f) return false;
     if (dirNote) *dirNote = t >= 40.0f ? " (tracks from the " + CompassWord(s.wildernessPlayerPos, hunterPos) + ")" : "";
@@ -11970,6 +11981,9 @@ static float g_t3dDragDist = 0.0f;
 // damping), so orbit/zoom/follow all glide. First call (or a screen switch)
 // snaps the follow target to the new player instead of sweeping across the world.
 struct Town3DCam { Vector3 pos, target, fwd, right, up; float fovY, aspect, vw, vh; };
+// The camera the world was drawn with this frame, for HUD pointers (first-steps arrow).
+static Town3DCam g_hudCam = {};
+static int g_hudCamZone = -1; // 0 wilderness, 2 town, -1 none this frame
 
 // Two-finger pinch zoom for touch (mobile): spread to zoom in, pinch to zoom
 // out. Tracked across frames; a pinch in progress cancels any orbit drag.
@@ -14392,6 +14406,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     Town3DLoadModels();
     Town3DEnsureGround(s);
     Town3DCam c = Town3DGetCam(s, screenW, screenH);
+    g_hudCam = c; g_hudCamZone = 2;
     // Hover highlight: the same hit-test taps use (Town3DHitTest), evaluated on
     // the smoothed camera so hover and tap always agree. Touch taps get their
     // feedback from the selectedTile ring below while the panel is open.
@@ -17444,6 +17459,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     Wild3DBuildScatter();
     Town3DCam c = Wild3DGetCam(s, screenW, screenH);
     T3DApplyShake(c); // combat camera kick (hit / hurt), zero when idle
+    g_hudCam = c; g_hudCamZone = 0;
     Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
     T3DUpdateDayNight(s.worldTime, false); // time of day: sun, sky, fog colors
     BeginMode3D(cam3d);
@@ -22038,8 +22054,8 @@ static bool TryParry(GameState& s, int zone, const std::string& attacker, bool r
                  s.equipped.rightHand->category != "Archery";
     if (!shield && !blade) return false;
     if (ranged && !shield) return false;
-    float gain = RandUnit() < 0.5f ? GainSkillCapped(s.parrying, RollGatherSkillGain(s.parrying) * (shield ? 1.0f : 0.5f), 100.0f) : 0.0f;
     float parry = EffectiveSkill(s, &GameState::parrying);
+    float gain = SkillUseGain(s.parrying, 0.5f, shield ? 0.9f : 0.4f); // every blow you try to turn
     float chance = shield ? 4.0f + parry * 0.30f + std::max(0, s.dex - 20) * 0.08f : parry * 0.12f;
     if (ranged) chance *= 0.5f;
     chance = std::min(chance, shield ? 45.0f : 15.0f);
@@ -24021,7 +24037,7 @@ static void FinishSkinning(GameState& s, GameState::WorldCorpse& c) {
     float yieldMult = 0.5f + 1.5f * (s.skinning / 100.0f); // same curve as the old SkinCorpse
     int yield = std::max(1, (int)std::round(c.skinYield * yieldMult));
     c.loot.push_back({ c.furs ? GameState::kClFurs : GameState::kClHides, yield, std::nullopt });
-    float gain = GainSkillCapped(s.skinning, RollGatherSkillGain(s.skinning), 100.0f);
+    float gain = SkillUseGain(s.skinning, 0.5f, 12.0f); // one per corpse, so each counts
     std::string note = gain > 0 ? " (Skinning +" + std::to_string(gain).substr(0, 4) + ")" : "";
     if (MaybeGainStat(s, &GameState::dex, 0.06f)) note += " (DEX +1)";
     Journal(s, "You skin the " + c.name + ": " + std::to_string(yield) + (c.furs ? " furs." : " hides.") + note);
@@ -24437,6 +24453,148 @@ static const char* kGuideBodies[5] = {
     "The LOG button (L key) opens\nyour journal.\n\nEvery hit, spell, kill, and\nloot is written there with\nthe time. Open it anytime\nto see what happened.",
     "Chop, mine, and fish to train\nskills - every skill caps\nat 100.\n\nThe bank keeps your gold and\nitems safe. Buy a house plot\nfor storage and a hearth\nyou can recall to.\n\nLeave a dungeon anytime from\nits MENU - needs 25 Magery,\na 3-second cast, no hits.",
 };
+
+// ---- First steps (2026-09-27) ---------------------------------------------------------
+// New players get one simple goal at a time instead of a manual: a big banner
+// with the goal, and a bouncing gold arrow in the world pointing at where to go.
+// Walk -> visit a shop -> walk out -> go to the wilderness -> chop a tree ->
+// fight a monster -> loot it -> "You're ready!". Skippable; never shown again once
+// done. The old walkthrough pages live on under Help.
+enum StarterStep { kStWalk = 0, kStShop, kStLeave, kStGate, kStGather, kStFight, kStLoot, kStDone, kStCount };
+static const char* kStarterGoal[kStCount] = {
+    "Walk around! Drag the stick (or use WASD).",
+    "Visit a shop! Follow the gold arrow, then tap ENTER.",
+    "Have a look around, then walk out the door.",
+    "Time for adventure! Follow the arrow to the town gate.",
+    "Chop a tree or mine a rock: walk up and tap GATHER.",
+    "Fight a monster! Walk up to one and tap FIGHT.",
+    "You won! Tap the body, then tap LOOT ALL.",
+    "You're ready! Explore, get stronger, have fun. Stuck? Tap HELP.",
+};
+static void StarterBegin(GameState& s, int step) {
+    s.starterStep = step;
+    s.starterT = 0.0f;
+    s.starterBase = step == kStGather ? s.wood + s.ore + s.fish + s.ice : step == kStFight ? s.nextCorpseId : step == kStLoot ? s.gold : 0;
+    s.starterWalked = 0.0f;
+    if (step > 0) PlaySfx(SfxId::Quest);
+}
+// Where the arrow points for this step (world x/z), false = no arrow.
+static bool StarterTarget(GameState& s, Vector2* out) {
+    auto nearest = [&](Vector2 me, auto&& each) { float bd = 1e9f; bool ok = false; each([&](Vector2 p, float bias) {
+        float d = Dist(me, p) + bias; if (d < bd) { bd = d; *out = p; ok = true; } }); return ok; };
+    if (s.screen == Screen::Town) {
+        Vector2 me = s.townPlayerPos;
+        if (s.starterStep == kStShop)
+            return nearest(me, [&](auto f) { for (auto& n : ActiveTownNodes(s.selectedTown)) if (n.key != "house") f(n.pos, 0.0f); });
+        if (s.starterStep == kStGate || s.starterStep >= kStGather) { *out = kWildernessGatePos; return true; }
+        return false;
+    }
+    if (s.screen == Screen::Wilderness) {
+        Vector2 me = s.wildernessPlayerPos;
+        if (s.starterStep == kStGather)
+            return nearest(me, [&](auto f) { for (auto& n : kWildernessGatherNodes) if (n.resource == "wood" || n.resource == "ore") f(n.pos, 0.0f); });
+        if (s.starterStep == kStFight)
+            return nearest(me, [&](auto f) {
+                for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
+                    if (s.wildSpotRespawn[i] > 0.0f) continue;
+                    f(WildernessMonsterLivePos((int)i, s.worldTime), kWildernessMonsterSpots[i].level * 120.0f); // easy ones first
+                }
+            });
+        if (s.starterStep == kStLoot)
+            return nearest(me, [&](auto f) { for (auto& c : s.worldCorpses) if (c.zone == 0 && c.Lootable()) f(c.pos, 0.0f); });
+    }
+    return false;
+}
+static void UpdateDrawStarter(GameState& s, int screenW, int screenH) {
+    if (s.starterStep < 0 || s.starterStep >= kStCount) return;
+    float dt = GetFrameTime();
+    s.starterT += dt;
+    // --- progress ---
+    static Vector2 lastPos = { -1, -1 };
+    Vector2 me = s.screen == Screen::Wilderness ? s.wildernessPlayerPos : s.townPlayerPos;
+    if (lastPos.x >= 0 && (s.screen == Screen::Town || s.screen == Screen::Wilderness)) s.starterWalked += std::min(50.0f, Dist(lastPos, me));
+    lastPos = me;
+    switch (s.starterStep) {
+        case kStWalk: if (s.starterWalked > 220.0f) StarterBegin(s, kStShop); break;
+        case kStShop: if (s.screen == Screen::Interior) StarterBegin(s, kStLeave); break;
+        case kStLeave: if (s.screen == Screen::Town || s.screen == Screen::Wilderness) StarterBegin(s, kStGate); break;
+        case kStGate: if (s.screen == Screen::Wilderness) StarterBegin(s, kStGather); break;
+        case kStGather: if (s.wood + s.ore + s.fish + s.ice > s.starterBase) StarterBegin(s, kStFight); break;
+        case kStFight: if (s.nextCorpseId > s.starterBase) StarterBegin(s, kStLoot); break;
+        case kStLoot: {
+            bool any = false;
+            for (auto& c : s.worldCorpses) if (c.zone == 0 && c.Lootable()) any = true;
+            if (s.gold > s.starterBase || !any) StarterBegin(s, kStDone);
+            break;
+        }
+        case kStDone: if (s.starterT > 9.0f) { s.starterStep = -1; return; } break;
+    }
+    // Only over the playable world (and shops), never over menus, fights' panels or the map.
+    bool world = s.screen == Screen::Town || s.screen == Screen::Wilderness || s.screen == Screen::Interior;
+    if (!world || s.worldMapOpen || s.combat.has_value() || s.houseDesignerOpen || s.exploreMenuOpen || s.selectedTile.has_value()) return;
+    // --- the arrow ---
+    Vector2 tgt;
+    bool camOk = (s.screen == Screen::Town && g_hudCamZone == 2) || (s.screen == Screen::Wilderness && g_hudCamZone == 0);
+    if (camOk && StarterTarget(s, &tgt)) {
+        float gy = s.screen == Screen::Wilderness ? WildGroundY(tgt.x, tgt.y) : 0.0f;
+        Vector2 sp;
+        bool front = Town3DProject(g_hudCam, { tgt.x, gy + 75.0f, tgt.y }, &sp);
+        float t = (float)GetTime();
+        Rectangle view = { 20, 150, (float)screenW - 40, 560 };
+        Color gold = { 255, 206, 84, 255 }, dark = { 60, 36, 10, 255 };
+        if (front && CheckCollisionPointRec(sp, view)) {
+            float bob = sinf(t * 5.0f) * 7.0f;
+            Vector2 a = { sp.x, sp.y + bob + 16 }, b = { sp.x - 16, sp.y + bob - 8 }, c = { sp.x + 16, sp.y + bob - 8 };
+            DrawTriangle({ a.x, a.y + 3 }, { c.x + 3, c.y }, { b.x - 3, b.y }, dark);
+            DrawTriangle(a, c, b, gold);
+            DrawRectangleRec({ sp.x - 6, sp.y + bob - 28, 12, 21 }, dark);
+            DrawRectangleRec({ sp.x - 4, sp.y + bob - 26, 8, 19 }, gold);
+        } else { // off screen: an arrow on the edge pointing the way
+            Vector2 c0 = { screenW * 0.5f, 430.0f };
+            Vector2 d = front ? Vector2{ sp.x - c0.x, sp.y - c0.y } : Vector2{ c0.x - sp.x, c0.y - sp.y };
+            float l = std::max(1.0f, hypotf(d.x, d.y));
+            d = { d.x / l, d.y / l };
+            float k = std::min((view.width * 0.5f - 24) / std::max(0.001f, fabsf(d.x)), (view.height * 0.5f - 24) / std::max(0.001f, fabsf(d.y)));
+            Vector2 p = { c0.x + d.x * k, c0.y + d.y * k };
+            float pulse = 1.0f + 0.12f * sinf(t * 6.0f);
+            Vector2 n = { -d.y, d.x };
+            Vector2 tip = { p.x + d.x * 20 * pulse, p.y + d.y * 20 * pulse };
+            Vector2 l1 = { p.x - d.x * 10 + n.x * 16 * pulse, p.y - d.y * 10 + n.y * 16 * pulse };
+            Vector2 l2 = { p.x - d.x * 10 - n.x * 16 * pulse, p.y - d.y * 10 - n.y * 16 * pulse };
+            DrawCircleV(p, 26.0f, Fade(BLACK, 0.35f));
+            DrawTriangle(tip, l2, l1, gold);
+            DrawTriangleLines(tip, l2, l1, dark);
+        }
+    }
+    // --- the banner ---
+    Rectangle bn = { 16, 626, (float)screenW - 32, 70 };
+    float in = std::min(1.0f, s.starterT * 3.0f);
+    bn.y += (1.0f - in) * 30.0f;
+    DrawRectangleRounded({ bn.x + 3, bn.y + 4, bn.width, bn.height }, 0.25f, 8, Fade(BLACK, 0.4f));
+    DrawRectangleRounded(bn, 0.25f, 8, Color{ 42, 27, 14, 240 });
+    DrawRectangleRoundedLines(bn, 0.25f, 8, Color{ 232, 186, 84, 255 });
+    int stepNo = std::min(s.starterStep + 1, (int)kStDone);
+    DrawCircle((int)bn.x + 34, (int)(bn.y + bn.height / 2), 22, Color{ 232, 186, 84, 255 });
+    std::string num = s.starterStep == kStDone ? "!" : std::to_string(stepNo);
+    int nw = MeasureUIText(num.c_str(), 22);
+    DrawUIText(num.c_str(), (int)bn.x + 34 - nw / 2, (int)(bn.y + bn.height / 2 - 12), 22, Color{ 50, 30, 10, 255 });
+    // wrap the goal onto two lines if needed
+    std::string goal = kStarterGoal[s.starterStep];
+    int maxW = (int)bn.width - 110, fs = 17;
+    std::string l1 = goal, l2;
+    if (MeasureUIText(goal.c_str(), fs) > maxW) {
+        size_t cut = goal.rfind(' ', goal.size() / 2 + 6);
+        if (cut != std::string::npos) { l1 = goal.substr(0, cut); l2 = goal.substr(cut + 1); }
+    }
+    int ty = (int)(bn.y + (l2.empty() ? bn.height / 2 - 9 : bn.height / 2 - 20));
+    DrawUIText(l1.c_str(), (int)bn.x + 66, ty, fs, Color{ 255, 236, 190, 255 });
+    if (!l2.empty()) DrawUIText(l2.c_str(), (int)bn.x + 66, ty + 22, fs, Color{ 255, 236, 190, 255 });
+    Rectangle skip = { bn.x + bn.width - 40, bn.y + 6, 32, 24 };
+    DrawUIText("skip", (int)skip.x, (int)skip.y + 4, 12, Color{ 200, 170, 120, 255 });
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), { skip.x - 6, skip.y - 6, skip.width + 12, skip.height + 12 }))
+        s.starterStep = -1;
+    (void)screenH;
+}
 
 // Shared page chrome: title, page dots, body lines.
 static void DrawGuidePageContent(GameState& s, float x, float y, float w) {
@@ -25524,7 +25682,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         int power = CombatPower(s);
         float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
         float hitChance = std::clamp(50.0f + (power - spot.level) * 4.0f + weaponSkillBonus, 5.0f, 95.0f);
-        LiveApplyWeaponTraining(s);
+        LiveApplyWeaponTraining(s, hitChance / 100.0f);
         std::string mname = spot.name; int mgold = spot.baseGold, mleather = spot.baseLeather;
         bool foeBlocked = false; // (2026-09-26) the rival carries a shield and uses it
         if (RandUnit() * 100.0f < hitChance && !(foeBlocked = FoeShieldBlock(s, am))) {
@@ -26423,7 +26581,7 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         bool tabsEnabled = !s.combat.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f;
         std::string townLabel = ActiveTownName(s.selectedTown);
         float bx0 = 24.0f, bx1 = 188.0f;
-        if (Button({ bx0, by, 152, 40 }, "Char", tabsEnabled)) { s.screen = Screen::Character; open = false; }
+        if (Button({ bx0, by, 152, 40 }, "Me (gear & bag)", tabsEnabled)) { s.screen = Screen::Character; open = false; }
         if (Button({ bx1, by, 152, 40 }, townLabel, tabsEnabled)) { s.screen = Screen::Town; open = false; }
         by += 48;
         if (Button({ bx0, by, 152, 40 }, "Craft", tabsEnabled)) {
@@ -26439,7 +26597,7 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         if (Button({ bx0, by, 152, 40 }, "House", tabsEnabled)) { s.screen = Screen::House; open = false; }
         if (Button({ bx1, by, 152, 40 }, "Skills", tabsEnabled)) { s.screen = Screen::Skills; open = false; }
         by += 48;
-        if (Button({ bx0, by, 152, 40 }, "Guide", tabsEnabled)) { s.screen = Screen::Guide; s.guidePage = 0; open = false; }
+        if (Button({ bx0, by, 152, 40 }, "Help", tabsEnabled)) { s.screen = Screen::Guide; s.guidePage = 0; open = false; }
         if (inDungeon) {
             // UO-style travel (2026-09-25): magery escape. Allowed mid-fight -
             // the 3s cast breaks on damage, so it can't blank a boss mid-swing.
@@ -27015,7 +27173,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         int power = CombatPower(s);
         float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
         float hitChance = std::clamp(50.0f + (power - m.level) * 4.0f + weaponSkillBonus, 5.0f, 95.0f);
-        LiveApplyWeaponTraining(s);
+        LiveApplyWeaponTraining(s, hitChance / 100.0f);
         std::string mname = m.name; int mgold = m.baseGold, mleather = m.baseLeather;
         bool wasBoss = am.isBoss; int dungeonIdx = *s.selectedDungeon; int level = m.level;
         if (RandUnit() * 100.0f < hitChance) {
@@ -27866,7 +28024,7 @@ static void TryBuyOreFromGuild(GameState& s) { // 12g per ore - for crafters who
 }
 static void TryGuildMiningTraining(GameState& s) { // 100g - supervised Mining practice
     if (s.gold < 100) { s.logLine = "Not enough gold for Guild training (100g)."; return; }
-    float gain = GainSkillCapped(s.mining, RollGatherSkillGain(s.mining), 100.0f);
+    float gain = SkillUseGain(s.mining, 0.5f, 10.0f); // paid, supervised practice
     s.gold -= 100;
     s.logLine = gain > 0 ? "Guild training complete. (Mining +" + std::to_string(gain).substr(0, 4) + ")"
                          : "Guild training complete - no further progress to make.";
@@ -27966,110 +28124,134 @@ static void DrawRefugeScreen(GameState& s, int screenW, int screenH) {
 // ---------------------------------------------------------------------
 
 static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
-    int y = 116;
-    DrawUIText(TextFormat("Mana: %.1f / %.0f   Reagents: %d", s.mana, MaxMana(s), s.reagents),
-               20, y, 15, kColorText);
-    y += 22;
-    DrawUIText(TextFormat("Magery: %.1f   Eval Int: %.1f   Meditation: %.1f   Necromancy: %.1f", s.magery, s.evalInt, s.meditation, s.necromancy),
-               20, y, 13, DARKGRAY);
-    y += 24;
-
-    DrawUIText("Out of reagents? Buy more at the Provisioner.", 20, y + 7, 13, Fade(DARKGRAY, 0.8f));
-    y += 40;
-
-    bool canMeditate = !s.combat.has_value() && !s.ambush.has_value() && !s.innocentEncounter.has_value() &&
-                         s.mana < MaxMana(s);
-    if (Button({ 20, (float)y, 150, 28 }, "Meditate", canMeditate)) Meditate(s);
-    DrawUIText("Restores mana instantly, small chance of +Meditation", 180, y + 7, 13, Fade(DARKGRAY, 0.8f));
-    y += 40;
-
-    // UO-style travel (2026-09-25): Recall. Works from anywhere - towns mark
-    // themselves on first visit; unmarked towns stay locked until walked to.
+    // The spellbook (2026-09-27): a UO-style open book instead of a long list - the
+    // red tome for Magery, the black one for Necromancy, four spells to a page,
+    // page corners to turn. Your spell bar sits above it; Meditate sits by your mana.
+    static int book = 0, spread = 0;
+    const Color ink = { 58, 36, 20, 255 }, inkSoft = { 110, 80, 50, 255 };
+    // --- mana, reagents, skills, Meditate ---
     {
-        const Spell& rsp = kSpells[kRecallSpellIdx];
-        DrawUIText(TextFormat("Recall - travel to a marked town (%d Magery, %d mana, %d reagents):",
-                              rsp.minSkill, rsp.manaCost, rsp.reagentCost), 20, y, 12, kColorAccent);
-        y += 24;
-        bool recallBlocked = s.playerIsGhost || s.playerDeathAnimT > 0.0f;
-        for (int ti = 0; ti < 4; ti++) {
-            bool marked = (s.markedTowns & (1 << ti)) != 0;
-            std::string label = std::string(ActiveTownName(ti)) + (marked ? "" : " *");
-            if (Button({ 20.0f + ti * 125.0f, (float)y, 120, 30 }, label, marked && !recallBlocked))
-                TryRecallToTown(s, ti);
-        }
-        y += 34;
-        DrawUIText("* = not yet visited - walk through its gate to mark it.", 20, y, 12, Fade(DARKGRAY, 0.8f));
-        y += 22;
+        float mx = MaxMana(s);
+        DrawUIText("Mana", 20, 116, 14, kColorText);
+        Rectangle bar = { 64, 118, 170, 14 };
+        DrawRectangleRounded(bar, 0.5f, 6, Fade(BLACK, 0.25f));
+        DrawRectangleRounded({ bar.x, bar.y, bar.width * std::clamp(s.mana / std::max(1.0f, mx), 0.0f, 1.0f), bar.height }, 0.5f, 6,
+                             Color{ 60, 110, 200, 255 });
+        DrawUIText(TextFormat("%.0f / %.0f", s.mana, mx), 244, 116, 14, kColorText);
+        DrawUIText(TextFormat("Reagents: %d", s.reagents), 330, 116, 14, kColorText);
+        DrawUIText(TextFormat("Magery %.1f   Eval Int %.1f   Meditation %.1f   Necromancy %.1f", s.magery, s.evalInt, s.meditation, s.necromancy),
+                   20, 140, 12, DARKGRAY);
+        bool canMeditate = !s.combat.has_value() && !s.ambush.has_value() && !s.innocentEncounter.has_value() && s.mana < mx;
+        if (Button({ (float)screenW - 118, 112, 98, 26 }, "Meditate", canMeditate)) Meditate(s);
     }
-
-    // Combat hotbar setup (2026-09-22) - configuration moved here from the Wilderness/
-    // Hunt screens, where the same on-screen spot overlapped their interact button when
-    // not engaged in a fight. This is the only place to assign slots now; casting still
-    // happens on whichever live-combat screen you're actually fighting on.
-    DrawUIText("Combat hotbar - tap a slot to assign a spell for live fights:", 20, y, 12, kColorAccent);
-    y += 26;
-    // Fall-through guard (2026-09-25): Button fires on press-down, so the tap that
-    // opens the picker is still "pressed" when the picker draws later in this same
-    // frame - without suppression it would instantly trigger whatever picker button
-    // sits under the finger (usually a spell row), assigning the wrong spell. Skip
-    // picker press handling for exactly that frame.
-    //
-    // Modal (2026-09-25, hotbar duplication fix): while the picker is open the
-    // hotbar row underneath must not take taps at all. The picker overlay covers
-    // the row geometrically, so a tap on a spell row ALSO lands inside the hotbar
-    // slot rect beneath it - the old code re-targeted hotbarPickerSlot to that
-    // slot before assigning, spraying one spell across many slots (the "Ember
-    // Burst x4" report). With the row untappable while open, a tap can only ever
-    // assign to the slot the picker was opened for: one tap = one slot.
+    // --- the spell bar ---
+    DrawUIText("Your spell bar - tap a slot to choose its spell:", 20, 164, 12, kColorAccent);
     bool pickerSuppress = false;
     {
         int tapped = -1;
-        if (!s.hotbarPickerSlot.has_value())
-            tapped = DrawCombatHotbarRow(s, false, nullptr, 0.0f, 30.0f, (float)y + 10.0f);
+        if (!s.hotbarPickerSlot.has_value()) tapped = DrawCombatHotbarRow(s, false, nullptr, 0.0f, 30.0f, 184.0f);
         if (tapped >= 0) { s.hotbarPickerSlot = tapped; pickerSuppress = true; }
     }
-    y += 100; // the framed spell bar (2026-09-26) is taller than the old button row
-    bool pickerOpen = s.hotbarPickerSlot.has_value(); // modal: the list below goes inert under it
+    bool pickerOpen = s.hotbarPickerSlot.has_value(); // modal: the book goes inert under it
 
-    DrawUIText("Spellcraft - practice trains Magery/Eval Int/Meditation, mana only:", 20, y, 12,
-               kColorAccent);
-    y += 20;
-
-    int listTop = y;
-    int listHeight = screenH - listTop - 40;
-    Rectangle listArea = { 0, (float)listTop, (float)screenW, (float)listHeight };
-    s.magicScroll -= ScrollDelta(listArea);
-    float maxScroll = std::max(0.0f, (float)kSpells.size() * 30.0f + 34.0f - listHeight);
-    s.magicScroll = std::clamp(s.magicScroll, 0.0f, maxScroll);
-
-    BeginScissorMode(0, listTop, screenW, listHeight);
-    for (size_t i = 0; i < kSpells.size(); i++) {
-        const Spell& sp = kSpells[i];
-        float rowY = listTop + (float)i * 30 + (sp.necro ? 34.0f : 0.0f) - s.magicScroll;
-        if ((int)i == kSpTeeth) { // Necromancy section header (2026-09-27)
-            float hy = rowY - 32;
-            DrawRectangle(14, (int)hy + 4, screenW - 28, 26, Fade(Color{ 60, 30, 70, 255 }, 0.85f));
-            DrawUIText("Necromancy - bone, blood and the risen dead (mana only; some need a corpse)", 22, (int)hy + 11, 12, Color{ 220, 200, 240, 255 });
-        }
-        if (rowY < listTop - 30 || rowY > listTop + listHeight) continue;
-
-        std::string line = TextFormat("Circle %d: %s (%dmp, needs %d %s)%s", sp.circle, sp.name.c_str(),
-                                        sp.manaCost, sp.minSkill, sp.necro ? "necromancy" : "magery",
-                                        SpellNeedsCorpse((int)i) ? " - corpse" : "");
-        if (const Texture2D* icon = SpellIcon((int)i))
-            DrawIconCentered(*icon, { 32, rowY + 12 }, 26.0f, WHITE);
-        DrawUIText(line.c_str(), 50, (int)rowY + 6, 12, kColorText);
-        if ((int)i == kRecallSpellIdx) {
-            // UO-style travel: Recall isn't practiced - it opens the town picker.
-            if (Button({ (float)(screenW - 100), rowY, 80, 24 }, "Recall", !pickerOpen))
-                s.recallPickerOpen = true;
-        } else if (Button({ (float)(screenW - 100), rowY, 80, 24 }, "Practice", !pickerOpen && s.mana >= sp.manaCost && CanPracticeSpell(s, sp)))
-            TryPracticeSpell(s, (int)i);
+    // --- which book ---
+    std::vector<int> spells;
+    for (size_t i = 0; i < kSpells.size(); i++) if (kSpells[i].necro == (book == 1)) spells.push_back((int)i);
+    const int perPage = 4, pages = ((int)spells.size() + perPage - 1) / perPage, spreads = (pages + 1) / 2;
+    spread = std::clamp(spread, 0, std::max(0, spreads - 1));
+    for (int b = 0; b < 2; b++) { // two tomes on the shelf
+        Rectangle r = { 22.0f + b * 150.0f, 290, 140, 34 };
+        bool on = book == b;
+        Color cover = b == 0 ? Color{ 128, 30, 30, 255 } : Color{ 34, 28, 40, 255 };
+        DrawRectangleRounded({ r.x, r.y + (on ? 0 : 6), r.width, r.height }, 0.2f, 6, on ? cover : ColorBrightness(cover, -0.25f));
+        DrawRectangleRoundedLines({ r.x, r.y + (on ? 0 : 6), r.width, r.height }, 0.2f, 6, on ? kUoBronzeHi : kUoBronze);
+        const char* nm = b == 0 ? "Magery" : "Necromancy";
+        int w = MeasureUIText(nm, 15);
+        DrawUIText(nm, (int)(r.x + (r.width - w) / 2), (int)r.y + (on ? 9 : 15), 15, on ? kUoGoldText : Color{ 236, 220, 190, 255 });
+        if (!pickerOpen && !on && UOTapped(r)) { book = b; spread = 0; PlaySfx(SfxId::Click); }
     }
-    EndScissorMode();
-    DrawHotbarPicker(s, screenW, screenH, pickerSuppress); // drawn over the list (2026-09-26)
-    // UO-style travel (2026-09-25): recall destination modal, drawn last so it
-    // floats above the screen. R opens it on desktop.
+    // --- the open book ---
+    Rectangle cover = { 10, 322, (float)screenW - 20, (float)screenH - 336 };
+    Color coverCol = book == 0 ? Color{ 110, 26, 26, 255 } : Color{ 30, 24, 36, 255 };
+    DrawRectangleRounded({ cover.x + 4, cover.y + 6, cover.width, cover.height }, 0.03f, 6, Fade(BLACK, 0.4f));
+    DrawRectangleRounded(cover, 0.03f, 6, coverCol);
+    DrawRectangleRoundedLines(cover, 0.03f, 6, kUoBronze);
+    const float pw = (cover.width - 34) / 2;
+    Rectangle pageR[2] = { { cover.x + 12, cover.y + 12, pw, cover.height - 24 }, { cover.x + 22 + pw, cover.y + 12, pw, cover.height - 24 } };
+    for (int side = 0; side < 2; side++) {
+        Rectangle pr = pageR[side];
+        UOFill(pr, kUoParchment, book == 0 ? WHITE : Color{ 225, 218, 205, 255 });
+        // the fold: shade toward the spine
+        if (side == 0) DrawRectangleGradientH((int)(pr.x + pr.width - 26), (int)pr.y, 26, (int)pr.height, Fade(BLACK, 0.0f), Fade(BLACK, 0.28f));
+        else DrawRectangleGradientH((int)pr.x, (int)pr.y, 26, (int)pr.height, Fade(BLACK, 0.28f), Fade(BLACK, 0.0f));
+        DrawRectangleLinesEx(pr, 1.0f, Fade(ink, 0.35f));
+    }
+    for (int side = 0; side < 2; side++) {
+        int page = spread * 2 + side;
+        Rectangle pr = pageR[side];
+        if (page >= pages) {
+            if (book == 0 && page == pages) { // a note on the last blank page
+                DrawUIText("Notes", (int)pr.x + 16, (int)pr.y + 14, 16, ink);
+                const char* lines[] = { "Casting in a fight costs", "mana and 1 reagent.", "", "Buy reagents at the", "Provisioner.", "",
+                                        "Recall carries you to any", "town you have visited", "(40 Magery)." };
+                for (int i = 0; i < 9; i++) DrawUIText(lines[i], (int)pr.x + 16, (int)pr.y + 46 + i * 20, 13, inkSoft);
+            }
+            continue;
+        }
+        int first = page * perPage;
+        const Spell& head = kSpells[spells[(size_t)first]];
+        std::string title = book == 1 ? "Necromantic Rites" : TextFormat("Circle %d%s", head.circle, "");
+        if (book == 0) {
+            int lastC = kSpells[spells[(size_t)std::min((int)spells.size() - 1, first + perPage - 1)]].circle;
+            if (lastC != head.circle) title = TextFormat("Circles %d - %d", head.circle, lastC);
+        }
+        int tw = MeasureUIText(title.c_str(), 16);
+        DrawUIText(title.c_str(), (int)(pr.x + (pr.width - tw) / 2), (int)pr.y + 12, 16, book == 1 ? Color{ 80, 30, 60, 255 } : Color{ 120, 30, 26, 255 });
+        DrawLineEx({ pr.x + 20, pr.y + 36 }, { pr.x + pr.width - 20, pr.y + 36 }, 1.0f, Fade(ink, 0.4f));
+        float rowH = (pr.height - 80) / perPage;
+        for (int k = 0; k < perPage; k++) {
+            int n = first + k;
+            if (n >= (int)spells.size()) break;
+            int idx = spells[(size_t)n];
+            const Spell& sp = kSpells[idx];
+            float y = pr.y + 44 + k * rowH;
+            bool known = CanPracticeSpell(s, sp);
+            Rectangle ic = { pr.x + 12, y + 6, 40, 40 };
+            if (const Texture2D* icon = SpellIcon(idx)) DrawTexturePro(*icon, { 0, 0, (float)icon->width, (float)icon->height }, ic, { 0, 0 }, 0.0f,
+                                                                       known ? WHITE : Color{ 120, 110, 100, 255 });
+            DrawRectangleLinesEx(ic, 1.5f, known ? kUoBronze : Fade(ink, 0.4f));
+            float tx = ic.x + ic.width + 8;
+            std::string nm = sp.name;
+            while (MeasureUIText(nm.c_str(), 14) > pr.width - (tx - pr.x) - 8 && nm.size() > 4) nm = nm.substr(0, nm.size() - 2) + ".";
+            DrawUIText(nm.c_str(), (int)tx, (int)y + 5, 14, known ? ink : Fade(ink, 0.45f));
+            std::string info = TextFormat("%d mana%s", sp.manaCost, SpellNeedsCorpse(idx) ? " - corpse" : "");
+            DrawUIText(info.c_str(), (int)tx, (int)y + 24, 11, inkSoft);
+            if (!known) {
+                DrawUIText(TextFormat("Needs %d %s", sp.minSkill, sp.necro ? "Necromancy" : "Magery"), (int)tx, (int)y + 40, 11, Color{ 150, 60, 40, 255 });
+                continue;
+            }
+            Rectangle btn = { tx, y + 42, std::min(96.0f, pr.width - (tx - pr.x) - 10), 24 };
+            if (idx == kRecallSpellIdx) {
+                if (UOButton(btn, "Travel", !pickerOpen)) s.recallPickerOpen = true;
+            } else if (UOButton(btn, "Practice", !pickerOpen && s.mana >= sp.manaCost)) TryPracticeSpell(s, idx);
+        }
+        std::string pn = std::to_string(page + 1);
+        DrawUIText(pn.c_str(), (int)(pr.x + pr.width / 2 - 4), (int)(pr.y + pr.height - 22), 12, inkSoft);
+    }
+    // page corners
+    auto corner = [&](Rectangle pr, bool left, bool enabled) {
+        if (!enabled) return false;
+        float cx = left ? pr.x : pr.x + pr.width, cy = pr.y + pr.height;
+        Vector2 a = { cx, cy }, b = { cx + (left ? 34.0f : -34.0f), cy }, c = { cx, cy - 34.0f };
+        if (left) DrawTriangle(a, b, c, Color{ 196, 168, 120, 255 }); else DrawTriangle(a, c, b, Color{ 196, 168, 120, 255 });
+        DrawLineEx(b, c, 1.5f, Fade(ink, 0.6f));
+        DrawUIText(left ? "<" : ">", (int)(cx + (left ? 8 : -16)), (int)cy - 22, 14, ink);
+        return !pickerOpen && UOTapped({ cx - 44, cy - 44, 88, 44 });
+    };
+    if (corner(pageR[0], true, spread > 0)) { spread--; PlaySfx(SfxId::Click); }
+    if (corner(pageR[1], false, spread < spreads - 1)) { spread++; PlaySfx(SfxId::Click); }
+
+    DrawHotbarPicker(s, screenW, screenH, pickerSuppress); // over the book
     if (IsKeyPressed(KEY_R) && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f) s.recallPickerOpen = true;
     DrawRecallPicker(s, screenW, screenH);
 }
@@ -29041,6 +29223,13 @@ static void UpdateDrawFrame() {
         UpdateDeathAndRespawn(state, dt); // death anims, ghost timer, monster respawns, corpse fades
         UpdateGuildOffscreen(state, dt);  // the rival and Murder Inc. keep living while you're elsewhere
 
+        { // Tracking (2026-09-27): reading the land while you roam the wilderness - slow and steady
+            static float trackT = 0.0f;
+            if (state.screen == Screen::Wilderness && !state.playerIsGhost && (trackT += dt) >= 12.0f) {
+                trackT = 0.0f;
+                SkillUseGain(state.tracking, 0.5f, 1.5f);
+            }
+        }
         // JS: autosave every 2 seconds (setInterval(() => { render(); save(); }, 2000)).
         autosaveTimer += dt;
         if (autosaveTimer >= 2.0f) {
@@ -29236,8 +29425,11 @@ static void UpdateDrawFrame() {
         Rectangle houseTab  = { tabX, 84, 53, 26 }; tabX += 56;
         Rectangle skillsTab = { tabX, 84, 53, 26 };
         Rectangle guideTab  = { tabX + 56, 84, 40, 26 }; // newbie walkthrough (2026-09-25)
-        if (Button(charTab, "Char", tabsEnabled)) state.screen = Screen::Character;
-        if (Button(townTab, ActiveTownName(state.selectedTown), tabsEnabled)) state.screen = Screen::Town;
+        if (Button(charTab, "Me", tabsEnabled)) state.screen = Screen::Character;
+        // (2026-09-27) the way back into the game, made obvious: a glowing gold "Play"
+        DrawRectangleRounded({ townTab.x - 3, townTab.y - 3, townTab.width + 6, townTab.height + 6 }, 0.35f, 6,
+                             Fade(Color{ 255, 196, 70, 255 }, 0.55f + 0.25f * sinf((float)GetTime() * 3.0f)));
+        if (Button(townTab, "> Play", tabsEnabled)) state.screen = Screen::Town;
         if (Button(craftTab, "Craft", tabsEnabled)) {
             Screen target = Screen::Craft;
             GuardZoneConfiscateIfMurderer(state, target);
@@ -29249,7 +29441,7 @@ static void UpdateDrawFrame() {
         if (Button(bankTab, "Bank", tabsEnabled)) state.screen = Screen::Bank;
         if (Button(houseTab, "House", tabsEnabled)) state.screen = Screen::House;
         if (Button(skillsTab, "Skills", tabsEnabled)) state.screen = Screen::Skills;
-        if (Button(guideTab, "Guide", tabsEnabled)) { state.screen = Screen::Guide; state.guidePage = 0; }
+        if (Button(guideTab, "Help", tabsEnabled)) { state.screen = Screen::Guide; state.guidePage = 0; }
         } // end if (!inDungeon): HUD + tab bar hidden inside dungeons
 
         if (state.ambush.has_value()) {
@@ -29318,11 +29510,12 @@ static void UpdateDrawFrame() {
         bool guideBlocked = state.wildEngaged.has_value() || state.dungeonEngaged.has_value() ||
                             state.combat.has_value() || state.ambush.has_value() ||
                             state.playerIsGhost || state.playerDeathAnimT > 0.0f;
-        if (!state.guideSeen && !state.guideOpen && guideHome && !guideBlocked) {
-            state.guideOpen = true;
-            state.guidePage = 0;
-        }
+        // (2026-09-27) new players now get the "first steps" goals instead of the
+        // five-page overlay; the pages live on under Help.
+        (void)guideBlocked;
         if (state.guideOpen && guideHome) DrawGuideOverlay(state);
+        if (!guideBlocked || state.starterStep == kStFight || state.starterStep == kStLoot) UpdateDrawStarter(state, screenW, screenH);
+        g_hudCamZone = -1;
         // UO-style travel (2026-09-25): arriving in a town marks it as a recall
         // destination. selectedTown only changes on real arrivals (gates, tabs,
         // resurrect, recall), so this one hook catches every path - no per-gate
