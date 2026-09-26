@@ -292,6 +292,11 @@ static const std::array<BuildingDef, 4> kCraftBuildings = {{
         {"Plate Arms", ItemType::Armor, "Plate Mail", "arms", "", 85, 20, 7},
         {"Plate Legs", ItemType::Armor, "Plate Mail", "legs", "", 90, 24, 8},
         {"Plate Chest", ItemType::Armor, "Plate Mail", "chest", "", 100, 40, 16},
+        // Shields (2026-09-26) - worn in the off hand; defense, and Parrying blocks blows
+        {"Buckler", ItemType::Armor, "Shield", "shield", "", 0, 10, 3},
+        {"Bronze Shield", ItemType::Armor, "Shield", "shield", "", 25, 14, 5},
+        {"Metal Kite Shield", ItemType::Armor, "Shield", "shield", "", 55, 20, 8},
+        {"Heater Shield", ItemType::Armor, "Shield", "shield", "", 85, 30, 11},
     } },
     { "carpenter", "The Hewnwood Hall", Resource::Wood, {120, 80, 40, 255}, {{
         {1, 50,  25,  15, 8.0f},
@@ -311,6 +316,9 @@ static const std::array<BuildingDef, 4> kCraftBuildings = {{
         {"Composite Bow", ItemType::Weapon, "Archery", "", "2h", 50, 20, 11},
         {"Crossbow", ItemType::Weapon, "Archery", "", "2h", 75, 28, 15},
         {"Heavy Crossbow", ItemType::Weapon, "Archery", "", "2h", 100, 40, 21},
+        // Shields (2026-09-26)
+        {"Wooden Shield", ItemType::Armor, "Shield", "shield", "", 0, 8, 2},
+        {"Wooden Kite Shield", ItemType::Armor, "Shield", "shield", "", 35, 14, 5},
     } },
     { "tailor", "The Woven Hearth", Resource::Leather, {180, 140, 60, 255}, {{
         {1, 50,  20,  12, 8.0f},
@@ -1390,6 +1398,7 @@ struct GameState {
     // always-active, matching the JS exactly. ---
     float swordsmanship = 0, fencing = 0, macing = 0, archery = 0, wrestling = 0;
     float tactics = 0, anatomy = 0, magicResist = 0, healing = 0; // capped at 100 each
+    float parrying = 0; // (2026-09-26) blocking blows - best with a shield; capped at 100
 
     // --- Bandages - mirrors state.bandages. A plain consumable count, not a backpack
     // item; crafted by the Tailor or bought from the Provisioner stand-in (see
@@ -1399,8 +1408,8 @@ struct GameState {
     // --- The Echo system - mirrors state.skillActive. true = contributing to
     // gameplay right now; false = benched (still fully trained, just inactive).
     // Indexed by WeeklyGoalIdx... no - indexed by position in kCappedSkills below. ---
-    std::array<bool, 18> skillActive = { true, true, true, true, true, true, true, true,
-                                          true, true, true, true, true, true, true, true, true, true };
+    std::array<bool, 19> skillActive = { true, true, true, true, true, true, true, true,
+                                          true, true, true, true, true, true, true, true, true, true, true };
 
     // --- The Bloodstained Road - mirrors state.bloodstainedProgress/bloodstainedLoop/
     // bloodstainedBossDefeated/grayEncounter. Tier index 0-4 = current rung; reaching
@@ -1589,6 +1598,7 @@ struct GameState {
     };
     FloatText floatTexts[16];
     float playerHurtT = -1.0f; // >=0: seconds since the player was last hit (flash + knockback)
+    float playerBlockT = -1.0f; // >=0: seconds since the player last blocked/parried (2026-09-26)
     float healGlowT = -1.0f;   // >=0: seconds since a self-targeted spell visual fired
     int healGlowKind = 0;      // 0 mending, 1 vigor, 2 summoning
     float vigorT = 0.0f;       // Blessing of Vigor: +25% melee/spell damage, seconds left
@@ -3750,7 +3760,7 @@ static bool HasWeeklyBlessing(const GameState& s) {
 // ---------------------------------------------------------------------
 
 struct CappedSkillDef { const char* label; float GameState::* field; };
-static const std::array<CappedSkillDef, 18> kCappedSkills = {{
+static const std::array<CappedSkillDef, 19> kCappedSkills = {{
     {"Swordsmanship", &GameState::swordsmanship}, {"Fencing", &GameState::fencing},
     {"Macing", &GameState::macing}, {"Archery", &GameState::archery}, {"Wrestling", &GameState::wrestling},
     {"Tactics", &GameState::tactics}, {"Anatomy", &GameState::anatomy},
@@ -3759,6 +3769,7 @@ static const std::array<CappedSkillDef, 18> kCappedSkills = {{
     {"Animal Taming", &GameState::animalTaming}, {"Animal Lore", &GameState::animalLore},
     {"Veterinary", &GameState::veterinary},
     {"Stealing", &GameState::stealing}, {"Snooping", &GameState::snooping}, {"Poisoning", &GameState::poisoning},
+    {"Parrying", &GameState::parrying}, // (2026-09-26) appended so saved indices 0-17 keep their meaning
 }};
 static const float kTotalSkillCap = 700.0f;
 
@@ -3798,7 +3809,8 @@ static bool SetSkillActive(GameState& s, int idx, bool active) {
 // JS activeWeaponCategory(): the equipped weapon's combat category, or Wrestling
 // unarmed. Returns the matching skill field so callers can read/train it directly.
 static float GameState::* ActiveWeaponSkillField(const GameState& s) {
-    const Item* weapon = s.equipped.rightHand ? &*s.equipped.rightHand : (s.equipped.leftHand ? &*s.equipped.leftHand : nullptr);
+    const Item* weapon = s.equipped.rightHand ? &*s.equipped.rightHand
+                       : ((s.equipped.leftHand && s.equipped.leftHand->type == ItemType::Weapon) ? &*s.equipped.leftHand : nullptr);
     if (weapon && weapon->type == ItemType::Weapon) {
         if (weapon->category == "Swordsmanship") return &GameState::swordsmanship;
         if (weapon->category == "Fencing") return &GameState::fencing;
@@ -3838,6 +3850,7 @@ static float OverallSkill(const GameState& s) {
     float best = std::max({ s.lumberjacking, s.mining, s.skinning, s.fishing,
                               s.buildingSkill[0], s.buildingSkill[1], s.buildingSkill[2], s.buildingSkill[3] });
     for (int i = 0; i < 15; i++) best = std::max(best, s.*(kCappedSkills[i].field)); // 0-14 excludes Stealing/Snooping/Poisoning (15-17)
+    best = std::max(best, s.parrying);
     return best;
 }
 static std::string KarmaAdjective(const GameState& s) {
@@ -3858,6 +3871,7 @@ static std::string TopVocationTitle(const GameState& s) {
     for (int i = 0; i < 9; i++) entries.push_back({ s.*(kCappedSkills[i].field), 2 });   // 5 weapon skills + Tactics/Anatomy/MagicResist/Healing
     for (int i = 9; i < 12; i++) entries.push_back({ s.*(kCappedSkills[i].field), 3 });  // Magery/EvalInt/Meditation
     for (int i = 12; i < 15; i++) entries.push_back({ s.*(kCappedSkills[i].field), 4 }); // Taming/Lore/Vet
+    entries.push_back({ s.parrying, 2 }); // Parrying - a warrior's skill
     static const char* kVocationNames[5] = { "Gatherer", "Craftsman", "Warrior", "Mage", "Tamer" };
     float bestVal = 0.0f; int bestVocation = -1;
     for (auto& e : entries) if (e.val > bestVal) { bestVal = e.val; bestVocation = e.vocation; }
@@ -4247,7 +4261,7 @@ static int CombatPower(const GameState& s) {
     // The Lumberjacking-axe-specific bonus from the JS is omitted (a narrow, flavor-only
     // case not worth the added complexity here).
     int basePower = 0;
-    if (s.equipped.leftHand) basePower += s.equipped.leftHand->power;
+    if (s.equipped.leftHand && s.equipped.leftHand->type == ItemType::Weapon) basePower += s.equipped.leftHand->power; // a shield is defense, not power
     if (s.equipped.rightHand && (!s.equipped.leftHand || s.equipped.rightHand->id != s.equipped.leftHand->id))
         basePower += s.equipped.rightHand->power;
     if (basePower == 0) basePower = std::max(1, (int)std::round(EffectiveSkill(s, &GameState::wrestling) / 6.0f));
@@ -4270,6 +4284,7 @@ static int TotalDefense(const GameState& s) {
     for (auto* slot : { &s.equipped.helmet, &s.equipped.gorget, &s.equipped.gloves,
                           &s.equipped.arms, &s.equipped.legs, &s.equipped.chest })
         if (slot->has_value()) def += (*slot)->power;
+    if (s.equipped.leftHand && s.equipped.leftHand->type == ItemType::Armor) def += s.equipped.leftHand->power; // shield
     return def;
 }
 
@@ -6103,6 +6118,7 @@ static void SaveGame(const GameState& s) {
 
     out << "swordsmanship=" << s.swordsmanship << "\nfencing=" << s.fencing << "\nmacing=" << s.macing <<
            "\narchery=" << s.archery << "\nwrestling=" << s.wrestling << "\n";
+    out << "parrying=" << s.parrying << "\n";
     out << "tactics=" << s.tactics << "\nanatomy=" << s.anatomy << "\nmagicResist=" << s.magicResist <<
            "\nhealing=" << s.healing << "\n";
     out << "skillActive=";
@@ -6314,6 +6330,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "wrestling") s.wrestling = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "tactics") s.tactics = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "anatomy") s.anatomy = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
+        else if (key == "parrying") s.parrying = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "magicResist") s.magicResist = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "healing") s.healing = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "skillActive") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < s.skillActive.size(); i++) s.skillActive[i] = std::atoi(p[i].c_str()) != 0; }
@@ -6691,9 +6708,20 @@ static void EquipFromBackpack(GameState& s, int backpackIdx) {
             s.equipped.leftHand = item;
             s.equipped.rightHand = item;
         } else {
+            bool wasTwoH = s.equipped.rightHand && s.equipped.leftHand && s.equipped.rightHand->id == s.equipped.leftHand->id;
             if (s.equipped.rightHand) s.backpack.push_back(*s.equipped.rightHand);
+            if (wasTwoH) s.equipped.leftHand.reset(); // (2026-09-26 fix) the two-hander left both hands, not just one
             s.equipped.rightHand = item;
         }
+    } else if (item.slot == "shield") { // (2026-09-26) shields go in the off hand
+        bool twoH = s.equipped.rightHand && s.equipped.leftHand && s.equipped.rightHand->id == s.equipped.leftHand->id;
+        if (twoH) { // can't hold a two-hander and a shield
+            s.backpack.push_back(*s.equipped.rightHand);
+            s.equipped.rightHand.reset();
+            s.logLine = "You put away the " + s.backpack.back().name + " to take up the shield.";
+        } else if (s.equipped.leftHand) s.backpack.push_back(*s.equipped.leftHand);
+        s.equipped.leftHand = item;
+        if (twoH) { PlaySfx(SfxId::Click); return; }
     } else { // armor
         std::optional<Item>* target = item.slot == "helmet" ? &s.equipped.helmet
             : item.slot == "gorget" ? &s.equipped.gorget : item.slot == "gloves" ? &s.equipped.gloves
@@ -10683,7 +10711,8 @@ static HumanOutfit HumanOutfitFor(const Equipment& e) {
     }
     HumanArmWith(o, e.rightHand);
     if (o.weapon == kHwNone) HumanArmWith(o, e.leftHand);
-    if (e.leftHand.has_value()) {
+    if (e.leftHand.has_value() && e.leftHand->slot == "shield") o.shield = true;
+    else if (e.leftHand.has_value()) {
         const std::string& n = e.leftHand->name;
         o.shield = n.find("Shield") != std::string::npos || n.find("Buckler") != std::string::npos;
     }
@@ -11413,6 +11442,9 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
         tint = Fade(Color{ 170, 205, 255, 255 }, 0.45f);
         hp = HumanPose{};
         hp.move = move;
+    } else if (s.playerDeathAnimT <= 0.0f && s.playerBlockT >= 0.0f) {
+        tint = Color{ 170, 200, 255, 255 }; // blocked: a cold steel flash, no knockback
+        hp.engaged = true;
     } else if (s.playerDeathAnimT <= 0.0f && s.playerHurtT >= 0.0f) {
         tint = Color{ 255, 150, 150, 255 };
         if (enemy) {
@@ -19263,6 +19295,11 @@ static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
     if (packCarrier ? RandUnit() < 0.55f : RandUnit() < 0.15f)
         c.loot.push_back({ GameState::kClReagents, 1 + std::rand() % (dm.isRival || dm.isBoss ? 4 : 2), std::nullopt });
     if (packCarrier && RandUnit() < 0.3f) c.loot.push_back({ GameState::kClBandages, 1 + std::rand() % 2, std::nullopt });
+    if (packCarrier && !dm.isRival && dm.bladeIdx < 0 && RandUnit() < 0.08f) { // (2026-09-26) now and then, its shield
+        bool bronze = dm.baseGold >= 12;
+        c.loot.push_back({ GameState::kClItem, 1, Item{ s.nextItemId++, bronze ? "Bronze Shield" : "Wooden Shield", ItemType::Armor,
+                                                        "shield", "", bronze ? 5 : 2, "Shield" } });
+    }
     if (dm.isRival) { // your stolen gear rides on its body
         for (const Item& it : s.rivalStash) c.loot.push_back({ GameState::kClItem, 1, it });
         s.rivalStash.clear();
@@ -19559,6 +19596,41 @@ static void SpawnFloatText(GameState& s, int zone, Vector2 pos, const std::strin
 // Event journal (2026-09-25, UO-style): timestamped combat/event history.
 // Journal() records the line (bounded to the last 100) AND mirrors it to the
 // bottom logLine display, so call sites just call Journal(s, text).
+// The rival's shield (2026-09-26): 15% of your landed blows ring off it.
+static bool FoeShieldBlock(GameState& s, const GameState::ActiveMonster& am) {
+    if (!am.isRival || RandUnit() >= 0.15f) return false;
+    SpawnFloatText(s, 0, am.pos, "Blocked", kFloatMissColor);
+    PlaySfx(SfxId::Hit);
+    s.logLine = "The " + RivalEpithetName(s) + " blocks your blow with its shield!";
+    return true;
+}
+
+// Parrying (2026-09-26, UO-style): a shield blocks a share of the blows aimed
+// at you - melee fully, ranged strikes at half the odds - scaling with Parrying
+// (and a little Dex); with just a melee weapon you can still turn aside a few
+// melee blows. Every blow you meet with a shield or blade up is a chance to learn.
+static bool TryParry(GameState& s, int zone, const std::string& attacker, bool ranged) {
+    const std::optional<Item>& L = s.equipped.leftHand;
+    bool shield = L.has_value() && L->slot == "shield";
+    bool blade = s.equipped.rightHand.has_value() && s.equipped.rightHand->type == ItemType::Weapon &&
+                 s.equipped.rightHand->category != "Archery";
+    if (!shield && !blade) return false;
+    if (ranged && !shield) return false;
+    float gain = RandUnit() < 0.5f ? GainSkillCapped(s.parrying, RollGatherSkillGain(s.parrying) * (shield ? 1.0f : 0.5f), 100.0f) : 0.0f;
+    float parry = EffectiveSkill(s, &GameState::parrying);
+    float chance = shield ? 4.0f + parry * 0.30f + std::max(0, s.dex - 20) * 0.08f : parry * 0.12f;
+    if (ranged) chance *= 0.5f;
+    chance = std::min(chance, shield ? 45.0f : 15.0f);
+    if (RandUnit() * 100.0f >= chance) return false;
+    Vector2 me = zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    SpawnFloatText(s, zone, me, shield ? "Blocked!" : "Parried!", Color{ 190, 215, 255, 255 });
+    PlaySfx(SfxId::Hit);
+    s.playerBlockT = 0.0f; // shield-up flash on the body
+    std::string note = gain > 0 ? std::string(" (Parrying +") + std::to_string(gain).substr(0, 4) + ")" : "";
+    Journal(s, std::string("You ") + (shield ? "block" : "parry") + " the " + attacker + "'s " + (ranged ? "strike" : "blow") + "." + note);
+    return true;
+}
+
 static void Journal(GameState& s, const std::string& text) {
     s.journal.push_back({ text, s.worldTime });
     while (s.journal.size() > 100) s.journal.pop_front();
@@ -19933,7 +20005,8 @@ static void ResolveEnemyRangedImpact(GameState& s, bool castByRival, int castByB
     EngagedMonsterStats spot = EngagedWildMonsterStats(s, am);
     std::string mname = spot.name;
     float hitCh = MonsterHitChance(s) - (am.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
-    if (RandUnit() * 100.0f < hitCh) {
+    bool parried = false; // (2026-09-26) Parrying
+    if (RandUnit() * 100.0f < hitCh && !(parried = TryParry(s, 0, mname, true))) {
         float raw = spot.level * (0.9f + RandUnit() * 0.5f);
         if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
         int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
@@ -19951,7 +20024,7 @@ static void ResolveEnemyRangedImpact(GameState& s, bool castByRival, int castByB
             RivalCorpseLoot(s);
             return;
         }
-    } else {
+    } else if (!parried) {
         s.logLine = "The " + mname + " strikes from range, but misses!";
     }
 }
@@ -20022,6 +20095,7 @@ static void UpdateLiveSpellFX(GameState& s, float dt) {
     if (s.wildEngaged.has_value()) tickEngagedFX(*s.wildEngaged);
     if (s.dungeonEngaged.has_value()) tickEngagedFX(*s.dungeonEngaged);
     if (s.playerHurtT >= 0.0f) { s.playerHurtT += dt; if (s.playerHurtT > kCombatFlashTime) s.playerHurtT = -1.0f; }
+    if (s.playerBlockT >= 0.0f) { s.playerBlockT += dt; if (s.playerBlockT > 0.3f) s.playerBlockT = -1.0f; }
     if (s.healGlowT >= 0.0f) { s.healGlowT += dt; if (s.healGlowT > 0.6f) s.healGlowT = -1.0f; }
     if (s.vigorT > 0.0f) s.vigorT -= dt;
 
@@ -22347,7 +22421,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             am.monsterAttackT = 0.0f; // world-space lunge anim, synced to this tick
             std::string mname = spot.name;
             float hitCh = MonsterHitChance(s) - (am.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
-            if (RandUnit() * 100.0f < hitCh) {
+            bool parried = false; // (2026-09-26) Parrying
+            if (RandUnit() * 100.0f < hitCh && !(parried = TryParry(s, 0, mname, false))) {
                 float raw = spot.level * (0.8f + RandUnit() * 0.6f);
                 if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
@@ -22356,7 +22431,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 CombatShake(7.0f);
                 PlaySfx(SfxId::Hurt);
                 Journal(s, "The " + mname + " hits you for " + std::to_string(dmg) + " damage");
-            } else {
+            } else if (!parried) {
                 Journal(s, "The " + mname + " misses");
             }
             if (s.hp <= 0) { EndWildMonsterLoss(s, mname); return; }
@@ -22516,7 +22591,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             am.monsterAttackT = 0.0f; // world-space lunge anim, synced to this tick
             std::string mname = spot.name;
             float hitCh = MonsterHitChance(s) - (am.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
-            if (RandUnit() * 100.0f < hitCh) {
+            bool parried = false; // (2026-09-26) Parrying
+            if (RandUnit() * 100.0f < hitCh && !(parried = TryParry(s, 0, mname, false))) {
                 float raw = spot.level * (0.8f + RandUnit() * 0.6f);
                 if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
@@ -22525,7 +22601,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 CombatShake(7.0f);
                 PlaySfx(SfxId::Hurt);
                 Journal(s, "The " + mname + " hits you for " + std::to_string(dmg) + " damage");
-            } else {
+            } else if (!parried) {
                 Journal(s, "The " + mname + " misses");
             }
             if (s.hp <= 0) {
@@ -22629,7 +22705,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 if (rank < kMaxMeleeAttackers) {
                     ex.monsterAttackCooldown = kWildMonsterAttackCooldown * (ex.debuffKind == 3 ? 1.5f : 1.0f);
                     float hitCh = MonsterHitChance(s) - (ex.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
-                    if (RandUnit() * 100.0f < hitCh) {
+                    bool parried = false; // (2026-09-26) Parrying
+                    if (RandUnit() * 100.0f < hitCh && !(parried = TryParry(s, 0, spot.name, false))) {
                         float raw = spot.level * (0.8f + RandUnit() * 0.6f);
                         if (ex.debuffKind == 1) raw *= 0.7f; // Sap Strength
                         int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
@@ -22638,7 +22715,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                         CombatShake(7.0f);
                         PlaySfx(SfxId::Hurt);
                         Journal(s, "The " + spot.name + " hits you for " + std::to_string(dmg) + " damage");
-                    } else {
+                    } else if (!parried) {
                         Journal(s, "The " + spot.name + " misses");
                     }
                     if (s.hp <= 0) { EndWildMonsterLoss(s, spot.name); return; }
@@ -22667,7 +22744,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         float hitChance = std::clamp(50.0f + (power - spot.level) * 4.0f + weaponSkillBonus, 5.0f, 95.0f);
         LiveApplyWeaponTraining(s);
         std::string mname = spot.name; int mgold = spot.baseGold, mleather = spot.baseLeather;
-        if (RandUnit() * 100.0f < hitChance) {
+        bool foeBlocked = false; // (2026-09-26) the rival carries a shield and uses it
+        if (RandUnit() * 100.0f < hitChance && !(foeBlocked = FoeShieldBlock(s, am))) {
             int dmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
             if (s.vigorT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.25f)); // Blessing of Vigor
             am.hp -= dmg;
@@ -22727,7 +22805,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                                 std::to_string(cleaveCount) + (cleaveCount == 1 ? " foe!" : " foes!");
             }
             Journal(s, s.logLine); // hits dealt go to the event journal
-        } else {
+        } else if (!foeBlocked) {
             s.logLine = "Your attack misses";
             SpawnFloatText(s, 0, am.pos, "MISS", kFloatMissColor);
             Journal(s, s.logLine);
@@ -24026,7 +24104,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             am.monsterAttackT = 0.0f; // world-space lunge anim, synced to this tick
             std::string mname = m.name;
             float hitCh = MonsterHitChance(s) - (am.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
-            if (RandUnit() * 100.0f < hitCh) {
+            bool parried = false; // (2026-09-26) Parrying
+            if (RandUnit() * 100.0f < hitCh && !(parried = TryParry(s, 1, mname, false))) {
                 float raw = m.level * (0.8f + RandUnit() * 0.6f);
                 if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
@@ -24035,7 +24114,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                 CombatShake(7.0f);
                 PlaySfx(SfxId::Hurt);
                 Journal(s, "The " + mname + " hits you for " + std::to_string(dmg) + " damage");
-            } else {
+            } else if (!parried) {
                 Journal(s, "The " + mname + " misses");
             }
             if (s.hp <= 0) { EndDungeonMonsterLoss(s, mname); return; }
@@ -24109,7 +24188,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                 if (rank < kMaxMeleeAttackers) {
                     ex.monsterAttackCooldown = kWildMonsterAttackCooldown * (ex.debuffKind == 3 ? 1.5f : 1.0f);
                     float hitCh = MonsterHitChance(s) - (ex.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
-                    if (RandUnit() * 100.0f < hitCh) {
+                    bool parried = false; // (2026-09-26) Parrying
+                    if (RandUnit() * 100.0f < hitCh && !(parried = TryParry(s, 1, exM.name, false))) {
                         float raw = exM.level * (0.8f + RandUnit() * 0.6f);
                         if (ex.debuffKind == 1) raw *= 0.7f; // Sap Strength
                         int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
@@ -24118,7 +24198,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                         CombatShake(7.0f);
                         PlaySfx(SfxId::Hurt);
                         Journal(s, "The " + exM.name + " hits you for " + std::to_string(dmg) + " damage");
-                    } else {
+                    } else if (!parried) {
                         Journal(s, "The " + exM.name + " misses");
                     }
                     if (s.hp <= 0) { EndDungeonMonsterLoss(s, exM.name); return; }
@@ -25877,7 +25957,7 @@ struct PaperdollSlot { const char* label; std::optional<Item> Equipment::*field;
 static const PaperdollSlot kPdSlots[8] = {
     { "Head", &Equipment::helmet, 0 },    { "Neck", &Equipment::gorget, 1 },
     { "Chest", &Equipment::chest, 2 },    { "Arms", &Equipment::arms, 3 },
-    { "Weapon", &Equipment::rightHand, 4 }, { "Off-hand", &Equipment::leftHand, 5 },
+    { "Weapon", &Equipment::rightHand, 4 }, { "Shield", &Equipment::leftHand, 5 },
     { "Hands", &Equipment::gloves, 6 },   { "Legs", &Equipment::legs, 7 },
 };
 static Rectangle PaperdollSlotRect(int i) {
@@ -25900,7 +25980,8 @@ static void PaperdollGlyph(int g, Rectangle r) {
     }
 }
 static bool PaperdollItemFits(const Item& it, int slot) {
-    if (slot == 4 || slot == 5) return it.type == ItemType::Weapon;
+    if (slot == 4) return it.type == ItemType::Weapon;
+    if (slot == 5) return it.slot == "shield" || (it.type == ItemType::Weapon && it.handed == "2h");
     if (it.type != ItemType::Armor) return false;
     static const char* names[8] = { "helmet", "gorget", "chest", "arms", "", "", "gloves", "legs" };
     return it.slot == names[slot] || (slot == 2 && it.slot.empty());
@@ -25909,6 +25990,7 @@ static std::string ItemStatLine(const Item& it) {
     if (it.type == ItemType::Weapon)
         return std::string(it.handed == "2h" ? "Two-handed" : "One-handed") + " weapon  -  Power " + std::to_string(it.power) +
                (it.category.empty() ? "" : "  -  " + it.category);
+    if (it.slot == "shield") return "Shield  -  Defense " + std::to_string(it.power) + "  -  blocks blows (Parrying)";
     return "Armor  -  Defense " + std::to_string(it.power) + (it.slot.empty() ? "" : "  -  " + it.slot);
 }
 
