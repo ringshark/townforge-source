@@ -532,6 +532,11 @@ static const std::array<Vector2, 5> kRivalCampSpots = {{ // Murder Inc.'s camp r
     {500, 2300}, {2300, 1500}, {1300, 1100}, {2700, 1900}, {400, 800}
 }};
 static const Vector2 kOutlawRefuge = {2750, 2450}; // hidden black market, far southeast corner
+// Grimtusk Hold (2026-09-27): the orc fortress, far south past the river below the
+// Fields of Sorrow. Its gate faces west-northwest, where the river can be walked round.
+static const Vector2 kOrcFortPos = { 1800, 2880 };
+static const float kOrcFortRadius = 205.0f;
+static const float kOrcFortGateYaw = -2.8253f; // toward (1250, 2700)
 
 struct HousePlot { Vector2 pos; int cells; int price; const char* name; RegionId region; };
 // Positions were hand-picked against kWildernessMonsterSpots, kWildernessDungeonEntrances,
@@ -1157,7 +1162,7 @@ static const int kBladeCount = 3;
 // GameState's respawn-timer arrays are sized by these, and the spot tables they
 // must match (kWildernessMonsterSpots, kCenters in DungeonMonsterNodePos) are
 // declared much later. static_asserts next to those tables verify the match.
-static const int kWildMonsterSpotCount = 20;
+static const int kWildMonsterSpotCount = 27; // (2026-09-27) +7: the Grimtusk Hold orcs
 static const int kDungeonBossSlot = 8; // boss slot index; regular slots are 0..7
 static const int kDungeonSlotCount = kDungeonBossSlot + 1; // 9 slots per dungeon
 static const char* kGhostNoTouch = "Ghosts cannot touch the world of the living.";
@@ -7442,7 +7447,7 @@ static void UpdateEscort(GameState& s, float dt) {
 // fully separate roaming entity, so every entry left in this array is an ordinary
 // always-melee monster again, no per-entry AI-variant flag needed.
 struct WildernessMonsterSpot { Vector2 pos; std::string name; int level; int baseLeather; int baseGold; int iconIdx; RegionId region; };
-static const std::array<WildernessMonsterSpot, 20> kWildernessMonsterSpots = {{
+static const std::array<WildernessMonsterSpot, 27> kWildernessMonsterSpots = {{
     { {1150, 1250}, "Wild Bat", 2, 1, 2, 0, RegionAt({1150, 1250}) },
     { {600, 1000}, "Timber Wolf", 5, 3, 4, 2, RegionAt({600, 1000}) }, // Phase 1: Whisperwood signature - was Wandering Goblin
     { {1150, 700}, "Lone Wolf", 9, 5, 7, 2, RegionAt({1150, 700}) },
@@ -7477,6 +7482,15 @@ static const std::array<WildernessMonsterSpot, 20> kWildernessMonsterSpots = {{
     { {350, 2500}, "Rock Golem", 38, 20, 30, 7, RegionAt({350, 2500}) },
     { {150, 1800}, "Mountain Cat", 26, 14, 21, 8, RegionAt({150, 1800}) },
     { {450, 2300}, "Mountain Cat", 33, 18, 27, 8, RegionAt({450, 2300}) },
+    // Grimtusk Hold (2026-09-27) - the orc fortress (iconIdx 9 orcs, 10 the Warlord).
+    // One faction (MonsterFaction): strike one and the whole hold answers.
+    { {1681, 2794}, "Orc Grunt", 22, 8, 14, 9, RegionAt({1681, 2794}) },   // inside the gate
+    { {1653, 2879}, "Orc Grunt", 22, 8, 14, 9, RegionAt({1653, 2879}) },
+    { {1801, 2749}, "Orc Archer", 24, 6, 16, 9, RegionAt({1801, 2749}) },  // by the walls
+    { {1723, 2986}, "Orc Archer", 24, 6, 16, 9, RegionAt({1723, 2986}) },
+    { {1829, 2824}, "Orc Brute", 30, 12, 20, 9, RegionAt({1829, 2824}) },  // at the bonfire
+    { {1832, 2975}, "Orc Shaman", 30, 4, 22, 9, RegionAt({1832, 2975}) },  // at the war drum
+    { {1919, 2919}, "Orc Warlord", 42, 20, 60, 10, RegionAt({1919, 2919}) }, // before his hall
 }};
 static const int kWildMonsterIconCount = 9; // iconIdx 0-4 classic, 5 Ice Wolf, 6 Frostbitten Husk, 7 Rock Golem, 8 Mountain Cat
 static_assert(kWildernessMonsterSpots.size() == kWildMonsterSpotCount,
@@ -10471,6 +10485,7 @@ static const DirSpriteSheet& WildMonsterSheetFor(int iconIdx) {
     int base = iconIdx;
     if (base == 5 || base == 8) base = 2;
     else if (base == 6 || base == 7) base = 3;
+    else if (base == 9 || base == 10) base = 1; // orcs: the goblin sheet, darker and bigger
     if (base < 0 || base >= 5) base = 0;
     return g_assets.wildMonsterTex[base];
 }
@@ -10478,6 +10493,7 @@ static Color WildMonsterTintFor(int iconIdx) {
     if (iconIdx == 5 || iconIdx == 6) return Color{ 185, 215, 240, 255 }; // frostbitten
     if (iconIdx == 7) return Color{ 150, 140, 128, 255 }; // granite
     if (iconIdx == 8) return Color{ 205, 170, 115, 255 }; // tawny
+    if (iconIdx == 9 || iconIdx == 10) return Color{ 150, 175, 120, 255 }; // orc grey-green
     return WHITE;
 }
 // Wilderness fightable monsters by iconIdx: 0 Wild Bat, 1 Wandering Goblin,
@@ -10504,6 +10520,10 @@ static T3CMonLook T3CMonsterLook(int iconIdx) {
             return { true, 0, {0,0,0,0}, { 110, 125, 140, 255 }, { 80, 95, 110, 255 }, { 190, 215, 230, 255 }, 1.05f };
         case 7: // Rock Golem (Phase 4) - bulky stone humanoid, granite gray
             return { true, 1, {0,0,0,0}, { 120, 112, 100, 255 }, { 95, 88, 78, 255 }, { 150, 140, 125, 255 }, 1.50f };
+        case 9:  // Orcs of Grimtusk Hold (2026-09-27) - big grey-green humanoids in hide and iron
+            return { true, 0, {0,0,0,0}, { 88, 66, 44, 255 }, { 58, 48, 38, 255 }, { 98, 128, 72, 255 }, 1.12f };
+        case 10: // the Orc Warlord - larger still, blackened iron
+            return { true, 0, {0,0,0,0}, { 58, 56, 60, 255 }, { 44, 40, 40, 255 }, { 92, 120, 66, 255 }, 1.34f };
         case 8: // Mountain Cat (Phase 4) - tawny feline quadruped
         default:
             return { false, 1, { 195, 158, 105, 255 }, {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, 1.10f };
@@ -11719,6 +11739,28 @@ static HumanOutfit HumanOutfitMono(Color c) {
 // Wilderness humanoid monsters (T3CMonsterLook's humanoids), keyed by icon + name.
 static HumanOutfit HumanOutfitForWildMonster(int iconIdx, const std::string& name, const T3CMonLook& L) {
     switch (iconIdx) {
+        case 9: case 10: { // orcs: topknots, hide and iron, heavy weapons
+            HumanOutfit o = HumanOutfitPlain(L.skin, L.shirt, L.pants, Color{ 50, 40, 32, 255 }, Color{ 24, 22, 20, 255 });
+            o.hairStyle = 2; o.beard = false;
+            o.region[kHrBelt] = Color{ 120, 30, 26, 255 };
+            if (name == "Orc Warlord") {
+                HumanGive(o, kHwAxe, kHsTwoHand, 1.45f);
+                o.helm = kHhPlate; o.helmCol = Color{ 64, 60, 64, 255 };
+                o.cloak = true; o.cloakCol = Color{ 118, 20, 20, 255 };
+            } else if (name == "Orc Archer") {
+                HumanGive(o, kHwBow, kHsBow);
+                o.helm = kHhLeather; o.helmCol = Color{ 82, 60, 40, 255 };
+            } else if (name == "Orc Brute") {
+                HumanGive(o, kHwHammer, kHsTwoHand, 1.25f);
+            } else if (name == "Orc Shaman") {
+                HumanGive(o, kHwStaff, kHsMagic);
+                o.cloak = true; o.cloakCol = Color{ 196, 184, 150, 255 }; // bone-pale hides
+            } else { // grunt
+                HumanGive(o, kHwAxe, kHsOneHand, 1.1f); o.shield = true;
+                o.helm = kHhLeather; o.helmCol = Color{ 70, 52, 36, 255 };
+            }
+            return o;
+        }
         case 1: { // Wandering Goblin: green skin, rags, rusty dagger
             HumanOutfit o = HumanOutfitPlain(L.skin, L.shirt, L.pants, Color{ 60, 48, 36, 255 }, Color{ 60, 90, 50, 255 });
             HumanGive(o, kHwDagger, kHsDagger, 1.1f);
@@ -13735,6 +13777,13 @@ static void DrawWorldMap(GameState& s) {
         label(g.townName, { p.x, p.y + 10 }, 12, Color{ 255, 236, 180, 255 });
     }
     DrawCircleV(toMap(kRivalCampSpots[s.rivalCampIdx]), 5.0f, Color{ 200, 50, 45, 255 });
+    { // Grimtusk Hold (2026-09-27): a little red keep
+        Vector2 f = toMap(kOrcFortPos);
+        DrawRectangleRec({ f.x - 7, f.y - 5, 14, 10 }, Color{ 110, 40, 30, 255 });
+        for (int k = -1; k <= 1; k++) DrawRectangleRec({ f.x + k * 5 - 2, f.y - 9, 4, 4 }, Color{ 110, 40, 30, 255 });
+        DrawRectangleLinesEx({ f.x - 7, f.y - 5, 14, 10 }, 1.0f, Color{ 250, 220, 180, 255 });
+        label("Grimtusk Hold", { f.x, f.y + 12 }, 11, Color{ 255, 200, 170, 255 });
+    }
     if (s.notoriety > 1.0f || s.refugeKnown) DrawCircleV(toMap(kOutlawRefuge), 5.0f, Color{ 90, 60, 110, 255 });
     MapIconPlayer(toMap(s.wildernessPlayerPos), s.playerFacing, 7.0f);
     DrawRectangleLinesEx(mm, 2.0f, Fade(BLACK, 0.55f));
@@ -13807,6 +13856,13 @@ static void DrawMinimap(GameState& s) {
         auto mark = [&](Vector2 w) { Vector2 p = toMap(w); if (inside(p, 2)) { DrawCircleV(p, 5.0f, Fade(Color{ 230, 40, 40, 255 }, 0.35f * pulse)); DrawCircleV(p, 3.0f, Color{ 230, 40, 40, 255 }); } };
         if (s.rivalActivity != GameState::RivalActivity::Patrol) mark(s.rivalPos);
         for (int bi = 0; bi < kBladeCount; bi++) if (s.blades[bi].activity != GameState::RivalActivity::Patrol) mark(s.blades[bi].pos);
+    }
+    { // Grimtusk Hold on the minimap
+        Vector2 f = toMap(kOrcFortPos);
+        if (inside(f, -8)) {
+            DrawRectangleRec({ f.x - 5, f.y - 4, 10, 8 }, Color{ 110, 40, 30, 255 });
+            DrawRectangleLinesEx({ f.x - 5, f.y - 4, 10, 8 }, 1.0f, Color{ 250, 220, 180, 255 });
+        }
     }
     MapIconPlayer(toMap(s.wildernessPlayerPos), s.playerFacing, 5.0f);
     EndScissorMode();
@@ -14620,6 +14676,7 @@ static void WildHeightEnsure() {
     for (const auto& g : kTownGates) flats.push_back({ g.wildernessPos.x, g.wildernessPos.y, 220.0f });
     for (const auto& hp : kHousePlots) flats.push_back({ hp.pos.x, hp.pos.y, 60.0f + hp.cells * kHouseCellSize * 0.75f });
     for (const auto& cp : kRivalCampSpots) flats.push_back({ cp.x, cp.y, 250.0f }); // Murder Inc.'s war camps (2026-09-27)
+    flats.push_back({ kOrcFortPos.x, kOrcFortPos.y, kOrcFortRadius + 70.0f }); // Grimtusk Hold
     for (const auto& sh : kShrines) flats.push_back({ sh.pos.x, sh.pos.y, 110.0f });
     for (const auto& d : kSaltDocks) flats.push_back({ d.pos.x, d.pos.y, 140.0f });
     flats.push_back({ kFieldsOfSorrow.x, kFieldsOfSorrow.y, kFieldsOfSorrowRadius + 60.0f });
@@ -15240,6 +15297,7 @@ static void Wild3DBuildScatter() {
         }
         for (const Vector2& p : kRivalCampSpots) // war camps stand in cleared ground
             if (Dist({ x, z }, p) < 215.0f) return false;
+        if (Dist({ x, z }, kOrcFortPos) < kOrcFortRadius + 70.0f) return false; // and so does Grimtusk Hold
         return true;
     };
     struct Zone { float x0, x1, z0, z1, step, density; int kind; };
@@ -15432,6 +15490,7 @@ static void Wild3DBuildDressing() {
     for (const auto& ip : kWildernessInnocentSpots) keep.push_back({ ip.pos, 80.0f });
     for (const auto& hp : kHousePlots) keep.push_back({ hp.pos, 40.0f + hp.cells * kHouseCellSize * 0.5f });
     for (const auto& cp : kRivalCampSpots) keep.push_back({ cp, 215.0f });
+    keep.push_back({ kOrcFortPos, kOrcFortRadius + 70.0f });
     for (const auto& sh : kShrines) keep.push_back({ sh.pos, 100.0f });
     for (const auto& d : kSaltDocks) keep.push_back({ d.pos, 130.0f });
     keep.push_back({ kFieldsOfSorrow, kFieldsOfSorrowRadius + 40.0f });
@@ -16705,6 +16764,17 @@ static void RivalCampResolve(const GameState& s, Vector2& p, float r) {
     float want = d < kCampRadius ? kCampRadius - r - 6.0f : kCampRadius + r + 6.0f;
     p = { c.x + (p.x - c.x) / d * want, c.y + (p.y - c.y) / d * want };
 }
+// Grimtusk Hold's palisade: a ring you can only cross at the gate.
+static void OrcFortResolve(Vector2& p, float r) {
+    const Vector2 c = kOrcFortPos;
+    const float wallR = kOrcFortRadius + 4.0f;
+    float d = Dist(p, c);
+    if (d < 1.0f || fabsf(d - wallR) > r + 10.0f) return;
+    float a = atan2f(p.y - c.y, p.x - c.x) - kOrcFortGateYaw;
+    if (fabsf(atan2f(sinf(a), cosf(a))) < 0.15f) return; // the gateway
+    float want = d < wallR ? wallR - r - 10.0f : wallR + r + 10.0f;
+    p = { c.x + (p.x - c.x) / d * want, c.y + (p.y - c.y) / d * want };
+}
 struct RivalCampModel { bool built = false; Model m{}; };
 static RivalCampModel g_campModels[5];
 static void RivalCampBuild(int idx) {
@@ -16902,6 +16972,238 @@ static void Wild3DDrawRivalCamp(GameState& s, bool shadowPass, const Town3DCam* 
     rlSetTexture(0);
     EndBlendMode();
 }
+// ---- Grimtusk Hold, the orc fortress (2026-09-27) ------------------------------------
+// Rougher and meaner than the Murder Inc. camp: a double ring of dark, red-tipped
+// logs with outward stakes, a gatehouse crowned with a horned skull between two
+// watchtowers, hide huts, the Warlord's longhouse at the back, a great bonfire, a
+// war drum, skull totems and bone piles. The orcs themselves are ordinary monster
+// spots (kWildernessMonsterSpots "Orc ...") drawn by the monster pass.
+// A leaning stake from p0 to p1 (a four-sided prism tapering to a point).
+static void T3CStake(T3CMeshBuilder& b, Vector3 p0, Vector3 p1, float r, Color col) {
+    Vector3 d = { p1.x - p0.x, p1.y - p0.y, p1.z - p0.z };
+    float l = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
+    if (l < 1e-3f) return;
+    d = { d.x / l, d.y / l, d.z / l };
+    Vector3 a = fabsf(d.y) < 0.9f ? Vector3{ 0, 1, 0 } : Vector3{ 1, 0, 0 };
+    Vector3 u = { d.y * a.z - d.z * a.y, d.z * a.x - d.x * a.z, d.x * a.y - d.y * a.x };
+    float ul = sqrtf(u.x * u.x + u.y * u.y + u.z * u.z); u = { u.x / ul, u.y / ul, u.z / ul };
+    Vector3 v = { d.y * u.z - d.z * u.y, d.z * u.x - d.x * u.z, d.x * u.y - d.y * u.x };
+    float tip[3] = { p1.x, p1.y, p1.z };
+    float base[4][3];
+    for (int k = 0; k < 4; k++) {
+        float an = k * 1.5708f;
+        base[k][0] = p0.x + (u.x * cosf(an) + v.x * sinf(an)) * r;
+        base[k][1] = p0.y + (u.y * cosf(an) + v.y * sinf(an)) * r;
+        base[k][2] = p0.z + (u.z * cosf(an) + v.z * sinf(an)) * r;
+    }
+    for (int k = 0; k < 4; k++) T3CPushTri(b, base[k], base[(k + 1) % 4], tip, k % 2 ? col : ColorBrightness(col, -0.12f));
+}
+static void T3CSkull(T3CMeshBuilder& b, float x, float y, float z, float s, float yaw, bool horns) {
+    const Color bone = { 226, 218, 196, 255 }, hole = { 30, 24, 22, 255 }, horn = { 190, 176, 140, 255 };
+    float fx = cosf(yaw), fz = sinf(yaw), sx = -fz, sz = fx;
+    T3CSphere(b, x, y, z, 7 * s, 7.5f * s, 7 * s, 6, 8, bone);
+    T3CBox(b, x + fx * 3 * s, y - 6 * s, z + fz * 3 * s, 8 * s, 4 * s, 8 * s, bone); // jaw
+    for (int e = -1; e <= 1; e += 2)
+        T3CSphere(b, x + fx * 6 * s + sx * e * 2.8f * s, y + 1 * s, z + fz * 6 * s + sz * e * 2.8f * s, 2 * s, 2.2f * s, 2 * s, 4, 6, hole);
+    if (horns)
+        for (int e = -1; e <= 1; e += 2)
+            T3CStake(b, { x + sx * e * 5 * s, y + 4 * s, z + sz * e * 5 * s }, { x + sx * e * 16 * s, y + 14 * s, z + sz * e * 16 * s }, 2.4f * s, horn);
+}
+static bool g_orcFortBuilt = false;
+static Model g_orcFortModel{};
+static void OrcFortBuild() {
+    if (g_orcFortBuilt) return;
+    g_orcFortBuilt = true;
+    T3CMeshBuilder b;
+    const float R = kOrcFortRadius, gate = kOrcFortGateYaw;
+    const Color log = { 70, 50, 34, 255 }, logDk = { 52, 38, 28, 255 }, red = { 150, 36, 28, 255 }, hide = { 132, 102, 72, 255 };
+    auto P = [&](float ang, float r) { return Vector2{ cosf(gate + ang) * r, sinf(gate + ang) * r }; };
+    // palisade: two staggered rings of thick logs, red-tipped, with outward stakes
+    int n = (int)(6.2832f * R / 10.0f);
+    for (int ring = 0; ring < 2; ring++)
+        for (int i = 0; i < n; i++) {
+            float a = 6.2832f * (i + ring * 0.5f) / n;
+            float rel = atan2f(sinf(a), cosf(a));
+            if (fabsf(rel) < 0.17f) continue; // the gateway
+            float rr = R + ring * 8.0f, h = (ring ? 58.0f : 70.0f) + T3CHash01((float)i, (float)ring) * 14.0f;
+            Vector2 q = P(a, rr);
+            T3CCylinder(b, q.x, 0.0f, q.y, h, 5.6f, 5.0f, 6, (i + ring) % 3 ? log : logDk, false, false);
+            T3CCylinder(b, q.x, h, q.y, h + 11.0f, 5.0f, 0.3f, 6, i % 4 == 0 ? red : Color{ 120, 96, 70, 255 }, false, false);
+            if (ring == 1 && i % 2 == 0) { // outward stakes against a charge
+                Vector2 o = P(a, rr + 6.0f), t = P(a, rr + 30.0f);
+                T3CStake(b, { o.x, 8.0f, o.y }, { t.x, 26.0f, t.y }, 2.6f, log);
+            }
+        }
+    // gatehouse: two square towers, a walkway beam and the horned skull over the gate
+    for (int side = -1; side <= 1; side += 2) {
+        Vector2 t = P(side * 0.22f, R + 4.0f);
+        T3CBox(b, t.x, 55.0f, t.y, 30.0f, 110.0f, 30.0f, logDk);
+        for (int k = 0; k < 4; k++) { // crenellations
+            float ox = (k % 2 ? 1 : -1) * 11.0f, oz = (k / 2 ? 1 : -1) * 11.0f;
+            T3CBox(b, t.x + ox, 116.0f, t.y + oz, 8.0f, 12.0f, 8.0f, log);
+        }
+        T3CStake(b, { t.x, 110.0f, t.y }, { t.x, 150.0f, t.y }, 1.6f, Color{ 90, 70, 50, 255 }); // banner pole
+    }
+    {
+        Vector2 a = P(-0.22f, R + 4.0f), c = P(0.22f, R + 4.0f), m = P(0.0f, R + 10.0f);
+        float bx = (a.x + c.x) * 0.5f, bz = (a.y + c.y) * 0.5f;
+        float len = hypotf(c.x - a.x, c.y - a.y);
+        float yawG = gate;
+        // walkway: a slab spanning the gap between the towers
+        for (int k = 0; k <= 8; k++) {
+            float t = k / 8.0f;
+            T3CBox(b, a.x + (c.x - a.x) * t, 92.0f, a.y + (c.y - a.y) * t, 12.0f, 7.0f, 12.0f, log);
+        }
+        (void)bx; (void)bz; (void)len;
+        T3CSkull(b, m.x, 108.0f, m.y, 2.1f, yawG, true);
+    }
+    // hide huts round the yard
+    const float hutA[5] = { 1.2f, 1.75f, -1.2f, -1.75f, 2.4f };
+    for (int i = 0; i < 5; i++) {
+        Vector2 h = P(hutA[i], 120.0f);
+        T3CCylinder(b, h.x, 0.0f, h.y, 24.0f, 24.0f, 22.0f, 10, hide);
+        T3CCylinder(b, h.x, 24.0f, h.y, 56.0f, 28.0f, 2.0f, 10, ColorBrightness(hide, -0.2f), false, false);
+        T3CStake(b, { h.x, 50.0f, h.y }, { h.x + 4.0f, 70.0f, h.y }, 1.2f, logDk); // poles poking out the top
+        T3CStake(b, { h.x, 50.0f, h.y }, { h.x - 4.0f, 68.0f, h.y + 3.0f }, 1.2f, logDk);
+    }
+    // the Warlord's longhouse at the back (beyond his spot), gable roof, antler horns
+    {
+        Vector2 c = P(3.1416f, 160.0f);
+        float fx = cosf(gate), fz = sinf(gate); // local x runs along the gate axis
+        float sx = -fz, sz = fx;
+        auto W = [&](float lx, float ly, float lz) { return Vector3{ c.x + fx * lx + sx * lz, ly, c.y + fz * lx + sz * lz }; };
+        const float hl = 34.0f, hw = 62.0f, hh = 42.0f;
+        // walls as boxes along each side
+        for (int k = -6; k <= 6; k++) T3CBox(b, W(0, 0, k * 10.0f).x, hh * 0.5f, W(0, 0, k * 10.0f).z, 64.0f * 0 + 68.0f, hh, 10.5f, k % 2 ? log : logDk);
+        // roof
+        float r0[3], r1[3], r2[3], r3[3], a0[3], a1[3];
+        Vector3 v;
+        v = W(-hl - 8, hh, -hw - 6); r0[0] = v.x; r0[1] = v.y; r0[2] = v.z;
+        v = W(-hl - 8, hh, hw + 6);  r1[0] = v.x; r1[1] = v.y; r1[2] = v.z;
+        v = W(0, hh + 34, hw + 6);    a1[0] = v.x; a1[1] = v.y; a1[2] = v.z;
+        v = W(0, hh + 34, -hw - 6);   a0[0] = v.x; a0[1] = v.y; a0[2] = v.z;
+        T3CQuad(b, r0, r1, a1, a0, Color{ 96, 76, 50, 255 });
+        v = W(hl + 8, hh, -hw - 6); r2[0] = v.x; r2[1] = v.y; r2[2] = v.z;
+        v = W(hl + 8, hh, hw + 6);  r3[0] = v.x; r3[1] = v.y; r3[2] = v.z;
+        T3CQuad(b, r3, r2, a0, a1, Color{ 84, 66, 44, 255 });
+        T3CPushTri(b, r0, a0, r2, logDk); T3CPushTri(b, r1, r3, a1, logDk); // gable ends
+        Vector3 top = W(0, hh + 34, hw + 6), top2 = W(0, hh + 34, -hw - 6);
+        T3CStake(b, top, { top.x + sx * 22, top.y + 16, top.z + sz * 22 }, 2.4f, Color{ 200, 186, 150, 255 }); // crossed horns
+        T3CStake(b, top2, { top2.x - sx * 22, top2.y + 16, top2.z - sz * 22 }, 2.4f, Color{ 200, 186, 150, 255 });
+        Vector3 dr = W(hl + 0.5f, 0, 0);
+        T3CBox(b, dr.x, 17.0f, dr.z, 3.0f, 34.0f, 22.0f, Color{ 30, 22, 18, 255 }); // dark doorway
+        T3CSkull(b, W(hl + 4, 44, 0).x, 44.0f, W(hl + 4, 44, 0).z, 1.3f, gate, true);
+    }
+    // bonfire: stone ring and a log pyre
+    for (int i = 0; i < 12; i++) {
+        float a = 6.2832f * i / 12;
+        T3CSphere(b, cosf(a) * 20.0f, 3.0f, sinf(a) * 20.0f, 6.0f, 4.0f, 6.0f, 5, 6, Color{ 96, 92, 88, 255 });
+    }
+    for (int i = 0; i < 6; i++) {
+        float a = i * 1.047f;
+        T3CStake(b, { cosf(a) * 14.0f, 0.0f, sinf(a) * 14.0f }, { cosf(a) * 2.0f, 24.0f, sinf(a) * 2.0f }, 2.6f, logDk);
+    }
+    // war drum on its frame
+    {
+        Vector2 d = P(3.1416f + 0.7f, 95.0f);
+        T3CCylinder(b, d.x, 10.0f, d.y, 34.0f, 16.0f, 16.0f, 12, Color{ 110, 60, 40, 255 });
+        T3CCylinder(b, d.x, 34.0f, d.y, 35.0f, 16.5f, 16.5f, 12, Color{ 200, 176, 130, 255 });
+        for (int k = 0; k < 4; k++) {
+            float a = k * 1.5708f + 0.785f;
+            T3CStake(b, { d.x + cosf(a) * 18, 0, d.y + sinf(a) * 18 }, { d.x + cosf(a) * 14, 22, d.y + sinf(a) * 14 }, 2.0f, logDk);
+        }
+    }
+    // skull totems lining the approach and the yard, bone piles
+    const float totA[6] = { 0.45f, -0.45f, 0.9f, -0.9f, 2.9f, -2.9f };
+    const float totR[6] = { R + 50.0f, R + 50.0f, 70.0f, 70.0f, 105.0f, 105.0f };
+    for (int i = 0; i < 6; i++) {
+        Vector2 t = P(totA[i], totR[i]);
+        T3CStake(b, { t.x, 0, t.y }, { t.x, 58.0f, t.y }, 2.8f, logDk);
+        T3CSkull(b, t.x, 56.0f, t.y, 1.1f, gate + totA[i], i < 2);
+        T3CBox(b, t.x, 40.0f, t.y, 16.0f, 3.0f, 3.0f, red); // a strip of red cloth
+    }
+    for (int i = 0; i < 5; i++) {
+        Vector2 q = P(0.6f + i * 1.1f, 60.0f + (i % 3) * 25.0f);
+        for (int k = 0; k < 5; k++) {
+            float a = k * 1.3f + i;
+            T3CStake(b, { q.x + cosf(a) * 5, 1.5f, q.y + sinf(a) * 5 }, { q.x + cosf(a + 2) * 9, 3.0f, q.y + sinf(a + 2) * 9 }, 1.4f, Color{ 222, 214, 190, 255 });
+        }
+        if (i % 2 == 0) T3CSkull(b, q.x, 5.0f, q.y, 0.8f, (float)i, false);
+    }
+    // trampled earth yard
+    for (int i = 0; i < 28; i++) {
+        float a0 = 6.2832f * i / 28, a1 = 6.2832f * (i + 1) / 28, r = R - 8.0f;
+        float o[3] = { 0, 0.4f, 0 }, p0[3] = { cosf(a0) * r, 0.4f, sinf(a0) * r }, p1[3] = { cosf(a1) * r, 0.4f, sinf(a1) * r };
+        T3CPushTri(b, o, p1, p0, Color{ 104, 88, 66, 255 });
+    }
+    g_orcFortModel = T3CFinish(b);
+    Town3DApplyLitShader(g_orcFortModel);
+}
+static void DrawFireGlow(float x, float y, float z, float r, float k) {
+    float t = (float)GetTime();
+    float fl = 0.8f + 0.2f * sinf(t * 11.0f + x) * sinf(t * 4.3f + z), rr = r * fl;
+    rlSetTexture(GlowTex().id);
+    rlBegin(RL_QUADS);
+    rlColor4ub((unsigned char)(255 * k), (unsigned char)(150 * k), (unsigned char)(60 * k), 255);
+    rlTexCoord2f(0, 0); rlVertex3f(x - rr, y - rr, z); rlTexCoord2f(1, 0); rlVertex3f(x + rr, y - rr, z);
+    rlTexCoord2f(1, 1); rlVertex3f(x + rr, y + rr, z); rlTexCoord2f(0, 1); rlVertex3f(x - rr, y + rr, z);
+    rlTexCoord2f(0, 0); rlVertex3f(x, y - rr, z - rr); rlTexCoord2f(1, 0); rlVertex3f(x, y - rr, z + rr);
+    rlTexCoord2f(1, 1); rlVertex3f(x, y + rr, z + rr); rlTexCoord2f(0, 1); rlVertex3f(x, y + rr, z - rr);
+    rlEnd();
+    rlSetTexture(0);
+}
+static void Wild3DDrawOrcFort(bool shadowPass, const Town3DCam* cull) {
+    const Vector2 c = kOrcFortPos;
+    if (cull && !Wild3DInView(*cull, c.x, c.y, kOrcFortRadius + 80.0f)) return;
+    OrcFortBuild();
+    float gy = GroundY(c.x, c.y);
+    DrawModel(g_orcFortModel, { c.x, gy, c.y }, 1.0f, WHITE);
+    Wild3DBuildDressing();
+    const Wild3DDressing& D = g_wild3dDress;
+    auto prop = [&](int id, float ang, float rad, float y, float faceDeg, float sc, Color tint) {
+        if (!D.ok[id]) return;
+        float x = c.x + cosf(kOrcFortGateYaw + ang) * rad, z = c.y + sinf(kOrcFortGateYaw + ang) * rad;
+        DrawModelEx(D.models[id], { x, GroundY(x, z) + y, z }, { 0, 1, 0 }, faceDeg, { sc, sc, sc }, tint);
+    };
+    float gd = -kOrcFortGateYaw * RAD2DEG;
+    const Color warRed = { 170, 60, 50, 255 };
+    for (int side = -1; side <= 1; side += 2) prop(kWPFlagRed, side * 0.22f, kOrcFortRadius + 4.0f, 110.0f, gd, kWPScaleProp * 1.4f, warRed);
+    prop(kWPWeaponRack, 0.6f, 80.0f, 0, gd + 50, kWPScaleProp, Color{ 150, 130, 110, 255 });
+    prop(kWPWeaponRack, -0.6f, 80.0f, 0, gd - 50, kWPScaleProp, Color{ 150, 130, 110, 255 });
+    prop(kWPCrateBig, 2.3f, 150.0f, 0, 30, kWPScaleProp, Color{ 150, 130, 110, 255 });
+    prop(kWPBarrel, -2.3f, 150.0f, 0, 0, kWPScaleProp, Color{ 150, 130, 110, 255 });
+    prop(kWPSack, -2.1f, 160.0f, 0, 20, kWPScaleProp, WHITE);
+    prop(kWPLumber, 1.9f, 165.0f, 0, gd, kWPScaleProp, WHITE);
+    if (shadowPass) return;
+    float night = g_t3dNight, t = (float)GetTime();
+    BeginBlendMode(BLEND_ADDITIVE);
+    rlDisableDepthMask();
+    DrawFireGlow(c.x, gy + 20.0f, c.y, 26.0f, 1.0f);
+    DrawFireGlow(c.x, gy + 10.0f, c.y, 40.0f, 0.55f);
+    GlowPool(c.x, c.y, gy + 0.8f, 90.0f + 60.0f * night, Color{ (unsigned char)(140 + 90 * night), (unsigned char)(70 + 40 * night), 30, 255 });
+    for (int side = -1; side <= 1; side += 2) { // tower braziers
+        float a = kOrcFortGateYaw + side * 0.22f;
+        DrawFireGlow(c.x + cosf(a) * (kOrcFortRadius + 4), gy + 124.0f, c.y + sinf(a) * (kOrcFortRadius + 4), 12.0f, 0.5f + 0.5f * night);
+    }
+    rlEnableDepthMask();
+    EndBlendMode();
+    BeginBlendMode(BLEND_ALPHA); // thick bonfire smoke
+    rlSetTexture(GlowTex().id);
+    rlBegin(RL_QUADS);
+    for (int i = 0; i < 9; i++) {
+        float ph = fmodf(t * 0.18f + i / 9.0f, 1.0f);
+        Vector3 p = { c.x + ph * 40.0f + sinf(t + i) * 5.0f, gy + 30.0f + ph * 150.0f, c.y + ph * 16.0f };
+        float r = 10.0f + ph * 30.0f;
+        unsigned char al = (unsigned char)(120 * (1.0f - ph) * std::min(1.0f, ph * 8.0f));
+        unsigned char v = (unsigned char)(110 - 50 * night);
+        rlColor4ub(v, v, v, al);
+        rlTexCoord2f(0, 0); rlVertex3f(p.x - r, p.y - r, p.z); rlTexCoord2f(1, 0); rlVertex3f(p.x + r, p.y - r, p.z);
+        rlTexCoord2f(1, 1); rlVertex3f(p.x + r, p.y + r, p.z); rlTexCoord2f(0, 1); rlVertex3f(p.x - r, p.y + r, p.z);
+    }
+    rlEnd();
+    rlSetTexture(0);
+    EndBlendMode();
+}
 static void Wild3DDrawHouse(GameState& s, bool shadowPass); // Housing 2.0 (below, with the room surfaces)
 static Vector3 g_houseSignPos = { 0, -1, 0 };                // the homestead's sign post (y < 0: none built)
 static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DCam* cull) {
@@ -16969,6 +17271,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         }
     }
     Wild3DDrawRivalCamp(s, shadowPass, cull); // Murder Inc.'s war camp (2026-09-27)
+    Wild3DDrawOrcFort(shadowPass, cull);      // Grimtusk Hold, the orc fortress (2026-09-27)
     if (s.notoriety > 1.0f || s.refugeKnown) { // the outlaw refuge: dark tent + red lantern
         if (vis(kOutlawRefuge.x, kOutlawRefuge.y, 90.0f)) {
             T3DLiftScope lift_(kOutlawRefuge.x, kOutlawRefuge.y);
@@ -17513,6 +17816,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
         label3D(kWildernessTown2GatePos.x, 110, kWildernessTown2GatePos.y, kTown2Name);
         label3D(kWildernessTown3GatePos.x, 110, kWildernessTown3GatePos.y, kTown3Name);
         label3D(kWildernessTown4GatePos.x, 110, kWildernessTown4GatePos.y, kTown4Name); // Phase 4
+        label3D(kOrcFortPos.x + cosf(kOrcFortGateYaw) * kOrcFortRadius, 170, kOrcFortPos.y + sinf(kOrcFortGateYaw) * kOrcFortRadius, "Grimtusk Hold");
         for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances)
             label3D(e.pos.x, 110, e.pos.y, kDungeons[e.dungeonIdx].name);
         for (size_t pi = 0; pi < kHousePlots.size(); pi++) {
@@ -21528,17 +21832,53 @@ static bool InSwingArc(Vector2 playerPos, Vector2 playerFacing, Vector2 enemyPos
 // same-faction monsters within kPackAggroRadius of the victim join the fight as
 // extra attackers. Rival/blade duels never trigger this (1v1 stays 1v1), and the
 // dungeon boss never joins as a pack member - it only fights when engaged.
+// Who fights together: every "Orc ..." is one warband; everything else by its own name.
+static std::string MonsterFaction(const std::string& name) { return name.rfind("Orc ", 0) == 0 ? std::string("Orc") : name; }
+// An orc war party (2026-09-27): up to three of Grimtusk Hold's orcs (never the
+// Warlord) leave their posts and come at you from the fortress side.
+static void OrcRaidStrike(GameState& s) {
+    if (s.wildEngaged.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f || s.screen != Screen::Wilderness) return;
+    std::vector<int> band;
+    for (size_t i = 0; i < kWildernessMonsterSpots.size() && band.size() < 3; i++) {
+        const auto& sp = kWildernessMonsterSpots[i];
+        if (MonsterFaction(sp.name) != "Orc" || sp.name == "Orc Warlord") continue;
+        if (s.wildSpotRespawn[i] > 0.0f || FindWildExtra(s, (int)i)) continue;
+        band.push_back((int)i);
+    }
+    if (band.empty()) return;
+    Vector2 me = s.wildernessPlayerPos;
+    Vector2 d = { kOrcFortPos.x - me.x, kOrcFortPos.y - me.y };
+    float l = std::max(1.0f, hypotf(d.x, d.y));
+    d = { d.x / l, d.y / l };
+    Vector2 n = { -d.y, d.x };
+    Vector2 origin = { me.x + d.x * 280.0f, me.y + d.y * 280.0f };
+    for (size_t k = 0; k < band.size(); k++) {
+        GameState::ActiveMonster am;
+        am.spotIdx = band[k];
+        float side = k == 0 ? 0.0f : (k == 1 ? 50.0f : -50.0f);
+        am.pos = { origin.x + n.x * side, origin.y + n.y * side };
+        if (WildBlocked(am.pos)) am.pos = origin;
+        am.spawnPos = am.pos;
+        am.maxHp = std::max(1.0f, kWildernessMonsterSpots[(size_t)band[k]].level * 3.0f);
+        am.hp = am.maxHp;
+        if (k == 0) s.wildEngaged = am; else s.wildExtraAttackers.push_back(am);
+    }
+    s.logLine = "An orc war party bursts from the brush!";
+    s.rivalBanner = "Orc war party!";
+    s.rivalBannerTimer = kRivalBannerTime * 0.7f;
+    PlaySfx(SfxId::Hunt);
+}
 static void WildPackAggro(GameState& s, int damagedSpotIdx, Vector2 center) {
     if (damagedSpotIdx < 0 || damagedSpotIdx >= (int)kWildernessMonsterSpots.size()) return;
     if (!s.wildEngaged.has_value() || s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0) return;
-    const std::string& faction = kWildernessMonsterSpots[damagedSpotIdx].name;
+    const std::string faction = MonsterFaction(kWildernessMonsterSpots[damagedSpotIdx].name);
     int joined = 0;
     for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
         if ((int)i == damagedSpotIdx) continue;
         if (s.wildSpotRespawn[i] > 0.0f) continue;
         if (s.wildEngaged->spotIdx == (int)i) continue;
         if (FindWildExtra(s, (int)i) != nullptr) continue;
-        if (kWildernessMonsterSpots[i].name != faction) continue;
+        if (MonsterFaction(kWildernessMonsterSpots[i].name) != faction) continue;
         if (Dist(WildernessMonsterLivePos((int)i, s.worldTime), center) > kPackAggroRadius) continue;
         GameState::ActiveMonster ex;
         ex.spotIdx = (int)i;
@@ -21551,7 +21891,7 @@ static void WildPackAggro(GameState& s, int damagedSpotIdx, Vector2 center) {
         s.wildExtraAttackers.push_back(ex);
         joined++;
     }
-    if (joined > 0) s.logLine = "More " + faction + "s join the fight!";
+    if (joined > 0) s.logLine = faction == "Orc" ? "War horns! The orcs of Grimtusk Hold charge in!" : "More " + faction + "s join the fight!";
 }
 
 static void DungeonPackAggro(GameState& s, int dungeonIdx, int damagedMonsterIdx, bool damagedIsBoss,
@@ -21728,6 +22068,12 @@ static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
         bool bronze = dm.baseGold >= 12;
         c.loot.push_back({ GameState::kClItem, 1, Item{ s.nextItemId++, bronze ? "Bronze Shield" : "Wooden Shield", ItemType::Armor,
                                                         "shield", "", bronze ? 5 : 2, "Shield" } });
+    }
+    if (dm.name == "Orc Warlord") { // (2026-09-27) the hold's prize
+        c.loot.push_back({ GameState::kClGold, 40 + std::rand() % 41, std::nullopt });
+        c.loot.push_back({ GameState::kClItem, 1, Item{ s.nextItemId++, "Warlord's Cleaver", ItemType::Weapon, "", "2H", 34, "Swordsmanship" } });
+        if (RandUnit() < 0.5f)
+            c.loot.push_back({ GameState::kClItem, 1, Item{ s.nextItemId++, "Grimtusk War Helm", ItemType::Armor, "helmet", "", 30, "" } });
     }
     if (dm.isRival) { // your stolen gear rides on its body
         for (const Item& it : s.rivalStash) c.loot.push_back({ GameState::kClItem, 1, it });
@@ -25107,6 +25453,34 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             s.logLine = "The mist thickens - a Sorrow Wraith rises from the broken field!";
             PlaySfx(SfxId::Hunt);
         }
+        // Grimtusk Hold war parties (2026-09-27): roam near the fortress and now and
+        // then a band of orcs comes for you. War drums first - if your Tracking
+        // catches them - then, a few seconds later, they burst out of the brush.
+        {
+            static float raidCheckT = 30.0f, raidWarnT = -1.0f, raidCooldown = 60.0f;
+            float df = Dist(s.wildernessPlayerPos, kOrcFortPos);
+            raidCooldown -= dt;
+            if (raidWarnT >= 0.0f) {
+                raidWarnT -= dt;
+                if (raidWarnT <= 0.0f) { raidWarnT = -1.0f; if (quiet) OrcRaidStrike(s); }
+            } else if (quiet && s.starterStep < 0 && raidCooldown <= 0.0f && df > kOrcFortRadius + 140.0f && df < 1300.0f) {
+                raidCheckT -= dt;
+                if (raidCheckT <= 0.0f) {
+                    raidCheckT = 45.0f;
+                    if (RandUnit() < 0.3f) {
+                        raidWarnT = 8.0f;
+                        raidCooldown = 240.0f + RandUnit() * 180.0f;
+                        std::string dir;
+                        if (TrackingSenses(s, kOrcFortPos, &dir)) {
+                            s.rivalBanner = "War drums! An orc war party is coming!";
+                            s.rivalBannerTimer = kRivalBannerTime;
+                            s.logLine = "You hear war drums - an orc war party is coming for you" + dir + ".";
+                            PlaySfx(SfxId::Hunt);
+                        }
+                    }
+                }
+            }
+        }
         // Stumbling into Murder Inc.'s camp starts a hunt - the hard way to find it.
         if (quiet && !GuildThreatActive(s) &&
             Dist(s.wildernessPlayerPos, kRivalCampSpots[s.rivalCampIdx]) < 130.0f) {
@@ -25974,6 +26348,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         }
     }
     RivalCampResolve(s, s.wildernessPlayerPos, kPlayerRadius); // the war camp's palisade (in through the gate)
+    OrcFortResolve(s.wildernessPlayerPos, kPlayerRadius);     // Grimtusk Hold's walls
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessReturnGatePos, kNodeRadius);
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown2GatePos, kNodeRadius);
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown3GatePos, kNodeRadius); // Phase 3
