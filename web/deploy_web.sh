@@ -14,6 +14,7 @@ else
   echo "cloud saves: off (SUPABASE_URL / SUPABASE_ANON_KEY not set)"
 fi
 mkdir -p "$dst"/icons && cp "$here"/icons/*.png "$dst"/icons/
+mkdir -p "$dst"/wiki && cp "$here"/wiki/index.html "$dst"/wiki/ # the player wiki, public at <site>/wiki/
 stamp=$(date -u +%Y%m%d%H%M%S)-$(git -C "$here" rev-parse --short HEAD)
 sed "s/__VERSION__/$stamp/" "$here"/sw.js > "$dst"/sw.js
 echo "deployed web app version $stamp"

@@ -1,0 +1,666 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Player guide to Town Forge 3D: controls, stats and skills, magic, crafting, pets, housing and the Settlement, dungeons and the world boss.">
+<link rel="icon" href="../icons/icon-192.png">
+<title>Town Forge Wiki</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IM+Fell+English+SC&family=IM+Fell+English:ital@0;1&family=Nunito:wght@400;600;700&display=swap">
+<style>
+:root {
+  --page: #f1e6cc;
+  --panel: #f8f0dc;
+  --panel-2: #eadbb8;
+  --ink: #2a1c10;
+  --ink-soft: #5a4431;
+  --rule: #cbb48a;
+  --bronze: #9a6b2f;
+  --bronze-hi: #b8863f;
+  --ember: #b4481f;
+  --leather: #3b2b1f;
+  --leather-ink: #f3e6c8;
+  --t-trivial: #8d8d8d; --t-easy: #3f9a3f; --t-fair: #b99312; --t-tough: #c9701c; --t-deadly: #c0392b;
+  --fire: #c9531c; --storm: #2f6fb8; --venom: #4f8f22;
+  --code: #efe0bd;
+  --display: "IM Fell English SC", "IM Fell English", Georgia, "Times New Roman", serif;
+  --serif: "IM Fell English", Georgia, "Times New Roman", serif;
+  --body: "Nunito", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #17110d; --panel: #221912; --panel-2: #2d2118;
+    --ink: #eadcbf; --ink-soft: #b9a483; --rule: #4a3826;
+    --bronze: #c9964f; --bronze-hi: #e0b066; --ember: #e0703f;
+    --leather: #0f0b08; --leather-ink: #eadcbf;
+    --t-trivial: #a6a6a6; --t-easy: #6fce6f; --t-fair: #e6c95c; --t-tough: #ef9a4c; --t-deadly: #ec6a5c;
+    --fire: #f07a3c; --storm: #6aa6ee; --venom: #86c952; --code: #2d2118;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #17110d; --panel: #221912; --panel-2: #2d2118;
+  --ink: #eadcbf; --ink-soft: #b9a483; --rule: #4a3826;
+  --bronze: #c9964f; --bronze-hi: #e0b066; --ember: #e0703f;
+  --leather: #0f0b08; --leather-ink: #eadcbf;
+  --t-trivial: #a6a6a6; --t-easy: #6fce6f; --t-fair: #e6c95c; --t-tough: #ef9a4c; --t-deadly: #ec6a5c;
+  --fire: #f07a3c; --storm: #6aa6ee; --venom: #86c952; --code: #2d2118;
+}
+* { box-sizing: border-box; }
+body { background: var(--page); color: var(--ink); font-family: var(--body); font-size: 16px; line-height: 1.6; margin: 0; }
+a { color: var(--ember); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--bronze-hi); outline-offset: 2px; }
+
+.masthead { background: var(--leather); color: var(--leather-ink); padding-block: 22px 18px; padding-inline: 16px; border-bottom: 3px solid var(--bronze); }
+.masthead-inner { max-width: 1160px; margin: 0 auto; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 28px; justify-content: space-between; }
+.masthead h1 { font-family: var(--display); font-weight: 400; font-size: clamp(34px, 6vw, 52px); line-height: 1; margin: 0; letter-spacing: 0.02em; text-wrap: balance; }
+.masthead p { margin: 6px 0 0; font-family: var(--serif); font-style: italic; color: color-mix(in srgb, var(--leather-ink) 75%, transparent); font-size: 17px; }
+.search { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 0 1 320px; }
+.search label { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: color-mix(in srgb, var(--leather-ink) 70%, transparent); }
+.search input { width: 100%; font: inherit; font-size: 15px; padding: 9px 12px; border-radius: 6px; border: 1px solid var(--bronze); background: color-mix(in srgb, var(--leather-ink) 10%, var(--leather)); color: var(--leather-ink); }
+.search input::placeholder { color: color-mix(in srgb, var(--leather-ink) 50%, transparent); }
+
+.layout { max-width: 1160px; margin: 0 auto; padding-inline: 16px; padding-block: 24px 64px; display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 36px; }
+nav.toc { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 16px); align-self: start; max-height: calc(100vh - 32px); overflow: auto; font-size: 14px; }
+nav.toc h2 { font-family: var(--display); font-weight: 400; font-size: 18px; margin: 0 0 8px; color: var(--bronze); }
+nav.toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+nav.toc a { display: block; padding: 4px 10px; border-radius: 5px; color: var(--ink-soft); text-decoration: none; border-left: 2px solid transparent; }
+nav.toc a:hover { background: var(--panel-2); color: var(--ink); }
+nav.toc a.on { color: var(--ink); border-left-color: var(--bronze); background: var(--panel); font-weight: 700; }
+nav.toc .group { margin-top: 10px; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--bronze); padding-left: 10px; }
+
+main { min-width: 0; }
+.lede { font-family: var(--serif); font-size: 20px; line-height: 1.5; max-width: 66ch; margin: 0 0 18px; }
+section { padding-block: 14px 26px; border-top: 1px solid var(--rule); scroll-margin-top: 16px; }
+section:first-of-type { border-top: 0; }
+section h2 { font-family: var(--display); font-weight: 400; font-size: 30px; line-height: 1.15; margin: 8px 0 10px; color: var(--ink); text-wrap: balance; }
+section h3 { font-family: var(--serif); font-weight: 400; font-size: 21px; margin: 22px 0 6px; color: var(--bronze); }
+section p, section li { max-width: 68ch; }
+section ul { padding-left: 1.2em; }
+section li { margin-block: 3px; }
+.kbd { font-family: var(--body); font-weight: 700; font-size: 13px; background: var(--code); border: 1px solid var(--rule); border-bottom-width: 2px; border-radius: 4px; padding: 0 6px; white-space: nowrap; }
+.muted { color: var(--ink-soft); }
+
+.infobox { float: right; width: min(300px, 100%); margin: 6px 0 14px 22px; background: var(--panel); border: 1px solid var(--rule); border-top: 3px solid var(--bronze); border-radius: 6px; padding: 12px 14px; font-size: 14px; }
+.infobox h4 { font-family: var(--display); font-weight: 400; font-size: 18px; margin: 0 0 6px; }
+.infobox dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; }
+.infobox dt { color: var(--ink-soft); }
+.infobox dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.clear { clear: both; }
+
+.table-wrap { overflow-x: auto; margin: 10px 0 6px; border: 1px solid var(--rule); border-radius: 6px; background: var(--panel); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); background: var(--panel-2); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; }
+.boss { color: var(--ember); font-weight: 700; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; padding: 0; list-style: none; }
+.chip { display: inline-flex; align-items: center; gap: 7px; font-size: 14px; font-weight: 600; padding: 4px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--rule); }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+
+.callout { background: var(--panel); border: 1px solid var(--rule); border-left: 4px solid var(--ember); border-radius: 6px; padding: 10px 14px; margin: 12px 0; max-width: 68ch; }
+.callout strong { color: var(--ember); }
+.heads { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 12px 0; }
+.head { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 10px 12px; font-size: 14px; }
+.head b { font-family: var(--display); font-weight: 400; font-size: 18px; display: block; }
+.head.fire { border-top: 3px solid var(--fire); } .head.fire b { color: var(--fire); }
+.head.storm { border-top: 3px solid var(--storm); } .head.storm b { color: var(--storm); }
+.head.venom { border-top: 3px solid var(--venom); } .head.venom b { color: var(--venom); }
+.noresults { padding: 20px; background: var(--panel); border: 1px dashed var(--rule); border-radius: 6px; }
+footer { max-width: 1160px; margin: 0 auto; padding-inline: 16px; padding-block: 0 40px; font-size: 13px; color: var(--ink-soft); }
+
+@media (max-width: 860px) {
+  .layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  nav.toc { position: static; max-height: none; }
+  nav.toc ol { display: flex; flex-wrap: wrap; gap: 6px; }
+  nav.toc .group { display: none; }
+  nav.toc a { border: 1px solid var(--rule); border-radius: 999px; padding: 3px 10px; background: var(--panel); }
+  .infobox { float: none; margin: 8px 0 14px; width: 100%; }
+}
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+</style>
+<style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)} img{max-width:100%} [hidden]{display:none!important}
+.playlink{display:inline-block;margin-top:10px;padding:8px 16px;border-radius:6px;background:var(--bronze);color:#fff8e8;font-weight:700;text-decoration:none}</style>
+</head>
+<body>
+
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <div>
+      <h1>Town Forge Wiki</h1>
+      <p>A field guide to the towns, wilds and dungeons of Town Forge 3D</p>
+      <a class="playlink" href="../">Play Town Forge</a>
+    </div>
+    <div class="search">
+      <label for="q">Search the wiki</label>
+      <input id="q" type="search" placeholder="Try &ldquo;reagents&rdquo;, &ldquo;raid&rdquo; or &ldquo;Bless&rdquo;" autocomplete="off">
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="toc" aria-label="Contents">
+    <h2>Contents</h2>
+    <ol id="toclist">
+      <li class="group">Start here</li>
+      <li><a href="#getting-started">Getting started</a></li>
+      <li><a href="#controls">Controls &amp; menus</a></li>
+      <li><a href="#world">The world</a></li>
+      <li class="group">Your character</li>
+      <li><a href="#stats">Stats</a></li>
+      <li><a href="#skills">Skills</a></li>
+      <li><a href="#combat">Combat</a></li>
+      <li><a href="#magic">Magic</a></li>
+      <li><a href="#gear">Gear, clothing &amp; jewelry</a></li>
+      <li class="group">Making a living</li>
+      <li><a href="#gathering">Gathering</a></li>
+      <li><a href="#crafting">Crafting &amp; commissions</a></li>
+      <li><a href="#pets">Pets &amp; taming</a></li>
+      <li class="group">Home &amp; allies</li>
+      <li><a href="#housing">Housing</a></li>
+      <li><a href="#settlement">The Settlement</a></li>
+      <li><a href="#guilds">Guilds &amp; wars</a></li>
+      <li class="group">Danger</li>
+      <li><a href="#threats">Threats &amp; enemies</a></li>
+      <li><a href="#dungeons">Dungeons</a></li>
+      <li><a href="#world-boss">World boss: Vyrathax</a></li>
+      <li><a href="#death">Death &amp; the Young</a></li>
+      <li><a href="#faq">Tips &amp; FAQ</a></li>
+    </ol>
+  </nav>
+
+  <main id="content">
+    <p class="lede">Town Forge is an open-world sandbox RPG with a town to build at its heart. Train any skill just by using it, raise your homestead into a walled settlement that keeps working while you&rsquo;re away, and hold it against a wilderness of monsters, rival adventurers and orc war bands.</p>
+    <div class="noresults" id="noresults" hidden>No section mentions that. Try a shorter word, like &ldquo;pet&rdquo; or &ldquo;boss&rdquo;.</div>
+
+    <section id="getting-started">
+      <h2>Getting started</h2>
+      <aside class="infobox">
+        <h4>A new character</h4>
+        <dl>
+          <dt>Strength</dt><dd>50 (HP 50)</dd>
+          <dt>Dexterity</dt><dd>20</dd>
+          <dt>Gold</dt><dd>100</dd>
+          <dt>Young status</dt><dd>20 min of play</dd>
+          <dt>Starting town</dt><dd>Emberhold</dd>
+        </dl>
+      </aside>
+      <p>You start in Emberhold, dressed and carrying a little gold. A short <strong>First steps</strong> guide walks you through the basics one goal at a time: walk around, visit a shop, head out the town gate, gather from a tree or rock, fight a monster and loot it. You can skip it at any time.</p>
+      <p>While you are <strong>Young</strong> (your first 20 minutes of play, plus the whole First steps guide), Murder Inc., ambushes and orc war parties leave you alone, and monsters notice you from closer in.</p>
+      <h3>A good first hour</h3>
+      <ul>
+        <li>Gather wood and ore in the Whisperwood just outside Emberhold to train Lumberjacking and Mining.</li>
+        <li>Fight grey and green monsters (see <a href="#threats">threat colors</a>) until your weapon skill passes 30.</li>
+        <li>Buy reagents at the Provisioner and put Spark Dart and Mending Word on your spell bar.</li>
+        <li>Save for a house plot, then start a <a href="#settlement">Settlement</a>. It works for you while you're offline.</li>
+      </ul>
+      <div class="clear"></div>
+    </section>
+
+    <section id="controls">
+      <h2>Controls &amp; menus</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Action</th><th>Phone / tablet</th><th>Keyboard</th></tr></thead>
+        <tbody>
+          <tr><td>Move</td><td>Drag the stick (bottom left)</td><td><span class="kbd">WASD</span> or arrows</td></tr>
+          <tr><td>Interact (enter, gather, fight, loot)</td><td>Gold action button (bottom right)</td><td><span class="kbd">E</span></td></tr>
+          <tr><td>Pick a target</td><td>Tap a monster, or the TARGET button</td><td><span class="kbd">G</span> cycles targets</td></tr>
+          <tr><td>Swing</td><td>Automatic once you're fighting</td><td>Automatic</td></tr>
+          <tr><td>Cast from the spell bar</td><td>Tap a slot</td><td><span class="kbd">1</span>&ndash;<span class="kbd">5</span></td></tr>
+          <tr><td>Bandage yourself</td><td>Belt pouch above the spell bar</td><td><span class="kbd">B</span></td></tr>
+          <tr><td>Journal (full log)</td><td>LOG button</td><td><span class="kbd">L</span></td></tr>
+          <tr><td>Turn and zoom the camera</td><td>Drag the view, pinch</td><td>Mouse drag, wheel</td></tr>
+        </tbody>
+      </table></div>
+      <h3>The MENU</h3>
+      <p>Every screen has one <strong>MENU</strong> button at the top left. It shows your resources and opens every page: <strong>Me</strong> (paperdoll, backpack and stats), Craft, Magic, Pets, Bank, House, Skills and Help. It also holds Cloud save and Reset. The gold <strong>&gt; Play</strong> button next to MENU always takes you back to where you were in the world.</p>
+      <p>Messages pop up just above your spell bar: <span style="color:var(--t-tough);font-weight:700">orange</span> for warnings, <span style="color:var(--t-easy);font-weight:700">green</span> for good news. Every hit and miss is kept in the journal.</p>
+    </section>
+
+    <section id="world">
+      <h2>The world</h2>
+      <h3>Towns</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Town</th><th>Where</th><th>Known for</th></tr></thead>
+        <tbody>
+          <tr><td>Emberhold</td><td>Central Whisperwood</td><td>Your starting town. All four workshops, the Provisioner, the Vaultkeep bank.</td></tr>
+          <tr><td>Saltmere</td><td>The Salt Coast, east along the King's Road</td><td>Fishing and the coast. Near the Sunken Vault.</td></tr>
+          <tr><td>Frostmere</td><td>The Frostwastes, north</td><td>The Fur Trader pays best for Ice Wolf furs.</td></tr>
+          <tr><td>Cragmoor</td><td>The Stonepeaks, west</td><td>The Miners' Guild buys and sells ore.</td></tr>
+        </tbody>
+      </table></div>
+      <p>Visiting a town marks it, so you can Recall there later. You walk into a town through its gatehouse, and into dungeons through their doorways.</p>
+      <h3>Regions</h3>
+      <ul class="chips">
+        <li class="chip"><span class="dot" style="background:#5f8f3a"></span>Whisperwood</li>
+        <li class="chip"><span class="dot" style="background:#3f7fa6"></span>Salt Coast</li>
+        <li class="chip"><span class="dot" style="background:#9fbfd6"></span>Frostwastes</li>
+        <li class="chip"><span class="dot" style="background:#8a7b69"></span>Stonepeaks</li>
+      </ul>
+      <p>Rivers, the lake and rock ridges block your way; cross at bridges and fords. The King's Road links the towns, and its patrols make monsters slower to notice you while you're on it.</p>
+      <h3>Landmarks</h3>
+      <ul>
+        <li><strong>Grimtusk Hold</strong>: the orc fortress in the south. Strike one orc and the whole hold answers. The Orc Warlord drops the Warlord's Cleaver.</li>
+        <li><strong>The Fields of Sorrow</strong>: a haunted battlefield where Sorrow Wraiths roam.</li>
+        <li><strong>The Cinder Caldera</strong>: far south-east, lair of the <a href="#world-boss">Tri-Wyrm</a>.</li>
+        <li><strong>Virtue shrines</strong>: seven across the land. A ghost can pray at one to come back to life.</li>
+        <li><strong>Murder Inc.'s war camp</strong>: a palisade camp. It moves if it would sit too close to your home.</li>
+      </ul>
+    </section>
+
+    <section id="stats">
+      <h2>Stats</h2>
+      <aside class="infobox">
+        <h4>Stat caps</h4>
+        <dl>
+          <dt>Trained, each</dt><dd>100</dd>
+          <dt>Trained, total</dt><dd>260</dd>
+          <dt>With gear &amp; magic</dt><dd>up to 150</dd>
+        </dl>
+      </aside>
+      <ul>
+        <li><strong>Strength</strong> is your hit points (STR 60 means 60 HP) and adds melee damage.</li>
+        <li><strong>Dexterity</strong> makes you swing faster, dodge more blows and parry better. At 100 DEX you swing about every 0.4 seconds; bonus DEX past 100 gets you down to 0.35.</li>
+        <li><strong>Intelligence</strong> is your maximum mana.</li>
+      </ul>
+      <p>Stats rise on their own as you use related skills: fighting raises STR and DEX, casting and brewing raise INT. Each gain is announced in the journal.</p>
+      <h3>Going past 100</h3>
+      <p>Training stops at 100, but gear and magic add on top, up to 150 in each stat. Your Me page shows both, for example <span class="kbd">Str 100(+14)</span>.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Source</th><th>Bonus</th><th>How long</th></tr></thead>
+        <tbody>
+          <tr><td>Jewelry: ring, bracelet, amulet</td><td>+1 to +12</td><td>While worn</td></tr>
+          <tr><td>Magic items (e.g. Wyrmfang Blade)</td><td>Varies</td><td>While worn</td></tr>
+          <tr><td>Bless (Magery, circle 3)</td><td>+5 to +15 to all three</td><td>3 minutes</td></tr>
+          <tr><td>Strength potion</td><td>+5 / +10 / +15 STR</td><td>3 minutes</td></tr>
+          <tr><td>Agility potion</td><td>+5 / +10 / +15 DEX</td><td>3 minutes</td></tr>
+        </tbody>
+      </table></div>
+      <p class="muted">Potions and Bless end when you die.</p>
+    </section>
+
+    <section id="skills">
+      <h2>Skills</h2>
+      <p>Every skill trains by use and caps at 100. Gains come fastest when the task is a fair challenge for you.</p>
+      <h3>Adventuring skills (the active build)</h3>
+      <p>These 21 skills share a budget of <strong>700 points</strong>. On the Skills page you can bench a skill: it keeps its value but stops counting, freeing budget for another. Nothing you train is ever lost.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Group</th><th>Skills</th></tr></thead>
+        <tbody>
+          <tr><td>Weapons</td><td>Swordsmanship, Fencing, Macing, Archery, Wrestling</td></tr>
+          <tr><td>Fighting</td><td>Tactics, Anatomy, Parrying, Healing, Magic Resistance</td></tr>
+          <tr><td>Magic</td><td>Magery, Eval Int, Meditation, Necromancy</td></tr>
+          <tr><td>Animals</td><td>Animal Taming, Animal Lore, Veterinary</td></tr>
+          <tr><td>Rogue</td><td>Stealing, Snooping, Poisoning, Tracking</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Trade skills</h3>
+      <p>Lumberjacking, Mining, Fishing, Skinning, Blacksmithing, Carpentry, Tailoring and Alchemy are outside the budget and always count.</p>
+      <ul>
+        <li><strong>Tracking</strong> warns you when Murder Inc. is hunting you. At 30 it also marks hunters on the minimap.</li>
+        <li><strong>Magic Resistance</strong> cuts the damage from the Tri-Wyrm's breath attacks, up to half.</li>
+        <li><strong>Carpentry</strong> speeds up Settlement construction, up to 40% faster at 100.</li>
+      </ul>
+    </section>
+
+    <section id="combat">
+      <h2>Combat</h2>
+      <p>Walk up to a monster, or let it come to you. Once you're fighting, you swing automatically; your job is to pick targets, cast, heal and move.</p>
+      <h3>Hitting and being hit</h3>
+      <ul>
+        <li>Your chance to hit compares your weapon skill with the monster's level. An even match is about 50%, and training the skill is what makes you land blows.</li>
+        <li>Damage comes from your weapon, plus bonuses from Tactics, Anatomy and Strength.</li>
+        <li>A monster's chance to hit you falls as your Dexterity rises. Armor reduces the damage.</li>
+        <li><strong>Parrying</strong> with a shield equipped can block blows outright.</li>
+      </ul>
+      <h3>Packs</h3>
+      <p>Hurt one monster and nearby members of the same kind may join in. Every orc belongs to one warband. Tap another monster, or press <span class="kbd">G</span>, to switch targets.</p>
+      <h3>Healing</h3>
+      <ul>
+        <li><strong>Bandages</strong>: from the Provisioner (5 for 40g). Use them from the belt pouch or with <span class="kbd">B</span>.</li>
+        <li><strong>Heal potions</strong>: Lesser (15 HP), Heal (30), Greater (50). Brew them or buy them.</li>
+        <li><strong>Mending Word</strong> and <strong>Greater Mending</strong>: heal spells you can cast in or out of a fight.</li>
+      </ul>
+      <h3>Loot</h3>
+      <p>Defeated monsters leave a body. Tap it to open it: <strong>Loot All</strong> takes the gold, reagents, bandages and items, and <strong>Skin</strong> gives leather (furs from Ice Wolves). Magic jewelry is a rare drop, and a likely one from bosses.</p>
+    </section>
+
+    <section id="magic">
+      <h2>Magic</h2>
+      <p>There are two schools. <strong>Magery</strong> uses mana plus <strong>1 reagent per cast</strong> in combat. <strong>Necromancy</strong> uses mana only. Put spells on your spell bar from the Magic page.</p>
+      <div class="callout"><strong>Out of reagents?</strong> The spell bar shows your reagent count and turns red below 5. Buy more at the Provisioner (5 for 5g), or switch on <em>Auto-restock</em> there to be topped up to 30 every time you enter a town.</div>
+      <p>Your chance to cast depends on Magery and the spell's circle. Circle 1 is dependable from the start, and each higher circle needs about 14 more Magery.</p>
+      <h3>Magery</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Spell</th><th class="num">Circle</th><th>Kind</th><th class="num">Mana</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td>Spark Dart</td><td class="num">1</td><td>Attack</td><td class="num">4</td><td>A small bolt</td></tr>
+          <tr><td>Mending Word</td><td class="num">1</td><td>Heal</td><td class="num">4</td><td>Heals you</td></tr>
+          <tr><td>Sap Strength</td><td class="num">1</td><td>Curse</td><td class="num">4</td><td>The target hits 30% softer</td></tr>
+          <tr><td>Cloud Mind</td><td class="num">1</td><td>Curse</td><td class="num">4</td><td>The target misses more</td></tr>
+          <tr><td>Fumbling Curse</td><td class="num">1</td><td>Curse</td><td class="num">4</td><td>The target attacks 50% slower</td></tr>
+          <tr><td>Wounding Touch</td><td class="num">2</td><td>Attack</td><td class="num">6</td><td></td></tr>
+          <tr><td>Blessing of Vigor</td><td class="num">3</td><td>Buff</td><td class="num">9</td><td>+25% damage for 30 seconds</td></tr>
+          <tr><td>Bless</td><td class="num">3</td><td>Buff</td><td class="num">9</td><td>+5 to +15 STR, DEX and INT for 3 minutes</td></tr>
+          <tr><td>Ember Burst</td><td class="num">3</td><td>Attack</td><td class="num">9</td><td>Fire</td></tr>
+          <tr><td>Venom Sting</td><td class="num">3</td><td>Attack</td><td class="num">9</td><td>Poison</td></tr>
+          <tr><td>Greater Mending</td><td class="num">4</td><td>Heal</td><td class="num">11</td><td>A bigger heal</td></tr>
+          <tr><td>Storm Lance</td><td class="num">4</td><td>Attack</td><td class="num">11</td><td>Lightning</td></tr>
+          <tr><td>Recall</td><td class="num">4</td><td>Travel</td><td class="num">12</td><td>Teleports you to a marked town. Needs 40 Magery and 2 reagents.</td></tr>
+          <tr><td>Psychic Shatter</td><td class="num">5</td><td>Attack</td><td class="num">14</td><td></td></tr>
+          <tr><td>Arc Bolt</td><td class="num">6</td><td>Attack</td><td class="num">20</td><td></td></tr>
+          <tr><td>Detonation</td><td class="num">6</td><td>Attack</td><td class="num">20</td><td></td></tr>
+          <tr><td>Inferno Strike</td><td class="num">7</td><td>Attack</td><td class="num">40</td><td>The hardest hitter</td></tr>
+          <tr><td>Summon Fiend</td><td class="num">8</td><td>Summon</td><td class="num">50</td><td>A demon fights beside you for 25 seconds</td></tr>
+        </tbody>
+      </table></div>
+      <p class="muted">With 25 Magery you can also leave any dungeon from its MENU: a 3-second cast that damage interrupts.</p>
+      <h3>Necromancy</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Spell</th><th class="num">Circle</th><th class="num">Mana</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td>Teeth</td><td class="num">1</td><td class="num">4</td><td>A spray of bone shards</td></tr>
+          <tr><td>Raise Skeleton</td><td class="num">1</td><td class="num">9</td><td>Raises a skeleton warrior from a nearby body</td></tr>
+          <tr><td>Amplify Damage</td><td class="num">2</td><td class="num">7</td><td>The target takes more damage</td></tr>
+          <tr><td>Bone Armor</td><td class="num">3</td><td class="num">10</td><td>Absorbs incoming damage</td></tr>
+          <tr><td>Bone Spear</td><td class="num">4</td><td class="num">12</td><td>A piercing bolt</td></tr>
+          <tr><td>Corpse Explosion</td><td class="num">5</td><td class="num">14</td><td>Blows up a body, hurting everything near it</td></tr>
+          <tr><td>Raise Skeletal Mage</td><td class="num">6</td><td class="num">16</td><td>A caster minion, from a body</td></tr>
+          <tr><td>Life Tap</td><td class="num">7</td><td class="num">16</td><td>Your hits heal you</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="gear">
+      <h2>Gear, clothing &amp; jewelry</h2>
+      <p>Open <strong>Me</strong> from the MENU to see your paperdoll. Tap a slot, then tap a glowing item in your backpack to wear it. The paperdoll has three pages.</p>
+      <ul>
+        <li><strong>Armor</strong>: head, neck, chest, arms, weapon, shield, hands and legs. Armor comes in Leather, Studded, Ring Mail, Chainmail and Plate.</li>
+        <li><strong>Clothes</strong>: hat, shirt, robe, cloak, sash, pants and shoes. Buy or sew them at the Tailor.</li>
+        <li><strong>Jewels</strong>: ring, bracelet and amulet.</li>
+      </ul>
+      <h3>Dyes</h3>
+      <p>Dye clothing at the Tailor's dye tub for 15 gold a dip. There are 26 hues. The five rare ones (Blaze, Ice, Shadow, Gilded and Sea Foam) need 80 Tailoring, or a rare dye from commissions or the world boss.</p>
+      <h3>Jewelry</h3>
+      <p>A ring leans Strength, a bracelet Dexterity and an amulet Intelligence; bigger pieces sometimes spread into a second stat. The metal shows the tier: Copper, Silver, Gold, then Starmetal.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Where</th><th>What</th></tr></thead>
+        <tbody>
+          <tr><td>Provisioner</td><td>Copper ring, bracelet or amulet, +2, for 450 gold</td></tr>
+          <tr><td>Jeweler's commission</td><td>A random +3 to +5 piece for 8 marks</td></tr>
+          <tr><td>Monster drops</td><td>Rare off anything (3%), about 30% off dungeon bosses, 35% off the Orc Warlord</td></tr>
+          <tr><td>The Tri-Wyrm</td><td>Wyrmheart Amulet: +4 to +7 to every stat</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="gathering">
+      <h2>Gathering</h2>
+      <p>Walk up to a glowing tree, rock or fishing spot in the wilds and tap the action button. Each gather takes about 3 seconds and trains Lumberjacking, Mining or Fishing.</p>
+      <ul>
+        <li><strong>Wood</strong> and <strong>ore</strong> feed crafting and Settlement construction.</li>
+        <li><strong>Fish</strong> come from tidal pools along the Salt Coast.</li>
+        <li><strong>Ice</strong> is mined in the Frostwastes.</li>
+        <li><strong>Leather</strong> and <strong>furs</strong> come from skinning bodies.</li>
+      </ul>
+      <p>Once you have a Settlement, its Lumber Camp, Mine, Tannery, Herb Garden and Fishery bring these in for you, even while you're offline.</p>
+    </section>
+
+    <section id="crafting">
+      <h2>Crafting &amp; commissions</h2>
+      <p>Open <strong>Craft</strong> from the MENU, from anywhere. There are four workshops:</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Workshop</th><th>Makes</th><th>Uses</th></tr></thead>
+        <tbody>
+          <tr><td>The Cinderforge (Blacksmith)</td><td>Swords, maces, metal armor</td><td>Ore</td></tr>
+          <tr><td>The Hewnwood Hall (Carpenter)</td><td>Bows, staves, shields</td><td>Wood</td></tr>
+          <tr><td>The Woven Hearth (Tailor)</td><td>Leather armor, clothing, dyeing</td><td>Leather</td></tr>
+          <tr><td>The Bitterroot Still (Alchemist)</td><td>Potions</td><td>Reagents</td></tr>
+        </tbody>
+      </table></div>
+      <p>Each workshop has a <strong>cap</strong>, the highest skill it lets you use. Upgrade the workshop building in town to raise it. Higher skill makes better quality. The Settlement's Forge adds more quality, and Masterwork tools add +10.</p>
+      <h3>Potions</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Potion</th><th>Tiers</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td>Heal</td><td>Lesser, normal, Greater</td><td>Heals 15 / 30 / 50 HP</td></tr>
+          <tr><td>Strength</td><td>Lesser, normal, Greater</td><td>+5 / +10 / +15 STR for 3 minutes</td></tr>
+          <tr><td>Agility</td><td>Lesser, normal, Greater</td><td>+5 / +10 / +15 DEX for 3 minutes</td></tr>
+          <tr><td>Poison</td><td>Lesser, normal, Greater</td><td>Coats your weapon for 3 / 5 / 8 poisoned hits</td></tr>
+          <tr><td>Explosion</td><td>Lesser, normal, Greater</td><td>Thrown in a fight</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Commissions</h3>
+      <p>Each workshop's master hands out orders, like &ldquo;10 Longswords&rdquo; or &ldquo;8 Leather Tunics, Well-crafted or better&rdquo;. Fill them from your pack and turn them in for gold and <strong>marks</strong>. You can carry up to 6 orders, and each workshop offers a new one every 10 minutes.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Spend marks on</th><th class="num">Marks</th></tr></thead>
+        <tbody>
+          <tr><td>Masterwork tools: 25 crafts at +10 quality</td><td class="num">6</td></tr>
+          <tr><td>Rare dye: one dip in a rare hue</td><td class="num">4</td></tr>
+          <tr><td>Jeweler's commission: magic jewelry, +3 to +5</td><td class="num">8</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="pets">
+      <h2>Pets &amp; taming</h2>
+      <p>Walk up to a wild creature and tap the action button to try to tame it. Success depends on your Animal Taming. A tamed pet follows you, fights beside you and grows stronger.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Creature</th><th class="num">Taming needed</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td>Stray Dog</td><td class="num">0</td><td>Melee</td></tr>
+          <tr><td>Timber Wolf</td><td class="num">20</td><td>Melee</td></tr>
+          <tr><td>Grizzly Bear</td><td class="num">30</td><td>Tank</td></tr>
+          <tr><td>Dire Panther</td><td class="num">40</td><td>Melee</td></tr>
+          <tr><td>Plains Bison</td><td class="num">50</td><td>Tank</td></tr>
+          <tr><td>War Horse</td><td class="num">60</td><td>Tank</td></tr>
+          <tr><td>Sabertooth Cat</td><td class="num">70</td><td>Melee</td></tr>
+          <tr><td>Storm Griffin</td><td class="num">80</td><td>Tank</td></tr>
+          <tr><td>Young Drake</td><td class="num">90</td><td>Caster</td></tr>
+          <tr><td>Elder Wyvern</td><td class="num">100</td><td>Caster</td></tr>
+          <tr><td>Forest Dragon</td><td class="num">100</td><td>Caster</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="housing">
+      <h2>Housing</h2>
+      <p>Ten plots with for-sale signs are scattered across the wilds, and you can own one. Plots are 7&times;7 (2,500 gold) or 9&times;9 (5,000 gold), and one grand 12&times;12, the Kingswood Plot, costs 9,000.</p>
+      <ul>
+        <li>Walk to your plot and tap the action button to <strong>design</strong> your house on a grid: floors, walls, windows and a door. You need a door to go inside.</li>
+        <li>Inside, place furniture and a storage chest.</li>
+        <li><strong>Bind Hearth</strong> on the House page, then Recall to Homestead from anywhere.</li>
+        <li>The crafting benches in your house open as your Settlement grows: the Forge opens the Blacksmith bench, the Lumber Camp the Carpenter's, the Tannery the Tailor's and the Herb Garden the Alchemist's.</li>
+      </ul>
+    </section>
+
+    <section id="settlement">
+      <h2>The Settlement</h2>
+      <p>Your plot grows into a walled settlement. Open it from <strong>House &gt; Settlement</strong>. Buildings ring your house, settlers walk to work, and guards man the gate.</p>
+      <h3>How it works</h3>
+      <ul>
+        <li>The <strong>Great Hall</strong> comes first. Its level (up to 10) unlocks buildings and caps their level.</li>
+        <li>One build at a time, on a real-time timer. Upgrades cost gold, wood and ore.</li>
+        <li><strong>Producers</strong> fill their storage over time, including while you're offline (up to 24 hours). Tap Take, or Collect all.</li>
+        <li><strong>Boosters</strong> give you lasting bonuses. A damaged building works at half strength until you repair it.</li>
+      </ul>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Building</th><th class="num">Hall</th><th>Does</th></tr></thead>
+        <tbody>
+          <tr><td>Great Hall</td><td class="num">&ndash;</td><td>Unlocks the rest; homes 2 settlers per level</td></tr>
+          <tr><td>Lumber Camp</td><td class="num">1</td><td>Produces wood</td></tr>
+          <tr><td>Mine</td><td class="num">1</td><td>Produces ore</td></tr>
+          <tr><td>Walls</td><td class="num">1</td><td>Raid defense: palisade, then stone at level 4, towers at 8</td></tr>
+          <tr><td>Tannery</td><td class="num">2</td><td>Produces leather</td></tr>
+          <tr><td>Storehouse</td><td class="num">2</td><td>+2 backpack slots per level</td></tr>
+          <tr><td>Barracks</td><td class="num">2</td><td>2 guard posts per level; stronger guards</td></tr>
+          <tr><td>Herb Garden</td><td class="num">3</td><td>Produces reagents</td></tr>
+          <tr><td>Forge</td><td class="num">3</td><td>+2 crafting quality per level</td></tr>
+          <tr><td>Fishery</td><td class="num">4</td><td>Produces fish</td></tr>
+          <tr><td>Training Yard</td><td class="num">4</td><td>+6% weapon skill gains per level</td></tr>
+          <tr><td>Chapel</td><td class="num">5</td><td>Heals you out of combat</td></tr>
+          <tr><td>Library</td><td class="num">5</td><td>+8% mana regeneration per level</td></tr>
+          <tr><td>Stable</td><td class="num">5</td><td>+2% travel speed in the wilds per level</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Settlers</h3>
+      <p>Travelers you escort, and some you spare, may ask to settle on your land. From Great Hall 3, wanderers arrive on their own. Assign each settler to a building, or as a guard at the Barracks. Every settler is a natural at one building and works it at double pace.</p>
+      <h3>Raids</h3>
+      <p>Grimtusk orcs and Murder Inc.'s cutthroats raid about every one to two hours, and more often while you're at war with them. Raids don't start until you've built the Great Hall and you're no longer Young.</p>
+      <ul>
+        <li><strong>If you're nearby</strong>, raiders come through your gate at you, and your guards run in to fight beside you. Win to earn gold and Fame.</li>
+        <li><strong>If you're away</strong>, your walls, guards and the Hall's townsfolk decide it. A win pays spoils. A loss costs 35% of stored goods and sets a building on fire until you repair it.</li>
+        <li>The Settlement page's <em>Raids</em> tab compares your defense with the raiders' expected strength, and lists recent news.</li>
+      </ul>
+    </section>
+
+    <section id="guilds">
+      <h2>Guilds &amp; wars</h2>
+      <p>Once you own a house, found a guild at the <strong>Guildstone</strong> on the House page. Hire warriors, archers and healers; take them along or leave them home to guard the Settlement. They level up from the fights they share.</p>
+      <p>Declare war on <strong>Grimtusk Hold</strong> or <strong>Murder Inc.</strong>. Kills against your enemy count toward victory, and winning a war pays 800 gold and renown. War cuts both ways: your enemy hunts you more often and raids your Settlement more.</p>
+    </section>
+
+    <section id="threats">
+      <h2>Threats &amp; enemies</h2>
+      <h3>Threat colors</h3>
+      <p>Every monster's nameplate and ground ring shows how the fight would go for you right now:</p>
+      <ul class="chips">
+        <li class="chip"><span class="dot" style="background:var(--t-trivial)"></span>Trivial: ignores you</li>
+        <li class="chip"><span class="dot" style="background:var(--t-easy)"></span>Easy</li>
+        <li class="chip"><span class="dot" style="background:var(--t-fair)"></span>Fair fight</li>
+        <li class="chip"><span class="dot" style="background:var(--t-tough)"></span>Tough</li>
+        <li class="chip"><span class="dot" style="background:var(--t-deadly)"></span>Deadly: run</li>
+      </ul>
+      <p>Anything that's a real fight notices you from about 200 paces (less on the King's Road or while Young), shows a red &ldquo;!&rdquo;, and chases you. Trivial monsters leave you alone.</p>
+      <h3>Enemies with a memory</h3>
+      <ul>
+        <li><strong>The Rival Adventurer</strong> lives in the world like you: gathers, hunts, sells, and grows stronger. It may come for you, and if it wins it takes some of your gear. Beat it to get your gear back.</li>
+        <li><strong>Murder Inc.</strong> sends Blades to hunt you once you're no longer Young. Train Tracking to hear them coming.</li>
+        <li><strong>Orc war parties</strong> from Grimtusk Hold may burst out of the brush in the south.</li>
+      </ul>
+      <h3>Innocents</h3>
+      <p>Travelers on the road can be helped, escorted, spared or robbed. Escorting and sparing raise Karma and can bring new settlers to your Settlement. Murdering innocents raises your Notoriety and makes you a target.</p>
+    </section>
+
+    <section id="dungeons">
+      <h2>Dungeons</h2>
+      <p>Walk into a dungeon's doorway to enter. Clearing its monsters builds up to its boss; take the stairs up to leave.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Dungeon</th><th>Monsters</th><th>Boss</th><th class="num">Boss level</th></tr></thead>
+        <tbody>
+          <tr><td>The Weavers' Nest</td><td>Web Spinners, Silk Stalkers, Venom Weavers</td><td class="boss">The Broodmother</td><td class="num">35</td></tr>
+          <tr><td>The Whisper Crypt</td><td>Bonewalkers, Gravewretches, Grave Wardens</td><td class="boss">The Whisper King</td><td class="num">42</td></tr>
+          <tr><td>The Sunken Vault</td><td>Fen Serpents, Scalekin Raiders, Brine Drakes</td><td class="boss">The Sunken King</td><td class="num">50</td></tr>
+          <tr><td>The Ember Depths</td><td>Cinder Imps, Magma Hounds, Obsidian Maulers</td><td class="boss">The Emberlord</td><td class="num">52</td></tr>
+          <tr><td>The Frostbound Tomb</td><td>Frostbite Husks, Glacier Wights, Rimebound Horrors</td><td class="boss">The Frostbound King</td><td class="num">54</td></tr>
+          <tr><td>The Hollow</td><td>Warren Rats, Tunnel Skulkers, Cave Brutes</td><td class="boss">The Hollow King</td><td class="num">64</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="world-boss">
+      <h2>World boss: Vyrathax the Tri-Wyrm</h2>
+      <aside class="infobox">
+        <h4>Vyrathax</h4>
+        <dl>
+          <dt>Lair</dt><dd>Cinder Caldera (far SE)</dd>
+          <dt>Health</dt><dd>3,000</dd>
+          <dt>First wakes</dt><dd>After 10 min of play</dd>
+          <dt>Respawn</dt><dd>90 min of play</dd>
+          <dt>Warning</dt><dd>3 min before waking</dd>
+        </dl>
+      </aside>
+      <p>A three-headed dragon sleeps in the Cinder Caldera. Bring friends: guildmates, pets and raised skeletons all fight it with you.</p>
+      <h3>Knowing when it wakes</h3>
+      <ul>
+        <li><strong>3 minutes before:</strong> the ground shakes, and a timer appears on screen (&ldquo;Vyrathax wakes in 2:41&rdquo;) with the direction and distance to the Caldera and an arrow pointing the way.</li>
+        <li><strong>When it wakes:</strong> a banner and a message. The timer changes to &ldquo;Vyrathax is awake!&rdquo; and keeps pointing the way until you arrive.</li>
+        <li><strong>On the maps:</strong> a pulsing orange arrow on the minimap's edge points to the Caldera, and the Caldera glows on the world map while the dragon is awake.</li>
+        <li><strong>Directions:</strong> both maps have north at the top and show N, E, S and W. The small compass beside the minimap turns with your camera.</li>
+      </ul>
+      <p>Each head holds a third of its health. The heads fall in order, and the survivors attack faster.</p>
+      <div class="heads">
+        <div class="head fire"><b>Fire head</b>Rears back, then breathes a cone of flame. A red cone on the ground shows where. Step out of it.</div>
+        <div class="head storm"><b>Storm head</b>Marks three blue circles, one under you. Lightning strikes when they close. Move.</div>
+        <div class="head venom"><b>Venom head</b>Leaves a green cloud that poisons you while you stand in it. Walk out.</div>
+      </div>
+      <p>Its bite is weak; the breath attacks are what kill you, and Magic Resistance cuts them. If you retreat or die, its wounds stay, and it heals slowly (full again in about 17 minutes).</p>
+      <h3>Rewards</h3>
+      <ul>
+        <li>About 1,200 to 1,600 gold, 2 rare dyes and Fame</li>
+        <li>The <strong>Wyrmheart Amulet</strong> (+4 to +7 to every stat)</li>
+        <li>The <strong>Wyrmfang Blade</strong> (power 32, +5 STR, +3 DEX): always on your first kill, 35% after that</li>
+        <li>Its skull hangs over your Great Hall</li>
+      </ul>
+      <div class="clear"></div>
+    </section>
+
+    <section id="death">
+      <h2>Death &amp; the Young</h2>
+      <p>When you fall you become a ghost. You can walk but touch nothing. After a short wait you're resurrected, or you can pray at a virtue shrine. Bless, potions and summoned allies end when you die.</p>
+      <p>New characters are <strong>Young</strong> for their first 20 minutes of play and for the whole First steps guide. While Young, Murder Inc., ambushes, orc war parties and Settlement raids leave you alone.</p>
+    </section>
+
+    <section id="faq">
+      <h2>Tips &amp; FAQ</h2>
+      <h3>My spells won't cast in a fight</h3>
+      <p>You're probably out of reagents. Check the count above your spell bar, and turn on Auto-restock at the Provisioner.</p>
+      <h3>I keep missing with my weapon</h3>
+      <p>Your weapon skill is low for that monster. Fight Easy (green) monsters until the skill climbs, and train Tactics and Anatomy alongside it.</p>
+      <h3>How do I make money?</h3>
+      <p>Fill commissions, sell crafted gear, skin and sell furs in Frostmere, collect from your Settlement, and defend it from raids for spoils.</p>
+      <h3>How do I get back to the game from a menu?</h3>
+      <p>Tap the gold <strong>&gt; Play</strong> button next to MENU.</p>
+      <h3>Is my game saved?</h3>
+      <p>The game saves itself every few seconds in your browser. If cloud saves are set up, MENU &gt; Cloud save keeps your character across devices.</p>
+    </section>
+  </main>
+</div>
+<footer>A player guide to Town Forge 3D. Numbers reflect the current build and may change as the game grows.</footer>
+
+<script>
+(function () {
+  var sections = Array.prototype.slice.call(document.querySelectorAll('main section'));
+  var links = Array.prototype.slice.call(document.querySelectorAll('#toclist a'));
+  var q = document.getElementById('q');
+  var none = document.getElementById('noresults');
+  var byId = {};
+  links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+
+  function filter() {
+    var term = q.value.trim().toLowerCase();
+    var shown = 0;
+    sections.forEach(function (s) {
+      var hit = !term || s.textContent.toLowerCase().indexOf(term) !== -1;
+      s.hidden = !hit;
+      var a = byId[s.id];
+      if (a) a.parentElement.hidden = !hit;
+      if (hit) shown++;
+    });
+    document.querySelectorAll('#toclist .group').forEach(function (g) { g.hidden = !!term; });
+    none.hidden = shown !== 0;
+  }
+  q.addEventListener('input', filter);
+
+  if ('IntersectionObserver' in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (!e.isIntersecting) return;
+        links.forEach(function (a) { a.classList.remove('on'); });
+        var a = byId[e.target.id];
+        if (a) a.classList.add('on');
+      });
+    }, { rootMargin: '-10% 0px -75% 0px' });
+    sections.forEach(function (s) { io.observe(s); });
+  }
+})();
+</script>
+
+</body>
+</html>

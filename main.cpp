@@ -6648,6 +6648,7 @@ EM_JS(int, JS_PersistReady, (), {
 // dot, a save block while a cloud copy is being restored, and the reset notice.
 EM_JS(int, JS_CloudState, (), { return (window.TFCloud && window.TFCloud.configured) ? window.TFCloud.state() : 0; });
 EM_JS(void, JS_CloudOpen, (), { if (window.TFCloud) window.TFCloud.open(); });
+EM_JS(void, JS_OpenWiki, (), { window.open('wiki/', '_blank'); }); // the player wiki (2026-09-27)
 EM_JS(int, JS_SaveBlocked, (), { return Module._TF_blockSave ? 1 : 0; });
 EM_JS(void, JS_CloudOnReset, (), { if (window.TFCloud) window.TFCloud.onReset(); });
 EM_JS(void, JS_FlushPersistence, (), {
@@ -27915,6 +27916,9 @@ static void DrawGuideScreen(GameState& s, int screenW) {
     if (page < kGuidePageCount - 1 && Button({ cx + cw - 140, btnY, 140, 56 }, "Next", true)) s.guidePage++;
     DrawUIText("This is the same walkthrough from your first visit.", (int)cx, (int)btnY + 70, 13,
                Fade(kColorText, 0.7f));
+#ifdef __EMSCRIPTEN__
+    if (Button({ cx, btnY + 100, cw, 48 }, "Open the player wiki (full guide)", true)) JS_OpenWiki(); // (2026-09-27)
+#endif
 }
 
 // Player combat phase for the 3D rig: 0→1 over the swing/cast, -1 when idle.
