@@ -452,11 +452,17 @@ static const int kHouseChestCap = 60;
 // boundary math. Boundaries: north of y=700 is Frostwastes, east of x=1950 is
 // the Salt Coast corridor, west of x=500 is the Stonepeaks; the rest is
 // Whisperwood (the central heartland).
+// The wilderness was enlarged 1.5x (2026-09-27, "spread the monsters out").
+// Every wilderness position is still written in the original 3200-unit layout
+// and scaled by WP() / kWS, so the comments' coordinates keep matching; sizes
+// (radii, widths, camp and fort footprints) are not scaled.
+static constexpr float kWS = 1.5f;
+static constexpr Vector2 WP(float x, float y) { return { x * kWS, y * kWS }; }
 enum class RegionId { Whisperwood, SaltCoast, Frostwastes, Stonepeaks };
 static constexpr RegionId RegionAt(Vector2 p) {
-    if (p.y < 700.0f) return RegionId::Frostwastes;  // northern reaches (snow in Phase 3)
-    if (p.x > 1950.0f) return RegionId::SaltCoast;   // Saltmere corridor (coast in Phase 2)
-    if (p.x < 500.0f) return RegionId::Stonepeaks;    // Dragontooth mountains (peaks in Phase 4)
+    if (p.y < 700.0f * kWS) return RegionId::Frostwastes;  // northern reaches (snow in Phase 3)
+    if (p.x > 1950.0f * kWS) return RegionId::SaltCoast;   // Saltmere corridor (coast in Phase 2)
+    if (p.x < 500.0f * kWS) return RegionId::Stonepeaks;    // Dragontooth mountains (peaks in Phase 4)
     return RegionId::Whisperwood;                    // central heartland
 }
 static const char* RegionName(RegionId r) {
@@ -472,22 +478,22 @@ static const char* RegionName(RegionId r) {
 // later phases can extend it (Phase 3: north to Frostmere; Phase 4: west to
 // Cragmoor). Both the 2D and 3D views draw it from this one table.
 static const std::array<Vector2, 14> kKingsRoadWaypoints = {{
-    {900, 1750},   // Town return gate
-    {1400, 1710},  // bend south of the Whisper Crypt approach
-    {1900, 1680},  // Whisperwood edge
-    {2300, 1720},  // Saltmere corridor
-    {2600, 1700},  // Saltmere corridor
-    {2900, 1750},  // Saltmere gate
+    WP(900, 1750),   // Town return gate
+    WP(1400, 1710),  // bend south of the Whisper Crypt approach
+    WP(1900, 1680),  // Whisperwood edge
+    WP(2300, 1720),  // Saltmere corridor
+    WP(2600, 1700),  // Saltmere corridor
+    WP(2900, 1750),  // Saltmere gate
     // Phase 3 - the road turns north from Saltmere toward Frostmere.
-    {2560, 1350},  // north out of the Saltmere corridor (clear of the tidal pools)
-    {2200, 1080},  // Salt Coast corridor, west of the Sunken Vault approach
-    {1750, 820},   // Whisperwood north edge, east of the Weavers' Nest (Phase 5: was Bloodtusk Hold)
-    {1400, 640},   // Frostmere gate
+    WP(2560, 1350),  // north out of the Saltmere corridor (clear of the tidal pools)
+    WP(2200, 1080),  // Salt Coast corridor, west of the Sunken Vault approach
+    WP(1750, 820),   // Whisperwood north edge, east of the Weavers' Nest (Phase 5: was Bloodtusk Hold)
+    WP(1400, 640),   // Frostmere gate
     // Phase 4 - the road switchbacks west from Frostmere into the Stonepeaks.
-    {1050, 760},   // down off the northern shelf
-    {700, 900},    // Stonepeaks foothills (west of the Emberveil approach)
-    {450, 1000},   // mountain pass
-    {300, 1050},   // Cragmoor gate
+    WP(1050, 760),   // down off the northern shelf
+    WP(700, 900),    // Stonepeaks foothills (west of the Emberveil approach)
+    WP(450, 1000),   // mountain pass
+    WP(300, 1050),   // Cragmoor gate
 }};
 // Distance from p to the nearest King's Road segment - reserved for Phase 6
 // patrol logic; Phase 0 keeps it for road-proximity checks.
@@ -518,23 +524,23 @@ static bool PlayerRoadWarded(Vector2 playerPos) {
 // outlaw refuge (black market for reds).
 struct ShrineDef { const char* name; Vector2 pos; };
 static const std::array<ShrineDef, 7> kShrines = {{
-    { "Valor",      {500, 1300} },  // Whisperwood west
-    { "Compassion", {2100, 1900} }, // south Whisperwood
-    { "Honesty",    {2400, 700} },  // Salt Coast
-    { "Honor",      {500, 200} },   // Frostwastes south edge
-    { "Humility",   {100, 2800} },  // deep Stonepeaks
-    { "Justice",    {2200, 2400} }, // far southeast wilds
-    { "Sacrifice",  {1800, 500} },  // northeast Whisperwood
+    { "Valor",      WP(500, 1300) },  // Whisperwood west
+    { "Compassion", WP(2100, 1900) }, // south Whisperwood
+    { "Honesty",    WP(2400, 700) },  // Salt Coast
+    { "Honor",      WP(500, 200) },   // Frostwastes south edge
+    { "Humility",   WP(100, 2800) },  // deep Stonepeaks
+    { "Justice",    WP(2200, 2400) }, // far southeast wilds
+    { "Sacrifice",  WP(1800, 500) },  // northeast Whisperwood
 }};
-static const Vector2 kFieldsOfSorrow = {1900, 2300}; // haunted battlefield, deep south wilds
+static const Vector2 kFieldsOfSorrow = WP(1900, 2300); // haunted battlefield, deep south wilds
 static constexpr float kFieldsOfSorrowRadius = 220.0f;
 static const std::array<Vector2, 5> kRivalCampSpots = {{ // Murder Inc.'s camp relocates between these
-    {500, 2300}, {2300, 1500}, {1300, 1100}, {2700, 1900}, {400, 800}
+    WP(500, 2300), WP(2300, 1500), WP(1300, 1100), WP(2700, 1900), WP(400, 800)
 }};
-static const Vector2 kOutlawRefuge = {2750, 2450}; // hidden black market, far southeast corner
+static const Vector2 kOutlawRefuge = WP(2750, 2450); // hidden black market, far southeast corner
 // Grimtusk Hold (2026-09-27): the orc fortress, far south past the river below the
 // Fields of Sorrow. Its gate faces west-northwest, where the river can be walked round.
-static const Vector2 kOrcFortPos = { 1800, 2880 };
+static const Vector2 kOrcFortPos = WP(1800, 2880);
 static const float kOrcFortRadius = 205.0f;
 static const float kOrcFortGateYaw = -2.8253f; // toward (1250, 2700)
 
@@ -543,16 +549,16 @@ struct HousePlot { Vector2 pos; int cells; int price; const char* name; RegionId
 // the two town gates, and kWildernessGatherNodes (all >= ~250 units away except a few
 // gather nodes at >= 120, which read fine next to a house).
 static const std::array<HousePlot, 10> kHousePlots = {{
-    {{450, 600},     7, 2500, "West Woods Plot",  RegionAt({450, 600})},
-    {{1150, 420},    7, 2500, "Northfield Plot",  RegionAt({1150, 420})},
-    {{1750, 1150},   9, 5000, "Eastmarch Plot",   RegionAt({1750, 1150})},
-    {{600, 1550},    9, 5000, "Southfen Plot",    RegionAt({600, 1550})},
-    {{800, 2150},    7, 2500, "Far South Plot",   RegionAt({800, 2150})},
-    {{1600, 2150},   9, 5000, "Southgate Plot",   RegionAt({1600, 2150})},
-    {{2150, 1200},   7, 2500, "Highridge Plot",   RegionAt({2150, 1200})},
-    {{2450, 2150},   9, 5000, "Duskmere Plot",    RegionAt({2450, 2150})},
-    {{2650, 900},    7, 2500, "Far East Plot",    RegionAt({2650, 900})},
-    {{1950, 400},   12, 9000, "Kingswood Plot",   RegionAt({1950, 400})},
+    {WP(450, 600),     7, 2500, "West Woods Plot",  RegionAt(WP(450, 600))},
+    {WP(1150, 420),    7, 2500, "Northfield Plot",  RegionAt(WP(1150, 420))},
+    {WP(1750, 1150),   9, 5000, "Eastmarch Plot",   RegionAt(WP(1750, 1150))},
+    {WP(600, 1550),    9, 5000, "Southfen Plot",    RegionAt(WP(600, 1550))},
+    {WP(800, 2150),    7, 2500, "Far South Plot",   RegionAt(WP(800, 2150))},
+    {WP(1600, 2150),   9, 5000, "Southgate Plot",   RegionAt(WP(1600, 2150))},
+    {WP(2150, 1200),   7, 2500, "Highridge Plot",   RegionAt(WP(2150, 1200))},
+    {WP(2450, 2150),   9, 5000, "Duskmere Plot",    RegionAt(WP(2450, 2150))},
+    {WP(2650, 900),    7, 2500, "Far East Plot",    RegionAt(WP(2650, 900))},
+    {WP(1950, 400),   12, 9000, "Kingswood Plot",   RegionAt(WP(1950, 400))},
 }};
 // Layout helpers. The layout string always has cells*cells chars for the owned plot.
 static std::string HouseEmptyLayout(int cells) { return std::string((size_t)cells * cells, '.'); }
@@ -1400,6 +1406,7 @@ struct GameState {
     Vector2 companionPos = {0, 0};
     bool companionFollowInitialized = false;
     float companionAttackCooldown = 0.0f;
+    float companionAtkT = -1.0f; // seconds into the pet's bite/claw animation, <0 none (2026-09-27)
 
     // The Rival Adventurer (2026-09-23, "Rival hunts you" plan) - no longer a static
     // kWildernessMonsterSpots row, since it now roams and grows persistently instead of
@@ -1434,12 +1441,12 @@ struct GameState {
     GuildMind rivalMind;
     float rivalGrudge = 0.0f; // PERSISTED - rises when you kill it or its crew; fuels revenge hunts
     float rivalLevel = 16.0f; // starting value matches the old static spot's level
-    Vector2 rivalPos = { 900, 900 }; // the old spot's position, now just a starting point
+    Vector2 rivalPos = WP(900, 900); // the old spot's position, now just a starting point
     bool rivalHasBeatenPlayer = false; // once true, losing to it again is a harsher "murderer" loss
     int rivalKillsOnPlayer = 0; // PERSISTED - drives the epithet ladder (Ruthless/Relentless/Merciless/Bane)
     enum class RivalActivity { Patrol, Stalking, Hunting };
     RivalActivity rivalActivity = RivalActivity::Patrol;
-    Vector2 rivalPatrolTarget = { 900, 900 };
+    Vector2 rivalPatrolTarget = WP(900, 900);
     float rivalActivityTimer = 0.0f; // counts down to the next patrol-target pick, or the next hunt attempt
     // Phase 6 - connective tissue landmarks. rivalCampIdx/rivalCampTimer/refugeKnown
     // are PERSISTED (the camp's spot and the refuge discovery survive sessions);
@@ -1462,18 +1469,18 @@ struct GameState {
     // transient like the champion's; levels/positions save like the champion's.
     struct BladeState {
         float level = 12.0f; // PERSISTED - grows slowly, capped below the champion
-        Vector2 pos = { 400.0f, 900.0f }; // PERSISTED
+        Vector2 pos = WP(400.0, 900.0); // PERSISTED
         RivalActivity activity = RivalActivity::Patrol; // transient
-        Vector2 patrolTarget = { 400.0f, 900.0f };      // transient
+        Vector2 patrolTarget = WP(400.0, 900.0);      // transient
         float activityTimer = 0.0f;  // transient - patrol pause / hunt give-up countdown
         float stalkTimer = 0.0f;     // transient - counts down a stalk before commit/break-off
         bool autoEngage = false;     // transient - set when a hunt closes to catch range
         GuildMind mind;              // what it does between hunts (see GuildMind)
     };
     std::array<BladeState, kBladeCount> blades = {{ // persistent levels/positions; activities transient
-        { 12.0f, { 400.0f, 900.0f } },    // Blade II - west woods
-        { 12.0f, { 1400.0f, 1200.0f } },  // Blade III - central wilds
-        { 12.0f, { 2200.0f, 1500.0f } }, // Blade IV - Saltmere corridor
+        { 12.0f, WP(400.0, 900.0) },    // Blade II - west woods
+        { 12.0f, WP(1400.0, 1200.0) },  // Blade III - central wilds
+        { 12.0f, WP(2200.0, 1500.0) }, // Blade IV - Saltmere corridor
     }};
     bool rivalAutoEngage = false;      // set by UpdateRivalRoaming when a hunt closes to catch range
     std::string rivalBanner;           // unmissable center-screen banner text (hunt/stalk warnings)
@@ -1607,7 +1614,7 @@ struct GameState {
     Vector2 townPlayerPos = {675, 900}; // layout {450,600} x kTS 1.5 - on the main north-south street, clear of Townhall/Bank's collision radius
     Vector2 dungeonPlayerPos = {900, 900};
     Vector2 bloodstainedPlayerPos = {450, 700};
-    Vector2 wildernessPlayerPos = {900, 1650}; // just inside the gate from Town
+    Vector2 wildernessPlayerPos = { 900 * kWS, 1750 * kWS - 100 }; // just inside the gate from Town
     Vector2 playerFacing = {0, 1}; // last nonzero movement direction, for a facing indicator
     float worldTime = 0; // elapsed seconds, ticks every frame - drives monster wander motion
 
@@ -1722,6 +1729,7 @@ struct GameState {
         bool isBoss = false;
     };
     std::optional<FlagTarget> flagTarget;
+    float wildAlertT = -1.0f; int wildAlertSpot = -1; // (2026-09-27) "!" over a monster that just spotted you. Transient.
     float disengageGraceT = 0.0f; // (2026-09-25) post-disengage window where contact auto-engage is suppressed, so clicking empty ground to break away doesn't instantly re-engage while the monster is still standing on you. Transient, not saved.
     struct SpellProjectile {
         bool active = false;
@@ -1834,7 +1842,7 @@ static const float kDungeonWorldSize = 1800.0f; // dungeons get their own, much 
 // session. All of Wilderness's existing content (gather/tame/monster nodes, the 5
 // dungeon entrances, foliage, the Town 1 gate) keeps its original 0-1800 coordinates
 // unchanged; the extra space is new territory toward Town 2's gate.
-static const float kWildernessWorldSize = 3200.0f;
+static const float kWildernessWorldSize = 3200.0f * kWS; // 4800 since the 1.5x enlargement (2026-09-27)
 // Town 2's name and its gate position out in the newly added Wilderness space - a
 // straight-line ~2000 units from the Town 1 return gate (kWildernessReturnGatePos,
 // {900,1750}), well past the original 1800-unit map's edge, so reaching it is a real
@@ -1843,15 +1851,15 @@ static const float kWildernessWorldSize = 3200.0f;
 // Phase 1: the central town's proper name - Emberhold, capital of the Whisperwood.
 static const char* kTown1Name = "Emberhold";
 static const char* kTown2Name = "Saltmere";
-static const Vector2 kWildernessTown2GatePos = { 2900, 1750 };
+static const Vector2 kWildernessTown2GatePos = WP(2900, 1750);
 // Phase 3: Frostmere, the northern town - its wilderness gate sits just inside the
 // Frostwastes (y < 700), at the end of the King's Road's northern extension.
 static const char* kTown3Name = "Frostmere";
-static const Vector2 kWildernessTown3GatePos = { 1400, 640 };
+static const Vector2 kWildernessTown3GatePos = WP(1400, 640);
 // Phase 4: Cragmoor, the western mountain town - its wilderness gate sits in the
 // Stonepeaks (x < 500, y >= 700), at the end of the King's Road's western extension.
 static const char* kTown4Name = "Cragmoor";
-static const Vector2 kWildernessTown4GatePos = { 300, 1050 };
+static const Vector2 kWildernessTown4GatePos = WP(300, 1050);
 // Mark asked for "everything in Town a little larger" since the camera scrolls with
 // the player anyway - rather than bumping kNodeRadius/kPlayerRadius/kWorldSize above
 // (which would also resize Hunt's dungeons and the Bloodstained Road, neither of which
@@ -3694,7 +3702,7 @@ static const std::array<CoastProp, 9> kCoastProps = {{
 // "Saltmere Docks" - wilderness landmark on the Salt Coast near the town gate.
 // Decorative only (the tidal-pool fishing nodes nearby are the interactables).
 static const std::array<CoastProp, 3> kSaltDocks = {{
-    {{2800, 1450}, 20, 48.0f}, {{2720, 1480}, 21, 44.0f}, {{2760, 1420}, 22, 20.0f},
+    {WP(2800, 1450), 20, 48.0f}, {WP(2720, 1480), 21, 44.0f}, {WP(2760, 1420), 22, 20.0f},
 }};
 
 static void DrawCoastProp2D(int kind, Vector2 sp, float size, float t) {
@@ -4501,9 +4509,19 @@ static const float kCompanionAttackCooldown = 1.5f;
 // - longer than a plain melee swing so alternating melee/ranged still feels paced, not
 // spammy.
 static const float kTacticalRangedCooldown = 3.0f;
-static void UpdateCompanionFollow(GameState& s, Vector2 playerPos, Vector2 playerFacing, float dt) {
+static void UpdateCompanionFollow(GameState& s, Vector2 playerPos, Vector2 playerFacing, float dt,
+                                  const Vector2* foe = nullptr) {
+    if (s.companionAtkT >= 0.0f) { s.companionAtkT += dt; if (s.companionAtkT > 0.7f) s.companionAtkT = -1.0f; }
     Vector2 targetPos = { playerPos.x - playerFacing.x * kCompanionFollowDistance,
                             playerPos.y - playerFacing.y * kCompanionFollowDistance };
+    if (foe) {
+        // In a fight (2026-09-27) the pet flanks the foe - beside it, off the
+        // player's side - so its bites and claws visibly land.
+        Vector2 d = { foe->x - playerPos.x, foe->y - playerPos.y };
+        float L = std::max(1.0f, sqrtf(d.x * d.x + d.y * d.y));
+        d.x /= L; d.y /= L;
+        targetPos = { foe->x - d.x * 14.0f - d.y * 30.0f, foe->y - d.y * 14.0f + d.x * 30.0f };
+    }
     float distFromPlayer = Dist(s.companionPos, playerPos);
     if (!s.companionFollowInitialized || distFromPlayer > 400.0f) {
         s.companionPos = targetPos;
@@ -5001,9 +5019,9 @@ static std::string InnocentCaughtLine(int id) {
 static std::string InnocentRumor(const GameState& s, int id) {
     std::vector<std::string> options;
     std::string region;
-    if (s.rivalPos.x > 1900.0f) region = "out along the Saltmere road";
-    else if (s.rivalPos.x < 900.0f) region = "in the western woods";
-    else if (s.rivalPos.y < 700.0f) region = "up in the northern hills";
+    if (s.rivalPos.x > 1900.0f * kWS) region = "out along the Saltmere road";
+    else if (s.rivalPos.x < 900.0f * kWS) region = "in the western woods";
+    else if (s.rivalPos.y < 700.0f * kWS) region = "up in the northern hills";
     else region = "in the heart of the wilds";
     if (s.rivalMind.downT > 0.0f)
         options.push_back("Someone finally put " + RivalEpithetName(s) + " in the dirt. Won't last - that sort always crawls back.");
@@ -6386,6 +6404,7 @@ static void SaveGame(const GameState& s) {
     out << "titleLordEarned=" << (s.titleLordEarned ? 1 : 0) << "\nshaken=" << s.shaken << "\n";
     out << "nextItemId=" << s.nextItemId << "\nnextPetId=" << s.nextPetId << "\n";
     out << "lastActiveEpoch=" << (long long)std::time(nullptr) << "\n";
+    out << "wildScale=1.5\n"; // 1.5x wilderness (2026-09-27); missing = positions in the old 3200-unit map
     out << "saveVersion=2\n"; // 2 = six-dungeon ladder (2026-09-25); missing/1 = old seven-slot
     out << "rivalLevel=" << s.rivalLevel << "\nrivalPosX=" << s.rivalPos.x << "\nrivalPosY=" << s.rivalPos.y <<
            "\nrivalHasBeatenPlayer=" << (s.rivalHasBeatenPlayer ? 1 : 0) <<
@@ -6520,6 +6539,7 @@ static bool LoadGame(GameState& s) {
 
     long long lastActiveEpoch = 0;
     int saveVersion = 1; // missing = pre-ladder seven-slot format
+    bool wildScaled = false; // saved before the 1.5x wilderness: scale the persisted positions out
     bool sawMarkedTowns = false; // UO-style travel (2026-09-25): pre-marking saves lack the key
     bool sawStarter = false;     // (2026-09-27) saves from before "first steps" are veterans: skip it
     bool sawYoung = false;       // (2026-09-27) ...and they aren't Young either
@@ -6530,6 +6550,7 @@ static bool LoadGame(GameState& s) {
         std::string key = line.substr(0, eq);
         std::string val = line.substr(eq + 1);
         if (key == "saveVersion") saveVersion = std::atoi(val.c_str());
+        if (key == "wildScale") wildScaled = true;
         else if (key == "characterName") s.characterName = val;
         else if (key == "houseTierIdx") s.houseTierIdx = std::clamp(std::atoi(val.c_str()), 0, (int)kHouseTiers.size() - 1);
         else if (key == "houseHue") s.houseHue = std::atoi(val.c_str());
@@ -6811,6 +6832,11 @@ static bool LoadGame(GameState& s) {
         s.playerDeathAnimT = 0.0f;
         s.ghostTimer = 0.0f;
         s.logLine = "You wake in Emberhold, whole once more.";
+    }
+    if (!wildScaled) { // older save: its wilderness positions were on the 3200-unit map
+        s.rivalPos = { s.rivalPos.x * kWS, s.rivalPos.y * kWS };
+        s.rivalPatrolTarget = s.rivalPos;
+        for (auto& b : s.blades) { b.pos = { b.pos.x * kWS, b.pos.y * kWS }; b.patrolTarget = b.pos; }
     }
     return true;
 }
@@ -7266,9 +7292,11 @@ static void MarkTownVisited(GameState& s, int townIdx) {
 }
 // Where the player lands in the Wilderness when leaving a town's gate.
 static Vector2 TownWildernessSpawn(int townIdx) {
-    if (townIdx == 2) return { 1400, 740 }; // just south of the Frostmere gate
-    if (townIdx == 3) return { 300, 1150 }; // just south of the Cragmoor gate (Phase 4)
-    return (townIdx == 0) ? Vector2{ 900, 1650 } : Vector2{ 2900, 1650 };
+    // Offsets from each gate stay in plain world units (1.5x map, 2026-09-27).
+    if (townIdx == 2) return { WP(1400, 640).x, WP(1400, 640).y + 100.0f }; // just south of the Frostmere gate
+    if (townIdx == 3) return { WP(300, 1050).x, WP(300, 1050).y + 100.0f }; // just south of the Cragmoor gate (Phase 4)
+    return (townIdx == 0) ? Vector2{ WP(900, 1750).x, WP(900, 1750).y - 100.0f }
+                          : Vector2{ WP(2900, 1750).x, WP(2900, 1750).y - 100.0f };
 }
 // The town's central plaza - sized to hold only Townhall's grid slot, so every other
 // building (all 300 units out on the grid) is clearly outside it and gets a road.
@@ -7303,27 +7331,27 @@ static const Vector2 kWildernessGatePos = TS(500, 900);
 // spot below, not just the original 5.
 struct WildernessGatherNode { Vector2 pos; std::string resource; RegionId region; }; // "wood", "ore", "fish", "ice", or "richore"
 static const std::array<WildernessGatherNode, 21> kWildernessGatherNodes = {{
-    { {500, 1400}, "wood", RegionAt({500, 1400}) }, { {1300, 1400}, "wood", RegionAt({1300, 1400}) }, { {900, 1100}, "wood", RegionAt({900, 1100}) },
-    { {400, 900}, "ore", RegionAt({400, 900}) },   { {1400, 900}, "ore", RegionAt({1400, 900}) },   { {900, 600}, "ore", RegionAt({900, 600}) },
-    { {1700, 150}, "wood", RegionAt({1700, 150}) }, { {1650, 450}, "wood", RegionAt({1650, 450}) }, // Dense Forest zone (NE)
-    { {250, 300}, "ore", RegionAt({250, 300}) },   { {300, 1300}, "ore", RegionAt({300, 1300}) },   // Dragontooth mountain zone (W)
+    { WP(500, 1400), "wood", RegionAt(WP(500, 1400)) }, { WP(1300, 1400), "wood", RegionAt(WP(1300, 1400)) }, { WP(900, 1100), "wood", RegionAt(WP(900, 1100)) },
+    { WP(400, 900), "ore", RegionAt(WP(400, 900)) },   { WP(1400, 900), "ore", RegionAt(WP(1400, 900)) },   { WP(900, 600), "ore", RegionAt(WP(900, 600)) },
+    { WP(1700, 150), "wood", RegionAt(WP(1700, 150)) }, { WP(1650, 450), "wood", RegionAt(WP(1650, 450)) }, // Dense Forest zone (NE)
+    { WP(250, 300), "ore", RegionAt(WP(250, 300)) },   { WP(300, 1300), "ore", RegionAt(WP(300, 1300)) },   // Dragontooth mountain zone (W)
     // The new stretch toward Saltmere (2026-09-22, "second town" plan) - a couple of
     // waypoints so the longer walk isn't completely empty, not an exhaustive re-scatter.
-    { {2200, 1550}, "wood", RegionAt({2200, 1550}) }, { {2550, 1900}, "ore", RegionAt({2550, 1900}) },
+    { WP(2200, 1550), "wood", RegionAt(WP(2200, 1550)) }, { WP(2550, 1900), "ore", RegionAt(WP(2550, 1900)) },
     // Phase 2 - Salt Coast fishery: tidal pools by the Saltmere Docks landmark.
     // Walk up and press E like any other node; yields fish + Fishing skill.
-    { {2700, 1400}, "fish", RegionAt({2700, 1400}) }, { {2850, 1550}, "fish", RegionAt({2850, 1550}) },
-    { {2600, 1400}, "fish", RegionAt({2600, 1400}) },
+    { WP(2700, 1400), "fish", RegionAt(WP(2700, 1400)) }, { WP(2850, 1550), "fish", RegionAt(WP(2850, 1550)) },
+    { WP(2600, 1400), "fish", RegionAt(WP(2600, 1400)) },
     // Phase 3 - Frostwastes ice crystals: walk up and press E like any other node;
     // yields ice + Mining skill (crystal mining). Positions hand-checked against the
     // Tomb entrance (900,300), northern monster spots, and the Frostmere gate.
-    { {800, 450}, "ice", RegionAt({800, 450}) }, { {1500, 200}, "ice", RegionAt({1500, 200}) },
-    { {500, 550}, "ice", RegionAt({500, 550}) },
+    { WP(800, 450), "ice", RegionAt(WP(800, 450)) }, { WP(1500, 200), "ice", RegionAt(WP(1500, 200)) },
+    { WP(500, 550), "ice", RegionAt(WP(500, 550)) },
     // Phase 4 - Stonepeaks rich ore veins: walk up and press E; yields ore at a
     // much richer rate than normal veins + Mining skill. Deep in the southern
     // Stonepeaks, clear of the Ember Depths entrance (200,2100) and house plots.
-    { {350, 1900}, "richore", RegionAt({350, 1900}) }, { {150, 2400}, "richore", RegionAt({150, 2400}) },
-    { {450, 2650}, "richore", RegionAt({450, 2650}) },
+    { WP(350, 1900), "richore", RegionAt(WP(350, 1900)) }, { WP(150, 2400), "richore", RegionAt(WP(150, 2400)) },
+    { WP(450, 2650), "richore", RegionAt(WP(450, 2650)) },
 }};
 // Index into kWildCreatures - a spread of difficulties so there's an easy tame near the
 // entrance and a real challenge (Forest Dragon) at the far end of the map.
@@ -7340,7 +7368,7 @@ static const std::array<WildernessGatherNode, 21> kWildernessGatherNodes = {{
 // after a cooldown" shape as a gather node, not a one-time encounter.
 struct WildernessInnocentSpot { Vector2 pos; RegionId region; };
 static const std::array<WildernessInnocentSpot, 4> kWildernessInnocentSpots = {{
-    { {450, 1150}, RegionAt({450, 1150}) }, { {1450, 1150}, RegionAt({1450, 1150}) }, { {1150, 450}, RegionAt({1150, 450}) }, { {2100, 1350}, RegionAt({2100, 1350}) }, // last one along the Saltmere stretch
+    { WP(450, 1150), RegionAt(WP(450, 1150)) }, { WP(1450, 1150), RegionAt(WP(1450, 1150)) }, { WP(1150, 450), RegionAt(WP(1150, 450)) }, { WP(2100, 1350), RegionAt(WP(2100, 1350)) }, // last one along the Saltmere stretch
 }};
 // (kInnocentRespawnSeconds is defined just above the innocent deep-dive section.)
 // Called once per frame from DrawWildernessScreen - rolls a fresh traveler into
@@ -7368,29 +7396,29 @@ static void UpdateInnocentSpots(GameState& s, float dt) {
 }
 struct WildernessCreatureSpot { Vector2 pos; int creatureIdx; };
 static const std::array<WildernessCreatureSpot, 17> kWildernessCreatureSpots = {{
-    { {700, 1550}, 0 },  // Stray Dog (difficulty 0)
-    { {1100, 1550}, 1 }, // Timber Wolf (difficulty 20)
-    { {300, 500}, 2 },   // Grizzly Bear (difficulty 30)
-    { {1500, 300}, 7 },  // Storm Griffin (difficulty 80)
-    { {900, 150}, 10 },  // Forest Dragon (difficulty 100)
-    { {1650, 600}, 1 },  // Timber Wolf #2 - Dense Forest zone (NE)
-    { {700, 900}, 3 },   // Dire Panther (difficulty 40)
-    { {1100, 900}, 4 },  // Plains Bison (difficulty 50)
-    { {1100, 400}, 5 },  // War Horse (difficulty 60)
-    { {700, 500}, 6 },   // Sabertooth Cat (difficulty 70)
-    { {1300, 600}, 8 },  // Young Drake (difficulty 90)
-    { {500, 200}, 9 },   // Elder Wyvern (difficulty 100)
+    { WP(700, 1550), 0 },  // Stray Dog (difficulty 0)
+    { WP(1100, 1550), 1 }, // Timber Wolf (difficulty 20)
+    { WP(300, 500), 2 },   // Grizzly Bear (difficulty 30)
+    { WP(1500, 300), 7 },  // Storm Griffin (difficulty 80)
+    { WP(900, 150), 10 },  // Forest Dragon (difficulty 100)
+    { WP(1650, 600), 1 },  // Timber Wolf #2 - Dense Forest zone (NE)
+    { WP(700, 900), 3 },   // Dire Panther (difficulty 40)
+    { WP(1100, 900), 4 },  // Plains Bison (difficulty 50)
+    { WP(1100, 400), 5 },  // War Horse (difficulty 60)
+    { WP(700, 500), 6 },   // Sabertooth Cat (difficulty 70)
+    { WP(1300, 600), 8 },  // Young Drake (difficulty 90)
+    { WP(500, 200), 9 },   // Elder Wyvern (difficulty 100)
     // The Saltmere corridor (2026-09-24) - had zero creatures/monsters at all before
     // this (only 2 gather nodes + 1 innocent NPC dotted the whole stretch); Mark asked
     // for monsters/animals "all thru the wilderness", and this was the one real gap.
     // Reuses the same 11 creature types (no new art needed) at a few waypoints along
     // the walk, roughly easy-to-moderate - the corridor is meant to feel like an
     // established trade road, not a second gauntlet on top of the original zone.
-    { {2000, 1900}, 0 }, // Stray Dog
-    { {2300, 1600}, 4 }, // Plains Bison
-    { {2500, 1800}, 5 }, // War Horse - fits the "road" setting
-    { {2700, 1950}, 1 }, // Timber Wolf
-    { {2400, 1450}, 6 }, // Sabertooth Cat
+    { WP(2000, 1900), 0 }, // Stray Dog
+    { WP(2300, 1600), 4 }, // Plains Bison
+    { WP(2500, 1800), 5 }, // War Horse - fits the "road" setting
+    { WP(2700, 1950), 1 }, // Timber Wolf
+    { WP(2400, 1450), 6 }, // Sabertooth Cat
 }};
 // wildCreatureTex is parallel to kWildCreatures (not kWildernessCreatureSpots) -
 // creatureIdx indexes it directly. Was a 5-of-11-covered array needing a slot-mapping
@@ -7398,9 +7426,9 @@ static const std::array<WildernessCreatureSpot, 17> kWildernessCreatureSpots = {
 // Dragon(10)) until every creature got real art - see GameAssets.wildCreatureTex.
 // Walk here and press E to head back to Town - placed just past the entrance so it's
 // the first thing you see coming in, same as walking straight back out a real gate.
-static const Vector2 kWildernessReturnGatePos = { 900, 1750 };
+static const Vector2 kWildernessReturnGatePos = WP(900, 1750);
 // Saltmere-side gate position (mirrors the wilderness entry point for town 2).
-static const Vector2 kSaltmereGatePos = { 2900, 1650 };
+static const Vector2 kSaltmereGatePos = WP(2900, 1650);
 
 // Phase 0: the towns' wilderness gates, tagged with their regions. (kTown2Name
 // is "Saltmere"; the Town 1 gate uses kTown1Name ("Emberhold") - matches its HUD usage.
@@ -7460,52 +7488,52 @@ static void UpdateEscort(GameState& s, float dt) {
 // always-melee monster again, no per-entry AI-variant flag needed.
 struct WildernessMonsterSpot { Vector2 pos; std::string name; int level; int baseLeather; int baseGold; int iconIdx; RegionId region; };
 static const std::array<WildernessMonsterSpot, 29> kWildernessMonsterSpots = {{
-    { {1150, 1250}, "Wild Bat", 2, 1, 2, 0, RegionAt({1150, 1250}) },
-    { {600, 1000}, "Timber Wolf", 5, 3, 4, 2, RegionAt({600, 1000}) }, // Phase 1: Whisperwood signature - was Wandering Goblin
-    { {1150, 700}, "Lone Wolf", 9, 5, 7, 2, RegionAt({1150, 700}) },
-    { {600, 350}, "Lesser Imp", 14, 7, 10, 3, RegionAt({600, 350}) },
-    { {1300, 150}, "Highway Bandit", 20, 10, 15, 4, RegionAt({1300, 150}) },
-    { {300, 1550}, "Mountain Bandit", 20, 10, 15, 4, RegionAt({300, 1550}) }, // same art/stats as Highway Bandit - Dragontooth zone (W)
+    { WP(1150, 1250), "Wild Bat", 2, 1, 2, 0, RegionAt(WP(1150, 1250)) },
+    { WP(600, 1000), "Timber Wolf", 5, 3, 4, 2, RegionAt(WP(600, 1000)) }, // Phase 1: Whisperwood signature - was Wandering Goblin
+    { WP(1150, 700), "Lone Wolf", 9, 5, 7, 2, RegionAt(WP(1150, 700)) },
+    { WP(600, 350), "Lesser Imp", 14, 7, 10, 3, RegionAt(WP(600, 350)) },
+    { WP(1300, 150), "Highway Bandit", 20, 10, 15, 4, RegionAt(WP(1300, 150)) },
+    { WP(300, 1550), "Mountain Bandit", 20, 10, 15, 4, RegionAt(WP(300, 1550)) }, // same art/stats as Highway Bandit - Dragontooth zone (W)
     // Density pass + Saltmere corridor coverage (2026-09-24, Mark asked for monsters
     // "all thru the wilderness") - two fill in gaps in the original zone, four cover
     // the corridor east toward Saltmere (which had zero monster spots at all before
     // this). All reuse the existing 5 monster art types; no new assets needed.
-    { {900, 1400}, "Timber Wolf", 5, 3, 4, 2, RegionAt({900, 1400}) },   // Phase 1: Whisperwood signature - was Wandering Goblin; south-central gap, original zone
-    { {1500, 900}, "Lesser Imp", 14, 7, 10, 3, RegionAt({1500, 900}) },        // east-central gap, original zone
-    { {2000, 1650}, "Wild Bat", 2, 1, 2, 0, RegionAt({2000, 1650}) },           // corridor, near the Town 1 side
-    { {2300, 1750}, "Highway Bandit", 20, 10, 15, 4, RegionAt({2300, 1750}) },  // corridor, a real "road danger"
-    { {2600, 1650}, "Wandering Goblin", 5, 3, 4, 1, RegionAt({2600, 1650}) },   // corridor
-    { {2750, 1850}, "Lone Wolf", 9, 5, 7, 2, RegionAt({2750, 1850}) },          // corridor, near the Saltmere side
+    { WP(900, 1400), "Timber Wolf", 5, 3, 4, 2, RegionAt(WP(900, 1400)) },   // Phase 1: Whisperwood signature - was Wandering Goblin; south-central gap, original zone
+    { WP(1500, 900), "Lesser Imp", 14, 7, 10, 3, RegionAt(WP(1500, 900)) },        // east-central gap, original zone
+    { WP(2000, 1650), "Wild Bat", 2, 1, 2, 0, RegionAt(WP(2000, 1650)) },           // corridor, near the Town 1 side
+    { WP(2300, 1750), "Highway Bandit", 20, 10, 15, 4, RegionAt(WP(2300, 1750)) },  // corridor, a real "road danger"
+    { WP(2600, 1650), "Wandering Goblin", 5, 3, 4, 1, RegionAt(WP(2600, 1650)) },   // corridor
+    { WP(2750, 1850), "Lone Wolf", 9, 5, 7, 2, RegionAt(WP(2750, 1850)) },          // corridor, near the Saltmere side
     // Phase 3 - Frostwastes: ice wolves (iconIdx 5) and frostbitten undead
     // (iconIdx 6). New icon indices reuse existing sheets with an icy tint (see
     // WildMonsterSheetFor/WildMonsterTintFor); 3D looks are new procedural
     // entries in T3CMonsterLook. Positions hand-checked against the Frostmere
     // gate (1400,640), the Frostbound Tomb entrance (900,300), and existing
     // northern nodes (all >= ~140 units away).
-    { {1000, 400}, "Ice Wolf", 25, 13, 19, 5, RegionAt({1000, 400}) },
-    { {1600, 300}, "Ice Wolf", 32, 17, 25, 5, RegionAt({1600, 300}) },
-    { {700, 200}, "Frostbitten Husk", 28, 15, 22, 6, RegionAt({700, 200}) },
-    { {1300, 500}, "Frostbitten Husk", 35, 19, 28, 6, RegionAt({1300, 500}) },
+    { WP(1000, 400), "Ice Wolf", 25, 13, 19, 5, RegionAt(WP(1000, 400)) },
+    { WP(1600, 300), "Ice Wolf", 32, 17, 25, 5, RegionAt(WP(1600, 300)) },
+    { WP(700, 200), "Frostbitten Husk", 28, 15, 22, 6, RegionAt(WP(700, 200)) },
+    { WP(1300, 500), "Frostbitten Husk", 35, 19, 28, 6, RegionAt(WP(1300, 500)) },
     // Phase 4 - Stonepeaks: rock golems (iconIdx 7, alias the Emberveil
     // elemental sheets) and mountain cats (iconIdx 8, tawny-tinted wolf sheet).
     // Deep in the southern peaks, clear of the Cragmoor gate (300,1050), the
     // Ember Depths entrance (200,2100), and the house plots.
-    { {320, 2050}, "Rock Golem", 30, 16, 24, 7, RegionAt({320, 2050}) },
-    { {350, 2500}, "Rock Golem", 38, 20, 30, 7, RegionAt({350, 2500}) },
-    { {150, 1800}, "Mountain Cat", 26, 14, 21, 8, RegionAt({150, 1800}) },
-    { {450, 2300}, "Mountain Cat", 33, 18, 27, 8, RegionAt({450, 2300}) },
+    { WP(320, 2050), "Rock Golem", 30, 16, 24, 7, RegionAt(WP(320, 2050)) },
+    { WP(350, 2500), "Rock Golem", 38, 20, 30, 7, RegionAt(WP(350, 2500)) },
+    { WP(150, 1800), "Mountain Cat", 26, 14, 21, 8, RegionAt(WP(150, 1800)) },
+    { WP(450, 2300), "Mountain Cat", 33, 18, 27, 8, RegionAt(WP(450, 2300)) },
     // Grimtusk Hold (2026-09-27) - the orc fortress (iconIdx 9 orcs, 10 the Warlord).
     // One faction (MonsterFaction): strike one and the whole hold answers.
-    { {1681, 2794}, "Orc Grunt", 22, 8, 14, 9, RegionAt({1681, 2794}) },   // inside the gate
-    { {1653, 2879}, "Orc Grunt", 22, 8, 14, 9, RegionAt({1653, 2879}) },
-    { {1801, 2749}, "Orc Archer", 24, 6, 16, 9, RegionAt({1801, 2749}) },  // by the walls
-    { {1723, 2986}, "Orc Archer", 24, 6, 16, 9, RegionAt({1723, 2986}) },
-    { {1829, 2824}, "Orc Brute", 30, 12, 20, 9, RegionAt({1829, 2824}) },  // at the bonfire
-    { {1832, 2975}, "Orc Shaman", 30, 4, 22, 9, RegionAt({1832, 2975}) },  // at the war drum
-    { {1919, 2919}, "Orc Warlord", 42, 20, 60, 10, RegionAt({1919, 2919}) }, // before his hall
+    { WP(1681, 2794), "Orc Grunt", 22, 8, 14, 9, RegionAt(WP(1681, 2794)) },   // inside the gate
+    { WP(1653, 2879), "Orc Grunt", 22, 8, 14, 9, RegionAt(WP(1653, 2879)) },
+    { WP(1801, 2749), "Orc Archer", 24, 6, 16, 9, RegionAt(WP(1801, 2749)) },  // by the walls
+    { WP(1723, 2986), "Orc Archer", 24, 6, 16, 9, RegionAt(WP(1723, 2986)) },
+    { WP(1829, 2824), "Orc Brute", 30, 12, 20, 9, RegionAt(WP(1829, 2824)) },  // at the bonfire
+    { WP(1832, 2975), "Orc Shaman", 30, 4, 22, 9, RegionAt(WP(1832, 2975)) },  // at the war drum
+    { WP(1919, 2919), "Orc Warlord", 42, 20, 60, 10, RegionAt(WP(1919, 2919)) }, // before his hall
     // The Fields of Sorrow (2026-09-27) - live wraiths replace the old pop-up ambush.
-    { {1880, 2280}, "Sorrow Wraith", 26, 0, 18, 6, RegionAt({1880, 2280}) },
-    { {2010, 2310}, "Sorrow Wraith", 32, 0, 24, 6, RegionAt({2010, 2310}) },
+    { WP(1880, 2280), "Sorrow Wraith", 26, 0, 18, 6, RegionAt(WP(1880, 2280)) },
+    { WP(2010, 2310), "Sorrow Wraith", 32, 0, 24, 6, RegionAt(WP(2010, 2310)) },
 }};
 static const int kWildMonsterIconCount = 9; // iconIdx 0-4 classic, 5 Ice Wolf, 6 Frostbitten Husk, 7 Rock Golem, 8 Mountain Cat
 static_assert(kWildernessMonsterSpots.size() == kWildMonsterSpotCount,
@@ -7751,7 +7779,7 @@ static void BladeFightEnded(GameState& s, int bi, const GameState::ActiveMonster
 // keeps a chasing monster from wandering into a neighboring node's territory, and the
 // disengage range (320) lets it "lose interest" if the player breaks away.
 static const float kWildMeleeRange = 60.0f;
-static const float kWildMonsterChaseSpeed = 90.0f;
+static const float kWildMonsterChaseSpeed = 140.0f; // 2026-09-27: was 90 - aggressive monsters really come for you (you can still outrun them at 220)
 static const float kWildMonsterLeashRange = 250.0f;
 static const float kWildDisengageRange = 320.0f;
 
@@ -7801,6 +7829,55 @@ static float PlayerSwingCooldown(const GameState& s) {
     return kWildPlayerAttackCooldown - t * (kWildPlayerAttackCooldown - 0.4f);
 }
 
+// ---- Threat read (2026-09-27) ----
+// "An easy way to identify threats in the wild": every monster gets a UO/EQ-
+// style con color from how the fight would go - seconds for you to kill it vs
+// seconds for it to kill you, from the same hit/damage formulas the live fight
+// uses (your swing + pet; its level-scaled bite against your armor).
+enum ThreatTier { kThreatTrivial, kThreatEasy, kThreatFair, kThreatTough, kThreatDeadly };
+static int ThreatOf(const GameState& s, int monsterLevel) {
+    int power = CombatPower(s);
+    float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
+    float hit = std::clamp(50.0f + (power - monsterLevel) * 4.0f + weaponSkillBonus, 5.0f, 95.0f) / 100.0f;
+    float myDps = hit * power / PlayerSwingCooldown(s);
+    if (ActivePet(const_cast<GameState&>(s))) myDps *= 1.35f; // a pet adds roughly a third again
+    float itsHit = MonsterHitChance(s) / 100.0f;
+    float itsDmg = std::max(1.0f, monsterLevel * 1.1f - TotalDefense(s) * 0.3f);
+    float itsDps = itsHit * itsDmg / kWildMonsterAttackCooldown;
+    float tKillIt = std::max(1.0f, monsterLevel * 3.0f) / std::max(0.05f, myDps);
+    float tKillMe = std::max(1.0f, (float)s.hp) / std::max(0.05f, itsDps);
+    float r = tKillIt / tKillMe; // < 1: you win the race
+    if (r < 0.15f) return kThreatTrivial;
+    if (r < 0.45f) return kThreatEasy;
+    if (r < 0.85f) return kThreatFair;
+    if (r < 1.40f) return kThreatTough;
+    return kThreatDeadly;
+}
+static Color ThreatColor(int t) {
+    switch (t) {
+        case kThreatTrivial: return Color{ 170, 170, 170, 255 }; // grey: not worth your time
+        case kThreatEasy:    return Color{ 110, 215, 110, 255 }; // green
+        case kThreatFair:    return Color{ 240, 215, 90, 255 };  // yellow
+        case kThreatTough:   return Color{ 245, 150, 60, 255 };  // orange
+        default:             return Color{ 235, 70, 60, 255 };   // red: run
+    }
+}
+static const char* ThreatWord(int t) {
+    static const char* w[] = { "Trivial", "Easy", "Fair fight", "Tough", "Deadly" };
+    return w[std::clamp(t, 0, 4)];
+}
+// UO-style aggression: monsters that are a real fight for you notice you from
+// here and come for you (trivial ones ignore you). The King's Road's patrols
+// halve it, and Young players get a shorter reach while they learn.
+static const float kWildNoticeRange = 200.0f;
+static float WildNoticeRange(const GameState& s, int monsterLevel) {
+    if (ThreatOf(s, monsterLevel) == kThreatTrivial) return 0.0f;
+    float r = kWildNoticeRange;
+    if (PlayerYoung(s)) r *= 0.6f;
+    if (PlayerRoadWarded(s.wildernessPlayerPos)) r *= 0.5f;
+    return r;
+}
+
 // Purely decorative scatter (no collision) - same role as Town's kFoliagePositions.
 // CraftPix "Rocks & Bushes" (assets/wilderness/PNG/), same license as the tame-spot art.
 // 3=tree (reuses GameAssets.wildTree, the same texture wood-gather nodes use) and
@@ -7815,32 +7892,32 @@ struct WildernessFoliage { Vector2 pos; int variant; }; // 0=bush1,1=bush2,2=fer
                                                           // 10=cactus,11=fence,12=grass,
                                                           // 13=haybale,14=plant
 static const std::array<WildernessFoliage, 52> kWildernessFoliage = {{
-    { {750, 1300}, 0 }, { {1000, 1450}, 2 }, { {250, 1150}, 1 }, { {1550, 1050}, 0 },
-    { {800, 800}, 2 },  { {1250, 950}, 1 },  { {450, 550}, 0 },  { {1000, 250}, 2 },
+    { WP(750, 1300), 0 }, { WP(1000, 1450), 2 }, { WP(250, 1150), 1 }, { WP(1550, 1050), 0 },
+    { WP(800, 800), 2 },  { WP(1250, 950), 1 },  { WP(450, 550), 0 },  { WP(1000, 250), 2 },
     // Dense Forest zone (NE)
-    { {1750, 300}, 3 }, { {1600, 200}, 3 }, { {1750, 550}, 3 }, { {1500, 500}, 3 },
+    { WP(1750, 300), 3 }, { WP(1600, 200), 3 }, { WP(1750, 550), 3 }, { WP(1500, 500), 3 },
     // Dragontooth mountain zone (W)
-    { {200, 650}, 4 },  { {350, 1050}, 4 }, { {200, 1450}, 4 }, { {350, 200}, 4 },
+    { WP(200, 650), 4 },  { WP(350, 1050), 4 }, { WP(200, 1450), 4 }, { WP(350, 200), 4 },
     // Medieval Animal Set props, scattered for general flavor
-    { {1000, 1600}, 5 }, { {1450, 1300}, 6 }, { {1200, 250}, 7 }, { {1600, 1300}, 8 },
-    { {600, 1400}, 9 },  { {250, 1550}, 10 }, { {1000, 1650}, 11 }, { {800, 1650}, 12 },
-    { {1100, 1700}, 13 }, { {1450, 700}, 14 },
+    { WP(1000, 1600), 5 }, { WP(1450, 1300), 6 }, { WP(1200, 250), 7 }, { WP(1600, 1300), 8 },
+    { WP(600, 1400), 9 },  { WP(250, 1550), 10 }, { WP(1000, 1650), 11 }, { WP(800, 1650), 12 },
+    { WP(1100, 1700), 13 }, { WP(1450, 700), 14 },
     // The new stretch toward Saltmere - a light scatter, reusing existing variants
     // (2026-09-22, "second town" plan), not an exhaustive re-decoration.
-    { {2000, 1650}, 0 }, { {2350, 1850}, 1 }, { {2650, 1600}, 2 }, { {2800, 1850}, 0 },
+    { WP(2000, 1650), 0 }, { WP(2350, 1850), 1 }, { WP(2650, 1600), 2 }, { WP(2800, 1850), 0 },
     // Phase 1 - Whisperwood densification: a thicker stand north-west of Emberhold's
     // gate and a few trees south of it. Hand-checked clear of the road, gate, monster
     // spots, gather nodes, house plots, and dungeon entrances. 3D parity is automatic
     // (variant 3 maps to the 3D tree in Wild3DDrawFoliageOne).
-    { {700, 1180}, 3 }, { {780, 1260}, 3 }, { {660, 1300}, 0 }, { {820, 1150}, 2 },
-    { {740, 1100}, 3 }, { {860, 1320}, 1 }, { {620, 1220}, 2 }, { {880, 1200}, 3 },
-    { {700, 1900}, 3 }, { {620, 1980}, 0 }, { {1050, 1500}, 3 }, { {1120, 1600}, 2 },
+    { WP(700, 1180), 3 }, { WP(780, 1260), 3 }, { WP(660, 1300), 0 }, { WP(820, 1150), 2 },
+    { WP(740, 1100), 3 }, { WP(860, 1320), 1 }, { WP(620, 1220), 2 }, { WP(880, 1200), 3 },
+    { WP(700, 1900), 3 }, { WP(620, 1980), 0 }, { WP(1050, 1500), 3 }, { WP(1120, 1600), 2 },
     // Phase 4 - Stonepeaks cliff/mesa scatter: granite outcrops across the western
     // highlands. Hand-checked clear of the Cragmoor gate, King's Road, ore veins,
     // the Ember Depths entrance, monster spots, and house plots.
-    { {80, 1900}, 4 }, { {450, 1500}, 4 }, { {100, 2200}, 4 }, { {480, 2450}, 4 },
-    { {250, 2700}, 4 }, { {150, 2900}, 4 }, { {400, 2900}, 4 }, { {80, 1200}, 4 },
-    { {480, 750}, 4 }, { {120, 1000}, 4 },
+    { WP(80, 1900), 4 }, { WP(450, 1500), 4 }, { WP(100, 2200), 4 }, { WP(480, 2450), 4 },
+    { WP(250, 2700), 4 }, { WP(150, 2900), 4 }, { WP(400, 2900), 4 }, { WP(80, 1200), 4 },
+    { WP(480, 750), 4 }, { WP(120, 1000), 4 },
 }};
 static const Texture2D* WildFoliageIcon(int variant) {
     switch (variant) {
@@ -7869,19 +7946,19 @@ struct WildernessDungeonEntrance { Vector2 pos; int dungeonIdx; Color color; Reg
 // [2] Sunken Vault, [3] Ember Depths, [4] Frostbound Tomb, [5] The Hollow.
 // (Emberveil Hollow's entrance removed 2026-09-25 - not part of the plan.)
 static const std::array<WildernessDungeonEntrance, 6> kWildernessDungeonEntrances = {{
-    { {1650, 1650}, 0, Color{ 65, 95, 135, 255 }, RegionAt({1650, 1650}) }, // [0] The Whisper Crypt
-    { {1650, 900}, 1, Color{ 95, 65, 95, 255 }, RegionAt({1650, 900}) }, // [1] The Weavers' Nest (Phase 5: was Bloodtusk Hold)
-    { {2500, 1100}, 2, Color{ 45, 95, 150, 255 }, RegionAt({2500, 1100}) },   // [2] The Sunken Vault (Phase 2: relocated from the Stonepeaks to the Salt Coast corridor)
+    { WP(1650, 1650), 0, Color{ 65, 95, 135, 255 }, RegionAt(WP(1650, 1650)) }, // [0] The Whisper Crypt
+    { WP(1650, 900), 1, Color{ 95, 65, 95, 255 }, RegionAt(WP(1650, 900)) }, // [1] The Weavers' Nest (Phase 5: was Bloodtusk Hold)
+    { WP(2500, 1100), 2, Color{ 45, 95, 150, 255 }, RegionAt(WP(2500, 1100)) },   // [2] The Sunken Vault (Phase 2: relocated from the Stonepeaks to the Salt Coast corridor)
     // Phase 4 - The Ember Depths: deep in the southern Stonepeaks, clear of the
     // Cragmoor gate (300,1050), the rich ore veins, and the house plots.
-    { {200, 2100}, 3, Color{ 200, 90, 40, 255 }, RegionAt({200, 2100}) }, // [3] The Ember Depths
+    { WP(200, 2100), 3, Color{ 200, 90, 40, 255 }, RegionAt(WP(200, 2100)) }, // [3] The Ember Depths
     // Phase 3 - The Frostbound Tomb: north in the Frostwastes, clear of the
     // Frostmere gate (1400,640), the Lesser Imp spot (600,350), and the wood
     // node at (900,600).
-    { {900, 300}, 4, Color{ 140, 180, 220, 255 }, RegionAt({900, 300}) }, // [4] The Frostbound Tomb
+    { WP(900, 300), 4, Color{ 140, 180, 220, 255 }, RegionAt(WP(900, 300)) }, // [4] The Frostbound Tomb
     // Phase 5 - The Hollow: beneath Emberhold (southeast of the town return gate),
     // clear of the road, the Southfen/Far South house plots, and the gate itself.
-    { {1050, 1900}, 5, Color{ 110, 100, 90, 255 }, RegionAt({1050, 1900}) }, // [5] The Hollow
+    { WP(1050, 1900), 5, Color{ 110, 100, 90, 255 }, RegionAt(WP(1050, 1900)) }, // [5] The Hollow
 }};
 
 // ---- The living guild (2026-09-26) ---------------------------------------------
@@ -10642,7 +10719,7 @@ static const int kT3CTrackMonsterDungeon = 140; // + monster idx (0..8), engaged
 // stags, foxes). raylib skins them on the CPU (UpdateModelAnimation), so each
 // instance poses the shared model right before it is drawn.
 // ---------------------------------------------------------------------
-enum AnimalId { kAnDog, kAnWolf, kAnHorse, kAnDeer, kAnStag, kAnFox, kAnCount };
+enum AnimalId { kAnDog, kAnWolf, kAnHorse, kAnDeer, kAnStag, kAnFox, kAnCow, kAnCount };
 struct AnimalModel {
     bool ok = false;
     Model model{};
@@ -10661,6 +10738,7 @@ static void AnimalsEnsure() {
         { "assets/animals/ShibaInu.glb", 30.0f }, { "assets/animals/Wolf.glb", 40.0f },
         { "assets/animals/Horse.glb", 66.0f },    { "assets/animals/Deer.glb", 52.0f },
         { "assets/animals/Stag.glb", 64.0f },     { "assets/animals/Fox.glb", 24.0f },
+        { "assets/animals/Cow.glb", 56.0f }, // Plains Bison (recolored, 2026-09-27)
     };
     for (int i = 0; i < kAnCount; i++) {
         AnimalModel& A = g_animals[i];
@@ -10754,9 +10832,22 @@ static int AnimalForCreature(int creatureIdx) {
     switch (creatureIdx) {
         case 0: return kAnDog;   // Stray Dog
         case 1: return kAnWolf;  // Timber Wolf
+        case 4: return kAnCow;   // Plains Bison (the pack's cow, dark-coated)
         case 5: return kAnHorse; // War Horse
         default: return -1;
     }
+}
+// Coat tint for a tameable creature's animated model (alpha = blend amount).
+static Color AnimalRecolorForCreature(int creatureIdx) {
+    if (creatureIdx == 1) return Color{ 128, 112, 96, 150 }; // Timber Wolf: grey-brown
+    if (creatureIdx == 4) return Color{ 72, 50, 34, 215 };   // Plains Bison: dark shaggy brown
+    return Color{ 0, 0, 0, 0 };
+}
+// Tamed pets keep their species name (Pet::name = the creature's name).
+static int CreatureIdxForPetName(const std::string& name) {
+    for (size_t i = 0; i < kWildCreatures.size(); i++)
+        if (kWildCreatures[i].name == name) return (int)i;
+    return -1;
 }
 // Three wolves that read differently: Timber (grey-brown), Lone (the model's
 // own charcoal), Ice (near-white and bigger).
@@ -10770,6 +10861,24 @@ static int AnimalForMonster(int iconIdx, Color* recolor, float* scale) {
 static Color AnimalRecolorForMonsterName(const std::string& name) {
     if (name == "Timber Wolf") return Color{ 128, 112, 96, 150 }; // grey-brown forest wolf
     return Color{ 0, 0, 0, 0 };
+}
+
+// The active pet as the species it was tamed from (2026-09-27): the animated
+// model where one exists (dog, wolf, bison, horse), else that species' kit
+// body - no longer a generic wolf/bear/drake by role. Bites/claws play on
+// s.companionAtkT.
+static void DrawCompanionPet(const Pet& pet, const GameState& s, T3CAnim a, float face, float kitDist, bool shadowPass) {
+    int ci = CreatureIdxForPetName(pet.name);
+    float atk = s.companionAtkT >= 0.0f ? std::clamp(s.companionAtkT / 0.6f, 0.0f, 1.0f) : -1.0f;
+    if (ci >= 0) {
+        AnimalPose ap; ap.move = a.move; ap.time = a.t; ap.track = kT3CTrackCompanion;
+        ap.recolor = AnimalRecolorForCreature(ci); ap.attackT = atk;
+        if (DrawAnimal(AnimalForCreature(ci), s.companionPos.x, s.companionPos.y, face, 0.9f, WHITE, ap, shadowPass)) return;
+    }
+    T3CQuadLook look = ci >= 0 ? T3CCreatureLook(ci) : T3CPetLook(pet.role);
+    if (ci >= 0) look.scale *= 0.85f;
+    T3CDrawQuad(g_t3cQuads[look.specIdx].parts, s.companionPos.x, s.companionPos.y, face, look.scale, look.coat, a,
+                kitDist, shadowPass, atk);
 }
 
 // ---------------------------------------------------------------------
@@ -13312,95 +13421,95 @@ struct WildRoadRef { const Vector2* pts; int n; };
 // Re-run the tool, do not hand-edit, if spots or plots move.
 struct WildPathPt { float x, z, hw; };
 static const WildPathPt kWildRiverSilverrun[] = {
-    {2170,-120,34}, {2176,-106,34}, {2183,-91,34}, {2189,-76,34}, {2196,-62,34}, {2202,-48,34}, {2208,-33,34}, {2215,-19,34},
-    {2221,-4,34}, {2228,10,34}, {2235,25,34}, {2241,39,34}, {2248,54,34}, {2254,68,34}, {2261,84,34}, {2267,103,30},
-    {2269,124,30}, {2269,145,30}, {2269,166,30}, {2269,187,30}, {2269,208,30}, {2269,229,30}, {2269,250,30}, {2269,272,30},
-    {2269,293,30}, {2269,314,30}, {2269,335,30}, {2269,356,30}, {2269,377,30}, {2269,398,30}, {2269,420,30}, {2269,441,30},
-    {2269,462,30}, {2269,483,30}, {2269,504,30}, {2269,526,30}, {2269,547,30}, {2269,568,30}, {2269,589,30}, {2269,610,30},
-    {2269,632,30}, {2269,653,30}, {2268,674,29}, {2264,695,27}, {2254,714,31}, {2241,726,34}, {2228,735,34}, {2215,745,34},
-    {2202,754,34}, {2190,764,34}, {2178,773,34}, {2166,782,34}, {2155,792,34}, {2144,801,34}, {2133,810,34}, {2123,820,34},
-    {2113,829,34}, {2104,838,34}, {2095,847,34}, {2087,856,34}, {2079,864,34}, {2072,873,34}, {2065,881,34}, {2059,889,34},
-    {2053,897,34}, {2048,904,34}, {2042,912,34}, {2038,919,34}, {2034,925,34}, {2030,932,34}, {2026,938,34}, {2023,943,34},
-    {2021,948,34}, {2018,953,34}, {2016,958,34}, {2014,962,34}, {2012,966,34}, {2010,970,34}, {2009,973,34}, {2008,976,34},
-    {2007,978,34}, {2006,980,34}, {2005,983,34}, {2004,984,33}, {2004,986,32}, {2003,987,32}, {2003,989,32}, {2003,990,31},
-    {2002,990,31}, {2002,991,31}, {2002,992,30}, {2002,992,30}, {2002,993,30}, {2002,993,30}, {2001,994,30}, {2000,995,28},
-    {1993,1004,20}, {1978,1028,14}, {1972,1057,14}, {1972,1085,14}, {1972,1113,14}, {1972,1140,14}, {1972,1167,14}, {1972,1194,14},
-    {1972,1221,14}, {1972,1248,14}, {1972,1276,14}, {1972,1305,14}, {1972,1335,14}, {1970,1350,14}, {1968,1365,14}, {1960,1378,14},
-    {1952,1391,19}, {1945,1400,28}, {1944,1402,30}, {1944,1402,31}, {1944,1403,32}, {1944,1404,33}, {1944,1406,34}, {1945,1407,34},
-    {1947,1408,34}, {1949,1410,34}, {1951,1412,34}, {1954,1415,34}, {1957,1418,34}, {1960,1421,34}, {1964,1425,34}, {1968,1429,34},
-    {1972,1434,34}, {1977,1439,34}, {1982,1444,34}, {1987,1451,34}, {1992,1457,34}, {1998,1465,34}, {2004,1473,34}, {2010,1481,34},
-    {2017,1490,34}, {2024,1500,34}, {2030,1510,34}, {2038,1521,34}, {2045,1532,34}, {2052,1544,34}, {2059,1557,34}, {2067,1570,34},
-    {2074,1583,34}, {2082,1597,33}, {2089,1612,33}, {2097,1627,34}, {2104,1643,34}, {2112,1659,34}, {2119,1675,34}, {2127,1692,34},
-    {2134,1709,34}, {2142,1726,34}, {2149,1744,34}, {2156,1762,34}, {2164,1780,34}, {2171,1799,34}, {2179,1818,34}, {2186,1837,33},
-    {2194,1856,30}, {2200,1875,28}, {2202,1896,28}, {2200,1917,28}, {2197,1937,30}, {2193,1957,34}, {2190,1977,34}, {2186,1998,34},
-    {2182,2018,34}, {2178,2038,34}, {2174,2058,34}, {2170,2079,34}, {2166,2099,34}, {2161,2119,34}, {2157,2139,34}, {2152,2160,34},
-    {2148,2180,34}, {2143,2200,34}, {2138,2220,34}, {2134,2240,34}, {2129,2261,34}, {2124,2281,34}, {2119,2301,34}, {2114,2321,34},
-    {2109,2341,34}, {2103,2361,30}, {2099,2382,28}, {2098,2402,28}, {2100,2423,28}, {2107,2443,28}, {2118,2461,28}, {2132,2476,28},
-    {2148,2488,28}, {2167,2497,28}, {2187,2502,29}, {2208,2506,32}, {2228,2510,34}, {2249,2513,34}, {2269,2516,34}, {2290,2519,34},
-    {2310,2522,34}, {2331,2526,34}, {2351,2529,34}, {2372,2532,34}, {2392,2534,34}, {2413,2537,34}, {2433,2540,34}, {2454,2543,34},
-    {2474,2546,34}, {2495,2548,34}, {2515,2551,34}, {2536,2553,34}, {2556,2556,34}, {2577,2558,34}, {2597,2560,34}, {2618,2562,34},
-    {2638,2564,34}, {2659,2566,34}, {2679,2568,34}, {2700,2570,34}, {2720,2572,32}, {2741,2574,31}, {2761,2576,33}, {2782,2578,34},
-    {2802,2580,34}, {2822,2582,34}, {2843,2584,34}, {2863,2586,34}, {2884,2587,34}, {2904,2589,34}, {2925,2591,34}, {2945,2593,34},
-    {2965,2595,34}, {2986,2596,34}, {3006,2598,34}, {3027,2600,34}, {3047,2602,34}, {3067,2604,34}, {3088,2606,34}, {3108,2607,34},
-    {3128,2609,34}, {3149,2611,34}, {3169,2613,34}, {3189,2614,34}, {3209,2616,34}, {3230,2618,34}, {3250,2620,34},
+    {2170*kWS,-120*kWS,34}, {2176*kWS,-106*kWS,34}, {2183*kWS,-91*kWS,34}, {2189*kWS,-76*kWS,34}, {2196*kWS,-62*kWS,34}, {2202*kWS,-48*kWS,34}, {2208*kWS,-33*kWS,34}, {2215*kWS,-19*kWS,34},
+    {2221*kWS,-4*kWS,34}, {2228*kWS,10*kWS,34}, {2235*kWS,25*kWS,34}, {2241*kWS,39*kWS,34}, {2248*kWS,54*kWS,34}, {2254*kWS,68*kWS,34}, {2261*kWS,84*kWS,34}, {2267*kWS,103*kWS,30},
+    {2269*kWS,124*kWS,30}, {2269*kWS,145*kWS,30}, {2269*kWS,166*kWS,30}, {2269*kWS,187*kWS,30}, {2269*kWS,208*kWS,30}, {2269*kWS,229*kWS,30}, {2269*kWS,250*kWS,30}, {2269*kWS,272*kWS,30},
+    {2269*kWS,293*kWS,30}, {2269*kWS,314*kWS,30}, {2269*kWS,335*kWS,30}, {2269*kWS,356*kWS,30}, {2269*kWS,377*kWS,30}, {2269*kWS,398*kWS,30}, {2269*kWS,420*kWS,30}, {2269*kWS,441*kWS,30},
+    {2269*kWS,462*kWS,30}, {2269*kWS,483*kWS,30}, {2269*kWS,504*kWS,30}, {2269*kWS,526*kWS,30}, {2269*kWS,547*kWS,30}, {2269*kWS,568*kWS,30}, {2269*kWS,589*kWS,30}, {2269*kWS,610*kWS,30},
+    {2269*kWS,632*kWS,30}, {2269*kWS,653*kWS,30}, {2268*kWS,674*kWS,29}, {2264*kWS,695*kWS,27}, {2254*kWS,714*kWS,31}, {2241*kWS,726*kWS,34}, {2228*kWS,735*kWS,34}, {2215*kWS,745*kWS,34},
+    {2202*kWS,754*kWS,34}, {2190*kWS,764*kWS,34}, {2178*kWS,773*kWS,34}, {2166*kWS,782*kWS,34}, {2155*kWS,792*kWS,34}, {2144*kWS,801*kWS,34}, {2133*kWS,810*kWS,34}, {2123*kWS,820*kWS,34},
+    {2113*kWS,829*kWS,34}, {2104*kWS,838*kWS,34}, {2095*kWS,847*kWS,34}, {2087*kWS,856*kWS,34}, {2079*kWS,864*kWS,34}, {2072*kWS,873*kWS,34}, {2065*kWS,881*kWS,34}, {2059*kWS,889*kWS,34},
+    {2053*kWS,897*kWS,34}, {2048*kWS,904*kWS,34}, {2042*kWS,912*kWS,34}, {2038*kWS,919*kWS,34}, {2034*kWS,925*kWS,34}, {2030*kWS,932*kWS,34}, {2026*kWS,938*kWS,34}, {2023*kWS,943*kWS,34},
+    {2021*kWS,948*kWS,34}, {2018*kWS,953*kWS,34}, {2016*kWS,958*kWS,34}, {2014*kWS,962*kWS,34}, {2012*kWS,966*kWS,34}, {2010*kWS,970*kWS,34}, {2009*kWS,973*kWS,34}, {2008*kWS,976*kWS,34},
+    {2007*kWS,978*kWS,34}, {2006*kWS,980*kWS,34}, {2005*kWS,983*kWS,34}, {2004*kWS,984*kWS,33}, {2004*kWS,986*kWS,32}, {2003*kWS,987*kWS,32}, {2003*kWS,989*kWS,32}, {2003*kWS,990*kWS,31},
+    {2002*kWS,990*kWS,31}, {2002*kWS,991*kWS,31}, {2002*kWS,992*kWS,30}, {2002*kWS,992*kWS,30}, {2002*kWS,993*kWS,30}, {2002*kWS,993*kWS,30}, {2001*kWS,994*kWS,30}, {2000*kWS,995*kWS,28},
+    {1993*kWS,1004*kWS,20}, {1978*kWS,1028*kWS,14}, {1972*kWS,1057*kWS,14}, {1972*kWS,1085*kWS,14}, {1972*kWS,1113*kWS,14}, {1972*kWS,1140*kWS,14}, {1972*kWS,1167*kWS,14}, {1972*kWS,1194*kWS,14},
+    {1972*kWS,1221*kWS,14}, {1972*kWS,1248*kWS,14}, {1972*kWS,1276*kWS,14}, {1972*kWS,1305*kWS,14}, {1972*kWS,1335*kWS,14}, {1970*kWS,1350*kWS,14}, {1968*kWS,1365*kWS,14}, {1960*kWS,1378*kWS,14},
+    {1952*kWS,1391*kWS,19}, {1945*kWS,1400*kWS,28}, {1944*kWS,1402*kWS,30}, {1944*kWS,1402*kWS,31}, {1944*kWS,1403*kWS,32}, {1944*kWS,1404*kWS,33}, {1944*kWS,1406*kWS,34}, {1945*kWS,1407*kWS,34},
+    {1947*kWS,1408*kWS,34}, {1949*kWS,1410*kWS,34}, {1951*kWS,1412*kWS,34}, {1954*kWS,1415*kWS,34}, {1957*kWS,1418*kWS,34}, {1960*kWS,1421*kWS,34}, {1964*kWS,1425*kWS,34}, {1968*kWS,1429*kWS,34},
+    {1972*kWS,1434*kWS,34}, {1977*kWS,1439*kWS,34}, {1982*kWS,1444*kWS,34}, {1987*kWS,1451*kWS,34}, {1992*kWS,1457*kWS,34}, {1998*kWS,1465*kWS,34}, {2004*kWS,1473*kWS,34}, {2010*kWS,1481*kWS,34},
+    {2017*kWS,1490*kWS,34}, {2024*kWS,1500*kWS,34}, {2030*kWS,1510*kWS,34}, {2038*kWS,1521*kWS,34}, {2045*kWS,1532*kWS,34}, {2052*kWS,1544*kWS,34}, {2059*kWS,1557*kWS,34}, {2067*kWS,1570*kWS,34},
+    {2074*kWS,1583*kWS,34}, {2082*kWS,1597*kWS,33}, {2089*kWS,1612*kWS,33}, {2097*kWS,1627*kWS,34}, {2104*kWS,1643*kWS,34}, {2112*kWS,1659*kWS,34}, {2119*kWS,1675*kWS,34}, {2127*kWS,1692*kWS,34},
+    {2134*kWS,1709*kWS,34}, {2142*kWS,1726*kWS,34}, {2149*kWS,1744*kWS,34}, {2156*kWS,1762*kWS,34}, {2164*kWS,1780*kWS,34}, {2171*kWS,1799*kWS,34}, {2179*kWS,1818*kWS,34}, {2186*kWS,1837*kWS,33},
+    {2194*kWS,1856*kWS,30}, {2200*kWS,1875*kWS,28}, {2202*kWS,1896*kWS,28}, {2200*kWS,1917*kWS,28}, {2197*kWS,1937*kWS,30}, {2193*kWS,1957*kWS,34}, {2190*kWS,1977*kWS,34}, {2186*kWS,1998*kWS,34},
+    {2182*kWS,2018*kWS,34}, {2178*kWS,2038*kWS,34}, {2174*kWS,2058*kWS,34}, {2170*kWS,2079*kWS,34}, {2166*kWS,2099*kWS,34}, {2161*kWS,2119*kWS,34}, {2157*kWS,2139*kWS,34}, {2152*kWS,2160*kWS,34},
+    {2148*kWS,2180*kWS,34}, {2143*kWS,2200*kWS,34}, {2138*kWS,2220*kWS,34}, {2134*kWS,2240*kWS,34}, {2129*kWS,2261*kWS,34}, {2124*kWS,2281*kWS,34}, {2119*kWS,2301*kWS,34}, {2114*kWS,2321*kWS,34},
+    {2109*kWS,2341*kWS,34}, {2103*kWS,2361*kWS,30}, {2099*kWS,2382*kWS,28}, {2098*kWS,2402*kWS,28}, {2100*kWS,2423*kWS,28}, {2107*kWS,2443*kWS,28}, {2118*kWS,2461*kWS,28}, {2132*kWS,2476*kWS,28},
+    {2148*kWS,2488*kWS,28}, {2167*kWS,2497*kWS,28}, {2187*kWS,2502*kWS,29}, {2208*kWS,2506*kWS,32}, {2228*kWS,2510*kWS,34}, {2249*kWS,2513*kWS,34}, {2269*kWS,2516*kWS,34}, {2290*kWS,2519*kWS,34},
+    {2310*kWS,2522*kWS,34}, {2331*kWS,2526*kWS,34}, {2351*kWS,2529*kWS,34}, {2372*kWS,2532*kWS,34}, {2392*kWS,2534*kWS,34}, {2413*kWS,2537*kWS,34}, {2433*kWS,2540*kWS,34}, {2454*kWS,2543*kWS,34},
+    {2474*kWS,2546*kWS,34}, {2495*kWS,2548*kWS,34}, {2515*kWS,2551*kWS,34}, {2536*kWS,2553*kWS,34}, {2556*kWS,2556*kWS,34}, {2577*kWS,2558*kWS,34}, {2597*kWS,2560*kWS,34}, {2618*kWS,2562*kWS,34},
+    {2638*kWS,2564*kWS,34}, {2659*kWS,2566*kWS,34}, {2679*kWS,2568*kWS,34}, {2700*kWS,2570*kWS,34}, {2720*kWS,2572*kWS,32}, {2741*kWS,2574*kWS,31}, {2761*kWS,2576*kWS,33}, {2782*kWS,2578*kWS,34},
+    {2802*kWS,2580*kWS,34}, {2822*kWS,2582*kWS,34}, {2843*kWS,2584*kWS,34}, {2863*kWS,2586*kWS,34}, {2884*kWS,2587*kWS,34}, {2904*kWS,2589*kWS,34}, {2925*kWS,2591*kWS,34}, {2945*kWS,2593*kWS,34},
+    {2965*kWS,2595*kWS,34}, {2986*kWS,2596*kWS,34}, {3006*kWS,2598*kWS,34}, {3027*kWS,2600*kWS,34}, {3047*kWS,2602*kWS,34}, {3067*kWS,2604*kWS,34}, {3088*kWS,2606*kWS,34}, {3108*kWS,2607*kWS,34},
+    {3128*kWS,2609*kWS,34}, {3149*kWS,2611*kWS,34}, {3169*kWS,2613*kWS,34}, {3189*kWS,2614*kWS,34}, {3209*kWS,2616*kWS,34}, {3230*kWS,2618*kWS,34}, {3250*kWS,2620*kWS,34},
 };
 static const WildPathPt kWildRiverOutflow[] = {
-    {1720,2570,26}, {1738,2576,26}, {1756,2582,26}, {1773,2589,26}, {1791,2595,26}, {1809,2600,26}, {1827,2606,26}, {1845,2611,26},
-    {1863,2616,26}, {1881,2621,26}, {1899,2625,26}, {1917,2629,26}, {1935,2633,26}, {1954,2636,26}, {1972,2638,26}, {1990,2640,26},
-    {2009,2642,26}, {2027,2643,26}, {2046,2643,26}, {2065,2643,26}, {2083,2643,26}, {2102,2642,26}, {2121,2640,26}, {2139,2638,26},
-    {2158,2635,26}, {2177,2632,26}, {2196,2628,26}, {2214,2624,26}, {2233,2620,26}, {2252,2615,26}, {2271,2610,26}, {2289,2604,26},
-    {2308,2598,26}, {2327,2592,26}, {2345,2586,26}, {2364,2580,26}, {2383,2573,26}, {2401,2567,26}, {2420,2560,26},
+    {1720*kWS,2570*kWS,26}, {1738*kWS,2576*kWS,26}, {1756*kWS,2582*kWS,26}, {1773*kWS,2589*kWS,26}, {1791*kWS,2595*kWS,26}, {1809*kWS,2600*kWS,26}, {1827*kWS,2606*kWS,26}, {1845*kWS,2611*kWS,26},
+    {1863*kWS,2616*kWS,26}, {1881*kWS,2621*kWS,26}, {1899*kWS,2625*kWS,26}, {1917*kWS,2629*kWS,26}, {1935*kWS,2633*kWS,26}, {1954*kWS,2636*kWS,26}, {1972*kWS,2638*kWS,26}, {1990*kWS,2640*kWS,26},
+    {2009*kWS,2642*kWS,26}, {2027*kWS,2643*kWS,26}, {2046*kWS,2643*kWS,26}, {2065*kWS,2643*kWS,26}, {2083*kWS,2643*kWS,26}, {2102*kWS,2642*kWS,26}, {2121*kWS,2640*kWS,26}, {2139*kWS,2638*kWS,26},
+    {2158*kWS,2635*kWS,26}, {2177*kWS,2632*kWS,26}, {2196*kWS,2628*kWS,26}, {2214*kWS,2624*kWS,26}, {2233*kWS,2620*kWS,26}, {2252*kWS,2615*kWS,26}, {2271*kWS,2610*kWS,26}, {2289*kWS,2604*kWS,26},
+    {2308*kWS,2598*kWS,26}, {2327*kWS,2592*kWS,26}, {2345*kWS,2586*kWS,26}, {2364*kWS,2580*kWS,26}, {2383*kWS,2573*kWS,26}, {2401*kWS,2567*kWS,26}, {2420*kWS,2560*kWS,26},
 };
 static const WildPathPt kWildRiverCreek[] = {
-    {740,2400,20}, {760,2407,20}, {781,2413,20}, {801,2420,20}, {822,2427,20}, {842,2433,20}, {862,2440,20}, {883,2446,20},
-    {903,2453,20}, {924,2459,20}, {944,2465,20}, {965,2471,20}, {985,2478,20}, {1006,2484,20}, {1026,2490,20}, {1047,2495,20},
-    {1067,2501,20}, {1088,2507,20}, {1108,2513,20}, {1129,2519,20}, {1149,2524,20}, {1170,2530,20},
+    {740*kWS,2400*kWS,20}, {760*kWS,2407*kWS,20}, {781*kWS,2413*kWS,20}, {801*kWS,2420*kWS,20}, {822*kWS,2427*kWS,20}, {842*kWS,2433*kWS,20}, {862*kWS,2440*kWS,20}, {883*kWS,2446*kWS,20},
+    {903*kWS,2453*kWS,20}, {924*kWS,2459*kWS,20}, {944*kWS,2465*kWS,20}, {965*kWS,2471*kWS,20}, {985*kWS,2478*kWS,20}, {1006*kWS,2484*kWS,20}, {1026*kWS,2490*kWS,20}, {1047*kWS,2495*kWS,20},
+    {1067*kWS,2501*kWS,20}, {1088*kWS,2507*kWS,20}, {1108*kWS,2513*kWS,20}, {1129*kWS,2519*kWS,20}, {1149*kWS,2524*kWS,20}, {1170*kWS,2530*kWS,20},
 };
 static const WildPathPt kWildRidge0[] = {
-    {150,1708,32}, {172,1713,32}, {194,1720,32}, {215,1730,32}, {235,1740,32}, {256,1750,32}, {276,1759,32}, {297,1769,32},
-    {317,1779,32}, {338,1789,32}, {358,1798,32}, {379,1806,32}, {400,1813,32}, {420,1820,32},
+    {150*kWS,1708*kWS,32}, {172*kWS,1713*kWS,32}, {194*kWS,1720*kWS,32}, {215*kWS,1730*kWS,32}, {235*kWS,1740*kWS,32}, {256*kWS,1750*kWS,32}, {276*kWS,1759*kWS,32}, {297*kWS,1769*kWS,32},
+    {317*kWS,1779*kWS,32}, {338*kWS,1789*kWS,32}, {358*kWS,1798*kWS,32}, {379*kWS,1806*kWS,32}, {400*kWS,1813*kWS,32}, {420*kWS,1820*kWS,32},
 };
 static const WildPathPt kWildRidge1[] = {
-    {596,2250,32}, {596,2276,32}, {596,2301,32}, {602,2326,32}, {616,2349,32}, {634,2364,32}, {652,2376,32}, {670,2389,32},
-    {688,2401,32}, {706,2413,32}, {724,2426,32}, {742,2438,32}, {760,2450,32},
+    {596*kWS,2250*kWS,32}, {596*kWS,2276*kWS,32}, {596*kWS,2301*kWS,32}, {602*kWS,2326*kWS,32}, {616*kWS,2349*kWS,32}, {634*kWS,2364*kWS,32}, {652*kWS,2376*kWS,32}, {670*kWS,2389*kWS,32},
+    {688*kWS,2401*kWS,32}, {706*kWS,2413*kWS,32}, {724*kWS,2426*kWS,32}, {742*kWS,2438*kWS,32}, {760*kWS,2450*kWS,32},
 };
 static const WildPathPt kWildRidge2[] = {
-    {700,2860,32}, {721,2862,32}, {743,2864,32}, {764,2866,32}, {786,2869,32}, {807,2871,32}, {829,2873,32}, {850,2875,32},
-    {871,2877,32}, {893,2879,32}, {914,2882,32}, {936,2884,32}, {957,2886,32}, {979,2888,32}, {1000,2890,32},
+    {700*kWS,2860*kWS,32}, {721*kWS,2862*kWS,32}, {743*kWS,2864*kWS,32}, {764*kWS,2866*kWS,32}, {786*kWS,2869*kWS,32}, {807*kWS,2871*kWS,32}, {829*kWS,2873*kWS,32}, {850*kWS,2875*kWS,32},
+    {871*kWS,2877*kWS,32}, {893*kWS,2879*kWS,32}, {914*kWS,2882*kWS,32}, {936*kWS,2884*kWS,32}, {957*kWS,2886*kWS,32}, {979*kWS,2888*kWS,32}, {1000*kWS,2890*kWS,32},
 };
 static const WildPathPt kWildRidge3[] = {
-    {700,592,32}, {720,588,32}, {739,582,32}, {758,573,32}, {776,564,32}, {794,555,32}, {812,546,32}, {830,536,32},
-    {848,526,32}, {866,517,32}, {886,511,32}, {906,510,32}, {926,513,32}, {946,520,32},
+    {700*kWS,592*kWS,32}, {720*kWS,588*kWS,32}, {739*kWS,582*kWS,32}, {758*kWS,573*kWS,32}, {776*kWS,564*kWS,32}, {794*kWS,555*kWS,32}, {812*kWS,546*kWS,32}, {830*kWS,536*kWS,32},
+    {848*kWS,526*kWS,32}, {866*kWS,517*kWS,32}, {886*kWS,511*kWS,32}, {906*kWS,510*kWS,32}, {926*kWS,513*kWS,32}, {946*kWS,520*kWS,32},
 };
 static const WildPathPt kWildRidge4[] = {
-    {2300,420,32}, {2320,422,32}, {2340,423,32}, {2360,425,32}, {2380,427,32}, {2400,428,32}, {2420,430,32}, {2440,432,32},
-    {2460,433,32}, {2480,435,32}, {2500,437,32}, {2520,438,32}, {2540,440,32},
+    {2300*kWS,420*kWS,32}, {2320*kWS,422*kWS,32}, {2340*kWS,423*kWS,32}, {2360*kWS,425*kWS,32}, {2380*kWS,427*kWS,32}, {2400*kWS,428*kWS,32}, {2420*kWS,430*kWS,32}, {2440*kWS,432*kWS,32},
+    {2460*kWS,433*kWS,32}, {2480*kWS,435*kWS,32}, {2500*kWS,437*kWS,32}, {2520*kWS,438*kWS,32}, {2540*kWS,440*kWS,32},
 };
 static const WildPathPt kWildRidge5[] = {
-    {1150,2950,32}, {1170,2953,32}, {1190,2956,32}, {1210,2959,32}, {1230,2962,32}, {1250,2965,32}, {1270,2968,32}, {1290,2971,32},
-    {1310,2974,32}, {1330,2977,32}, {1350,2980,32},
+    {1150*kWS,2950*kWS,32}, {1170*kWS,2953*kWS,32}, {1190*kWS,2956*kWS,32}, {1210*kWS,2959*kWS,32}, {1230*kWS,2962*kWS,32}, {1250*kWS,2965*kWS,32}, {1270*kWS,2968*kWS,32}, {1290*kWS,2971*kWS,32},
+    {1310*kWS,2974*kWS,32}, {1330*kWS,2977*kWS,32}, {1350*kWS,2980*kWS,32},
 };
 static const WildPathPt kWildRidge6[] = {
-    {2350,2900,32}, {2371,2894,32}, {2393,2889,32}, {2414,2883,32}, {2436,2877,32}, {2457,2871,32}, {2479,2866,32}, {2500,2860,32},
+    {2350*kWS,2900*kWS,32}, {2371*kWS,2894*kWS,32}, {2393*kWS,2889*kWS,32}, {2414*kWS,2883*kWS,32}, {2436*kWS,2877*kWS,32}, {2457*kWS,2871*kWS,32}, {2479*kWS,2866*kWS,32}, {2500*kWS,2860*kWS,32},
 };
 struct WildPathRef { const WildPathPt* pts; int n; };
 static const WildPathRef kWildRivers[] = { {kWildRiverSilverrun, (int)(sizeof(kWildRiverSilverrun)/sizeof(WildPathPt))}, {kWildRiverOutflow, (int)(sizeof(kWildRiverOutflow)/sizeof(WildPathPt))}, {kWildRiverCreek, (int)(sizeof(kWildRiverCreek)/sizeof(WildPathPt))} };
 static const WildPathRef kWildRidges[] = { {kWildRidge0, (int)(sizeof(kWildRidge0)/sizeof(WildPathPt))}, {kWildRidge1, (int)(sizeof(kWildRidge1)/sizeof(WildPathPt))}, {kWildRidge2, (int)(sizeof(kWildRidge2)/sizeof(WildPathPt))}, {kWildRidge3, (int)(sizeof(kWildRidge3)/sizeof(WildPathPt))}, {kWildRidge4, (int)(sizeof(kWildRidge4)/sizeof(WildPathPt))}, {kWildRidge5, (int)(sizeof(kWildRidge5)/sizeof(WildPathPt))}, {kWildRidge6, (int)(sizeof(kWildRidge6)/sizeof(WildPathPt))} };
 // Branch roads (control points, Catmull-Rom smoothed at load). The King's Road
 // itself is kKingsRoadWaypoints, smoothed the same way.
-static const Vector2 kWildBranchRoad0[] = { {1640,1700}, {1650,1660} };
-static const Vector2 kWildBranchRoad1[] = { {1760,826}, {1700,870}, {1650,905} };
-static const Vector2 kWildBranchRoad2[] = { {2280,1135}, {2380,1120}, {2500,1100} };
-static const Vector2 kWildBranchRoad3[] = { {900,1760}, {760,1840}, {560,1930}, {380,2040}, {210,2100} };
-static const Vector2 kWildBranchRoad4[] = { {1395,645}, {1250,520}, {1080,400}, {905,305} };
-static const Vector2 kWildBranchRoad5[] = { {905,1760}, {980,1830}, {1045,1895} };
-static const Vector2 kWildBranchRoad6[] = { {1640,1700}, {1600,1950}, {1520,2150}, {1470,2300} };
+static const Vector2 kWildBranchRoad0[] = { WP(1640, 1700), WP(1650, 1660) };
+static const Vector2 kWildBranchRoad1[] = { WP(1760, 826), WP(1700, 870), WP(1650, 905) };
+static const Vector2 kWildBranchRoad2[] = { WP(2280, 1135), WP(2380, 1120), WP(2500, 1100) };
+static const Vector2 kWildBranchRoad3[] = { WP(900, 1760), WP(760, 1840), WP(560, 1930), WP(380, 2040), WP(210, 2100) };
+static const Vector2 kWildBranchRoad4[] = { WP(1395, 645), WP(1250, 520), WP(1080, 400), WP(905, 305) };
+static const Vector2 kWildBranchRoad5[] = { WP(905, 1760), WP(980, 1830), WP(1045, 1895) };
+static const Vector2 kWildBranchRoad6[] = { WP(1640, 1700), WP(1600, 1950), WP(1520, 2150), WP(1470, 2300) };
 static const WildRoadRef kWildBranchRoads[] = { {kWildBranchRoad0, 2}, {kWildBranchRoad1, 3}, {kWildBranchRoad2, 3}, {kWildBranchRoad3, 5}, {kWildBranchRoad4, 4}, {kWildBranchRoad5, 3}, {kWildBranchRoad6, 4} };
-static const Vector2 kWildFords[] = { {2215,2250} };
-static const float kWildLakeX = 1450, kWildLakeZ = 2540, kWildLakeRX = 300, kWildLakeRZ = 190; // Mirrormere
+static const Vector2 kWildFords[] = { WP(2215, 2250) };
+static const float kWildLakeX = 1450 * kWS, kWildLakeZ = 2540 * kWS, kWildLakeRX = 300 * kWS, kWildLakeRZ = 190 * kWS; // Mirrormere
 
 static const float kWTCell = 8.0f;
-static const int kWTN = 400; // 400 * 8 = 3200 = kWildernessWorldSize
+static const int kWTN = 600; // 600 * 8 = 4800 = kWildernessWorldSize (1.5x, 2026-09-27)
 enum : unsigned char {
     kWTWater = 1,   // blocks movement (sea, lake, river away from crossings)
     kWTBridge = 2,  // river under a road: walkable deck
@@ -13418,9 +13527,10 @@ struct WildBridge { Vector2 a, b; float halfW; };
 static std::vector<WildBridge> g_wtBridges;
 
 static float WildCoastX(float z) {
+    z /= kWS; // shaped in the original layout, scaled out (1.5x map)
     float x = 3080.0f + 40.0f * sinf(z / 260.0f) + 25.0f * sinf(z / 97.0f);
     float bay = expf(-((z - 1470.0f) / 140.0f) * ((z - 1470.0f) / 140.0f)); // Saltmere bay
-    return x - 190.0f * bay;
+    return (x - 190.0f * bay) * kWS;
 }
 static bool WildInLake(float x, float z) {
     float dx = (x - kWildLakeX) / kWildLakeRX, dz = (z - kWildLakeZ) / kWildLakeRZ;
@@ -13767,8 +13877,8 @@ static void DrawWorldMap(GameState& s) {
     };
     // Region names, faint and large.
     const struct { const char* n; Vector2 p; } regions[] = {
-        { "FROSTWASTES", { 1600, 330 } }, { "WHISPERWOOD", { 1200, 1300 } },
-        { "STONEPEAKS", { 250, 2000 } }, { "SALT COAST", { 2600, 2100 } } };
+        { "FROSTWASTES", WP(1600, 330) }, { "WHISPERWOOD", WP(1200, 1300) },
+        { "STONEPEAKS", WP(250, 2000) }, { "SALT COAST", WP(2600, 2100) } };
     for (auto& r : regions) {
         Vector2 p = toMap(r.p);
         int w = MeasureUIText(r.n, 16);
@@ -13861,6 +13971,19 @@ static void DrawMinimap(GameState& s) {
     for (const auto& g : kTownGates) {
         Vector2 p = toMap(g.wildernessPos);
         if (inside(p, -8)) MapIconTown(p, 6.0f);
+    }
+    // Danger nearby (2026-09-27): monsters that would come for you (not the
+    // trivial ones) show within ~650 units as small dots in their threat color.
+    for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
+        if (s.wildSpotRespawn[i] > 0.0f) continue;
+        Vector2 mp = WildernessMonsterLivePos((int)i, s.worldTime);
+        if (Dist(mp, s.wildernessPlayerPos) > 650.0f) continue;
+        int tier = ThreatOf(s, kWildernessMonsterSpots[i].level);
+        if (tier == kThreatTrivial) continue;
+        Vector2 p = toMap(mp);
+        if (!inside(p, 2)) continue;
+        DrawCircleV(p, 3.2f, Fade(BLACK, 0.6f));
+        DrawCircleV(p, 2.3f, ThreatColor(tier));
     }
     // The monster you're fighting, if any: one red dot, not every spawn.
     if (s.wildEngaged.has_value()) {
@@ -14817,7 +14940,7 @@ static void Wild3DEnsureGround() {
     Color* bp = LoadImageColors(blotchN);
     Color* dp = LoadImageColors(dirtN);
     for (int i = 0; i < SZ * SZ; i++) {
-        float wx = (float)(i % SZ) / k, wz = (float)(i / SZ) / k;
+        float wx = (float)(i % SZ) / k / kWS, wz = (float)(i / SZ) / k / kWS; // original-layout units (1.5x map)
         float t = np[i].r / 255.0f;                  // fine blade-level variation
         float m = (bp[i].r / 255.0f - 0.5f) * 0.9f;  // broad meadow blotches
         float r = grassDark.r + (grassLight.r - grassDark.r) * t + m * 26.0f;
@@ -15026,7 +15149,7 @@ struct T3DGrassField { bool built = false; Model model{}; };
 static T3DGrassField g_t3dGrassTown;
 static int g_t3dGrassTownIdx = -1;
 static const int kT3DGrassChunk = 400;
-static const int kT3DGrassChunksPerSide = 8; // 3200 / 400
+static const int kT3DGrassChunksPerSide = 12; // 4800 / 400 (1.5x map)
 static T3DGrassField g_t3dGrassWild[kT3DGrassChunksPerSide * kT3DGrassChunksPerSide];
 
 static float g_grassBaseY = 0.0f; // ground height under the clump being built (wilderness hills)
@@ -15262,7 +15385,7 @@ static void Wild3DDrawFoliageOne(const WildernessFoliage& f, bool shadowPass) {
     float rot = Town3DHash01(x, z) * 360.0f;
     float vs = 0.85f + 0.35f * Town3DHash01(z, x + 17.0f);
     // Phase 3 - Frostwastes: foliage north of y=700 gets a frosty tint.
-    Color frost = (z < 700.0f) ? Color{ 200, 220, 240, 255 } : WHITE;
+    Color frost = (z < 700.0f * kWS) ? Color{ 200, 220, 240, 255 } : WHITE;
     switch (f.variant) {
         case 0: case 1: case 2: case 8: case 14: // bushes/ferns/plant
             if (shadowPass) return; // no meaningful shadow; skip the pass
@@ -15321,17 +15444,17 @@ static void Wild3DBuildScatter() {
     };
     struct Zone { float x0, x1, z0, z1, step, density; int kind; };
     static const Zone zones[] = {
-        { 1500, 2050, 0, 700, 80, 0.62f, 0 },     // Dense Forest (NE) - trees
-        { 0, 450, 0, 1800, 95, 0.45f, 1 },        // Dragontooth mountains (W) - rocks
-        { 1800, 2950, 1500, 2000, 110, 0.40f, 2 },// Saltmere corridor verges - mixed
-        { 0, 1500, 0, 1800, 150, 0.16f, 2 },      // original zone - light filler
+        { 1500 * kWS, 2050 * kWS, 0, 700 * kWS, 80, 0.62f, 0 },     // Dense Forest (NE) - trees
+        { 0, 450 * kWS, 0, 1800 * kWS, 95, 0.45f, 1 },        // Dragontooth mountains (W) - rocks
+        { 1800 * kWS, 2950 * kWS, 1500 * kWS, 2000 * kWS, 110, 0.40f, 2 },// Saltmere corridor verges - mixed
+        { 0, 1500 * kWS, 0, 1800 * kWS, 150, 0.16f, 2 },      // original zone - light filler
     };
     for (const Zone& zn : zones) {
         for (float gx = zn.x0; gx <= zn.x1; gx += zn.step) {
             for (float gz = zn.z0; gz <= zn.z1; gz += zn.step) {
                 float jx = gx + (Town3DHash01(gx, gz) - 0.5f) * zn.step * 0.8f;
                 float jz = gz + (Town3DHash01(gz, gx + 31.0f) - 0.5f) * zn.step * 0.8f;
-                if (jx < 40 || jx > 3160 || jz < 40 || jz > 3160) continue;
+                if (jx < 40 || jx > kWildernessWorldSize - 40 || jz < 40 || jz > kWildernessWorldSize - 40) continue;
                 if (Town3DHash01(jx * 1.7f, jz * 2.3f) > zn.density) continue;
                 if (!isClear(jx, jz)) continue;
                 if (WildTerrainAt(jx, jz) & (kWTWater | kWTRidge | kWTRiver | kWTBridge | kWTRoad)) continue; // terrain (2026-09-26)
@@ -15622,7 +15745,7 @@ static void Wild3DBuildDressing() {
             if (acc < 22.0f && i > 0) continue;
             acc = 0.0f;
             float h = Town3DHash01(a.x * 0.37f, a.z * 0.61f);
-            Color tint = (a.z < 700.0f) ? Color{ 220, 230, 244, 255 } : WHITE;
+            Color tint = (a.z < 700.0f * kWS) ? Color{ 220, 230, 244, 255 } : WHITE;
             add(kWPMountainA + (int)(h * 3.0f) % 3, a.x + (h - 0.5f) * 10.0f, a.z, h * 360.0f,
                 34.0f + 12.0f * h, tint, 70.0f);
             if (h > 0.55f) // loose boulders at the foot
@@ -15634,8 +15757,8 @@ static void Wild3DBuildDressing() {
     // 2) Roadside camps: one per region-ish slice of the map, the first hashed
     //    candidate that sits 70-260 units off a road and clear of everything.
     static const Rectangle kCampAreas[] = {
-        { 600, 900, 700, 700 }, { 1300, 2000, 600, 700 }, { 2100, 900, 900, 700 },
-        { 150, 1400, 300, 900 }, { 700, 150, 900, 450 }, { 2100, 2200, 900, 800 },
+        { 600 * kWS, 900 * kWS, 700 * kWS, 700 * kWS }, { 1300 * kWS, 2000 * kWS, 600 * kWS, 700 * kWS }, { 2100 * kWS, 900 * kWS, 900 * kWS, 700 * kWS },
+        { 150 * kWS, 1400 * kWS, 300 * kWS, 900 * kWS }, { 700 * kWS, 150 * kWS, 900 * kWS, 450 * kWS }, { 2100 * kWS, 2200 * kWS, 900 * kWS, 800 * kWS },
     };
     int campIdx = 0;
     for (const Rectangle& area : kCampAreas) {
@@ -15699,7 +15822,7 @@ static void WildMapPaintDressing(Image* img, float pxPerUnit) {
         if (!trees && !rock) continue;
         float r = trees ? (it.id <= kWPTreesBLarge ? 26.0f : 14.0f) * it.scale / kWPScaleTrees : 10.0f;
         Color c = trees ? Color{ 62, 104, 58, 255 } : Color{ 128, 124, 116, 255 };
-        if (it.z < 700.0f && trees) c = Color{ 150, 172, 160, 255 }; // frosted woods
+        if (it.z < 700.0f * kWS && trees) c = Color{ 150, 172, 160, 255 }; // frosted woods
         ImageDrawCircleV(img, { it.x * pxPerUnit, it.z * pxPerUnit }, (int)fmaxf(1.0f, r * pxPerUnit), c);
     }
 }
@@ -16609,8 +16732,10 @@ static void WildAnimalsEnsure() {
     WildTerrainEnsure();
     struct Home { float x, z; bool herd; };
     static const Home homes[] = {
-        { 1250, 2230, true }, { 620, 2640, true }, { 1950, 2950, true }, { 2600, 700, true }, { 1200, 3000, true },
-        { 1500, 1500, false }, { 2400, 2950, false }, { 380, 2950, false }, { 2850, 950, false }, { 800, 1300, false },
+        { 1250 * kWS, 2230 * kWS, true }, { 620 * kWS, 2640 * kWS, true }, { 1950 * kWS, 2950 * kWS, true }, { 2600 * kWS, 700 * kWS, true }, { 1200 * kWS, 3000 * kWS, true },
+        { 1500 * kWS, 1500 * kWS, false }, { 2400 * kWS, 2950 * kWS, false }, { 380 * kWS, 2950 * kWS, false }, { 2850 * kWS, 950 * kWS, false }, { 800 * kWS, 1300 * kWS, false },
+        // extra herds for the 1.5x map (2026-09-27)
+        { 1900 * kWS, 1300 * kWS, true }, { 700 * kWS, 1950 * kWS, true }, { 2300 * kWS, 2250 * kWS, false },
     };
     auto clearOfGameplay = [](Vector2 p) {
         for (const auto& m : kWildernessMonsterSpots) if (hypotf(p.x - m.pos.x, p.y - m.pos.y) < 170.0f) return false;
@@ -16696,7 +16821,7 @@ static void Town3DDrawSurroundings(const GameState& s, const Town3DCam& c) {
     Vector2 O = TownWildOffset(s.selectedTown);
     // Just under the town's own ground plane (y=0), so the town covers it.
     DrawModel(g_wild3dGround.model, { -O.x, -0.8f, -O.y }, 1.0f, WHITE); // world-coordinate mesh, shifted into town space
-    DrawPlane({ 5600.0f - O.x, -2.5f, 1600.0f - O.y }, { 4800, 8000 }, Color{ 44, 96, 122, 255 }); // open sea
+    DrawPlane({ 4200.0f * kWS - O.x, -2.5f, 1600.0f * kWS - O.y }, { 4800, 8000 * kWS }, Color{ 44, 96, 122, 255 }); // open sea
     auto outsideTown = [](float x, float z, float r) {
         return x < -r || z < -r || x > kTownWorldSize + r || z > kTownWorldSize + r;
     };
@@ -16769,7 +16894,7 @@ static void Wild3DDrawCorpse(const GameState::WorldCorpse& c, bool shadowPass) {
 static const Texture2D& GlowTex();                                  // (with the room surfaces)
 static void GlowPool(float x, float z, float y, float r, Color c);
 static const float kCampRadius = 170.0f;
-static float RivalCampGateYaw(Vector2 c) { return atan2f(1600.0f - c.y, 1600.0f - c.x); } // gate direction
+static float RivalCampGateYaw(Vector2 c) { return atan2f(1600.0f * kWS - c.y, 1600.0f * kWS - c.x); } // gate direction
 static bool RivalCampInGate(Vector2 c, Vector2 p) {
     float a = atan2f(p.y - c.y, p.x - c.x) - RivalCampGateYaw(c);
     a = atan2f(sinf(a), cosf(a));
@@ -17234,8 +17359,8 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     // Ground: procedural meadow with baked paths, plus a large flat outer field
     // so the horizon never shows a hard edge.
     DrawModel(g_wild3dGround.model, { 0, 0, 0 }, 1.0f, WHITE); // hilly mesh is in world coordinates
-    DrawPlane({ 1600, -15.0f, 1600 }, { 8000, 8000 }, Color{ 92, 132, 70, 255 });
-    DrawPlane({ 5600, -2.0f, 1600 }, { 4800, 8000 }, Color{ 44, 96, 122, 255 }); // open sea past the coast (2026-09-26)
+    DrawPlane({ 1600 * kWS, -15.0f, 1600 * kWS }, { 8000 * kWS, 8000 * kWS }, Color{ 92, 132, 70, 255 });
+    DrawPlane({ 4200 * kWS, -2.0f, 1600 * kWS }, { 4800, 8000 * kWS }, Color{ 44, 96, 122, 255 }); // open sea past the coast (2026-09-26)
 
     // Region dressing: tree clusters, rocks, camps, horizon ring (main pass only).
     if (!shadowPass) Wild3DDrawDressing(cull);
@@ -17280,7 +17405,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             DrawCylinder({ kFieldsOfSorrow.x, 1, kFieldsOfSorrow.y }, kFieldsOfSorrowRadius, kFieldsOfSorrowRadius, 2, 24,
                            Color{ 110, 110, 120, 90 });
             static const std::array<Vector2, 5> kSorrowPillars = {{
-                {1830, 2240}, {1970, 2260}, {1900, 2360}, {1850, 2320}, {1950, 2340}
+                WP(1830, 2240), WP(1970, 2260), WP(1900, 2360), WP(1850, 2320), WP(1950, 2340)
             }};
             for (auto& pp : kSorrowPillars) {
                 float h = 20.0f + Town3DHash01(pp.x, pp.y) * 30.0f;
@@ -17346,7 +17471,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         T3CAnim ca = T3CMakeAnim(kT3CTrackCreatureWild + (int)i, sp.pos.x, sp.pos.y, !shadowPass);
         {   // Animated model where one fits the species (2026-09-26).
             AnimalPose ap; ap.move = ca.move; ap.time = ca.t + ca.seed * 0.37f; ap.track = kT3CTrackCreatureWild + (int)i;
-            if (sp.creatureIdx == 1) ap.recolor = Color{ 128, 112, 96, 150 }; // Timber Wolf: grey-brown
+            ap.recolor = AnimalRecolorForCreature(sp.creatureIdx);
             if (DrawAnimal(AnimalForCreature(sp.creatureIdx), sp.pos.x, sp.pos.y,
                            Town3DHash01(sp.pos.x, sp.pos.y) * 6.2832f, 1.0f, WHITE, ap, shadowPass)) continue;
         }
@@ -17530,11 +17655,12 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             Vector2 d = { s.wildernessPlayerPos.x - s.companionPos.x,
                           s.wildernessPlayerPos.y - s.companionPos.y };
             float face = (d.x * d.x + d.y * d.y > 1.0f) ? atan2f(d.y, d.x) : 0.0f;
-            T3CQuadLook plook = T3CPetLook(ap->role);
+            if (s.wildEngaged.has_value()) { // face the foe while fighting
+                Vector2 fd = { s.wildEngaged->pos.x - s.companionPos.x, s.wildEngaged->pos.y - s.companionPos.y };
+                if (fd.x * fd.x + fd.y * fd.y > 1.0f) face = atan2f(fd.y, fd.x);
+            }
             T3CAnim pa2 = T3CMakeAnim(kT3CTrackCompanion, s.companionPos.x, s.companionPos.y, !shadowPass);
-            T3CDrawQuad(g_t3cQuads[plook.specIdx].parts, s.companionPos.x, s.companionPos.y,
-                        face, plook.scale, plook.coat, pa2,
-                        kitDist(s.companionPos.x, s.companionPos.y), shadowPass);
+            DrawCompanionPet(*ap, s, pa2, face, kitDist(s.companionPos.x, s.companionPos.y), shadowPass);
         }
     }
     // Player, same humanoid kit as the town 3D view - shrinks during the death
@@ -17593,11 +17719,14 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
 static void Wild3DShadowPass(GameState& s, const Town3DCam* cull) {
     Town3DEnsureShadow();
     if (!g_t3dShadow.ready) return;
-    Vector3 center = { 1600, 0, 1600 };
+    // 1.5x map (2026-09-27): the whole 4800-unit world no longer fits one
+    // sharp shadow map, so the sun's box follows the player (snapped, so the
+    // edges don't crawl as you walk). Fog hides everything past its edge.
+    Vector3 center = { floorf(s.wildernessPlayerPos.x / 64.0f) * 64.0f, 0, floorf(s.wildernessPlayerPos.y / 64.0f) * 64.0f };
     g_t3dLightCam.position = T3VSub(center, T3VScale(kT3DSunDir, -2600.0f));
     g_t3dLightCam.target = center;
     g_t3dLightCam.up = { 0, 1, 0 };
-    g_t3dLightCam.fovy = 4600.0f; // ortho box height; covers the world + margin
+    g_t3dLightCam.fovy = 3600.0f; // ortho box height around the player
     g_t3dLightCam.projection = CAMERA_ORTHOGRAPHIC;
     BeginTextureMode(g_t3dShadow.map);
     ClearBackground(WHITE);
@@ -17794,7 +17923,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     T3DGrassFrameUpdate(c.pos); // sway clock for the grass shader
     Wild3DDrawSceneContents(s, false, &c);
     Wild3DDrawAmbience(c); // birds, unlit, one batched draw call, main pass only
-    T3DDrawLife(c, s.wildernessPlayerPos, 1, 0, g_t3dNight, s.wildernessPlayerPos.y < 700.0f); // butterflies, leaves, ground birds
+    T3DDrawLife(c, s.wildernessPlayerPos, 1, 0, g_t3dNight, s.wildernessPlayerPos.y < 700.0f * kWS); // butterflies, leaves, ground birds
     // Combat FX (2026-09-24): flag marker, spell projectiles/impacts, heal +
     // vigor auras, summoned fiend - world-space, so they sit in the scene.
     DrawFlagMarker3D(s, 0);
@@ -17812,8 +17941,79 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
             Town3DDrawGroundRing(nearest.pos.x, nearest.pos.y, 3.0f, 52.0f, 62.0f, 36,
                                  Fade(Color{ 255, 196, 110, 255 }, pulse));
     }
+    // Threat rings (2026-09-27): a faint ring on the ground shows how close you
+    // can get to a monster before it notices you - drawn only while you're near
+    // the edge, in the monster's threat color.
+    if (!s.wildEngaged.has_value() && !s.playerIsGhost) {
+        for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
+            if (s.wildSpotRespawn[i] > 0.0f || FindWildExtra(s, (int)i)) continue;
+            float R = WildNoticeRange(s, kWildernessMonsterSpots[i].level);
+            if (R <= 0.0f) continue;
+            Vector2 mp = WildernessMonsterLivePos((int)i, s.worldTime);
+            float d = Dist(mp, s.wildernessPlayerPos);
+            if (d > R + 220.0f) continue;
+            float a = std::clamp((R + 220.0f - d) / 160.0f, 0.0f, 1.0f) * 0.55f;
+            Color rc = Fade(ThreatColor(ThreatOf(s, kWildernessMonsterSpots[i].level)), a);
+            const int seg = 64;
+            const float hw = 3.5f; // band half-width
+            rlDisableBackfaceCulling();
+            for (int k = 0; k < seg; k++) {
+                if (k % 2) continue; // dashed
+                float a0 = 6.2831853f * k / seg, a1 = 6.2831853f * (k + 1) / seg;
+                Vector3 p[4];
+                const float rr[2] = { R - hw, R + hw };
+                for (int e = 0; e < 2; e++) {
+                    float x0 = mp.x + cosf(a0) * rr[e], z0 = mp.y + sinf(a0) * rr[e];
+                    float x1 = mp.x + cosf(a1) * rr[e], z1 = mp.y + sinf(a1) * rr[e];
+                    p[e * 2] = { x0, GroundY(x0, z0) + 3.0f, z0 };
+                    p[e * 2 + 1] = { x1, GroundY(x1, z1) + 3.0f, z1 };
+                }
+                DrawTriangle3D(p[0], p[2], p[1], rc);
+                DrawTriangle3D(p[1], p[2], p[3], rc);
+            }
+            rlEnableBackfaceCulling();
+        }
+    }
     EndMode3D();
     T3DDrawVignette();
+
+    // --- Monster nameplates in threat colors + the "!" of one that just spotted you (2026-09-27) ---
+    for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
+        if (s.wildSpotRespawn[i] > 0.0f) continue;
+        bool eng = s.wildEngaged.has_value() && s.wildEngaged->spotIdx == (int)i;
+        const GameState::ActiveMonster* ex = FindWildExtra(s, (int)i);
+        Vector2 mp = eng ? s.wildEngaged->pos : (ex ? ex->pos : WildernessMonsterLivePos((int)i, s.worldTime));
+        float d = Dist(mp, s.wildernessPlayerPos);
+        if (d > 760.0f) continue;
+        float a = std::clamp((760.0f - d) / 200.0f, 0.0f, 1.0f);
+        Vector2 sp;
+        if (!Town3DProject(c, { mp.x, 62.0f + GroundY(mp.x, mp.y), mp.y }, &sp)) continue;
+        if (sp.x < -60 || sp.x > screenW + 60 || sp.y < 100 || sp.y > screenH) continue;
+        int tier = ThreatOf(s, kWildernessMonsterSpots[i].level);
+        Color tc = ThreatColor(tier);
+        std::string nm = kWildernessMonsterSpots[i].name;
+        int w = MeasureUIText(nm.c_str(), 12);
+        int sx = (int)sp.x - w / 2, sy = (int)sp.y - 14;
+        DrawRectangle(sx - 4, sy - 2, w + 8, 16, Fade(BLACK, 0.5f * a));
+        DrawUIText(nm.c_str(), sx, sy, 12, Fade(tc, a));
+        if (d < 420.0f && !eng) { // up close: spell out what the color means
+            const char* tw = ThreatWord(tier);
+            int w2 = MeasureUIText(tw, 10);
+            DrawUIText(tw, (int)sp.x - w2 / 2, sy + 15, 10, Fade(tc, a * 0.9f));
+        }
+        if (s.wildAlertT >= 0.0f && s.wildAlertSpot == (int)i) {
+            float t = s.wildAlertT;
+            float pop = t < 0.15f ? t / 0.15f * 1.3f : 1.0f + 0.3f * std::max(0.0f, 1.0f - (t - 0.15f) * 4.0f);
+            float fa = std::clamp((1.6f - t) / 0.4f, 0.0f, 1.0f);
+            // a red alert badge with a hand-drawn "!" (the UI font's glyph reads as a blob)
+            float r = 13.0f * pop;
+            Vector2 bc = { sp.x, sy - 10 - r };
+            DrawCircleV(bc, r + 2.0f, Fade(WHITE, fa));
+            DrawCircleV(bc, r, Fade(Color{ 220, 45, 35, 255 }, fa));
+            DrawRectangleRounded({ bc.x - r * 0.16f, bc.y - r * 0.62f, r * 0.32f, r * 0.8f }, 0.6f, 4, Fade(WHITE, fa));
+            DrawCircleV({ bc.x, bc.y + r * 0.45f }, r * 0.17f, Fade(WHITE, fa));
+        }
+    }
 
     // --- 2D overlay: gate/entrance labels (distance-faded like the town's) ---
     {
@@ -18624,10 +18824,12 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         Vector2 d = { s.dungeonPlayerPos.x - s.companionPos.x,
                       s.dungeonPlayerPos.y - s.companionPos.y };
         float face = (d.x * d.x + d.y * d.y > 1.0f) ? atan2f(d.y, d.x) : 0.0f;
-        T3CQuadLook plook = T3CPetLook(ActivePet(s)->role);
+        if (s.dungeonEngaged.has_value()) { // face the foe while fighting
+            Vector2 fd = { s.dungeonEngaged->pos.x - s.companionPos.x, s.dungeonEngaged->pos.y - s.companionPos.y };
+            if (fd.x * fd.x + fd.y * fd.y > 1.0f) face = atan2f(fd.y, fd.x);
+        }
         T3CAnim pa = T3CMakeAnim(kT3CTrackCompanion, s.companionPos.x, s.companionPos.y);
-        T3CDrawQuad(g_t3cQuads[plook.specIdx].parts, s.companionPos.x, s.companionPos.y,
-                    face, plook.scale, plook.coat, pa, 0.0f, false);
+        DrawCompanionPet(*ActivePet(s), s, pa, face, 0.0f, false);
     }
     if (torchOn) rlEnableShader(rlGetShaderIdDefault());
     // --- Unlit dressing: torch poles + flames, exit portal, rings ---
@@ -25770,6 +25972,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (s.companionAttackCooldown > 0) s.companionAttackCooldown -= dtF;
         if (ActivePet(s) && s.companionAttackCooldown <= 0) {
             s.companionAttackCooldown = kCompanionAttackCooldown;
+            s.companionAtkT = 0.0f; // play the pet's attack animation
             std::string mname = spot.name; int mgold = spot.baseGold, mleather = spot.baseLeather;
             int level = spot.level;
             float hpBefore = am.hp;
@@ -25954,6 +26157,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (s.companionAttackCooldown > 0) s.companionAttackCooldown -= dtF;
         if (ActivePet(s) && s.companionAttackCooldown <= 0) {
             s.companionAttackCooldown = kCompanionAttackCooldown;
+            s.companionAtkT = 0.0f; // play the pet's attack animation
             std::string mname = spot.name; int mgold = spot.baseGold, mleather = spot.baseLeather;
             int level = spot.level;
             ResolvePetTurnLive(s, am.hp, level);
@@ -26314,7 +26518,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // steer toward the flagged target until contact auto-engages. Manual
         // input always wins - steering only fills the idle gap.
         if (!moved) SteerTowardFlag(s, s.wildernessPlayerPos, s.playerFacing, GameDt(), kWildernessWorldSize, 0);
-        if (ActivePet(s)) UpdateCompanionFollow(s, s.wildernessPlayerPos, s.playerFacing, GameDt());
+        if (ActivePet(s)) UpdateCompanionFollow(s, s.wildernessPlayerPos, s.playerFacing, GameDt(),
+                                                s.wildEngaged.has_value() ? &s.wildEngaged->pos : nullptr);
     }
     UpdateLiveSpellFX(s, GameDt()); // combat anim timers, projectiles, debuffs, fiend
     for (auto& node : kWildernessGatherNodes)
@@ -26338,6 +26543,19 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             Dist(s.wildernessPlayerPos, livePos) < (kPlayerRadius + kNodeRadius * 0.7f) *
                 (PlayerRoadWarded(s.wildernessPlayerPos) ? 0.5f : 1.0f)) // Phase 6: road patrols halve the engage radius
             tryEngageWildMonster((int)i);
+        else if (!s.wildEngaged.has_value() && s.wildExtraAttackers.empty() && !s.playerIsGhost &&
+                 s.playerDeathAnimT <= 0.0f && s.disengageGraceT <= 0.0f && !s.innocentEncounter.has_value() &&
+                 Dist(s.wildernessPlayerPos, livePos) < WildNoticeRange(s, kWildernessMonsterSpots[i].level)) {
+            // UO-style aggro (2026-09-27): it spots you and comes for you - the
+            // engaged-monster AI below does the chase (leashed to its home).
+            tryEngageWildMonster((int)i);
+            if (s.wildEngaged.has_value()) {
+                s.wildAlertT = 0.0f; s.wildAlertSpot = (int)i;
+                s.logLine = "A " + kWildernessMonsterSpots[i].name + " has spotted you!";
+                Journal(s, s.logLine);
+                PlaySfx(SfxId::Hunt);
+            }
+        }
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, livePos, kNodeRadius * 0.7f);
     }
     // Live check, not wasEngaged - see the comment in the monster loop above (2026-09-25).
@@ -26427,13 +26645,14 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             DrawRectangle((int)tl.x, (int)tl.y, (int)w, (int)h, c);
         };
         const float WS = kWildernessWorldSize;
-        washRect(0, 0, WS, 700, Color{ 228, 238, 248, 120 });         // Frostwastes: snow (Phase 3)
-        washRect(1950, 700, WS - 1950, WS - 700, Color{ 216, 196, 150, 36 }); // Salt Coast: sandy wash
-        washRect(0, 700, 500, WS - 700, Color{ 138, 136, 130, 80 });  // Stonepeaks: granite (Phase 4)
+        const float F = 700.0f * kWS, C = 1950.0f * kWS, P = 500.0f * kWS; // region lines (1.5x map)
+        washRect(0, 0, WS, F, Color{ 228, 238, 248, 120 });         // Frostwastes: snow (Phase 3)
+        washRect(C, F, WS - C, WS - F, Color{ 216, 196, 150, 36 }); // Salt Coast: sandy wash
+        washRect(0, F, P, WS - F, Color{ 138, 136, 130, 80 });  // Stonepeaks: granite (Phase 4)
         Color boundCol = Color{ 90, 70, 50, 110 };
-        Vector2 b1a = WorldToScreen({ 0, 700 }, camera), b1b = WorldToScreen({ WS, 700 }, camera);
-        Vector2 b2a = WorldToScreen({ 1950, 700 }, camera), b2b = WorldToScreen({ 1950, WS }, camera);
-        Vector2 b3a = WorldToScreen({ 500, 700 }, camera), b3b = WorldToScreen({ 500, WS }, camera);
+        Vector2 b1a = WorldToScreen({ 0, F }, camera), b1b = WorldToScreen({ WS, F }, camera);
+        Vector2 b2a = WorldToScreen({ C, F }, camera), b2b = WorldToScreen({ C, WS }, camera);
+        Vector2 b3a = WorldToScreen({ P, F }, camera), b3b = WorldToScreen({ P, WS }, camera);
         DrawLineEx(b1a, b1b, 3.0f, boundCol);
         DrawLineEx(b2a, b2b, 3.0f, boundCol);
         DrawLineEx(b3a, b3b, 3.0f, boundCol);
@@ -26456,7 +26675,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                     DrawLineEx(a, b, pass == 0 ? 30.0f : 16.0f, pass == 0 ? roadOuter : roadInner);
                     DrawCircleV(a, pass == 0 ? 15.0f : 8.0f, pass == 0 ? roadOuter : roadInner);
                 }
-        Vector2 lbl = WorldToScreen({ 1900, 1630 }, camera);
+        Vector2 lbl = WorldToScreen(WP(1900, 1630), camera);
         DrawUIText("King's Road", (int)lbl.x - 38, (int)lbl.y, 12, Color{ 96, 74, 50, 255 });
         WildDraw2DTerrainOverlay(camera);
     }
@@ -27464,6 +27683,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (s.companionAttackCooldown > 0) s.companionAttackCooldown -= dtF;
         if (ActivePet(s) && s.companionAttackCooldown <= 0) {
             s.companionAttackCooldown = kCompanionAttackCooldown;
+            s.companionAtkT = 0.0f; // play the pet's attack animation
             std::string mname = m.name; int mgold = m.baseGold, mleather = m.baseLeather;
             bool wasBoss = am.isBoss; int dungeonIdx = *s.selectedDungeon; int level = m.level;
             float hpBefore = am.hp;
@@ -27649,7 +27869,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         bool moved = UpdatePlayerMovement(s.dungeonPlayerPos, s.playerFacing, GameDt(), kDungeonWorldSize);
         // Flag steering, same as Wilderness - the wall-slide below still applies.
         if (!moved) SteerTowardFlag(s, s.dungeonPlayerPos, s.playerFacing, GameDt(), kDungeonWorldSize, 1);
-        if (ActivePet(s)) UpdateCompanionFollow(s, s.dungeonPlayerPos, s.playerFacing, GameDt());
+        if (ActivePet(s)) UpdateCompanionFollow(s, s.dungeonPlayerPos, s.playerFacing, GameDt(),
+                                                s.dungeonEngaged.has_value() ? &s.dungeonEngaged->pos : nullptr);
     }
     UpdateLiveSpellFX(s, GameDt()); // combat anim timers, projectiles, debuffs, fiend
     for (int i = 0; i < kDungeonRegularSlots; i++) {
@@ -29606,6 +29827,7 @@ static void UpdateDrawFrame() {
         RegenNotoriety(state, dt);
         state.worldTime += dt;
         if (state.disengageGraceT > 0.0f) state.disengageGraceT -= dt; // manual-disengage grace (2026-09-25)
+        if (state.wildAlertT >= 0.0f && (state.wildAlertT += dt) > 1.6f) state.wildAlertT = -1.0f; // "!" pop (2026-09-27)
         UpdateCombatAnim(state, dt);
         UpdateDeathAndRespawn(state, dt); // death anims, ghost timer, monster respawns, corpse fades
         UpdateGuildOffscreen(state, dt);  // the rival and Murder Inc. keep living while you're elsewhere

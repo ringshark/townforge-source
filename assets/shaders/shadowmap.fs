@@ -79,6 +79,9 @@ void main()
     // we test the surrounding points as well
     // This blurs shadow edges, hiding aliasing artifacts
     vec2 texelSize = vec2(1.0/float(shadowMapResolution));
+    // Outside the sun's box (the wilderness box follows the player): unshadowed.
+    bool inBox = sampleCoords.x > 0.0 && sampleCoords.y > 0.0 && sampleCoords.x < 1.0 && sampleCoords.y < 1.0;
+    if (inBox)
     for (int x = -1; x <= 1; x++)
     {
         for (int y = -1; y <= 1; y++)
