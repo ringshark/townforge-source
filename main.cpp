@@ -14699,7 +14699,10 @@ static const Vector2 kWildBranchRoad3[] = { WP(900, 1760), WP(760, 1840), WP(560
 static const Vector2 kWildBranchRoad4[] = { WP(1395, 645), WP(1250, 520), WP(1080, 400), WP(905, 305) };
 static const Vector2 kWildBranchRoad5[] = { WP(905, 1760), WP(980, 1830), WP(1045, 1895) };
 static const Vector2 kWildBranchRoad6[] = { WP(1640, 1700), WP(1600, 1950), WP(1520, 2150), WP(1470, 2300) };
-static const WildRoadRef kWildBranchRoads[] = { {kWildBranchRoad0, 2}, {kWildBranchRoad1, 3}, {kWildBranchRoad2, 3}, {kWildBranchRoad3, 5}, {kWildBranchRoad4, 4}, {kWildBranchRoad5, 3}, {kWildBranchRoad6, 4} };
+// (2026-09-27) The Caldera Road: off the King's Road near Saltmere, south down the coast,
+// over the river on a bridge, to the Cinder Caldera's way in - the world boss was cut off.
+static const Vector2 kWildBranchRoad7[] = { WP(2650, 1712), WP(2760, 1950), WP(2820, 2200), WP(2800, 2450), WP(2730, 2600), WP(2640, 2690), WP(2600, 2728) };
+static const WildRoadRef kWildBranchRoads[] = { {kWildBranchRoad0, 2}, {kWildBranchRoad1, 3}, {kWildBranchRoad2, 3}, {kWildBranchRoad3, 5}, {kWildBranchRoad4, 4}, {kWildBranchRoad5, 3}, {kWildBranchRoad6, 4}, {kWildBranchRoad7, 7} };
 static const Vector2 kWildFords[] = { WP(2215, 2250) };
 static const float kWildLakeX = 1450 * kWS, kWildLakeZ = 2540 * kWS, kWildLakeRX = 300 * kWS, kWildLakeRZ = 190 * kWS; // Mirrormere
 
