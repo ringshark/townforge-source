@@ -1305,6 +1305,13 @@ static const int kGuildFoundCost = 500;
 static const int kGuildWarGoal = 12; // enemy kills to win a war
 enum { kGuildWarMurderInc = 0, kGuildWarOrcs = 1 };
 
+// Commissions (2026-09-27): UO's bulk order deeds, our way. A workshop's master
+// hands you an order - "10 Longswords", "8 Leather Tunics, Well-crafted or
+// better" - you fill it from your pack and turn it in for gold and Marks.
+struct CommissionDeed { int building = 0; int recipe = 0; int amount = 10; int filled = 0; int minTier = 0; };
+static const int kCommissionMax = 6;
+static const float kCommissionCooldown = 600.0f; // a new order per workshop every ten minutes of play
+
 struct GameState {
     int gold = 100;
     int wood = 10;
@@ -1426,6 +1433,12 @@ struct GameState {
 
     // --- Custom wilderness housing (2026-09-25) ---
     int housePlotIdx = -1;          // index into kHousePlots; -1 = no plot owned (one house max)
+    // Commissions (2026-09-27) - PERSISTED.
+    std::vector<CommissionDeed> commissions;
+    float commissionCd[4] = { 0, 0, 0, 0 };
+    int commissionMarks = 0;
+    int masterworkUses[4] = { 0, 0, 0, 0 }; // Masterwork tools: +10 crafting quality per use
+    int rareDyeCharges = 0;                 // one rare-hue dip each, no Tailoring 80 needed
     // Player guild (2026-09-27) - PERSISTED except the *Live transients.
     std::string guildName, guildTag;
     int guildHue = 14;               // tabard color (kDyeHues index)
@@ -6663,6 +6676,12 @@ static void SaveGame(const GameState& s) {
     WriteEquipSlot(out, "equipped.pants", s.equipped.pants);
     WriteEquipSlot(out, "equipped.shoes", s.equipped.shoes);
     out << "clothesInit=1\n";
+    out << "commissionMarks=" << s.commissionMarks << "\nrareDyeCharges=" << s.rareDyeCharges << "\n";
+    for (int b = 0; b < 4; b++) out << "commissionCd" << b << "=" << s.commissionCd[b] << "\nmasterwork" << b << "=" << s.masterworkUses[b] << "\n";
+    for (size_t i = 0; i < s.commissions.size(); i++) {
+        const CommissionDeed& d = s.commissions[i];
+        out << "commission." << i << "=" << d.building << "|" << d.recipe << "|" << d.amount << "|" << d.filled << "|" << d.minTier << "\n";
+    }
     out << "guildName=" << s.guildName << "\nguildTag=" << s.guildTag << "\nguildHue=" << s.guildHue
         << "\nguildRenown=" << s.guildRenown << "\n";
     for (int w = 0; w < 2; w++)
@@ -6915,6 +6934,17 @@ static bool LoadGame(GameState& s) {
         else if (key == "equipped.pants") ReadEquipSlot(val, s.equipped.pants);
         else if (key == "equipped.shoes") ReadEquipSlot(val, s.equipped.shoes);
         else if (key == "clothesInit") clothesInit = true;
+        else if (key == "commissionMarks") s.commissionMarks = std::atoi(val.c_str());
+        else if (key == "rareDyeCharges") s.rareDyeCharges = std::atoi(val.c_str());
+        else if (key.rfind("commissionCd", 0) == 0 && key.size() == 13) s.commissionCd[std::clamp(key[12] - '0', 0, 3)] = (float)std::atof(val.c_str());
+        else if (key.rfind("masterwork", 0) == 0 && key.size() == 11) s.masterworkUses[std::clamp(key[10] - '0', 0, 3)] = std::atoi(val.c_str());
+        else if (key.rfind("commission.", 0) == 0) {
+            auto p = SplitStr(val, '|');
+            if (p.size() >= 5 && (int)s.commissions.size() < kCommissionMax) {
+                CommissionDeed d{ std::atoi(p[0].c_str()), std::atoi(p[1].c_str()), std::atoi(p[2].c_str()), std::atoi(p[3].c_str()), std::atoi(p[4].c_str()) };
+                if (d.building >= 0 && d.building < 4) s.commissions.push_back(d);
+            }
+        }
         else if (key == "guildName") s.guildName = val;
         else if (key == "guildTag") s.guildTag = val;
         else if (key == "guildHue") s.guildHue = std::atoi(val.c_str());
@@ -7125,7 +7155,10 @@ static void TryCraftItem(GameState& s, int buildingIdx, int recipeIdx, int capOv
     float craftOdds = std::clamp(0.5f + (skillVal - r.reqSkill) / 40.0f, 0.05f, 1.0f);
     float gain = SkillUseGain(s.buildingSkill[buildingIdx], craftOdds, 4.0f, (float)buildingCap);
 
-    auto [qualityLabel, qualityMult] = QualityFor(effectiveSkill);
+    float qualitySkill = effectiveSkill;
+    bool masterwork = buildingIdx >= 0 && buildingIdx < 4 && s.masterworkUses[buildingIdx] > 0;
+    if (masterwork) { qualitySkill += 10.0f; s.masterworkUses[buildingIdx]--; } // Masterwork tools (2026-09-27)
+    auto [qualityLabel, qualityMult] = QualityFor(qualitySkill);
     int finalPower = std::max(1, (int)std::round(r.power * qualityMult));
     Item item{ s.nextItemId++, qualityLabel + " " + r.name, r.type, r.slot, r.handed, finalPower, r.category };
     s.backpack.push_back(item);
@@ -29245,7 +29278,7 @@ static void DrawDyeTub(GameState& s, int y, int screenW, int screenH) {
         int hue = k == 0 ? -1 : k - 1;
         Rectangle r = { 20 + (k % pcols) * sw, (float)y + (k / pcols) * sw, sw - 6, sw - 6 };
         bool rare = hue >= 0 && kDyeHues[hue].rare;
-        bool locked = rare && tailoring < 80.0f;
+        bool locked = rare && tailoring < 80.0f && s.rareDyeCharges <= 0;
         Color c = hue < 0 ? Color{ 200, 190, 170, 255 } : kDyeHues[hue].c;
         DrawRectangleRounded(r, 0.25f, 6, c);
         if (hue < 0) { DrawLineEx({ r.x + 4, r.y + r.height - 4 }, { r.x + r.width - 4, r.y + 4 }, 2.0f, Fade(BLACK, 0.4f)); }
@@ -29270,12 +29303,145 @@ static void DrawDyeTub(GameState& s, int y, int screenW, int screenH) {
         bool same = target->hue == g_dyeHue;
         if (Button({ 100, (float)y + 34, 170, 30 }, same ? "Already that color" : TextFormat("Dye it (%dg)", kDyeCost), !same && s.gold >= kDyeCost)) {
             s.gold -= kDyeCost;
+            if (g_dyeHue >= 0 && kDyeHues[g_dyeHue].rare && tailoring < 80.0f && s.rareDyeCharges > 0) s.rareDyeCharges--; // a rare dye bottle
             target->hue = g_dyeHue;
             s.logLine = "You dip the " + target->name + " in the tub - it comes out " + (g_dyeHue < 0 ? std::string("its natural color") : std::string(kDyeHues[g_dyeHue].name)) + ".";
             PlaySfx(SfxId::Buy);
         }
     }
-    DrawUIText("* rare hues need Tailoring 80+", 20, screenH - 36, 12, Fade(kColorText, 0.8f));
+    DrawUIText(s.rareDyeCharges > 0 ? TextFormat("* rare hues need Tailoring 80+ (or a rare dye: you have %d)", s.rareDyeCharges)
+                                    : "* rare hues need Tailoring 80+ (or a rare dye from Commissions)", 20, screenH - 36, 12, Fade(kColorText, 0.8f));
+}
+
+// ---- Commissions (2026-09-27) ----
+static const char* kCommissionTierName[4] = { "any quality", "Adeptly built or better", "Well-crafted or better", "Master quality or better" };
+// Quality tier of a crafted item for recipe r (-1 = not that item at all).
+static int CommissionItemTier(const Item& it, const Recipe& r) {
+    for (int t = 0; t < (int)kQualityTiersData.size(); t++)
+        if (it.name == std::string(kQualityTiersData[(size_t)t].second.first) + " " + r.name) return t;
+    return -1;
+}
+static int CommissionReward(const CommissionDeed& d) {
+    const Recipe& r = kCraftBuildings[(size_t)d.building].recipes[(size_t)d.recipe];
+    return 25 + (int)std::round(d.amount * VendorPriceFor(r) * (0.6f + 0.25f * d.minTier));
+}
+static int CommissionMarksFor(const CommissionDeed& d) { return 1 + (d.amount >= 10) + (d.amount >= 15) + d.minTier; }
+static void OfferCommission(GameState& s, int b) {
+    const BuildingDef& bd = kCraftBuildings[(size_t)b];
+    float skill = s.buildingSkill[b];
+    std::vector<int> pool;
+    for (size_t i = 0; i < bd.recipes.size(); i++) if (bd.recipes[i].reqSkill <= skill + 10.0f) pool.push_back((int)i);
+    if (pool.empty()) pool.push_back(0);
+    CommissionDeed d;
+    d.building = b;
+    d.recipe = pool[(size_t)(std::rand() % (int)pool.size())];
+    static const int amounts[3] = { 5, 10, 15 };
+    d.amount = amounts[std::rand() % (skill >= 50.0f ? 3 : 2)];
+    if (b != 3) { // potions have no quality tiers
+        float roll = RandUnit();
+        if (skill >= 90.0f && roll < 0.3f) d.minTier = 3;
+        else if (skill >= 70.0f && roll < 0.45f) d.minTier = 2;
+        else if (skill >= 50.0f && roll < 0.4f) d.minTier = 1;
+    }
+    s.commissions.push_back(d);
+    s.commissionCd[b] = kCommissionCooldown;
+    s.logLine = "The master hands you a commission: " + std::to_string(d.amount) + " x " + bd.recipes[(size_t)d.recipe].name + ".";
+    PlaySfx(SfxId::Quest);
+}
+// Moves matching crafted pieces (or potions) from your pack onto the deed.
+static int FillCommission(GameState& s, CommissionDeed& d) {
+    const Recipe& r = kCraftBuildings[(size_t)d.building].recipes[(size_t)d.recipe];
+    int added = 0;
+    if (d.building == 3) {
+        for (auto it = s.potions.begin(); it != s.potions.end() && d.filled < d.amount;) {
+            if (it->name == r.name) {
+                int take = std::min(it->count, d.amount - d.filled);
+                it->count -= take; d.filled += take; added += take;
+                if (it->count <= 0) { it = s.potions.erase(it); continue; }
+            }
+            ++it;
+        }
+    } else {
+        for (size_t i = 0; i < s.backpack.size() && d.filled < d.amount;) {
+            int t = CommissionItemTier(s.backpack[i], r);
+            if (t >= d.minTier) { s.backpack.erase(s.backpack.begin() + (long)i); d.filled++; added++; continue; }
+            i++;
+        }
+    }
+    return added;
+}
+static void DrawCommissions(GameState& s, int y, int screenW, int screenH) {
+    const int b = s.craftBuildingTab;
+    const BuildingDef& bd = kCraftBuildings[(size_t)b];
+    DrawInfoLine(TextFormat("Gold: %d    Marks: %d    Skill: %.1f", s.gold, s.commissionMarks, s.buildingSkill[b]), 20, y, 13, kColorAccent);
+    y += 22;
+    // this workshop's open orders
+    int count = 0, turnIn = -1, drop = -1;
+    for (size_t i = 0; i < s.commissions.size(); i++) {
+        CommissionDeed& d = s.commissions[i];
+        if (d.building != b) continue;
+        count++;
+        const Recipe& r = bd.recipes[(size_t)std::clamp(d.recipe, 0, (int)bd.recipes.size() - 1)];
+        Rectangle row = { 16, (float)y, (float)screenW - 32, 74 };
+        DrawRectangleRounded(row, 0.12f, 6, Fade(Color{ 236, 220, 184, 255 }, 0.9f));
+        DrawRectangleRoundedLines(row, 0.12f, 6, Fade(BLACK, 0.35f));
+        DrawUIText(TextFormat("%d x %s", d.amount, r.name.c_str()), (int)row.x + 12, (int)row.y + 8, 15, kColorHeading);
+        DrawUIText(b == 3 ? "brewed potions" : kCommissionTierName[std::clamp(d.minTier, 0, 3)], (int)row.x + 12, (int)row.y + 28, 11, kColorText);
+        float fr = (float)d.filled / std::max(1, d.amount);
+        DrawRectangleRec({ row.x + 12, row.y + 46, 180, 12 }, Fade(BLACK, 0.2f));
+        DrawRectangleRec({ row.x + 12, row.y + 46, 180 * fr, 12 }, Color{ 90, 150, 70, 255 });
+        DrawUIText(TextFormat("%d/%d", d.filled, d.amount), (int)row.x + 198, (int)row.y + 45, 12, kColorText);
+        DrawUIText(TextFormat("Pays %dg + %d marks", CommissionReward(d), CommissionMarksFor(d)), (int)row.x + 250, (int)row.y + 10, 11, Fade(kColorText, 0.85f));
+        if (d.filled >= d.amount) {
+            if (Button({ row.x + row.width - 128, row.y + 30, 118, 34 }, "Turn in!", true)) turnIn = (int)i;
+        } else {
+            if (Button({ row.x + row.width - 128, row.y + 30, 118, 34 }, "Hand in", true)) {
+                int n = FillCommission(s, d);
+                s.logLine = n > 0 ? "You hand over " + std::to_string(n) + " for the commission."
+                                  : (b == 3 ? "You have no " + r.name + "s to hand in." : "Nothing in your pack fits this commission yet - craft some!");
+            }
+            if (Button({ row.x + row.width - 200, row.y + 38, 64, 26 }, "Drop", true)) drop = (int)i;
+        }
+        y += 80;
+    }
+    if (turnIn >= 0) {
+        CommissionDeed d = s.commissions[(size_t)turnIn];
+        s.commissions.erase(s.commissions.begin() + turnIn);
+        int gold = CommissionReward(d), marks = CommissionMarksFor(d);
+        s.gold += gold; s.commissionMarks += marks;
+        GainFame(s, 2.0f);
+        s.logLine = "Commission complete! +" + std::to_string(gold) + " gold, +" + std::to_string(marks) + " marks.";
+        Journal(s, s.logLine);
+        PlaySfx(SfxId::Coin);
+    } else if (drop >= 0) {
+        s.commissions.erase(s.commissions.begin() + drop);
+        s.logLine = "You tear up the commission.";
+    }
+    if (count == 0) { DrawUIText("No open commissions here.", 20, y + 4, 13, kColorText); y += 26; }
+    // ask for a new one
+    bool full = (int)s.commissions.size() >= kCommissionMax;
+    if (s.commissionCd[b] > 0.0f)
+        DrawUIText(TextFormat("The master will have more work in %d:%02d.", (int)s.commissionCd[b] / 60, (int)s.commissionCd[b] % 60), 20, y + 8, 13, kColorText);
+    else if (Button({ 20, (float)y + 2, 240, 32 }, full ? "You carry too many orders" : "Ask for a commission", !full))
+        OfferCommission(s, b);
+    y += 48;
+    // rewards
+    DrawUIText("Spend marks", 20, y, 15, kColorHeading); y += 22;
+    if (Button({ 20, (float)y, (float)screenW - 40, 32 }, TextFormat("Masterwork %s tools - 25 crafts at +10 quality (6 marks)  [have %d]",
+               b == 0 ? "smithing" : b == 1 ? "carving" : b == 2 ? "sewing" : "brewing", s.masterworkUses[b]), s.commissionMarks >= 6)) {
+        s.commissionMarks -= 6; s.masterworkUses[b] += 25;
+        s.logLine = "The master presents you with a set of Masterwork tools.";
+        PlaySfx(SfxId::Buy);
+    }
+    y += 38;
+    if (Button({ 20, (float)y, (float)screenW - 40, 32 }, TextFormat("Rare dye - one dip in any rare hue (4 marks)  [have %d]", s.rareDyeCharges), s.commissionMarks >= 4)) {
+        s.commissionMarks -= 4; s.rareDyeCharges++;
+        s.logLine = "A stoppered bottle of rare dye - use it at the Tailor's dye tub.";
+        PlaySfx(SfxId::Buy);
+    }
+    y += 44;
+    DrawUIText("Craft (or buy) the pieces, hand them in, turn in the finished order.", 20, y, 11, Fade(kColorText, 0.8f));
+    (void)screenH;
 }
 
 static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
@@ -29312,12 +29478,13 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
     // TryBuyPremadeItem/TryBuyPremadePotion. Reuses `b`/`isAlchemy` just resolved above.
     {
         int mode = s.craftModeTab;
-        if (s.craftBuildingTab == 2) DrawPillTabs({ "Craft", "Buy", "Dye" }, &mode, 20, (float)y, 26); // the Tailor dyes (2026-09-27)
-        else { DrawPillTabs({ "Craft", "Buy" }, &mode, 20, (float)y, 26); if (mode > 1) mode = 0; }
+        if (s.craftBuildingTab == 2) DrawPillTabs({ "Craft", "Buy", "Commissions", "Dye" }, &mode, 20, (float)y, 26); // the Tailor dyes (2026-09-27)
+        else { DrawPillTabs({ "Craft", "Buy", "Commissions" }, &mode, 20, (float)y, 26); if (mode > 2) mode = 0; }
         s.craftModeTab = mode;
     }
     y += 34;
-    if (s.craftModeTab == 2 && s.craftBuildingTab == 2) { DrawDyeTub(s, y, screenW, screenH); return; }
+    if (s.craftModeTab == 3 && s.craftBuildingTab == 2) { DrawDyeTub(s, y, screenW, screenH); return; }
+    if (s.craftModeTab == 2) { DrawCommissions(s, y, screenW, screenH); return; }
     if (s.craftModeTab == 1) {
         DrawInfoLine(TextFormat("Gold: %d", s.gold), 20, y, 13, kColorAccent);
         y += 20;
@@ -31029,6 +31196,7 @@ static void UpdateDrawFrame() {
         if (state.disengageGraceT > 0.0f) state.disengageGraceT -= dt; // manual-disengage grace (2026-09-25)
         if (state.wildAlertT >= 0.0f && (state.wildAlertT += dt) > 1.6f) state.wildAlertT = -1.0f; // "!" pop (2026-09-27)
         if (IsPlayScreen(state.screen)) g_playScreen = state.screen; // remembered for "Play" (2026-09-27)
+        for (float& cd : state.commissionCd) if (cd > 0.0f) cd -= dt; // commission offers (2026-09-27)
         UpdateCombatAnim(state, dt);
         UpdateDeathAndRespawn(state, dt); // death anims, ghost timer, monster respawns, corpse fades
         UpdateGuildOffscreen(state, dt);  // the rival and Murder Inc. keep living while you're elsewhere
