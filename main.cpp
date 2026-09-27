@@ -4780,12 +4780,23 @@ static int TotalDefense(const GameState& s) {
     return def;
 }
 
+// Hit chance (2026-09-27, "at 43 swords I miss almost every time"): UO's rule -
+// your weapon skill against the foe's defense, (atk+20) / ((def+20)*2), so an
+// even match is about 50% and training the skill is what makes you land blows.
+// A monster's defense is 2x its level. Gear power only nudges it (+/-10).
+static float PlayerHitChance(const GameState& s, int monsterLevel) {
+    float atk = EffectiveSkill(s, ActiveWeaponSkillField(s));
+    float def = std::min(150.0f, monsterLevel * 2.0f);
+    float chance = (atk + 20.0f) / ((def + 20.0f) * 2.0f) * 100.0f;
+    chance += std::clamp((CombatPower(s) - monsterLevel) * 0.5f, -10.0f, 10.0f);
+    return std::clamp(chance, 10.0f, 95.0f);
+}
 // JS: winChanceAgainst() - used for the % shown on each "Hunt" button before you commit.
 static float WinChancePreview(const GameState& s, int monsterLevel) {
     int power = CombatPower(s);
     float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
-    float chance = 50.0f + (power - monsterLevel) * 4.0f + weaponSkillBonus;
-    return std::clamp(chance, 5.0f, 95.0f);
+    (void)power; (void)weaponSkillBonus;
+    return PlayerHitChance(s, monsterLevel);
 }
 
 // JS: monsterHitChance() - 50 - dex*0.2, clamped 20-90.
@@ -5858,7 +5869,7 @@ static void ResolveCombatRound(GameState& s) {
     float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
     ApplyWeaponTraining(s, c);
 
-    float hitChance = std::clamp(50.0f + (power - c.monster.level) * 4.0f + weaponSkillBonus, 5.0f, 95.0f);
+    float hitChance = PlayerHitChance(s, c.monster.level);
     if (RandUnit() * 100.0f < hitChance) {
         int dmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
         c.monsterHP -= dmg;
@@ -8122,7 +8133,7 @@ enum ThreatTier { kThreatTrivial, kThreatEasy, kThreatFair, kThreatTough, kThrea
 static int ThreatOf(const GameState& s, int monsterLevel) {
     int power = CombatPower(s);
     float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
-    float hit = std::clamp(50.0f + (power - monsterLevel) * 4.0f + weaponSkillBonus, 5.0f, 95.0f) / 100.0f;
+    float hit = PlayerHitChance(s, monsterLevel) / 100.0f;
     float myDps = hit * power / PlayerSwingCooldown(s);
     if (ActivePet(const_cast<GameState&>(s))) myDps *= 1.35f; // a pet adds roughly a third again
     float itsHit = MonsterHitChance(s) / 100.0f;
@@ -27385,7 +27396,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         PlaySfx(SfxId::Swing); // melee swing starts - world combat only
         int power = CombatPower(s);
         float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
-        float hitChance = std::clamp(50.0f + (power - spot.level) * 4.0f + weaponSkillBonus, 5.0f, 95.0f);
+        float hitChance = PlayerHitChance(s, spot.level);
         LiveApplyWeaponTraining(s, hitChance / 100.0f);
         std::string mname = spot.name; int mgold = spot.baseGold, mleather = spot.baseLeather;
         bool foeBlocked = false; // (2026-09-26) the rival carries a shield and uses it
@@ -27427,8 +27438,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                     bool inArc = Dist(ex.pos, s.wildernessPlayerPos) < kWildMeleeRange &&
                                  InSwingArc(s.wildernessPlayerPos, s.playerFacing, ex.pos);
                     if (!inArc) { ei++; continue; }
-                    float exHitChance = std::clamp(50.0f + (power - exSpot.level) * 4.0f + weaponSkillBonus,
-                                                   5.0f, 95.0f);
+                    float exHitChance = PlayerHitChance(s, exSpot.level);
                     if (RandUnit() * 100.0f < exHitChance) {
                         int exDmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
                         if (s.vigorT > 0.0f) exDmg = std::max(1, (int)std::round(exDmg * 1.25f));
@@ -28889,7 +28899,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         PlaySfx(SfxId::Swing); // melee swing starts - world combat only
         int power = CombatPower(s);
         float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
-        float hitChance = std::clamp(50.0f + (power - m.level) * 4.0f + weaponSkillBonus, 5.0f, 95.0f);
+        float hitChance = PlayerHitChance(s, m.level);
         LiveApplyWeaponTraining(s, hitChance / 100.0f);
         std::string mname = m.name; int mgold = m.baseGold, mleather = m.baseLeather;
         bool wasBoss = am.isBoss; int dungeonIdx = *s.selectedDungeon; int level = m.level;
@@ -28918,8 +28928,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                     bool inArc = Dist(ex.pos, s.dungeonPlayerPos) < kWildMeleeRange &&
                                  InSwingArc(s.dungeonPlayerPos, s.playerFacing, ex.pos);
                     if (!inArc) { ei++; continue; }
-                    float exHitChance = std::clamp(50.0f + (power - exM.level) * 4.0f + weaponSkillBonus,
-                                                   5.0f, 95.0f);
+                    float exHitChance = PlayerHitChance(s, exM.level);
                     if (RandUnit() * 100.0f < exHitChance) {
                         int exDmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
                         if (s.vigorT > 0.0f) exDmg = std::max(1, (int)std::round(exDmg * 1.25f));
