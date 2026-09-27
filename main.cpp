@@ -1492,6 +1492,7 @@ struct GameState {
     std::vector<std::string> settleReports; // newest last, up to 6
     bool settleRaidLive = false; int settleRaidStrength = 0; int settleRaidFaction = 0; float settleMilitiaCd = 0.0f;
     float settleHpAcc = 0.0f;
+    bool autoReagents = false; // PERSISTED (2026-09-27): top reagents up to 30 whenever you walk into a town
     // Stat buffs (2026-09-27) - transient: Bless, Strength and Agility potions.
     float blessT = 0.0f, strPotT = 0.0f, agiPotT = 0.0f;
     int blessAmt = 0, strPotAmt = 0, agiPotAmt = 0;
@@ -6980,6 +6981,7 @@ static void SaveGame(const GameState& s) {
         out << "settle" << k << "=" << s.settle[(size_t)k].level << "|" << s.settle[(size_t)k].stored << "|" << s.settle[(size_t)k].workers << "|" << (s.settle[(size_t)k].damaged ? 1 : 0) << "\n";
     out << "settleQueue=" << s.settleUpgrading << "|" << s.settleUpgradeT << "\nsettleRaidT=" << s.settleRaidT
         << "\nsettleArrivalT=" << s.settleArrivalT << "\nsettleEpoch=" << (long long)std::time(nullptr) << "\n";
+    out << "autoReagents=" << (s.autoReagents ? 1 : 0) << "\n";
     out << "wyrmRespawnT=" << s.wyrmRespawnT << "\nwyrmHp=" << s.wyrmHp << "\nwyrmKills=" << s.wyrmKills << "\n"; // world boss
     for (size_t i = 0; i < s.settlers.size(); i++) out << "settler." << i << "=" << s.settlers[i].name << "|" << s.settlers[i].trait << "|" << s.settlers[i].job << "\n";
     for (size_t i = 0; i < s.settleReports.size(); i++) out << "settleReport." << i << "=" << s.settleReports[i] << "\n";
@@ -7257,6 +7259,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "settleArrivalT") s.settleArrivalT = (float)std::atof(val.c_str());
         else if (key == "settleEpoch") s.settleEpoch = std::atoll(val.c_str());
         else if (key == "wyrmRespawnT") s.wyrmRespawnT = (float)std::atof(val.c_str());
+        else if (key == "autoReagents") s.autoReagents = std::atoi(val.c_str()) != 0;
         else if (key == "wyrmHp") s.wyrmHp = (float)std::atof(val.c_str());
         else if (key == "wyrmKills") s.wyrmKills = std::atoi(val.c_str());
         else if (key.rfind("settler.", 0) == 0) { auto p = SplitStr(val, '|'); if (p.size() >= 3) s.settlers.push_back({ p[0], std::atoi(p[1].c_str()), std::atoi(p[2].c_str()) }); }
@@ -9580,12 +9583,17 @@ static bool Button(Rectangle r, const std::string& label, bool enabled) {
     Rectangle big = { r.x - kOutset, r.y - kOutset, r.width + kOutset * 2.0f, r.height + kOutset * 2.0f };
     Vector2 mouse = GetMousePosition();
     bool hover = CheckCollisionPointRec(mouse, big);
-    Color bg = !enabled ? Fade(GRAY, 0.4f) : (hover ? Fade(kColorSlate, 0.9f) : Fade(kColorSlate, 0.7f));
+    // Readability pass (2026-09-27): solid dark leather with cream lettering - the old
+    // see-through slate with dark text washed out over the 3D world.
+    Color bg = !enabled ? Color{ 150, 144, 136, 200 } : (hover ? Color{ 92, 68, 46, 245 } : Color{ 62, 46, 34, 235 });
     DrawRectangleRounded(big, 0.25f, 6, bg);
-    DrawRectangleRoundedLines(big, 0.25f, 6, Fade(BLACK, 0.4f));
-    int tw = MeasureUIText(label.c_str(), 14);
-    DrawUIText(label.c_str(), (int)(big.x + (big.width - tw) / 2.0f), (int)(big.y + (big.height - 14) / 2.0f),
-              14, kColorText);
+    DrawRectangleRoundedLines(big, 0.25f, 6, enabled ? Color{ 176, 132, 72, 255 } : Fade(BLACK, 0.35f));
+    int fs = 14, tw = MeasureUIText(label.c_str(), fs);
+    while (tw > big.width - 8 && fs > 10) tw = MeasureUIText(label.c_str(), --fs); // long labels shrink to fit
+    Color fg = enabled ? Color{ 248, 236, 210, 255 } : Color{ 70, 64, 58, 255 };
+    int tx = (int)(big.x + (big.width - tw) / 2.0f), ty = (int)(big.y + (big.height - fs) / 2.0f);
+    if (enabled) DrawUIText(label.c_str(), tx + 1, ty + 1, fs, Fade(BLACK, 0.55f));
+    DrawUIText(label.c_str(), tx, ty, fs, fg);
     bool clicked = enabled && hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     if (clicked && g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(mouse, g_uiShield)) clicked = false;
     if (clicked) PlaySfx(SfxId::Click); // central UI click - one place covers all buttons
@@ -9812,8 +9820,38 @@ static Vector2 UOScatter(Rectangle area, int i, float cell, int seed) {
 // reason as DrawVirtualJoystick - so it isn't painted over and isn't affected by the
 // scissor region.
 static bool DrawInteractButton(const std::string& label) {
-    Rectangle r = { kViewport.x + kViewport.width - 150.0f, kViewport.y + kViewport.height - 90.0f, 130.0f, 60.0f };
-    return Button(r, label, true);
+    // (2026-09-27) gold, pulsing, and wide enough for "Fight Timber Wolf"
+    Rectangle r = { kViewport.x + kViewport.width - 186.0f, kViewport.y + kViewport.height - 92.0f, 170.0f, 64.0f };
+    Vector2 m = GetMousePosition();
+    bool hover = CheckCollisionPointRec(m, r);
+    float p = 0.5f + 0.5f * sinf((float)GetTime() * 4.0f);
+    DrawRectangleRounded({ r.x - 3, r.y - 3, r.width + 6, r.height + 6 }, 0.3f, 8, Fade(Color{ 255, 214, 110, 255 }, 0.25f + 0.25f * p));
+    DrawRectangleRounded(r, 0.3f, 8, hover ? Color{ 236, 190, 90, 255 } : Color{ 214, 164, 70, 255 });
+    DrawRectangleRoundedLines(r, 0.3f, 8, Color{ 90, 60, 24, 255 });
+    std::string t = label.rfind("[E] ", 0) == 0 ? label.substr(4) : label;
+    int fs = 17, tw = MeasureUIText(t.c_str(), fs);
+    while (tw > r.width - 14 && fs > 11) tw = MeasureUIText(t.c_str(), --fs);
+    DrawUIText(t.c_str(), (int)(r.x + (r.width - tw) / 2), (int)(r.y + r.height / 2 - fs / 2 - 6), fs, Color{ 40, 24, 10, 255 });
+    const char* hint = "tap or press E";
+    DrawUIText(hint, (int)(r.x + (r.width - MeasureUIText(hint, 10)) / 2), (int)(r.y + r.height - 16), 10, Color{ 80, 50, 20, 255 });
+    bool clicked = hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (clicked && g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(m, g_uiShield)) clicked = false;
+    if (clicked) PlaySfx(SfxId::Click);
+    return clicked;
+}
+// The "[E] ..." prompt over the world: bigger, darker backing, above the belt and spell bar.
+static void DrawPromptLabel(const std::string& prompt, int screenW, int screenH) {
+    int fs = 16, w = MeasureUIText(prompt.c_str(), fs);
+    int sx = (screenW - w) / 2, sy = screenH - 176;
+    DrawRectangleRounded({ (float)sx - 10, (float)sy - 5, (float)w + 20, (float)fs + 12 }, 0.4f, 6, Fade(Color{ 20, 14, 10, 255 }, 0.82f));
+    DrawRectangleRoundedLines({ (float)sx - 10, (float)sy - 5, (float)w + 20, (float)fs + 12 }, 0.4f, 6, Color{ 214, 164, 70, 255 });
+    DrawUIText(prompt.c_str(), sx, sy, fs, Color{ 255, 226, 150, 255 });
+}
+// A HUD line over the 3D world: dark pill, light text.
+static void DrawHudLine(const char* text, int x, int y, int fs = 13, Color c = Color{ 240, 230, 206, 255 }) {
+    int tw = MeasureUIText(text, fs);
+    DrawRectangleRounded({ (float)x - 7, (float)y - 3, (float)tw + 14, (float)fs + 8 }, 0.35f, 6, Fade(Color{ 20, 14, 10, 255 }, 0.72f));
+    DrawUIText(text, x, y, fs, c);
 }
 
 // Touch-drag scrolling (2026-09-22) - every scrollable list in the game (Craft/
@@ -9971,6 +10009,20 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
             DrawRectangleRec(big, Fade(Color{ 200, 40, 40, 255 }, 0.5f * f));
         }
     }
+    { // reagent count over the bar's right end (2026-09-27) - red when you're about to run dry
+        bool mage = false;
+        for (int sp : s.combatHotbar) if (sp >= 0 && sp < (int)kSpells.size() && !kSpells[sp].necro) mage = true;
+        if (mage) {
+            bool low = s.reagents < 5;
+            std::string rt = s.reagents <= 0 ? "OUT of reagents" : TextFormat("Reagents %d", s.reagents);
+            int fs = 13, tw = MeasureUIText(rt.c_str(), fs);
+            Rectangle pr = { bar.x + bar.width - tw - 22.0f, bar.y - 24.0f, (float)tw + 16.0f, 21.0f };
+            float pulse = low ? 0.6f + 0.4f * sinf(t * 6.0f) : 1.0f;
+            DrawRectangleRounded(pr, 0.4f, 6, low ? Fade(Color{ 150, 26, 26, 255 }, 0.9f * pulse) : Fade(Color{ 30, 22, 16, 255 }, 0.85f));
+            DrawRectangleRoundedLines(pr, 0.4f, 6, kUoBronze);
+            DrawUIText(rt.c_str(), (int)pr.x + 8, (int)pr.y + 4, fs, low ? WHITE : Color{ 200, 230, 170, 255 });
+        }
+    }
     return tapped;
 }
 
@@ -10043,15 +10095,16 @@ static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppre
 // branch literally logs "no stamina system in this scaffold"), confirmed and explicitly
 // deferred rather than guessed at.
 static void DrawLiveCombatHud(const GameState& s, float x, float y) {
-    DrawUIText(TextFormat("HP: %d / %d", s.hp, s.maxHp), (int)x, (int)y, 13, kColorText);
+    DrawRectangleRounded({ x - 6, y - 4, 286, 36 }, 0.25f, 6, Fade(Color{ 20, 14, 10, 255 }, 0.72f)); // (2026-09-27) readable plate
+    DrawUIText(TextFormat("HP: %d / %d", s.hp, s.maxHp), (int)x, (int)y, 13, Color{ 246, 236, 212, 255 });
     Rectangle hpBg = { x, y + 18, 140, 9 };
-    DrawRectangleRec(hpBg, Fade(BLACK, 0.25f));
+    DrawRectangleRec(hpBg, Fade(BLACK, 0.55f));
     float hpPct = std::clamp((float)s.hp / s.maxHp, 0.0f, 1.0f);
     DrawRectangleRec({ hpBg.x, hpBg.y, hpBg.width * hpPct, hpBg.height },
                        hpPct > 0.3f ? Color{ 63, 94, 63, 255 } : Color{ 122, 46, 46, 255 });
-    DrawUIText(TextFormat("Mana: %.0f / %.0f", s.mana, MaxMana(s)), (int)x + 150, (int)y, 13, kColorText);
+    DrawUIText(TextFormat("Mana: %.0f / %.0f", s.mana, MaxMana(s)), (int)x + 150, (int)y, 13, Color{ 190, 210, 255, 255 });
     Rectangle manaBg = { x + 150, y + 18, 120, 9 };
-    DrawRectangleRec(manaBg, Fade(BLACK, 0.25f));
+    DrawRectangleRec(manaBg, Fade(BLACK, 0.55f));
     float manaPct = std::clamp(s.mana / MaxMana(s), 0.0f, 1.0f);
     DrawRectangleRec({ manaBg.x, manaBg.y, manaBg.width * manaPct, manaBg.height }, Color{ 63, 82, 122, 255 });
 }
@@ -15867,10 +15920,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
             std::string label = npcIsNearest ? "Greet " + activeNPCs[nearestNPCIdx].name
                                 : gateIsNearest ? "Wilderness" : TileNameFor(nearestKey);
             std::string prompt = "[E] " + label;
-            int w = MeasureUIText(prompt.c_str(), 14);
-            int sx = (int)(screenW - w) / 2, sy = screenH - 96;
-            DrawRectangle(sx - 6, sy - 3, w + 12, 22, Fade(BLACK, 0.55f));
-            DrawUIText(prompt.c_str(), sx, sy, 14, WHITE);
+            DrawPromptLabel(prompt, screenW, screenH); // (2026-09-27) readability
         }
     }
     DrawUIText("3D view: drag to orbit, wheel to zoom, click a building. [V] toggles 2D.", 20, 196, 12,
@@ -19906,15 +19956,11 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     // Interaction prompt (the 2D view draws it via DrawPlayer; the 3D view has no
     // player sprite call, so it goes here, same style as the town 3D prompt).
     if (!prompt.empty()) {
-        int w = MeasureUIText(prompt.c_str(), 14);
-        int sx = (int)(screenW - w) / 2, sy = screenH - 96;
-        DrawRectangle(sx - 6, sy - 3, w + 12, 22, Fade(BLACK, 0.55f));
-        DrawUIText(prompt.c_str(), sx, sy, 14, WHITE);
+        DrawPromptLabel(prompt, screenW, screenH); // (2026-09-27) readability
     }
     DrawFloatTexts3D(s, c, 0, screenW, screenH); // combat feel: damage numbers / MISS
     DrawGuildTags3D(s, c, screenW, screenH);     // rival/Murder Inc. names, activity, speech
-    DrawUIText("3D view: drag to orbit, wheel to zoom. [V] toggles 2D.", 20, 196, 12,
-               Color{ 90, 74, 52, 255 });
+    if (s.worldTime < 120.0f) DrawHudLine("Drag to turn the view, pinch or wheel to zoom", 20, 196, 12); // (2026-09-27) early hint only
     // Phase 0: HUD region label (3D view) - same top-center pill as the 2D view,
     // computed live from the player position so it flips at boundaries.
     {
@@ -20760,10 +20806,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         }
     }
     if (!prompt.empty()) {
-        int w = MeasureUIText(prompt.c_str(), 14);
-        int sx = (int)(screenW - w) / 2, sy = screenH - 96;
-        DrawRectangle(sx - 6, sy - 3, w + 12, 22, Fade(BLACK, 0.55f));
-        DrawUIText(prompt.c_str(), sx, sy, 14, WHITE);
+        DrawPromptLabel(prompt, screenW, screenH); // (2026-09-27) readability
     }
     DrawFloatTexts3D(s, c, 1, screenW, screenH); // combat feel: damage numbers / MISS
     DrawUIText(TextFormat("%s - 3D view: drag to orbit, wheel to zoom. [V] toggles 2D.",
@@ -23620,10 +23663,10 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     // tiled ground with nothing else guaranteeing contrast (same class of bug already
     // fixed on the vendor screens' backdrops), and the combined skills+gathering string
     // could run long enough to overflow the safe margin on some viewports.
-    DrawInfoLine(TextFormat("Lumberjacking: %.1f   Mining: %.1f   Fishing: %.1f", s.lumberjacking, s.mining, s.fishing), 20, 156, 12);
+    DrawHudLine(TextFormat("Lumberjacking %.1f   Mining %.1f   Fishing %.1f", s.lumberjacking, s.mining, s.fishing), 20, 158);
     if (s.gatheringResource.has_value())
-        DrawInfoLine(TextFormat("Gathering %s... %.1fs", s.gatheringResource->c_str(), s.gatherSecondsRemaining),
-                       20, 176, 12);
+        DrawHudLine(TextFormat("Gathering %s... %.1fs", s.gatheringResource->c_str(), s.gatherSecondsRemaining),
+                    20, 182, 13, Color{ 255, 226, 150, 255 });
 
     // --- Detail / upgrade panel - opened by walking up + E, closed with [X]/[ESC] ---
     DrawBuildingDetailPanel(s, screenW);
@@ -29690,7 +29733,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // Drawn after EndScissorMode (not before), same reason Town's gather HUD strip
         // is - kViewport starts at y=110 and the tiled ground fill would paint over
         // anything drawn here earlier in the frame.
-        DrawLiveCombatHud(s, 20, 116);
+        if (!(s.wild3DView && ExploreHeaderCollapsed(s))) DrawLiveCombatHud(s, 20, 116); // the MENU plate shows HP/MP in 3D
         DrawLiveCombatQuickItems(s);
     } else {
         DrawLiveCombatQuickItems(s, 0); // hurt and out of a fight: bandage / potion / heal spell
@@ -29743,6 +29786,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                     if (tapped < 5) s.hotbarDenyT[tapped] = kHotbarDenyTime;
                     SpawnFloatText(s, 0, s.wildernessPlayerPos, deny, kFloatDenyColor);
                     Journal(s, deny + " (" + sp.name + ")");
+                    if (deny == "No reagents!") s.logLine = "Out of reagents - Magery needs 1 per cast. Buy more at the Provisioner (5 for 5g).";
                 } else if (spellIdx == kRecallSpellIdx) s.recallPickerOpen = true; // town picker; costs on select
                 else if (sp.type == SpellType::Offensive) tryCastSpellAtEngagedMonster(spellIdx);
                 else CastLiveUtilitySpell(s, spellIdx, 0);
@@ -29778,11 +29822,11 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // short lines rather than one long concatenated string (2026-09-22 fix, same reason
     // as Town's: no contrast guarantee against the tiled ground, and the combined
     // skills+gathering+taming text could run past a safe margin on some viewports).
-    DrawInfoLine(TextFormat("Lumberjacking: %.1f   Mining: %.1f   Fishing: %.1f   Taming: %.1f",
-                              s.lumberjacking, s.mining, s.fishing, s.animalTaming), 20, 156, 12);
-    int statusY = 176;
+    DrawHudLine(TextFormat("Lumber %.1f  Mining %.1f  Fishing %.1f  Taming %.1f",
+                           s.lumberjacking, s.mining, s.fishing, s.animalTaming), 20, 158);
+    int statusY = 182;
     if (s.gatheringResource.has_value()) {
-        DrawInfoLine(TextFormat("Gathering %s... %.1fs", s.gatheringResource->c_str(), s.gatherSecondsRemaining),
+        DrawHudLine(TextFormat("Gathering %s... %.1fs", s.gatheringResource->c_str(), s.gatherSecondsRemaining),
                        20, statusY, 12);
         statusY += 20;
     }
@@ -29810,10 +29854,18 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 // a dungeon, the Magery escape); picking one navigates and closes it.
 static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
     g_uiShieldBypass = true; // this panel's own buttons sit inside the shield
-    DrawUIText(TextFormat("HP: %d/%d", s.hp, s.maxHp), 236, 60, 14, kColorText);
+    { // (2026-09-27) readable over the world: dark plate, light text, HP and mana
+        DrawRectangleRounded({ 228, 52, 150, 50 }, 0.25f, 6, Fade(Color{ 20, 14, 10, 255 }, 0.74f));
+        DrawUIText(TextFormat("HP %d/%d", s.hp, s.maxHp), 236, 55, 14, Color{ 246, 236, 212, 255 });
+        std::string mt = TextFormat("MP %.0f", s.mana);
+        DrawUIText(mt.c_str(), 370 - MeasureUIText(mt.c_str(), 12), 57, 12, Color{ 170, 195, 255, 255 });
+        Rectangle mb = { 236, 93, 134, 5 };
+        DrawRectangleRec(mb, Fade(BLACK, 0.55f));
+        DrawRectangleRec({ mb.x, mb.y, mb.width * std::clamp(s.mana / std::max(1.0f, MaxMana(s)), 0.0f, 1.0f), mb.height }, Color{ 80, 120, 220, 255 });
+    }
     {
-        Rectangle dhpBg = { 236, 80, 130, 10 };
-        DrawRectangleRec(dhpBg, Fade(BLACK, 0.3f));
+        Rectangle dhpBg = { 236, 78, 134, 12 };
+        DrawRectangleRec(dhpBg, Fade(BLACK, 0.55f));
         float dhpPct = std::clamp((float)s.hp / (float)std::max(1, s.maxHp), 0.0f, 1.0f);
         DrawRectangleRec({ dhpBg.x, dhpBg.y, dhpBg.width * dhpPct, dhpBg.height },
                          dhpPct > 0.3f ? Color{ 63, 94, 63, 255 } : Color{ 122, 46, 46, 255 });
@@ -30873,6 +30925,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                     if (tapped < 5) s.hotbarDenyT[tapped] = kHotbarDenyTime;
                     SpawnFloatText(s, 1, s.dungeonPlayerPos, deny, kFloatDenyColor);
                     Journal(s, deny + " (" + sp.name + ")");
+                    if (deny == "No reagents!") s.logLine = "Out of reagents - Magery needs 1 per cast. Buy more at the Provisioner (5 for 5g).";
                 } else if (spellIdx == kRecallSpellIdx) s.recallPickerOpen = true; // town picker; costs on select
                 else if (sp.type == SpellType::Offensive) tryCastSpellAtEngagedDungeonMonster(spellIdx);
                 else CastLiveUtilitySpell(s, spellIdx, 1);
@@ -31381,6 +31434,13 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
         DrawInfoLine(TextFormat("Reagents: %d", s.reagents), 20, y + 6, 12, kColorText);
         if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Buy 5 (5g)", s.gold >= 5)) TryBuyReagents(s, 5);
         y += 34;
+        // (2026-09-27) never walk out dry again
+        if (Button({ 20, (float)y, (float)screenW - 40, 28 }, s.autoReagents ? "Auto-restock reagents: ON (tops up to 30 in any town)"
+                                                                                : "Auto-restock reagents: OFF (tap to turn on)", true)) {
+            s.autoReagents = !s.autoReagents;
+            s.logLine = s.autoReagents ? "You'll be restocked to 30 reagents whenever you enter a town (1g each)." : "Auto-restock is off.";
+        }
+        y += 36;
 
         DrawInfoLine(TextFormat("Bandages: %d", s.bandages), 20, y + 6, 12, kColorText);
         if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Buy 5 (40g)", s.gold >= 40)) TryBuyBandages(s, 5, 40);
@@ -33059,6 +33119,77 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     (void)screenW;
 }
 
+// ---- Toasts (2026-09-27) ----
+struct Toast { std::string text; float t = 0.0f, dur = 4.5f; Color col{}; };
+static std::vector<Toast> g_toasts;
+static std::string g_toastLast;
+static Color ToastColor(const std::string& t) {
+    auto has = [&](const char* k) { return t.find(k) != std::string::npos; };
+    if (t.rfind("Not ", 0) == 0 || t.rfind("No ", 0) == 0 || has("can't") || has("isn't") || has("fizzle") || has("full") ||
+        has("Out of") || has("Need ") || has("needs ") || has("defeated") || has("overran") || has("hunting you") || has("RAID"))
+        return Color{ 255, 150, 110, 255 }; // warning
+    if (has("+") || has("Collected") || has("slain") || has("Defeated") || has("finished") || has("threw back") || has("Bought") ||
+        has("increases") || has("Victory") || has("VICTORY"))
+        return Color{ 170, 235, 140, 255 }; // good news
+    return Color{ 246, 236, 212, 255 };
+}
+// Blow-by-blow combat lines stay in the journal; toasts are for news.
+static bool ToastIsChatter(const std::string& t) {
+    auto has = [&](const char* k) { return t.find(k) != std::string::npos; };
+    if (t.rfind("Your attack", 0) == 0 || t.rfind("You hit ", 0) == 0 || t.rfind("You cast ", 0) == 0) return true;
+    if (has(" misses") || (has(" for ") && has(" damage") && !has("Out of")) || has(": \"")) return true;
+    for (size_t i = 0; i + 3 < t.size(); i++) // skill ticks: "Tactics +0.2"
+        if (t[i] == '+' && isdigit((unsigned char)t[i + 1]) && t[i + 2] == '.' && !has("increases")) return true;
+    return false;
+}
+static void UpdateDrawToasts(GameState& s, int screenW, int screenH, bool play) {
+    float dt = GetFrameTime();
+    if (s.logLine != g_toastLast) {
+        g_toastLast = s.logLine;
+        bool boring = s.logLine.empty() || s.logLine == "Welcome to Town Forge." || ToastIsChatter(s.logLine);
+        if (!boring) {
+            // a line that ticks (a countdown) updates its toast instead of stacking new ones
+            if (!g_toasts.empty() && g_toasts.back().t < 0.35f) { g_toasts.back().text = s.logLine; g_toasts.back().col = ToastColor(s.logLine); }
+            else {
+                Toast t; t.text = s.logLine; t.col = ToastColor(s.logLine);
+                t.dur = 4.0f + std::min(3.0f, s.logLine.size() / 40.0f) + (t.col.r == 255 ? 1.0f : 0.0f);
+                g_toasts.push_back(t);
+                while (g_toasts.size() > 3) g_toasts.erase(g_toasts.begin());
+            }
+        }
+    }
+    const int fs = 15;
+    const float maxW = (float)screenW - 60.0f;
+    float y = play ? (float)screenH - 206.0f : (float)screenH - 44.0f; // bottom of the newest toast
+    for (int i = (int)g_toasts.size() - 1; i >= 0; i--) {
+        Toast& t = g_toasts[(size_t)i];
+        t.t += dt;
+        float a = std::min(1.0f, t.t / 0.15f) * std::clamp((t.dur - t.t) / 0.6f, 0.0f, 1.0f);
+        if (a <= 0.0f) continue;
+        // wrap to at most two lines
+        std::vector<std::string> lines; std::string cur, word;
+        std::istringstream ws(t.text);
+        while (ws >> word) {
+            std::string trial = cur.empty() ? word : cur + " " + word;
+            if (MeasureUIText(trial.c_str(), fs) > maxW - 24 && !cur.empty()) { lines.push_back(cur); cur = word; }
+            else cur = trial;
+        }
+        if (!cur.empty()) lines.push_back(cur);
+        if (lines.size() > 2) { lines.resize(2); lines[1] += "..."; }
+        float w = 0; for (auto& l : lines) w = std::max(w, (float)MeasureUIText(l.c_str(), fs));
+        float h = lines.size() * (fs + 4.0f) + 12.0f;
+        Rectangle r = { (screenW - w) / 2.0f - 14.0f, y - h, w + 28.0f, h };
+        DrawRectangleRounded(r, 0.3f, 8, Fade(Color{ 18, 12, 8, 255 }, 0.86f * a));
+        DrawRectangleRoundedLines(r, 0.3f, 8, Fade(t.col, 0.8f * a));
+        for (size_t k = 0; k < lines.size(); k++) {
+            int lw = MeasureUIText(lines[k].c_str(), fs);
+            DrawUIText(lines[k].c_str(), (int)((screenW - lw) / 2), (int)(r.y + 7 + k * (fs + 4)), fs, Fade(t.col, a));
+        }
+        y = r.y - 6.0f;
+    }
+    g_toasts.erase(std::remove_if(g_toasts.begin(), g_toasts.end(), [](const Toast& t) { return t.t > t.dur; }), g_toasts.end());
+}
+
 // Hoisted out of main() so UpdateDrawFrame() (a plain function pointer, called every
 // frame either by the desktop while-loop below or by emscripten_set_main_loop on web -
 // see main()) can reach them; there's exactly one of each for the process's lifetime
@@ -33143,6 +33274,18 @@ static void UpdateDrawFrame() {
         if (IsPlayScreen(state.screen)) g_playScreen = state.screen; // remembered for "Play" (2026-09-27)
         for (float& cd : state.commissionCd) if (cd > 0.0f) cd -= dt; // commission offers (2026-09-27)
         SettleTick(state, dt); // the settlement works in real time (2026-09-27)
+        { // auto-restock reagents on walking into a town (2026-09-27)
+            static Screen prevScr = Screen::Town;
+            if (state.screen == Screen::Town && prevScr != Screen::Town && state.autoReagents && state.reagents < 30) {
+                int want = std::min(30 - state.reagents, state.gold);
+                if (want > 0) {
+                    state.gold -= want; state.reagents += want;
+                    state.logLine = "The Provisioner's runner restocks you: +" + std::to_string(want) + " reagents (" + std::to_string(want) + "g).";
+                    Journal(state, state.logLine);
+                } else state.logLine = "Auto-restock: not enough gold for reagents.";
+            }
+            prevScr = state.screen;
+        }
         WyrmTick(state, dt);   // the world boss's wake timer and heads (2026-09-27)
         { // stat buffs run out; HP and mana follow the effective stats (2026-09-27)
             for (float* t : { &state.blessT, &state.strPotT, &state.agiPotT }) if (*t > 0.0f && (*t -= dt) <= 0.0f) {
@@ -33480,8 +33623,10 @@ static void UpdateDrawFrame() {
             state.lastTownMarkedIdx = state.selectedTown;
         }
 
-        // Log line (mirrors the JS log panel) - shown on all screens
-        DrawUIText(state.logLine.c_str(), 20, screenH - 30, 13, Color{ 90, 74, 52, 255 });
+        // Messages (2026-09-27): every new log line pops up as a toast - on the world
+        // screens above the belt and spell bar, on menus at the bottom - colored by
+        // what it means. The old faint line at the very bottom hid under the spell bar.
+        UpdateDrawToasts(state, screenW, screenH, IsPlayScreen(state.screen));
         DrawNotorietyFooter(state, screenW, screenH);
 
 #ifndef __EMSCRIPTEN__
