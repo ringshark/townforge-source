@@ -1272,6 +1272,22 @@ static const int kWildMonsterSpotCount = 29; // (2026-09-27) +7 Grimtusk Hold or
 static const int kDungeonBossSlot = 8; // boss slot index; regular slots are 0..7
 static const int kDungeonSlotCount = kDungeonBossSlot + 1; // 9 slots per dungeon
 static const char* kGhostNoTouch = "Ghosts cannot touch the world of the living.";
+// ---- Player guild (2026-09-27) ----
+// "Once you own a house, maybe you can start a guild to even the playing
+// field": found one at your house, hire NPC guildmates who fight beside you,
+// and declare war on Murder Inc. or the orcs of Grimtusk Hold.
+struct GuildRecruit {
+    std::string name;
+    int kind = 0;        // 0 warrior, 1 archer, 2 healer
+    float level = 10.0f; // grows with the fights they share
+    bool along = true;   // travelling with you (else minding the house)
+};
+struct GuildRecruitLive { Vector2 pos{ 0, 0 }; bool init = false; float atkCd = 0.0f; float atkT = -1.0f; float castT = -1.0f; float healCd = 0.0f; };
+static const int kGuildMaxRecruits = 3;
+static const int kGuildFoundCost = 500;
+static const int kGuildWarGoal = 12; // enemy kills to win a war
+enum { kGuildWarMurderInc = 0, kGuildWarOrcs = 1 };
+
 struct GameState {
     int gold = 100;
     int wood = 10;
@@ -1393,6 +1409,15 @@ struct GameState {
 
     // --- Custom wilderness housing (2026-09-25) ---
     int housePlotIdx = -1;          // index into kHousePlots; -1 = no plot owned (one house max)
+    // Player guild (2026-09-27) - PERSISTED except the *Live transients.
+    std::string guildName, guildTag;
+    int guildHue = 14;               // tabard color (kDyeHues index)
+    int guildRenown = 0;
+    std::vector<GuildRecruit> guildRecruits;
+    bool guildWarOn[2] = { false, false };
+    int guildWarKills[2] = { 0, 0 };
+    int guildWarWins[2] = { 0, 0 };
+    std::array<GuildRecruitLive, 3> guildLive{};
     std::string houseLayout;        // row-major layout string ('.', 'F', 'W', 'D', 'N'); see helpers above
     std::vector<Item> houseChest;   // persistent storage chest contents
     bool hearthBound = false;       // hearth recall bound to the owned plot
@@ -6621,6 +6646,14 @@ static void SaveGame(const GameState& s) {
     WriteEquipSlot(out, "equipped.pants", s.equipped.pants);
     WriteEquipSlot(out, "equipped.shoes", s.equipped.shoes);
     out << "clothesInit=1\n";
+    out << "guildName=" << s.guildName << "\nguildTag=" << s.guildTag << "\nguildHue=" << s.guildHue
+        << "\nguildRenown=" << s.guildRenown << "\n";
+    for (int w = 0; w < 2; w++)
+        out << "guildWar" << w << "=" << (s.guildWarOn[w] ? 1 : 0) << "|" << s.guildWarKills[w] << "|" << s.guildWarWins[w] << "\n";
+    for (size_t i = 0; i < s.guildRecruits.size(); i++) {
+        const GuildRecruit& r = s.guildRecruits[i];
+        out << "guildRecruit." << i << "=" << r.name << "|" << r.kind << "|" << r.level << "|" << (r.along ? 1 : 0) << "\n";
+    }
 
     for (size_t i = 0; i < s.rivalStash.size(); i++) out << "rivalStash." << i << "=" << ItemToLine(s.rivalStash[i]) << "\n";
     out << "backpack.count=" << s.backpack.size() << "\n";
@@ -6865,6 +6898,19 @@ static bool LoadGame(GameState& s) {
         else if (key == "equipped.pants") ReadEquipSlot(val, s.equipped.pants);
         else if (key == "equipped.shoes") ReadEquipSlot(val, s.equipped.shoes);
         else if (key == "clothesInit") clothesInit = true;
+        else if (key == "guildName") s.guildName = val;
+        else if (key == "guildTag") s.guildTag = val;
+        else if (key == "guildHue") s.guildHue = std::atoi(val.c_str());
+        else if (key == "guildRenown") s.guildRenown = std::atoi(val.c_str());
+        else if (key == "guildWar0" || key == "guildWar1") {
+            int w = key == "guildWar0" ? 0 : 1; auto p = SplitStr(val, '|');
+            if (p.size() >= 3) { s.guildWarOn[w] = p[0] == "1"; s.guildWarKills[w] = std::atoi(p[1].c_str()); s.guildWarWins[w] = std::atoi(p[2].c_str()); }
+        }
+        else if (key.rfind("guildRecruit.", 0) == 0) {
+            auto p = SplitStr(val, '|');
+            if (p.size() >= 4 && (int)s.guildRecruits.size() < kGuildMaxRecruits)
+                s.guildRecruits.push_back({ p[0], std::atoi(p[1].c_str()), (float)std::atof(p[2].c_str()), p[3] == "1" });
+        }
         else if (key == "backpack.count") { s.backpack.clear(); s.backpack.reserve(std::atoi(val.c_str())); }
         else if (key.rfind("backpack.", 0) == 0) { if (auto it = ItemFromLine(val)) s.backpack.push_back(*it); }
         else if (key == "pets.count") { s.pets.clear(); s.pets.reserve(std::atoi(val.c_str())); }
@@ -8369,7 +8415,7 @@ static int GuildWalk(GameState::GuildMind& m, Vector2& pos, Vector2 target, floa
 static void GuildLive(GameState& s, int who, float& level, float dt) {
     GameState::GuildMind& m = GuildMindOf(s, who);
     Vector2& pos = GuildPosOf(s, who);
-    m.sayT -= dt; m.sayCooldown -= dt; m.huntCooldown -= dt;
+    m.sayT -= dt; m.sayCooldown -= dt; m.huntCooldown -= dt * (s.guildWarOn[kGuildWarMurderInc] ? 1.8f : 1.0f); // at war: they come for you more often
     if (who < 0) s.rivalGrudge = std::max(0.0f, s.rivalGrudge - dt / 900.0f); // grudges fade over ~15 min each
     if (m.downT > 0.0f) { // beaten: out of the world until it recovers
         m.downT -= dt;
@@ -12137,6 +12183,34 @@ static HumanOutfit HumanOutfitPlain(Color skin, Color top, Color bottom, Color b
 static void HumanGive(HumanOutfit& o, int weapon, int style, float scale = 1.0f) {
     o.weapon = weapon; o.style = style; o.weaponScale = scale; o.staffCaster = weapon == kHwStaff;
 }
+// Your guildmates (2026-09-27): tabards in the guild's color, kit by calling.
+static void DrawGuildRecruits(const GameState& s, bool shadowPass) {
+    if (s.guildName.empty()) return;
+    Color tab = kDyeHues[std::clamp(s.guildHue, 0, kDyeHueCount - 1)].c;
+    static const Color skins[3] = { { 220, 180, 142, 255 }, { 176, 128, 92, 255 }, { 236, 200, 168, 255 } };
+    static const Color hairs[3] = { { 60, 40, 28, 255 }, { 150, 110, 60, 255 }, { 30, 26, 24, 255 } };
+    for (size_t i = 0; i < s.guildRecruits.size() && i < 3; i++) {
+        const GuildRecruit& r = s.guildRecruits[i];
+        const GuildRecruitLive& L = s.guildLive[i];
+        if (!r.along || !L.init) continue;
+        HumanOutfit o = HumanOutfitPlain(skins[i % 3], tab, Color{ 70, 62, 54, 255 }, Color{ 64, 44, 30, 255 }, hairs[i % 3]);
+        o.region[kHrBelt] = Color{ 200, 170, 80, 255 };
+        o.build = 1.1f;
+        if (r.kind == 0) { HumanGive(o, kHwSword, kHsOneHand); o.shield = true; o.helm = kHhChain; o.helmCol = Color{ 160, 164, 172, 255 };
+                           o.region[kHrSleeve] = o.region[kHrForearm] = Color{ 150, 154, 162, 255 }; }
+        else if (r.kind == 1) { HumanGive(o, kHwBow, kHsBow); o.cloak = true; o.cloakCol = ColorBrightness(tab, -0.3f); }
+        else { HumanGive(o, kHwStaff, kHsTwoHand); o.robe = true; o.robeCol = tab; o.hat = kClWizardHat; o.hatCol = ColorBrightness(tab, -0.2f); }
+        Vector2 look = s.wildEngaged.has_value() ? s.wildEngaged->pos : s.wildernessPlayerPos;
+        float yaw = atan2f(look.y - L.pos.y, look.x - L.pos.x);
+        if (!s.wildEngaged.has_value()) yaw = atan2f(s.playerFacing.y, s.playerFacing.x);
+        T3CAnim a = T3CMakeAnim(230 + (int)i, L.pos.x, L.pos.y, !shadowPass);
+        HumanPose hp; hp.move = a.move; hp.engaged = s.wildEngaged.has_value();
+        if (L.atkT >= 0.0f) hp.attackT = std::clamp(L.atkT / 0.5f, 0.0f, 1.0f);
+        if (L.castT >= 0.0f) hp.castT = std::clamp(L.castT / 0.6f, 0.0f, 1.0f);
+        DrawHuman(230 + (int)i, L.pos.x, L.pos.y, yaw, 0.97f, WHITE, o, hp, shadowPass);
+    }
+}
+
 // A body painted all one material (golems, husks, wraiths): skin shade over everything.
 static HumanOutfit HumanOutfitMono(Color c) {
     return HumanOutfitPlain(c, ColorBrightness(c, -0.12f), ColorBrightness(c, -0.2f), ColorBrightness(c, -0.3f),
@@ -17942,6 +18016,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             DrawCompanionPet(*ap, s, pa2, face, kitDist(s.companionPos.x, s.companionPos.y), shadowPass);
         }
     }
+    DrawGuildRecruits(s, shadowPass); // guildmates (2026-09-27)
     // Player, same humanoid kit as the town 3D view - shrinks during the death
     // animation, ghostly-translucent while a ghost.
     {
@@ -18292,6 +18367,21 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
             DrawRectangleRounded({ bc.x - r * 0.16f, bc.y - r * 0.62f, r * 0.32f, r * 0.8f }, 0.6f, 4, Fade(WHITE, fa));
             DrawCircleV({ bc.x, bc.y + r * 0.45f }, r * 0.17f, Fade(WHITE, fa));
         }
+    }
+
+    // Guild tags (2026-09-27): "[TAG]" over you, "[TAG] Name" over each guildmate, in green.
+    if (!s.guildName.empty()) {
+        auto tagAt = [&](Vector2 w, float h, const std::string& t) {
+            Vector2 sp;
+            if (!Town3DProject(c, { w.x, h + GroundY(w.x, w.y), w.y }, &sp)) return;
+            int tw = MeasureUIText(t.c_str(), 11);
+            DrawRectangle((int)sp.x - tw / 2 - 3, (int)sp.y - 13, tw + 6, 14, Fade(BLACK, 0.45f));
+            DrawUIText(t.c_str(), (int)sp.x - tw / 2, (int)sp.y - 12, 11, Color{ 120, 235, 130, 255 });
+        };
+        tagAt(s.wildernessPlayerPos, 74.0f, "[" + s.guildTag + "]");
+        for (size_t i = 0; i < s.guildRecruits.size() && i < 3; i++)
+            if (s.guildRecruits[i].along && s.guildLive[i].init)
+                tagAt(s.guildLive[i].pos, 70.0f, "[" + s.guildTag + "] " + s.guildRecruits[i].name);
     }
 
     // --- 2D overlay: gate/entrance labels (distance-faded like the town's) ---
@@ -22428,9 +22518,109 @@ static void DungeonPackAggro(GameState& s, int dungeonIdx, int damagedMonsterIdx
 // is dropped and the pack promotes/auto-flags per above. Pack-member deaths pass
 // false - the fight goes on. NOTE: am may alias *s.wildEngaged - callers must not
 // touch their am reference after this call when clearEngagement is true.
+// ---- Player guild logic (2026-09-27) ----
+static void SpawnFloatText(GameState& s, int zone, Vector2 pos, const std::string& text, Color color);
+static bool GuildFounded(const GameState& s) { return !s.guildName.empty(); }
+static const char* GuildRecruitKindName(int k) { return k == 0 ? "Warrior" : (k == 1 ? "Archer" : "Healer"); }
+static int GuildRecruitCost(int k) { return k == 2 ? 300 : 250; }
+static bool GuildWarFoe(const GameState& s, const GameState::ActiveMonster& am) {
+    if (am.isRival || am.bladeIdx >= 0) return s.guildWarOn[kGuildWarMurderInc];
+    if (am.spotIdx >= 0 && am.spotIdx < (int)kWildernessMonsterSpots.size())
+        return s.guildWarOn[kGuildWarOrcs] && kWildernessMonsterSpots[am.spotIdx].name.rfind("Orc ", 0) == 0;
+    return false;
+}
+// Guildmates walk with you: a loose wedge behind you, and in a fight they
+// close in on your foe (archers and healers keep their distance).
+static void GuildRecruitsFollow(GameState& s, float dt) {
+    if (!GuildFounded(s)) return;
+    Vector2 me = s.wildernessPlayerPos, f = s.playerFacing;
+    float fl = std::max(0.001f, hypotf(f.x, f.y)); f = { f.x / fl, f.y / fl };
+    Vector2 side = { -f.y, f.x };
+    int slot = 0;
+    for (size_t i = 0; i < s.guildRecruits.size() && i < 3; i++) {
+        const GuildRecruit& r = s.guildRecruits[i];
+        GuildRecruitLive& L = s.guildLive[i];
+        if (!r.along) { L.init = false; continue; }
+        float sx = slot == 0 ? -46.0f : (slot == 1 ? 46.0f : 0.0f), back = slot == 2 ? 78.0f : 52.0f;
+        slot++;
+        Vector2 tgt = { me.x - f.x * back + side.x * sx, me.y - f.y * back + side.y * sx };
+        if (s.wildEngaged.has_value()) {
+            Vector2 foe = s.wildEngaged->pos;
+            Vector2 d = { foe.x - me.x, foe.y - me.y };
+            float L2 = std::max(1.0f, hypotf(d.x, d.y)); d = { d.x / L2, d.y / L2 };
+            Vector2 n = { -d.y, d.x };
+            if (r.kind == 0) tgt = { foe.x - d.x * 10.0f + n.x * (sx < 0 ? -40.0f : 40.0f), foe.y - d.y * 10.0f + n.y * (sx < 0 ? -40.0f : 40.0f) };
+            else tgt = { me.x - d.x * 70.0f + n.x * sx * 1.4f, me.y - d.y * 70.0f + n.y * sx * 1.4f };
+        }
+        if (!L.init || Dist(L.pos, me) > 500.0f) { L.pos = tgt; L.init = true; continue; }
+        Vector2 dir = { tgt.x - L.pos.x, tgt.y - L.pos.y };
+        float dl = hypotf(dir.x, dir.y);
+        if (dl > 4.0f) {
+            float step = std::min(dl, 215.0f * dt);
+            L.pos.x += dir.x / dl * step; L.pos.y += dir.y / dl * step;
+        }
+        if (L.atkT >= 0.0f && (L.atkT += dt) > 0.6f) L.atkT = -1.0f;
+        if (L.castT >= 0.0f && (L.castT += dt) > 0.7f) L.castT = -1.0f;
+    }
+}
+// Their share of the fight this frame: damage to the engaged foe (returned),
+// and the healer mends you when you're hurt.
+static float GuildRecruitsFight(GameState& s, const GameState::ActiveMonster& am, float dt) {
+    if (!GuildFounded(s)) return 0.0f;
+    float total = 0.0f;
+    bool war = GuildWarFoe(s, am);
+    for (size_t i = 0; i < s.guildRecruits.size() && i < 3; i++) {
+        const GuildRecruit& r = s.guildRecruits[i];
+        GuildRecruitLive& L = s.guildLive[i];
+        if (!r.along || !L.init) continue;
+        L.atkCd -= dt; L.healCd -= dt;
+        if (r.kind == 2 && L.healCd <= 0.0f && s.hp < s.maxHp * 0.75f) {
+            int heal = (int)std::round(4.0f + r.level * 0.3f);
+            s.hp = std::min(s.maxHp, s.hp + heal);
+            L.healCd = 4.0f; L.castT = 0.0f;
+            SpawnFloatText(s, 0, s.wildernessPlayerPos, "+" + std::to_string(heal), Color{ 110, 230, 120, 255 });
+            continue;
+        }
+        float reach = r.kind == 0 ? 75.0f : 260.0f;
+        if (L.atkCd > 0.0f || Dist(L.pos, am.pos) > reach) continue;
+        L.atkCd = r.kind == 0 ? 1.6f : (r.kind == 1 ? 2.0f : 2.6f);
+        if (r.kind == 2) L.castT = 0.0f; else L.atkT = 0.0f;
+        if (RandUnit() > 0.8f) { SpawnFloatText(s, 0, am.pos, "miss", Color{ 200, 200, 200, 255 }); continue; }
+        float base = r.kind == 0 ? 2.0f + r.level * 0.5f : (r.kind == 1 ? 1.5f + r.level * 0.45f : 1.0f + r.level * 0.3f);
+        float dmg = base * (0.8f + RandUnit() * 0.4f) * (war ? 1.25f : 1.0f);
+        total += dmg;
+        SpawnFloatText(s, 0, am.pos, std::to_string((int)std::round(dmg)), Color{ 120, 200, 255, 255 });
+    }
+    return total;
+}
+// A kill while your guild is at war with the victim's side counts toward the war.
+static void GuildWarCredit(GameState& s, const GameState::ActiveMonster& am, const std::string& name) {
+    if (!GuildFounded(s)) return;
+    for (auto& r : s.guildRecruits) // everyone who was there learns something
+        if (r.along) r.level = std::min(60.0f, r.level + 0.05f + 0.5f * (1.0f - r.level / 60.0f));
+    int w = -1;
+    if ((am.isRival || am.bladeIdx >= 0) && s.guildWarOn[kGuildWarMurderInc]) w = kGuildWarMurderInc;
+    else if (s.guildWarOn[kGuildWarOrcs] && name.rfind("Orc ", 0) == 0) w = kGuildWarOrcs;
+    if (w < 0) return;
+    s.guildWarKills[w]++;
+    const char* foe = w == 0 ? "Murder Inc." : "Grimtusk Hold";
+    if (s.guildWarKills[w] >= kGuildWarGoal) {
+        s.guildWarOn[w] = false; s.guildWarKills[w] = 0; s.guildWarWins[w]++;
+        s.guildRenown += 10; s.gold += 800;
+        s.rivalBanner = std::string("VICTORY over ") + foe + "!";
+        s.rivalBannerTimer = kRivalBannerTime * 1.5f;
+        s.logLine = std::string("Your guild has won the war against ") + foe + "! +800 gold, +10 renown.";
+        Journal(s, s.logLine);
+        PlaySfx(SfxId::Victory);
+    } else {
+        s.logLine = std::string("War: ") + std::to_string(s.guildWarKills[w]) + "/" + std::to_string(kGuildWarGoal) + " of " + foe + " slain.";
+    }
+}
+
 static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& am,
                                   const std::string& name, int baseGold, int baseLeather,
                                   bool clearEngagement) {
+    GuildWarCredit(s, am, name); // (2026-09-27) before anything resets `am`
     PlaySfx(SfxId::MonsterDie);
     // Capture identity BEFORE s.wildEngaged.reset() below - callers pass *s.wildEngaged
     // by reference, so `am` dangles the moment the optional resets (2026-09-25).
@@ -25956,11 +26146,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             if (raidWarnT >= 0.0f) {
                 raidWarnT -= dt;
                 if (raidWarnT <= 0.0f) { raidWarnT = -1.0f; if (quiet) OrcRaidStrike(s); }
-            } else if (quiet && !PlayerYoung(s) && raidCooldown <= 0.0f && df > kOrcFortRadius + 140.0f && df < 1300.0f) {
+            } else if (quiet && !PlayerYoung(s) && raidCooldown <= 0.0f && df > kOrcFortRadius + 140.0f &&
+                       df < (s.guildWarOn[kGuildWarOrcs] ? 2400.0f : 1300.0f)) { // at war: they range much further
                 raidCheckT -= dt;
                 if (raidCheckT <= 0.0f) {
                     raidCheckT = 45.0f;
-                    if (RandUnit() < 0.3f) {
+                    if (RandUnit() < (s.guildWarOn[kGuildWarOrcs] ? 0.55f : 0.3f)) {
                         raidWarnT = 8.0f;
                         raidCooldown = 240.0f + RandUnit() * 180.0f;
                         std::string dir;
@@ -26260,6 +26451,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             if (am.hp <= 0) { BeginWildMonsterDeath(s, am, mname, mgold, mleather); return; }
             else if (am.hp < hpBefore) WildPackAggro(s, am.spotIdx, am.pos); // the pet's damage pulls the pack in too (2026-09-25)
         }
+        // Guildmates' turn (2026-09-27).
+        if (float gd = GuildRecruitsFight(s, am, dtF); gd > 0.0f) {
+            am.hp -= gd; am.monsterHurtT = 0.0f;
+            if (am.hp <= 0) { BeginWildMonsterDeath(s, am, spot.name, spot.baseGold, spot.baseLeather); return; }
+            WildPackAggro(s, am.spotIdx, am.pos);
+        }
     };
     // The tactical opponent's own AI (2026-09-22, "AI players" plan Part 3) - confirmed
     // via research to be the first monster in the whole game with any real decision-
@@ -26446,6 +26643,21 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                     BladeFightEnded(s, am.bladeIdx, am);
                     BeginWildMonsterDeath(s, am, mname, mgold, mleather);
                 } else {
+                    bool wasMurdererTier = s.rivalHasBeatenPlayer;
+                    RivalFightEnded(s, am);
+                    BeginWildMonsterDeath(s, am, mname, mgold, mleather);
+                    if (wasMurdererTier) { GainFame(s, 10.0f); s.notoriety = std::max(0.0f, s.notoriety - 10.0f); }
+                }
+                return;
+            }
+        }
+        // Guildmates stand with you against Murder Inc. too (2026-09-27) - the point of a guild.
+        if (float gd = GuildRecruitsFight(s, am, dtF); gd > 0.0f) {
+            am.hp -= gd; am.monsterHurtT = 0.0f;
+            if (am.hp <= 0) {
+                std::string mname = spot.name; int mgold = spot.baseGold, mleather = spot.baseLeather;
+                if (am.bladeIdx >= 0) { BladeFightEnded(s, am.bladeIdx, am); BeginWildMonsterDeath(s, am, mname, mgold, mleather); }
+                else {
                     bool wasMurdererTier = s.rivalHasBeatenPlayer;
                     RivalFightEnded(s, am);
                     BeginWildMonsterDeath(s, am, mname, mgold, mleather);
@@ -26799,6 +27011,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (!moved) SteerTowardFlag(s, s.wildernessPlayerPos, s.playerFacing, GameDt(), kWildernessWorldSize, 0);
         if (ActivePet(s)) UpdateCompanionFollow(s, s.wildernessPlayerPos, s.playerFacing, GameDt(),
                                                 s.wildEngaged.has_value() ? &s.wildEngaged->pos : nullptr);
+        GuildRecruitsFollow(s, GameDt()); // your guildmates (2026-09-27)
     }
     UpdateLiveSpellFX(s, GameDt()); // combat anim timers, projectiles, debuffs, fiend
     for (auto& node : kWildernessGatherNodes)
@@ -29622,12 +29835,159 @@ static void UpdateTextInput(std::string& text, size_t maxLen) {
     if (IsKeyPressed(KEY_BACKSPACE) && !text.empty()) text.pop_back();
 }
 
+// ---- The Guildstone (2026-09-27) ----
+// Found a guild (house owners only), hire guildmates, pick the tabard color,
+// declare or end wars with Murder Inc. and Grimtusk Hold.
+static bool g_guildOpen = false;
+static std::string g_guildDraft;
+static std::string GuildTagFor(const std::string& name) {
+    std::string tag; bool start = true;
+    for (char ch : name) {
+        if (ch == ' ') { start = true; continue; }
+        if (start && isalpha((unsigned char)ch) && tag.size() < 3) tag += (char)toupper((unsigned char)ch);
+        start = false;
+    }
+    if (tag.size() < 2) { tag.clear(); for (char ch : name) if (isalpha((unsigned char)ch) && tag.size() < 3) tag += (char)toupper((unsigned char)ch); }
+    return tag.empty() ? std::string("GLD") : tag;
+}
+static void DrawGuildstone(GameState& s, int screenW, int screenH) {
+    Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
+    UODrawGump(G, kUoParchment);
+    Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 };
+    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_guildOpen = false; return; }
+    float x = G.x + 22, y = G.y + 18, w = G.width - 44;
+    if (s.guildName.empty()) {
+        UODrawTitle(G, "Guildstone", 15);
+        y += 16;
+        DrawUIText("Found a guild and you won't face the wilds alone:", (int)x, (int)y, 14, ink); y += 22;
+        DrawUIText("- hire up to three guildmates who fight at your side", (int)x, (int)y, 13, soft); y += 18;
+        DrawUIText("- wear your guild's colors and tag", (int)x, (int)y, 13, soft); y += 18;
+        DrawUIText("- declare war on Murder Inc. or the orcs of Grimtusk Hold", (int)x, (int)y, 13, soft); y += 30;
+        if (s.housePlotIdx < 0) {
+            DrawUIText("A guild needs a home: buy a house plot in the wilderness first.", (int)x, (int)y, 13, Color{ 150, 40, 30, 255 });
+            return;
+        }
+        UpdateTextInput(g_guildDraft, 24);
+        Rectangle box = { x, y, w, 32 };
+        DrawRectangleRec(box, Fade(WHITE, 0.6f));
+        DrawRectangleLinesEx(box, 1.0f, kUoBronze);
+        TapToEditText(box, "Name your guild", g_guildDraft, 24);
+        DrawUIText(g_guildDraft.empty() ? "Tap to name your guild" : g_guildDraft.c_str(), (int)x + 8, (int)y + 8, 15,
+                   g_guildDraft.empty() ? Fade(ink, 0.5f) : ink);
+        y += 42;
+        if (!g_guildDraft.empty()) { DrawUIText(("Tag: [" + GuildTagFor(g_guildDraft) + "]").c_str(), (int)x, (int)y, 13, soft); }
+        y += 24;
+        bool ok = !g_guildDraft.empty() && s.gold >= kGuildFoundCost;
+        if (UOButton({ x, y, 240, 36 }, TextFormat("Found the guild (%dg)", kGuildFoundCost), ok)) {
+            s.gold -= kGuildFoundCost;
+            s.guildName = g_guildDraft; s.guildTag = GuildTagFor(g_guildDraft);
+            s.logLine = "You set the guildstone: " + s.guildName + " [" + s.guildTag + "] is founded!";
+            Journal(s, s.logLine);
+            PlaySfx(SfxId::Quest);
+        }
+        return;
+    }
+    UODrawTitle(G, s.guildName + "  [" + s.guildTag + "]", 15);
+    y += 8;
+    DrawUIText(TextFormat("Renown %d    Wars won: %d", s.guildRenown, s.guildWarWins[0] + s.guildWarWins[1]), (int)x, (int)y, 13, soft);
+    y += 24;
+    // tabard color
+    DrawUIText("Guild colors", (int)x, (int)y, 14, ink); y += 20;
+    for (int k = 0; k < 21; k++) {
+        Rectangle r = { x + (k % 11) * 44.0f, y + (k / 11) * 34.0f, 38, 28 };
+        DrawRectangleRounded(r, 0.25f, 6, kDyeHues[k].c);
+        bool sel = s.guildHue == k;
+        DrawRectangleRoundedLines(r, 0.25f, 6, sel ? Color{ 255, 214, 110, 255 } : Fade(BLACK, 0.35f));
+        if (sel) DrawRectangleRoundedLines({ r.x - 2, r.y - 2, r.width + 4, r.height + 4 }, 0.25f, 6, Color{ 255, 214, 110, 255 });
+        if (UOTapped(r)) { s.guildHue = k; PlaySfx(SfxId::Click); }
+    }
+    y += 76;
+    // members
+    DrawUIText(TextFormat("Guildmates  %d/%d", (int)s.guildRecruits.size(), kGuildMaxRecruits), (int)x, (int)y, 14, ink); y += 22;
+    int dismiss = -1;
+    for (size_t i = 0; i < s.guildRecruits.size(); i++) {
+        GuildRecruit& r = s.guildRecruits[i];
+        Rectangle row = { x, y, w, 44 };
+        DrawRectangleRec(row, Fade(i % 2 ? WHITE : BLACK, 0.06f));
+        DrawRectangleRec({ x + 4, y + 8, 10, 28 }, kDyeHues[std::clamp(s.guildHue, 0, kDyeHueCount - 1)].c);
+        DrawUIText(TextFormat("%s the %s", r.name.c_str(), GuildRecruitKindName(r.kind)), (int)x + 22, (int)y + 5, 14, ink);
+        DrawUIText(TextFormat("Level %.1f  -  %s", r.level, r.along ? "travelling with you" : "minding the house"), (int)x + 22, (int)y + 24, 11, soft);
+        if (UOButton({ x + w - 186, y + 7, 100, 30 }, r.along ? "Stay home" : "Come along")) { r.along = !r.along; s.guildLive[i].init = false; }
+        if (UOButton({ x + w - 80, y + 7, 78, 30 }, "Dismiss")) dismiss = (int)i;
+        y += 48;
+    }
+    if (dismiss >= 0) {
+        s.logLine = s.guildRecruits[(size_t)dismiss].name + " leaves the guild.";
+        s.guildRecruits.erase(s.guildRecruits.begin() + dismiss);
+        for (auto& L : s.guildLive) L.init = false;
+    }
+    if ((int)s.guildRecruits.size() < kGuildMaxRecruits) {
+        static const char* kNames[] = { "Aldric", "Brenna", "Corwin", "Dara", "Edric", "Fenna", "Garrick", "Hale",
+                                        "Isolde", "Jorund", "Kestrel", "Lyra", "Maren", "Osric", "Rowan", "Tamsin" };
+        for (int k = 0; k < 3; k++) {
+            int cost = GuildRecruitCost(k);
+            if (UOButton({ x + k * (w / 3), y + 4, w / 3 - 8, 34 }, TextFormat("Hire %s %dg", GuildRecruitKindName(k), cost), s.gold >= cost)) {
+                s.gold -= cost;
+                std::string nm;
+                for (int tries = 0; tries < 20; tries++) {
+                    nm = kNames[std::rand() % 16];
+                    bool dup = false; for (auto& r : s.guildRecruits) if (r.name == nm) dup = true;
+                    if (!dup) break;
+                }
+                s.guildRecruits.push_back({ nm, k, 10.0f, true });
+                s.logLine = nm + " the " + GuildRecruitKindName(k) + " joins " + s.guildName + "!";
+                PlaySfx(SfxId::Buy);
+            }
+        }
+        y += 44;
+        DrawUIText("Warriors hold the line, archers shoot from range, healers mend you.", (int)x, (int)y, 11, soft);
+        y += 18;
+    }
+    y += 10;
+    // wars
+    DrawUIText("Wars", (int)x, (int)y, 14, ink); y += 22;
+    const char* foes[2] = { "Murder Inc.", "Grimtusk Hold (orcs)" };
+    const char* what[2] = { "Their killers hunt you far more often.", "War parties range much further from the Hold." };
+    for (int k = 0; k < 2; k++) {
+        Rectangle row = { x, y, w, 58 };
+        DrawRectangleRec(row, s.guildWarOn[k] ? Fade(Color{ 170, 30, 30, 255 }, 0.12f) : Fade(BLACK, 0.05f));
+        DrawUIText(foes[k], (int)x + 8, (int)y + 5, 15, s.guildWarOn[k] ? Color{ 150, 30, 30, 255 } : ink);
+        if (s.guildWarOn[k]) {
+            DrawUIText(TextFormat("AT WAR - %d/%d slain", s.guildWarKills[k], kGuildWarGoal), (int)x + 8, (int)y + 24, 12, Color{ 150, 30, 30, 255 });
+            float fr = (float)s.guildWarKills[k] / kGuildWarGoal;
+            DrawRectangleRec({ x + 8, y + 42, 200, 8 }, Fade(BLACK, 0.2f));
+            DrawRectangleRec({ x + 8, y + 42, 200 * fr, 8 }, Color{ 180, 40, 30, 255 });
+            if (UOButton({ x + w - 150, y + 12, 146, 34 }, "Sue for peace (200g)", s.gold >= 200)) {
+                s.gold -= 200; s.guildWarOn[k] = false; s.guildWarKills[k] = 0;
+                s.logLine = std::string("Your guild makes peace with ") + foes[k] + ".";
+            }
+        } else {
+            DrawUIText(what[k], (int)x + 8, (int)y + 24, 11, soft);
+            DrawUIText(TextFormat("Slay %d of them to win: 800 gold and renown.", kGuildWarGoal), (int)x + 8, (int)y + 39, 11, soft);
+            bool needMates = s.guildRecruits.empty();
+            if (UOButton({ x + w - 150, y + 12, 146, 34 }, "Declare war", !needMates)) {
+                s.guildWarOn[k] = true; s.guildWarKills[k] = 0;
+                s.rivalBanner = std::string(s.guildName) + " declares war on " + foes[k] + "!";
+                s.rivalBannerTimer = kRivalBannerTime;
+                s.logLine = s.rivalBanner;
+                Journal(s, s.logLine);
+                PlaySfx(SfxId::Hunt);
+            }
+            if (needMates) DrawUIText("hire a guildmate first", (int)(x + w - 146), (int)y + 46, 10, soft);
+        }
+        y += 64;
+    }
+}
+
 static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
+    if (g_guildOpen) { DrawGuildstone(s, screenW, screenH); return; }
     UpdateTextInput(s.houseName, 24);
     const HouseTier& tier = kHouseTiers[s.houseTierIdx];
 
     int y = 116;
     DrawUIText(("Your House - " + tier.name).c_str(), 20, y, 18, kColorHeading);
+    if (Button({ (float)screenW - 150, (float)y - 4, 130, 28 }, s.guildName.empty() ? "Guildstone" : ("Guild [" + s.guildTag + "]").c_str(), true))
+        g_guildOpen = true; // (2026-09-27)
     y += 24;
 
     // Name entry - same always-live pattern as the Character screen's name field.
