@@ -14966,6 +14966,32 @@ static float WildFieldAt(const WildField& F, float x, float z) {
 // tap/click the map itself to close it. Every marker comes from the same tables
 // the world uses (kTownGates, kWildernessDungeonEntrances, kHousePlots,
 // kWildernessMonsterSpots, kKingsRoadWaypoints) - no duplicated coordinates.
+// ---- Directions (2026-09-27): compass letters on the maps, a compass that turns with
+// the 3D camera, and a pointer toward the world boss while it stirs or is awake. ----
+static const char* CompassWord(Vector2 d) { // world vector -> N, NE, ... (north is -z)
+    static const char* w[8] = { "E", "SE", "S", "SW", "W", "NW", "N", "NE" };
+    float a = atan2f(d.y, d.x); // 0 = east, +pi/2 = south
+    int i = ((int)floorf((a + 3.14159265f / 8.0f) / (3.14159265f / 4.0f)) % 8 + 8) % 8;
+    return w[i];
+}
+static void MapCompassLetters(Rectangle r, int fs) { // north-up maps
+    const char* L[4] = { "N", "E", "S", "W" };
+    Vector2 P[4] = { { r.x + r.width / 2, r.y + 2 }, { r.x + r.width - 2, r.y + r.height / 2 },
+                     { r.x + r.width / 2, r.y + r.height - 2 }, { r.x + 2, r.y + r.height / 2 } };
+    for (int i = 0; i < 4; i++) {
+        int w = MeasureUIText(L[i], fs);
+        float x = i == 1 ? P[i].x - w - 4 : (i == 3 ? P[i].x + 3 : P[i].x - w / 2.0f);
+        float y = i == 0 ? P[i].y + 1 : (i == 2 ? P[i].y - fs - 2 : P[i].y - fs / 2.0f);
+        DrawRectangleRounded({ x - 3, y - 1, (float)w + 6, (float)fs + 3 }, 0.4f, 4, Fade(Color{ 20, 14, 10, 255 }, 0.7f));
+        DrawUIText(L[i], (int)x, (int)y, fs, i == 0 ? Color{ 255, 120, 100, 255 } : Color{ 246, 236, 212, 255 });
+    }
+}
+static void DrawDirArrow(Vector2 c, float ang, float len, Color col) { // ang: screen radians, 0 = right, +y down
+    Vector2 d = { cosf(ang), sinf(ang) }, n = { -d.y, d.x };
+    Vector2 tip = { c.x + d.x * len, c.y + d.y * len }, b = { c.x - d.x * len * 0.45f, c.y - d.y * len * 0.45f };
+    DrawTriangle(tip, { b.x - n.x * len * 0.55f, b.y - n.y * len * 0.55f }, { b.x + n.x * len * 0.55f, b.y + n.y * len * 0.55f }, col);
+    DrawTriangle(tip, { b.x + n.x * len * 0.55f, b.y + n.y * len * 0.55f }, { b.x - n.x * len * 0.55f, b.y - n.y * len * 0.55f }, col);
+}
 static Rectangle MinimapRect() {
     // 2026-09-26: below the LOG / 2D buttons (it used to overlap them).
     return { kViewport.x + kViewport.width - 146.0f, 158.0f, 136.0f, 136.0f };
@@ -15062,6 +15088,7 @@ static void DrawWorldMap(GameState& s) {
     DrawUIText("Wilderness", (int)panel.x + 12, (int)panel.y + 8, 18, kColorHeading);
     DrawUIText("tap anywhere to close", (int)(panel.x + panel.width - 150), (int)panel.y + 12, 12, DARKGRAY);
     DrawTexturePro(g_wildMapTex, { 0, 0, (float)g_wildMapTex.width, (float)g_wildMapTex.height }, mm, { 0, 0 }, 0.0f, WHITE);
+    MapCompassLetters(mm, 14); // (2026-09-27)
     const float sc = mm.width / kWildernessWorldSize;
     auto toMap = [&](Vector2 w) -> Vector2 { return { mm.x + w.x * sc, mm.y + w.y * sc }; };
     auto label = [&](const char* t, Vector2 p, int size, Color c) {
@@ -15213,7 +15240,18 @@ static void DrawMinimap(GameState& s) {
         }
     }
     MapIconPlayer(toMap(s.wildernessPlayerPos), s.playerFacing, 5.0f);
+    if (s.wyrmRespawnT <= 180.0f) { // (2026-09-27) the Caldera: pointer on the edge when it's off this map
+        Vector2 f = toMap(kWyrmLair);
+        if (!inside(f, 4)) {
+            Vector2 ctr = { mm.x + mm.width / 2, mm.y + mm.height / 2 };
+            float a = atan2f(f.y - ctr.y, f.x - ctr.x);
+            float r = mm.width / 2 - 12;
+            float pulse = 0.6f + 0.4f * sinf((float)GetTime() * 6.0f);
+            DrawDirArrow({ ctr.x + cosf(a) * r, ctr.y + sinf(a) * r }, a, 9.0f, Fade(Color{ 255, 120, 40, 255 }, pulse));
+        }
+    }
     EndScissorMode();
+    MapCompassLetters(mm, 11);
     DrawRectangleLinesEx(mm, 1.5f, Fade(Color{ 250, 236, 170, 255 }, 0.85f));
     const char* rn = RegionName(RegionAt(s.wildernessPlayerPos));
     int w = MeasureUIText(rn, 11);
@@ -18802,7 +18840,7 @@ static void WyrmTick(GameState& s, float dt) {
         if (before > 180.0f && s.wyrmRespawnT <= 180.0f) {
             s.rivalBanner = "The ground shakes in the south-east...";
             s.rivalBannerTimer = kRivalBannerTime;
-            Journal(s, "The ground shakes. Something vast stirs in the Cinder Caldera, far south-east (about 3 minutes).");
+            Journal(s, "The ground shakes. Something vast stirs in the Cinder Caldera, far south-east - follow the orange arrow (3 minutes).");
         }
         if (s.wyrmRespawnT <= 0.0f) {
             s.wyrmRespawnT = 0.0f; s.wyrmHp = -1.0f; g_wyrmHeadsSeen = 3; g_wyrmCd[0] = 6.0f; g_wyrmCd[1] = 9.0f; g_wyrmCd[2] = 12.0f;
@@ -33079,6 +33117,58 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     (void)screenW;
 }
 
+// ---- Directions HUD (2026-09-27) ----
+// Screen angle of a world direction: turned with the 3D camera in the wilds, north-up elsewhere.
+static float ScreenAngleOf(Vector2 d) {
+    if (g_hudCamZone == 0) {
+        Vector2 f = { g_hudCam.fwd.x, g_hudCam.fwd.z }, r = { g_hudCam.right.x, g_hudCam.right.z };
+        float fl = std::max(0.001f, hypotf(f.x, f.y)), rl = std::max(0.001f, hypotf(r.x, r.y));
+        float sx = (d.x * r.x + d.y * r.y) / rl, sy = -(d.x * f.x + d.y * f.y) / fl;
+        return atan2f(sy, sx);
+    }
+    return atan2f(d.y, d.x);
+}
+static void DrawDirectionsHud(GameState& s, int screenW) {
+    bool wild = s.screen == Screen::Wilderness;
+    // a compass under the minimap that turns with the camera (the minimap itself stays north-up)
+    if (wild && g_hudCamZone == 0 && s.minimapOpen && !s.worldMapOpen) {
+        Rectangle mm = MinimapRect();
+        Vector2 c = { mm.x - 24.0f, mm.y + 24.0f };
+        DrawCircleV(c, 21.0f, Fade(Color{ 20, 14, 10, 255 }, 0.75f));
+        DrawCircleLines((int)c.x, (int)c.y, 21.0f, Color{ 176, 132, 72, 255 });
+        const char* L[4] = { "N", "E", "S", "W" };
+        Vector2 D[4] = { { 0, -1 }, { 1, 0 }, { 0, 1 }, { -1, 0 } };
+        for (int i = 0; i < 4; i++) {
+            float a = ScreenAngleOf(D[i]);
+            Vector2 p = { c.x + cosf(a) * 13.0f, c.y + sinf(a) * 13.0f };
+            int w = MeasureUIText(L[i], i == 0 ? 13 : 11);
+            DrawUIText(L[i], (int)(p.x - w / 2), (int)(p.y - (i == 0 ? 7 : 6)), i == 0 ? 13 : 11,
+                       i == 0 ? Color{ 255, 120, 100, 255 } : Color{ 230, 216, 190, 255 });
+        }
+    }
+    // the world boss: a countdown while it stirs, a pointer while it's awake
+    bool stirring = s.wyrmRespawnT > 0.0f && s.wyrmRespawnT <= 180.0f;
+    bool awake = s.wyrmRespawnT <= 0.0f;
+    if (!(stirring || awake) || s.playerIsGhost || s.worldMapOpen) return;
+    if (!IsPlayScreen(s.screen) && !IsMenuScreen(s.screen)) return;
+    Vector2 d = { kWyrmLair.x - s.wildernessPlayerPos.x, kWyrmLair.y - s.wildernessPlayerPos.y };
+    float dist = hypotf(d.x, d.y);
+    if (awake && wild && dist < 700.0f) return; // its own boss frame takes over up close
+    if (awake && WyrmActive(s)) return;
+    int t = (int)ceilf(s.wyrmRespawnT);
+    std::string line = stirring ? TextFormat("Vyrathax wakes in %d:%02d", t / 60, t % 60) : std::string("Vyrathax is awake!");
+    std::string sub = wild ? TextFormat("Cinder Caldera - %s, %d paces", CompassWord(d), (int)(dist / 10.0f) * 10)
+                           : std::string("Cinder Caldera - far south-east of Emberhold");
+    int w = std::max(MeasureUIText(line.c_str(), 15), MeasureUIText(sub.c_str(), 12)) + (wild ? 52 : 20);
+    Rectangle r = { (float)screenW - 10 - w, 318, (float)w, 44 };
+    float pulse = 0.55f + 0.45f * sinf((float)GetTime() * (stirring && t < 30 ? 9.0f : 4.0f));
+    DrawRectangleRounded(r, 0.3f, 8, Fade(Color{ 30, 14, 8, 255 }, 0.88f));
+    DrawRectangleRoundedLinesEx(r, 0.3f, 8, 2.0f, Fade(Color{ 255, 120, 40, 255 }, 0.5f + 0.5f * pulse));
+    DrawUIText(line.c_str(), (int)r.x + 10, (int)r.y + 5, 15, Color{ 255, 190, 120, 255 });
+    DrawUIText(sub.c_str(), (int)r.x + 10, (int)r.y + 25, 12, Color{ 230, 210, 180, 255 });
+    if (wild) DrawDirArrow({ r.x + r.width - 22, r.y + r.height / 2 }, ScreenAngleOf(d), 12.0f, Fade(Color{ 255, 140, 50, 255 }, 0.7f + 0.3f * pulse));
+}
+
 // ---- Toasts (2026-09-27) ----
 struct Toast { std::string text; float t = 0.0f, dur = 4.5f; Color col{}; };
 static std::vector<Toast> g_toasts;
@@ -33569,6 +33659,7 @@ static void UpdateDrawFrame() {
         (void)guideBlocked;
         if (state.guideOpen && guideHome) DrawGuideOverlay(state);
         if (!guideBlocked || state.starterStep == kStFight || state.starterStep == kStLoot) UpdateDrawStarter(state, screenW, screenH);
+        DrawDirectionsHud(state, screenW); // compass + world-boss timer (2026-09-27)
         g_hudCamZone = -1;
         // UO-style travel (2026-09-25): arriving in a town marks it as a recall
         // destination. selectedTown only changes on real arrivals (gates, tabs,
