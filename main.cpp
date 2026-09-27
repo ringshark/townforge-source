@@ -10124,6 +10124,7 @@ static const T3CQuadSpec kT3CQuadSpecs[11] = {
 
 struct T3CQuadParts {
     Model torso, head, leg, tail, wingL, wingR, merged;
+    Model headAcc{}, legAcc{};           // untinted accents: eyes, nose, fangs, horns, beak, claws (2026-09-27)
     Model segBody;                       // serpent: one body segment mesh
     int segCount = 0; float segSpacing = 0.0f;
     Vector3 neckP, legFLP, legFRP, legBLP, legBRP, tailP, wingLP, wingRP;
@@ -10170,89 +10171,224 @@ static T3CQuadParts T3CBuildQuad(const T3CQuadSpec& s) {
     P.hover = s.hover;
     P.alwaysFlap = s.alwaysFlap;
 
+    // Detail pass 2 (2026-09-27, "improve the placeholder animals"): real body
+    // masses (chest, haunch, lighter belly, neck), a muzzle with jaw, nose and
+    // eyes, muscled legs with paws and claws, curved tails, species features,
+    // and bat-membrane or feathered wings. Accents that must keep their own
+    // color (eyes, fangs, horns, claws, beak) go in *Acc meshes drawn untinted.
+    const std::string key = s.key;
+    const bool isBear = key == "bulky", isBison = key == "bulkyHorned", isCat = key.rfind("feline", 0) == 0;
+    const bool isDragon = key == "winged", isGriffin = key == "wingedBeak", isWyvern = key == "wyvern", isBat = key == "bat";
+    const bool scaly = isDragon || isWyvern;
+    const Color base = { 232, 228, 222, 255 }, belly = { 255, 252, 244, 255 }, shade = { 196, 190, 182, 255 };
+    const Color eye = { 16, 14, 14, 255 }, ivory = { 236, 226, 196, 255 }, nose = { 44, 36, 36, 255 };
+    const Color claw = { 46, 40, 38, 255 }, gold = { 232, 178, 60, 255 };
+
     float hipY = s.legLen + 1.0f;
     float torsoY = hipY + s.bodyH * 0.30f;
     float fx = s.bodyLen * 0.30f;
     float lz = s.bodyW * 0.42f;
+    const float L = s.bodyLen, H = s.bodyH, W = s.bodyW, R = s.headR;
 
-    { // Torso - baked at rest.
-        T3CMeshBuilder b;
-        T3CSphere(b, 0.0f, torsoY, 0.0f, s.bodyLen * 0.5f, s.bodyH * 0.5f, s.bodyW * 0.5f, 7, 10, WHITE);
-        P.torso = T3CFinish(b);
-    }
-    // Head group - pivot at the neck base so yaw/pitch read as head turns.
-    float neckX = s.bodyLen * 0.5f + 1.0f;
+    // Head pivot at the neck base so yaw/pitch read as head turns.
+    float neckX = L * 0.5f + 1.0f;
     float neckY = torsoY + s.neckUp;
     P.neckP = { neckX, neckY, 0.0f };
-    {
-        T3CMeshBuilder b;
+
+    { // Torso - baked at rest.
+        T3CMeshBuilder b, acc;
+        float bodyH = isCat ? H * 0.42f : H * 0.5f;
+        T3CSphere(b, 0.0f, torsoY, 0.0f, L * 0.46f, bodyH, W * 0.5f, 7, 10, base);
+        T3CSphere(b, 0.0f, torsoY - H * 0.12f, 0.0f, L * 0.40f, bodyH * 0.8f, W * 0.44f, 6, 10, belly);           // belly
+        float chestS = isBear ? 1.15f : 1.0f;
+        T3CSphere(b, L * 0.28f, torsoY + H * 0.05f, 0.0f, L * 0.24f, H * 0.55f * chestS, W * 0.5f * chestS, 6, 10, base); // chest
+        T3CSphere(b, -L * 0.28f, torsoY + H * 0.02f, 0.0f, L * 0.22f, H * 0.5f, W * 0.48f, 6, 10, base);          // haunch
+        if (isBear || isBison) T3CSphere(b, L * 0.16f, torsoY + H * 0.40f, 0.0f, L * 0.22f, H * 0.32f, W * 0.36f, 6, 8, shade); // hump
+        if (isGriffin) T3CSphere(b, L * 0.34f, torsoY + H * 0.1f, 0.0f, L * 0.2f, H * 0.56f, W * 0.52f, 6, 8, belly);   // feathered ruff
+        { // neck: a short chain of spheres from the chest up to the head pivot
+            Vector3 a = { L * 0.36f, torsoY + H * 0.2f, 0.0f }, c = { neckX + 3.0f, neckY, 0.0f };
+            for (int k = 0; k <= 3; k++) {
+                float t = k / 3.0f;
+                float rr = R * (0.85f - 0.2f * t) * (isBear || isBison ? 1.15f : 1.0f);
+                T3CSphere(b, a.x + (c.x - a.x) * t, a.y + (c.y - a.y) * t, 0.0f, rr, rr, rr * 0.9f, 5, 8, isGriffin ? belly : base);
+            }
+        }
+        if (scaly) for (int k = 0; k < 7; k++) { // back spines
+            float x = L * 0.34f - k * L * 0.13f;
+            float bs[3] = { x, torsoY + H * 0.44f, 0.0f }, dir[3] = { -0.35f, 1.0f, 0.0f };
+            T3CConeDir(b, bs, dir, H * 0.34f * (1.0f - k * 0.09f), H * 0.1f, 5, shade);
+        }
+        P.torso = T3CFinish(b);
+        (void)acc;
+    }
+    { // Head.
+        T3CMeshBuilder b, acc;
         float hx = 5.0f;
-        T3CSphere(b, hx, 1.5f, 0.0f, s.headR, s.headR, s.headR, 6, 8, WHITE);
-        if (s.snoutLen > 0.0f)
-            T3CBox(b, hx + s.headR * 0.65f + s.snoutLen * 0.5f, 0.0f, 0.0f,
-                   s.snoutLen, s.headR * 0.72f, s.headR * 0.72f, WHITE);
-        if (s.beakLen > 0.0f) {
-            float base[3] = { hx + s.headR * 0.55f, 0.5f, 0.0f };
-            float dir[3] = { 1.0f, -0.12f, 0.0f };
-            T3CConeDir(b, base, dir, s.beakLen, s.headR * 0.5f, 6, WHITE);
+        T3CSphere(b, hx, 1.5f, 0.0f, R * 1.05f, R * 0.95f, R * 0.9f, 6, 8, base); // cranium
+        float sn = s.snoutLen;
+        if (sn > 0.0f) {
+            float flat = scaly ? 0.7f : 1.0f, wide = isBear ? 1.15f : 1.0f;
+            for (int k = 0; k < 3; k++) { // tapering muzzle
+                float x = hx + R * 0.6f + k * sn * 0.4f, rr = R * (0.62f - 0.1f * k);
+                T3CSphere(b, x, -R * 0.15f, 0.0f, rr * 0.9f, rr * 0.85f * flat, rr * wide, 5, 8, base);
+            }
+            T3CSphere(b, hx + R * 0.7f + sn * 0.35f, -R * 0.48f, 0.0f, sn * 0.45f + R * 0.3f, R * 0.26f, R * 0.44f, 5, 8, shade); // jaw
+            T3CSphere(acc, hx + R * 0.62f + sn * 0.88f, -R * 0.08f * flat, 0.0f, R * 0.17f, R * 0.14f, R * 0.2f, 4, 6, nose);   // nose
         }
-        if (s.earH > 0.0f) {
+        for (int e = -1; e <= 1; e += 2) // eyes
+            T3CSphere(acc, hx + R * 0.66f, R * 0.3f, (float)e * R * 0.46f, R * 0.14f, R * 0.14f, R * 0.12f, 4, 6, isGriffin || scaly ? Color{ 230, 170, 40, 255 } : eye);
+        if (isBear) {
+            for (int e = -1; e <= 1; e += 2) T3CSphere(b, hx - 1.0f, R * 0.85f, (float)e * R * 0.62f, R * 0.3f, R * 0.3f, R * 0.18f, 4, 6, shade);
+        } else if (s.earH > 0.0f && !scaly) {
             for (int e = -1; e <= 1; e += 2) {
-                float base[3] = { hx - 1.0f, s.headR * 0.75f, (float)e * s.headR * 0.5f };
+                float bs[3] = { hx - 1.0f, R * 0.75f, (float)e * R * 0.5f };
                 float dir[3] = { -0.15f, 1.0f, (float)e * 0.25f };
-                T3CConeDir(b, base, dir, s.earH, s.headR * 0.32f, 5, WHITE);
+                T3CConeDir(b, bs, dir, s.earH, R * 0.32f, 5, base);
             }
         }
-        if (s.saberTeeth) {
+        if (s.beakLen > 0.0f) { // griffin: a hooked golden beak and a swept-back crest
+            float bs[3] = { hx + R * 0.7f, 0.2f, 0.0f }, dir[3] = { 1.0f, -0.25f, 0.0f };
+            T3CConeDir(acc, bs, dir, s.beakLen, R * 0.46f, 7, gold);
+            float tip[3] = { hx + R * 0.7f + s.beakLen * 0.85f, -s.beakLen * 0.2f, 0.0f }, down[3] = { 0.25f, -1.0f, 0.0f };
+            T3CConeDir(acc, tip, down, R * 0.4f, R * 0.16f, 5, gold);
+            for (int k = -1; k <= 1; k++) {
+                float cb[3] = { hx - R * 0.3f, R * 0.7f, (float)k * R * 0.3f }, cd[3] = { -1.0f, 0.55f, (float)k * 0.25f };
+                T3CConeDir(b, cb, cd, R * 1.2f, R * 0.22f, 5, belly);
+            }
+        }
+        if (s.saberTeeth)
             for (int e = -1; e <= 1; e += 2) {
-                float sx = hx + s.headR * 0.65f + s.snoutLen * 0.55f;
-                float base[3] = { sx, -s.headR * 0.28f, (float)e * s.headR * 0.3f };
-                float dir[3] = { 0.1f, -1.0f, 0.0f };
-                T3CConeDir(b, base, dir, s.headR * 0.7f, s.headR * 0.14f, 5, WHITE);
+                float bs[3] = { hx + R * 0.7f + s.snoutLen * 0.55f, -R * 0.35f, (float)e * R * 0.3f }, dir[3] = { 0.12f, -1.0f, 0.0f };
+                T3CConeDir(acc, bs, dir, R * 0.95f, R * 0.15f, 5, ivory);
             }
-        }
         if (s.horns) {
             for (int e = -1; e <= 1; e += 2) {
-                float base[3] = { hx - 2.0f, s.headR * 0.7f, (float)e * s.headR * 0.55f };
-                float dir[3] = { -0.35f, 0.75f, (float)e * 0.55f };
-                T3CConeDir(b, base, dir, s.headR * 1.5f, s.headR * 0.22f, 5, WHITE);
+                if (isBison) { // out to the sides, then up
+                    float a0[3] = { hx - 1.0f, R * 0.55f, (float)e * R * 0.7f }, d0[3] = { 0.0f, 0.15f, (float)e };
+                    T3CConeDir(acc, a0, d0, R * 0.8f, R * 0.24f, 6, ivory);
+                    float a1[3] = { hx - 1.0f, R * 0.66f, (float)e * R * 1.4f }, d1[3] = { 0.1f, 1.0f, (float)e * 0.2f };
+                    T3CConeDir(acc, a1, d1, R * 0.6f, R * 0.16f, 6, ivory);
+                } else { // swept back and curving
+                    float a0[3] = { hx - 2.0f, R * 0.7f, (float)e * R * 0.5f }, d0[3] = { -0.5f, 0.75f, (float)e * 0.35f };
+                    T3CConeDir(acc, a0, d0, R * 1.0f, R * 0.24f, 6, ivory);
+                    float a1[3] = { hx - 2.0f - R * 0.45f, R * 0.7f + R * 0.65f, (float)e * R * 0.72f }, d1[3] = { -1.0f, 0.1f, (float)e * 0.15f };
+                    T3CConeDir(acc, a1, d1, R * 0.9f, R * 0.14f, 6, ivory);
+                }
             }
         }
+        if (scaly) for (int e = -1; e <= 1; e += 2) // brow ridges
+            T3CSphere(b, hx + R * 0.45f, R * 0.55f, (float)e * R * 0.42f, R * 0.35f, R * 0.14f, R * 0.18f, 4, 6, shade);
         if (s.mane)
-            T3CBox(b, -2.0f, s.headR * 0.9f, 0.0f, s.headR * 1.6f, s.headR * 0.7f, s.headR * 0.35f, WHITE);
+            T3CBox(b, -2.0f, R * 0.9f, 0.0f, R * 1.6f, R * 0.7f, R * 0.35f, shade);
         P.head = T3CFinish(b);
+        if (!acc.pos.empty()) P.headAcc = T3CFinish(acc);
     }
     { // Leg - one mesh shared by all four legs (pivot at the hip, extends -Y).
-        T3CMeshBuilder b;
-        T3CCylinder(b, 0.0f, 0.0f, 0.0f, -s.legLen, s.legR, s.legR * 0.7f, 6, WHITE);
-        T3CBox(b, 0.0f, -s.legLen + 1.5f, 0.0f, s.legR * 1.8f, 3.0f, s.legR * 1.8f, WHITE);
+        T3CMeshBuilder b, acc;
+        float lr = s.legR * (isBear ? 1.2f : 1.0f);
+        T3CSphere(b, 0.0f, -s.legLen * 0.14f, 0.0f, lr * 1.7f, s.legLen * 0.3f, lr * 1.5f, 5, 8, base); // thigh
+        T3CCylinder(b, 0.0f, -s.legLen * 0.25f, 0.0f, -s.legLen, lr, lr * 0.72f, 6, base);
+        if (isBison) T3CBox(acc, 0.0f, -s.legLen + 1.8f, 0.0f, lr * 1.7f, 3.6f, lr * 1.7f, claw); // hooves
+        else {
+            T3CSphere(b, lr * 0.6f, -s.legLen + lr * 0.75f, 0.0f, lr * 1.55f, lr * 0.8f, lr * 1.3f, 4, 8, shade); // paw
+            if (isBear || isCat || isGriffin || scaly)
+                for (int k = -1; k <= 1; k++) {
+                    float bs[3] = { lr * 1.8f, -s.legLen + lr * 0.5f, (float)k * lr * 0.6f }, dir[3] = { 1.0f, -0.45f, (float)k * 0.2f };
+                    T3CConeDir(acc, bs, dir, lr * 0.95f, lr * 0.26f, 4, claw);
+                }
+        }
         P.leg = T3CFinish(b);
+        if (!acc.pos.empty()) P.legAcc = T3CFinish(acc);
     }
     P.legFLP = { fx, hipY, lz }; P.legFRP = { fx, hipY, -lz };
     P.legBLP = { -fx, hipY, lz }; P.legBRP = { -fx, hipY, -lz };
-    // Tail - pivot at the rear; cone angled up-back.
-    P.tailP = { -s.bodyLen * 0.5f + 2.0f, torsoY + s.bodyH * 0.22f, 0.0f };
+    // Tail - pivot at the rear.
+    P.tailP = { -L * 0.5f + 2.0f, torsoY + H * 0.22f, 0.0f };
     {
-        T3CMeshBuilder b;
-        float base[3] = { 0.0f, 0.0f, 0.0f };
-        float dir[3] = { -0.82f, 0.57f, 0.0f };
-        T3CConeDir(b, base, dir, s.tailLen, s.tailR, 6, WHITE);
+        T3CMeshBuilder b, acc;
+        if (isBear) T3CSphere(b, -1.0f, 0.0f, 0.0f, s.tailR * 1.6f, s.tailR * 1.4f, s.tailR * 1.4f, 4, 6, base);
+        else if (isCat || isGriffin || isBison || scaly) {
+            const int n = scaly ? 14 : 12; // overlapping, so the tail reads as one smooth curve
+            float len = s.tailLen * (scaly ? 1.3f : 1.1f);
+            for (int k = 0; k < n; k++) {
+                float t = (float)k / (n - 1);
+                float x = -t * len;
+                float y = isCat ? sinf(t * 2.6f) * len * 0.28f - t * len * 0.05f
+                        : scaly ? -t * len * 0.35f + sinf(t * 3.14159f) * len * 0.1f
+                                : -t * len * 0.45f;
+                float rr = s.tailR * (1.15f - 0.75f * t) * (scaly ? 1.6f : 1.0f);
+                T3CSphere(b, x, y, 0.0f, rr * 1.7f, rr, rr, 4, 6, base);
+                if (scaly && k % 3 == 1) {
+                    float bs[3] = { x, y + rr * 0.8f, 0.0f }, dir[3] = { -0.4f, 1.0f, 0.0f };
+                    T3CConeDir(b, bs, dir, rr * 1.4f, rr * 0.45f, 4, shade);
+                }
+                if (k == n - 1) {
+                    if (isGriffin || isBison) T3CSphere(b, x - 2.0f, y - 1.0f, 0.0f, s.tailR * 2.2f, s.tailR * 2.6f, s.tailR * 2.0f, 4, 6, shade); // tuft
+                    if (scaly) { // arrowhead tip
+                        float bs[3] = { x, y, 0.0f }, dir[3] = { -1.0f, -0.2f, 0.0f };
+                        T3CConeDir(b, bs, dir, s.tailR * 4.0f, s.tailR * 2.2f, 4, shade);
+                    }
+                }
+            }
+        } else {
+            float bs[3] = { 0.0f, 0.0f, 0.0f }, dir[3] = { -0.82f, 0.57f, 0.0f };
+            T3CConeDir(b, bs, dir, s.tailLen, s.tailR, 6, base);
+        }
         P.tail = T3CFinish(b);
+        (void)acc;
     }
-    // Wings - pivot at the shoulder; two double-sided triangles each.
+    // Wings - pivot at the shoulder, double-sided.
     if (P.hasWings) {
-        float wx = s.bodyLen * 0.08f, wy = torsoY + s.bodyH * 0.38f, wz = s.bodyW * 0.32f;
+        float wx = L * 0.08f, wy = torsoY + H * 0.38f, wz = W * 0.32f;
         float span = s.wingSpan, chord = s.wingChord;
         P.wingLP = { wx, wy, wz }; P.wingRP = { wx, wy, -wz };
+        auto tri2 = [](T3CMeshBuilder& b, const float* a, const float* c, const float* d, Color col) {
+            T3CPushTri(b, a, c, d, col); T3CPushTri(b, a, d, c, col);
+        };
         for (int side = 0; side < 2; side++) {
             float sg = (side == 0) ? 1.0f : -1.0f; // 0 = +Z, 1 = -Z
             T3CMeshBuilder b;
-            float r0[3] = { chord * 0.35f, 0.0f, sg * 2.0f };
-            float r1[3] = { -chord * 0.45f, 0.0f, sg * 2.0f };
-            float mid[3] = { 0.0f, 2.0f, sg * span * 0.55f };
-            float tip[3] = { -chord * 0.55f, 4.0f, sg * span };
-            T3CPushTri(b, r0, r1, mid, WHITE); T3CPushTri(b, r0, mid, r1, WHITE);
-            T3CPushTri(b, r1, tip, mid, WHITE); T3CPushTri(b, r1, mid, tip, WHITE);
+            if (isGriffin) { // feathered: an arm panel, a covert layer, then five long primaries fanned out
+                float r0[3] = { chord * 0.35f, 0.0f, sg * 2.0f }, r1[3] = { -chord * 0.4f, 0.0f, sg * 2.0f };
+                float el[3] = { chord * 0.15f, 3.0f, sg * span * 0.5f }, el2[3] = { -chord * 0.35f, 2.5f, sg * span * 0.5f };
+                tri2(b, r0, r1, el, base); tri2(b, r1, el2, el, base);
+                float cv[3] = { -chord * 0.1f, 1.2f, sg * span * 0.28f };
+                tri2(b, r0, el, cv, belly);
+                for (int k = 0; k < 5; k++) {
+                    float t = k / 4.0f;
+                    float ax = chord * 0.15f - t * chord * 0.5f;
+                    float a[3] = { ax, 3.0f, sg * span * (0.5f + 0.02f * k) };
+                    float a2[3] = { ax - chord * 0.16f, 2.8f, sg * span * (0.48f + 0.02f * k) };
+                    float tipz = span * (1.0f - 0.08f * t), tipx = ax - chord * (0.25f + 0.35f * t);
+                    float tp[3] = { tipx, 4.0f - t * 2.0f, sg * tipz };
+                    tri2(b, a, a2, tp, k % 2 ? shade : base);
+                }
+            } else if (scaly || isBat) { // bat membrane: an arm strut, three finger struts, membrane between
+                float r0[3] = { chord * 0.3f, 0.0f, sg * 2.0f }, r1[3] = { -chord * 0.55f, 0.0f, sg * 2.0f };
+                float el[3] = { chord * 0.12f, 3.5f, sg * span * 0.42f };
+                float t1[3] = { -chord * 0.15f, 6.0f, sg * span }, t2[3] = { -chord * 0.6f, 3.5f, sg * span * 0.86f };
+                float t3[3] = { -chord * 0.85f, 1.5f, sg * span * 0.58f };
+                float n1[3] = { -chord * 0.45f, 4.0f, sg * span * 0.8f }, n2[3] = { -chord * 0.72f, 2.2f, sg * span * 0.62f }; // scallops
+                Color mem = { 214, 206, 196, 255 };
+                tri2(b, r0, r1, el, mem);
+                tri2(b, el, t1, n1, mem); tri2(b, el, n1, t2, mem);
+                tri2(b, el, t2, n2, mem); tri2(b, el, n2, t3, mem);
+                tri2(b, el, t3, r1, mem);
+                float sd[3];
+                const float* tips[3] = { t1, t2, t3 };
+                for (int k = 0; k < 3; k++) { // finger struts
+                    for (int q = 0; q < 3; q++) sd[q] = tips[k][q] - el[q];
+                    T3CConeDir(b, el, sd, sqrtf(sd[0] * sd[0] + sd[1] * sd[1] + sd[2] * sd[2]), 0.9f, 4, shade);
+                }
+                float ad[3] = { el[0] - r0[0], el[1] - r0[1], el[2] - r0[2] };
+                T3CConeDir(b, r0, ad, sqrtf(ad[0] * ad[0] + ad[1] * ad[1] + ad[2] * ad[2]), 1.4f, 4, shade); // arm
+            } else {
+                float r0[3] = { chord * 0.35f, 0.0f, sg * 2.0f };
+                float r1[3] = { -chord * 0.45f, 0.0f, sg * 2.0f };
+                float mid[3] = { 0.0f, 2.0f, sg * span * 0.55f };
+                float tip[3] = { -chord * 0.55f, 4.0f, sg * span };
+                tri2(b, r0, r1, mid, base); tri2(b, r1, tip, mid, base);
+            }
             if (side == 0) P.wingL = T3CFinish(b); else P.wingR = T3CFinish(b);
         }
     }
@@ -10449,6 +10585,8 @@ static void T3CKitEnsure() {
         g_t3cKitModels.push_back(&p.head);
         g_t3cKitModels.push_back(&p.leg);
         g_t3cKitModels.push_back(&p.tail);
+        if (p.headAcc.meshCount > 0) g_t3cKitModels.push_back(&p.headAcc);
+        if (p.legAcc.meshCount > 0) g_t3cKitModels.push_back(&p.legAcc);
         g_t3cKitModels.push_back(&p.merged);
         if (p.serpent) g_t3cKitModels.push_back(&p.segBody);
         if (p.hasWings) { g_t3cKitModels.push_back(&p.wingL); g_t3cKitModels.push_back(&p.wingR); }
@@ -10644,6 +10782,7 @@ static void T3CDrawQuad(const T3CQuadParts& P, float x, float z, float yawRad, f
     rlRotatef(-headYaw * kT3CDeg, 0.0f, 1.0f, 0.0f);
     rlRotatef((headPitch - 0.5f * qAtk) * kT3CDeg, 0.0f, 0.0f, 1.0f); // dips into the bite on attack
     DrawModel(P.head, { 0.0f, 0.0f, 0.0f }, 1.0f, coatV);
+    if (P.headAcc.meshCount > 0) DrawModel(P.headAcc, { 0.0f, 0.0f, 0.0f }, 1.0f, WHITE); // eyes, fangs, horns, beak
     rlPopMatrix();
     // Legs - diagonal pairs (FL+BR phase 0, FR+BL phase PI), the trot cycle.
     const Vector3 piv[4] = { P.legFLP, P.legFRP, P.legBLP, P.legBRP };
@@ -10655,6 +10794,7 @@ static void T3CDrawQuad(const T3CQuadParts& P, float x, float z, float yawRad, f
         rlTranslatef(piv[i].x, piv[i].y + bobY, piv[i].z);
         rlRotatef(sw * kT3CDeg, 0.0f, 0.0f, 1.0f);
         DrawModel(P.leg, { 0.0f, 0.0f, 0.0f }, 1.0f, darkV);
+        if (P.legAcc.meshCount > 0) DrawModel(P.legAcc, { 0.0f, 0.0f, 0.0f }, 1.0f, WHITE); // claws / hooves
         rlPopMatrix();
     }
     rlPushMatrix(); // tail
