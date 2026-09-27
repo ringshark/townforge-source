@@ -15218,14 +15218,21 @@ static void DrawMinimap(GameState& s) {
 // resource line, tab bar and Reset live - so in 3D those were invisible but
 // still took taps (a hidden tab switch, or two taps on the hidden Reset). Like
 // the dungeons, the header now collapses behind one MENU toggle in these views.
+// Menu screens (2026-09-27): no big header or tab bar - the same MENU button as the
+// 3D world opens everything, and a gold Play button takes you back.
+static bool IsMenuScreen(Screen sc) {
+    return sc == Screen::Character || sc == Screen::Craft || sc == Screen::Magic || sc == Screen::Pets || sc == Screen::Bank ||
+           sc == Screen::House || sc == Screen::Skills || sc == Screen::Provisioner || sc == Screen::FurTrader ||
+           sc == Screen::MinersGuild || sc == Screen::Refuge || sc == Screen::Guide;
+}
 static bool ExploreHeaderCollapsed(const GameState& s) {
     return (s.screen == Screen::Town && s.town3DView) ||
            (s.screen == Screen::Wilderness && s.wild3DView) ||
-           (s.screen == Screen::Interior && s.interior3DView);
+           (s.screen == Screen::Interior && s.interior3DView) || IsMenuScreen(s.screen);
 }
 static const Rectangle kCompactMenuBtn = { 20, 56, 104, 40 };
 static Rectangle CompactMenuPanelRect(bool inDungeon) {
-    return { 12, 104, 336, inDungeon ? 328.0f : 318.0f };
+    return { 12, 104, 336, inDungeon ? 392.0f : 366.0f }; // (2026-09-27) + Cloud/Reset row
 }
 static bool ExploreMenuPointInUI(Vector2 m, const GameState& s) {
     if (!ExploreHeaderCollapsed(s)) return false;
@@ -27656,7 +27663,7 @@ static const char* kGuideTitles[5] = {
 static const char* kGuideBodies[5] = {
     "Drag the left stick to walk.\nOn desktop, WASD or arrow keys\nwork too.\n\nWalk up to glowing trees, rocks,\nand water to gather. Walk into\na dungeon entrance to go inside.",
     "Tap the sword button (or SPACE)\nto swing at your target.\n\nSwitch targets with the G key,\nthe TARGET button, or by\ntapping another monster.",
-    "Open the Magic tab, tap a hotbar\nslot, then pick a spell for it.\n\nCasting costs mana + 1 reagent.\nBuy reagents at the Provisioner.\n\nIn a fight, tap a slot - or\npress 1-5 - to cast.\n\nVisiting a town marks it.\nRecall needs 40 Magery and\na marked town.",
+    "Open Magic from the MENU, tap a\nhotbar slot, then pick a spell.\n\nCasting costs mana + 1 reagent.\nBuy reagents at the Provisioner.\n\nIn a fight, tap a slot - or\npress 1-5 - to cast.\n\nVisiting a town marks it.\nRecall needs 40 Magery and\na marked town.",
     "The LOG button (L key) opens\nyour journal.\n\nEvery hit, spell, kill, and\nloot is written there with\nthe time. Open it anytime\nto see what happened.",
     "Chop, mine, and fish to train\nskills - every skill caps\nat 100.\n\nThe bank keeps your gold and\nitems safe. Buy a house plot\nfor storage and a hearth\nyou can recall to.\n\nLeave a dungeon anytime from\nits MENU - needs 25 Magery,\na 3-second cast, no hits.",
 };
@@ -27676,7 +27683,7 @@ static const char* kStarterGoal[kStCount] = {
     "Chop a tree or mine a rock: walk up and tap GATHER.",
     "Fight a monster! Walk up to one and tap FIGHT.",
     "You won! Tap the body, then tap LOOT ALL.",
-    "You're ready! Explore, get stronger, have fun. Stuck? Tap HELP.",
+    "You're ready! Explore, get stronger, have fun. Stuck? MENU > Help.",
 };
 static void StarterBegin(GameState& s, int step) {
     s.starterStep = step;
@@ -29852,6 +29859,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 // the title/resource/tab header collapses behind one MENU/HIDE toggle, with a
 // slim HP bar always visible beside it. The dropdown holds every tab (and, in
 // a dungeon, the Magery escape); picking one navigates and closes it.
+static float g_resetArmedTimer = 0.0f; // >0 while the Reset button is armed, waiting for a confirm click
 static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
     g_uiShieldBypass = true; // this panel's own buttons sit inside the shield
     { // (2026-09-27) readable over the world: dark plate, light text, HP and mana
@@ -29906,6 +29914,30 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         if (Button({ bx1, by, 152, 40 }, "Skills", tabsEnabled)) { s.screen = Screen::Skills; open = false; }
         by += 48;
         if (Button({ bx0, by, 152, 40 }, "Help", tabsEnabled)) { s.screen = Screen::Guide; s.guidePage = 0; open = false; }
+        { // save & reset (2026-09-27: moved here from the old header)
+            float ry = by + 48;
+            bool armed = g_resetArmedTimer > 0.0f;
+            if (Button({ bx1, by, 152, 40 }, armed ? "Tap again to RESET" : "Reset character", !s.combat.has_value())) {
+                if (armed) {
+                    ResetGame(s); g_resetArmedTimer = 0.0f; open = false;
+#ifdef __EMSCRIPTEN__
+                    JS_CloudOnReset();
+#endif
+                } else g_resetArmedTimer = 3.0f;
+            }
+#ifdef __EMSCRIPTEN__
+            int cs = JS_CloudState();
+            if (cs > 0) {
+                Rectangle cb = { bx0, ry, 152, 40 };
+                if (Button(cb, "Cloud save", true)) JS_CloudOpen();
+                Color dot = cs == 2 ? Color{ 90, 200, 110, 255 } : cs == 3 ? Color{ 120, 170, 255, 255 }
+                          : cs == 4 ? Color{ 240, 170, 60, 255 } : Color{ 150, 150, 150, 255 };
+                DrawCircle((int)(cb.x + cb.width - 10), (int)cb.y + 10, 5.0f, dot);
+            }
+#endif
+            (void)ry;
+        }
+        by += 48;
         if (inDungeon) {
             // UO-style travel (2026-09-25): magery escape. Allowed mid-fight -
             // the 3s cast breaks on damage, so it can't blank a boss mid-swing.
@@ -29915,6 +29947,12 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         }
     }
     if (Button(kCompactMenuBtn, open ? "HIDE" : "MENU", true)) open = !open;
+    if (!open && IsMenuScreen(s.screen)) { // (2026-09-27) the way back, right beside MENU
+        Rectangle pb = { 130, 56, 92, 40 };
+        DrawRectangleRounded({ pb.x - 3, pb.y - 3, pb.width + 6, pb.height + 6 }, 0.35f, 6,
+                             Fade(Color{ 255, 196, 70, 255 }, 0.5f + 0.25f * sinf((float)GetTime() * 3.0f)));
+        if (Button(pb, "> Play", !s.playerIsGhost || true)) s.screen = g_playScreen;
+    }
     g_uiShieldBypass = false;
 }
 
@@ -29939,7 +29977,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     DrawUIText(("Weapon: " + weaponLine).c_str(), 240, 116, 13, DARKGRAY);
     DrawUIText(TextFormat("Power: %d   Defense: %d", CombatPower(s), TotalDefense(s)), 240, 134, 13, DARKGRAY);
     if (!s.equipped.rightHand && !s.equipped.leftHand)
-        DrawUIText("Craft or equip gear on the Craft tab.", 240, 152, 13, Fade(DARKGRAY, 0.8f));
+        DrawUIText("Craft or equip gear from the MENU.", 240, 152, 13, Fade(DARKGRAY, 0.8f));
     } // end if (!menuCollapsed): HP/gear header
 
     // --- Corpses waiting to be skinned (leather/gold sit here until skinned - see
@@ -30036,7 +30074,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
 
         BeginScissorMode(0, spellListTop, screenW, spellListHeight);
         if (knownIdx.empty()) {
-            DrawUIText("No spells known yet - practice on the Magic tab.", 20, spellListTop + 4, 13, DARKGRAY);
+            DrawUIText("No spells known yet - practice in Magic (MENU).", 20, spellListTop + 4, 13, DARKGRAY);
         }
         for (size_t row = 0; row < knownIdx.size(); row++) {
             int idx = knownIdx[row];
@@ -33198,7 +33236,6 @@ static GameState g_state;
 static const int kScreenW = 540;
 static const int kScreenH = 900;
 static float g_autosaveTimer = 0.0f;
-static float g_resetArmedTimer = 0.0f; // >0 while the Reset button is armed, waiting for a confirm click
 
 // Desktop-only "zoom the whole view" - Mark asked for the game to look ~10-15% bigger.
 // Every draw call in this file is an absolute pixel coordinate tuned for the fixed
