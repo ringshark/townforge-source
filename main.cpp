@@ -569,6 +569,13 @@ static const Vector2 kOutlawRefuge = WP(2750, 2450); // hidden black market, far
 // Fields of Sorrow. Its gate faces west-northwest, where the river can be walked round.
 static const Vector2 kOrcFortPos = WP(1800, 2880);
 static const float kOrcFortRadius = 205.0f;
+// World boss (2026-09-27): Vyrathax the Tri-Wyrm sleeps in the Cinder Caldera, far
+// south-east, and wakes on a timer - three heads (fire, storm, venom), each with
+// its own third of the health and its own telegraphed attack.
+static const Vector2 kWyrmLair = WP(2720, 2860);
+static const float kWyrmLairR = 270.0f;
+static const int kWyrmIcon = 11;
+static const float kWyrmMaxHp = 3000.0f;
 static const float kOrcFortGateYaw = -2.8253f; // toward (1250, 2700)
 
 struct HousePlot { Vector2 pos; int cells; int price; const char* name; RegionId region; };
@@ -1287,7 +1294,7 @@ static const int kBladeCount = 3;
 // GameState's respawn-timer arrays are sized by these, and the spot tables they
 // must match (kWildernessMonsterSpots, kCenters in DungeonMonsterNodePos) are
 // declared much later. static_asserts next to those tables verify the match.
-static const int kWildMonsterSpotCount = 29; // (2026-09-27) +7 Grimtusk Hold orcs, +2 Sorrow Wraiths
+static const int kWildMonsterSpotCount = 30; // (2026-09-27) +7 Grimtusk Hold orcs, +2 Sorrow Wraiths, +1 the Tri-Wyrm
 static const int kDungeonBossSlot = 8; // boss slot index; regular slots are 0..7
 static const int kDungeonSlotCount = kDungeonBossSlot + 1; // 9 slots per dungeon
 static const char* kGhostNoTouch = "Ghosts cannot touch the world of the living.";
@@ -1474,6 +1481,10 @@ struct GameState {
     std::vector<std::string> settleReports; // newest last, up to 6
     bool settleRaidLive = false; int settleRaidStrength = 0; int settleRaidFaction = 0; float settleMilitiaCd = 0.0f;
     float settleHpAcc = 0.0f;
+    // World boss (2026-09-27) - PERSISTED.
+    float wyrmRespawnT = 600.0f; // seconds of play until Vyrathax wakes (0 = awake)
+    float wyrmHp = -1.0f;        // its wounds while awake (-1 = unhurt)
+    int wyrmKills = 0;
     // Commissions (2026-09-27) - PERSISTED.
     std::vector<CommissionDeed> commissions;
     float commissionCd[4] = { 0, 0, 0, 0 };
@@ -6863,6 +6874,7 @@ static void SaveGame(const GameState& s) {
         out << "settle" << k << "=" << s.settle[(size_t)k].level << "|" << s.settle[(size_t)k].stored << "|" << s.settle[(size_t)k].workers << "|" << (s.settle[(size_t)k].damaged ? 1 : 0) << "\n";
     out << "settleQueue=" << s.settleUpgrading << "|" << s.settleUpgradeT << "\nsettleRaidT=" << s.settleRaidT
         << "\nsettleArrivalT=" << s.settleArrivalT << "\nsettleEpoch=" << (long long)std::time(nullptr) << "\n";
+    out << "wyrmRespawnT=" << s.wyrmRespawnT << "\nwyrmHp=" << s.wyrmHp << "\nwyrmKills=" << s.wyrmKills << "\n"; // world boss
     for (size_t i = 0; i < s.settlers.size(); i++) out << "settler." << i << "=" << s.settlers[i].name << "|" << s.settlers[i].trait << "|" << s.settlers[i].job << "\n";
     for (size_t i = 0; i < s.settleReports.size(); i++) out << "settleReport." << i << "=" << s.settleReports[i] << "\n";
     out << "commissionMarks=" << s.commissionMarks << "\nrareDyeCharges=" << s.rareDyeCharges << "\n";
@@ -7135,6 +7147,9 @@ static bool LoadGame(GameState& s) {
         else if (key == "settleRaidT") s.settleRaidT = (float)std::atof(val.c_str());
         else if (key == "settleArrivalT") s.settleArrivalT = (float)std::atof(val.c_str());
         else if (key == "settleEpoch") s.settleEpoch = std::atoll(val.c_str());
+        else if (key == "wyrmRespawnT") s.wyrmRespawnT = (float)std::atof(val.c_str());
+        else if (key == "wyrmHp") s.wyrmHp = (float)std::atof(val.c_str());
+        else if (key == "wyrmKills") s.wyrmKills = std::atoi(val.c_str());
         else if (key.rfind("settler.", 0) == 0) { auto p = SplitStr(val, '|'); if (p.size() >= 3) s.settlers.push_back({ p[0], std::atoi(p[1].c_str()), std::atoi(p[2].c_str()) }); }
         else if (key.rfind("settleReport.", 0) == 0) s.settleReports.push_back(val);
         else if (key == "rareDyeCharges") s.rareDyeCharges = std::atoi(val.c_str());
@@ -7970,7 +7985,7 @@ static void UpdateEscort(GameState& s, float dt) {
 // fully separate roaming entity, so every entry left in this array is an ordinary
 // always-melee monster again, no per-entry AI-variant flag needed.
 struct WildernessMonsterSpot { Vector2 pos; std::string name; int level; int baseLeather; int baseGold; int iconIdx; RegionId region; };
-static const std::array<WildernessMonsterSpot, 29> kWildernessMonsterSpots = {{
+static const std::array<WildernessMonsterSpot, 30> kWildernessMonsterSpots = {{
     { WP(1150, 1250), "Wild Bat", 2, 1, 2, 0, RegionAt(WP(1150, 1250)) },
     { WP(600, 1000), "Timber Wolf", 5, 3, 4, 2, RegionAt(WP(600, 1000)) }, // Phase 1: Whisperwood signature - was Wandering Goblin
     { WP(1150, 700), "Lone Wolf", 9, 5, 7, 2, RegionAt(WP(1150, 700)) },
@@ -8017,7 +8032,16 @@ static const std::array<WildernessMonsterSpot, 29> kWildernessMonsterSpots = {{
     // The Fields of Sorrow (2026-09-27) - live wraiths replace the old pop-up ambush.
     { WP(1880, 2280), "Sorrow Wraith", 26, 0, 18, 6, RegionAt(WP(1880, 2280)) },
     { WP(2010, 2310), "Sorrow Wraith", 32, 0, 24, 6, RegionAt(WP(2010, 2310)) },
+    // The world boss (2026-09-27) - keep it last: kWyrmSpot below.
+    { kWyrmLair, "Tri-Wyrm", 60, 40, 300, kWyrmIcon, RegionAt(kWyrmLair) }, // Vyrathax (named in its frame and news)
 }};
+static const int kWyrmSpot = 29;
+static bool IsWyrmName(const std::string& n) { return n == "Tri-Wyrm"; }
+// Health for a spot's monster: level*3, except the world boss.
+static float WildSpotMaxHp(int idx) {
+    const WildernessMonsterSpot& sp = kWildernessMonsterSpots[(size_t)idx];
+    return sp.iconIdx == kWyrmIcon ? kWyrmMaxHp : std::max(1.0f, sp.level * 3.0f);
+}
 static const int kWildMonsterIconCount = 9; // iconIdx 0-4 classic, 5 Ice Wolf, 6 Frostbitten Husk, 7 Rock Golem, 8 Mountain Cat
 static_assert(kWildernessMonsterSpots.size() == kWildMonsterSpotCount,
               "wildSpotRespawn is sized by kWildMonsterSpotCount - keep them in sync");
@@ -8591,7 +8615,7 @@ static void GuildPickTask(GameState& s, int who, float level) {
         int best = -1; float bestScore = 1e9f;
         for (int i = 0; i < (int)kWildernessMonsterSpots.size(); i++) {
             const WildernessMonsterSpot& sp = kWildernessMonsterSpots[i];
-            if ((float)sp.level > level * (who < 0 ? 1.15f : 1.3f)) continue;
+            if ((float)sp.level > level * (who < 0 ? 1.15f : 1.3f) || sp.iconIdx == kWyrmIcon) continue;
             float d = Dist(home, sp.pos);
             if (d > range || GuildSpotTaken(s, i, who)) continue;
             float score = d * (0.6f + RandUnit()); // nearish, with some whim
@@ -11243,6 +11267,8 @@ static T3CMonLook T3CMonsterLook(int iconIdx) {
             return { true, 0, {0,0,0,0}, { 88, 66, 44, 255 }, { 58, 48, 38, 255 }, { 98, 128, 72, 255 }, 1.12f };
         case 10: // the Orc Warlord - larger still, blackened iron
             return { true, 0, {0,0,0,0}, { 58, 56, 60, 255 }, { 44, 40, 40, 255 }, { 92, 120, 66, 255 }, 1.34f };
+        case 11: // the Tri-Wyrm (drawn by DrawTriWyrm; this is its corpse / fallback look)
+            return { false, 6, { 72, 54, 48, 255 }, {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, 3.2f };
         case 8: // Mountain Cat (Phase 4) - tawny feline quadruped
         default:
             return { false, 1, { 195, 158, 105, 255 }, {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, 1.10f };
@@ -14881,6 +14907,14 @@ static void DrawWorldMap(GameState& s) {
         DrawRectangleLinesEx({ f.x - 7, f.y - 5, 14, 10 }, 1.0f, Color{ 250, 220, 180, 255 });
         label("Grimtusk Hold", { f.x, f.y + 12 }, 11, Color{ 255, 200, 170, 255 });
     }
+    { // the Cinder Caldera (2026-09-27): glows while Vyrathax is awake
+        Vector2 f = toMap(kWyrmLair);
+        bool awake = s.wyrmRespawnT <= 0.0f;
+        DrawCircleV(f, 8.0f, Color{ 60, 36, 30, 255 });
+        DrawCircleV(f, 5.0f, awake ? Color{ 255, (unsigned char)(120 + 80 * sinf((float)GetTime() * 5.0f)), 40, 255 } : Color{ 120, 70, 50, 255 });
+        DrawCircleLines((int)f.x, (int)f.y, 8.0f, Color{ 250, 200, 160, 255 });
+        label(awake ? "Vyrathax (awake!)" : "Cinder Caldera", { f.x, f.y + 11 }, 11, awake ? Color{ 255, 170, 120, 255 } : Color{ 230, 190, 170, 255 });
+    }
     if (s.notoriety > 1.0f || s.refugeKnown) DrawCircleV(toMap(kOutlawRefuge), 5.0f, Color{ 90, 60, 110, 255 });
     MapIconPlayer(toMap(s.wildernessPlayerPos), s.playerFacing, 7.0f);
     DrawRectangleLinesEx(mm, 2.0f, Fade(BLACK, 0.55f));
@@ -14966,6 +15000,10 @@ static void DrawMinimap(GameState& s) {
         auto mark = [&](Vector2 w) { Vector2 p = toMap(w); if (inside(p, 2)) { DrawCircleV(p, 5.0f, Fade(Color{ 230, 40, 40, 255 }, 0.35f * pulse)); DrawCircleV(p, 3.0f, Color{ 230, 40, 40, 255 }); } };
         if (s.rivalActivity != GameState::RivalActivity::Patrol) mark(s.rivalPos);
         for (int bi = 0; bi < kBladeCount; bi++) if (s.blades[bi].activity != GameState::RivalActivity::Patrol) mark(s.blades[bi].pos);
+    }
+    if (Vector2 f = toMap(kWyrmLair); inside(f, -6)) { // the Cinder Caldera on the minimap
+        DrawCircleV(f, 5.0f, s.wyrmRespawnT <= 0.0f ? Color{ 255, 120, 40, 255 } : Color{ 90, 56, 44, 255 });
+        DrawCircleLines((int)f.x, (int)f.y, 5.0f, Color{ 250, 220, 180, 255 });
     }
     { // Grimtusk Hold on the minimap
         Vector2 f = toMap(kOrcFortPos);
@@ -15790,6 +15828,7 @@ static void WildHeightEnsure() {
     for (const auto& hp : kHousePlots) flats.push_back({ hp.pos.x, hp.pos.y, SettleWallR(hp.cells) + 30.0f }); // room for the settlement (2026-09-27)
     for (const auto& cp : kRivalCampSpots) flats.push_back({ cp.x, cp.y, 250.0f }); // Murder Inc.'s war camps (2026-09-27)
     flats.push_back({ kOrcFortPos.x, kOrcFortPos.y, kOrcFortRadius + 70.0f }); // Grimtusk Hold
+    flats.push_back({ kWyrmLair.x, kWyrmLair.y, kWyrmLairR + 40.0f });          // the Cinder Caldera
     for (const auto& sh : kShrines) flats.push_back({ sh.pos.x, sh.pos.y, 110.0f });
     for (const auto& d : kSaltDocks) flats.push_back({ d.pos.x, d.pos.y, 140.0f });
     flats.push_back({ kFieldsOfSorrow.x, kFieldsOfSorrow.y, kFieldsOfSorrowRadius + 60.0f });
@@ -16411,6 +16450,7 @@ static void Wild3DBuildScatter() {
         for (const Vector2& p : kRivalCampSpots) // war camps stand in cleared ground
             if (Dist({ x, z }, p) < 215.0f) return false;
         if (Dist({ x, z }, kOrcFortPos) < kOrcFortRadius + 70.0f) return false; // and so does Grimtusk Hold
+        if (Dist({ x, z }, kWyrmLair) < kWyrmLairR + 40.0f) return false;        // and the Cinder Caldera
         for (const auto& hp : kHousePlots) // settlement grounds (2026-09-27)
             if (Dist({ x, z }, hp.pos) < SettleWallR(hp.cells) + 25.0f) return false;
         return true;
@@ -16606,6 +16646,7 @@ static void Wild3DBuildDressing() {
     for (const auto& hp : kHousePlots) keep.push_back({ hp.pos, SettleWallR(hp.cells) + 25.0f }); // the settlement grounds (2026-09-27)
     for (const auto& cp : kRivalCampSpots) keep.push_back({ cp, 215.0f });
     keep.push_back({ kOrcFortPos, kOrcFortRadius + 70.0f });
+    keep.push_back({ kWyrmLair, kWyrmLairR + 40.0f });
     for (const auto& sh : kShrines) keep.push_back({ sh.pos, 100.0f });
     for (const auto& d : kSaltDocks) keep.push_back({ d.pos, 130.0f });
     keep.push_back({ kFieldsOfSorrow, kFieldsOfSorrowRadius + 40.0f });
@@ -18480,6 +18521,509 @@ static void Wild3DDrawOrcFort(bool shadowPass, const Town3DCam* cull) {
     rlSetTexture(0);
     EndBlendMode();
 }
+// ---- Vyrathax the Tri-Wyrm: the world boss (2026-09-27) ----
+// One wilderness monster spot (kWyrmSpot) for the fight itself - engaging,
+// spells, pets, guildmates, loot and the corpse all come from the usual code -
+// plus: a wake timer, three heads that each hold a third of its health (fire
+// falls first, then storm, then venom), and each living head's telegraphed
+// attack: a fire cone, storm strikes on marked circles, a lingering venom cloud.
+static void SpawnFloatText(GameState& s, int zone, Vector2 pos, const std::string& text, Color color);
+enum { kWyHeadFire = 0, kWyHeadStorm = 1, kWyHeadVenom = 2 };
+static const char* const kWyHeadName[3] = { "fire", "storm", "venom" };
+static const Color kWyHeadCol[3] = { { 255, 128, 40, 255 }, { 130, 190, 255, 255 }, { 130, 235, 90, 255 } };
+static bool WyrmHeadAlive(int h, float hpFrac) {
+    return h == kWyHeadVenom ? hpFrac > 0.0f : (h == kWyHeadStorm ? hpFrac > 1.0f / 3.0f : hpFrac > 2.0f / 3.0f);
+}
+static int WyrmHeadsUp(float hpFrac) { return (int)WyrmHeadAlive(0, hpFrac) + (int)WyrmHeadAlive(1, hpFrac) + (int)WyrmHeadAlive(2, hpFrac); }
+struct WyrmFx { int kind = 0; Vector2 pos{}, dir{}; float t = 0.0f, warn = 1.0f, live = 0.5f, tick = 0.0f; bool struck = false; };
+static std::vector<WyrmFx> g_wyrmFx;
+static float g_wyrmCd[3] = { 6.0f, 9.0f, 12.0f };
+static float g_wyrmHeadAtk[3] = { -1.0f, -1.0f, -1.0f }; // per-head lunge, 0..1
+static int g_wyrmHeadsSeen = 3;
+static Vector3 g_wyrmHeadWorld[3];                       // where each head is (for mouth glows)
+static const float kWyrmConeLen = 330.0f, kWyrmConeHalf = 0.5f; // fire breath reach, half-angle (rad)
+static const GameState::ActiveMonster* WyrmActive(const GameState& s) {
+    if (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == kWyrmSpot) return &*s.wildEngaged;
+    return FindWildExtra(s, kWyrmSpot);
+}
+static float WyrmHpFrac(const GameState& s) {
+    if (const GameState::ActiveMonster* am = WyrmActive(s)) return std::max(0.0f, am->hp / std::max(1.0f, am->maxHp));
+    return s.wyrmHp > 0.0f ? s.wyrmHp / kWyrmMaxHp : 1.0f;
+}
+static void WyrmHurtPlayer(GameState& s, int h, float raw) {
+    float resist = std::min(0.5f, s.magicResist * 0.004f); // Magic Resistance blunts the breath
+    int dmg = std::max(1, (int)std::round(raw * (1.0f - resist)));
+    s.hp -= dmg;
+    s.playerHurtT = 0.0f;
+    CombatShake(9.0f);
+    PlaySfx(SfxId::Hurt);
+    SpawnFloatText(s, 0, s.wildernessPlayerPos, std::to_string(dmg), kWyHeadCol[h]);
+    SkillUseGain(s.magicResist, 0.5f, 0.4f);
+    static const char* verb[3] = { "scorches", "strikes", "chokes" };
+    Journal(s, std::string("Vyrathax's ") + kWyHeadName[h] + " head " + verb[h] + " you for " + std::to_string(dmg) + " damage");
+    if (s.hp <= 0) { g_wyrmFx.clear(); EndWildMonsterLoss(s, "Tri-Wyrm"); }
+}
+static void WyrmSlain(GameState& s) {
+    s.wyrmKills++;
+    s.wyrmHp = -1.0f;
+    int gold = 1200 + GetRandomValue(0, 400);
+    s.gold += gold;
+    s.rareDyeCharges += 2;
+    GainFame(s, 25.0f);
+    std::string extra;
+    if (RandUnit() < 0.35f || s.wyrmKills == 1) { // the first kill always drops the blade
+        Item it{ s.nextItemId++, "Wyrmfang Blade", ItemType::Weapon, "", "1h", 32, "Swordsmanship" };
+        s.backpack.push_back(it);
+        extra = " The Wyrmfang Blade is yours!";
+    }
+    s.rivalBanner = "VYRATHAX IS SLAIN!";
+    s.rivalBannerTimer = kRivalBannerTime * 1.6f;
+    s.logLine = "Vyrathax the Tri-Wyrm is slain! +" + std::to_string(gold) + " gold, 2 rare dyes, Fame rises." + extra +
+                " Its skull will hang in your Great Hall.";
+    Journal(s, s.logLine);
+    PlaySfx(SfxId::Victory);
+}
+static void WyrmTick(GameState& s, float dt) {
+    // the wake timer (play time) and the death check
+    if (s.wyrmRespawnT > 0.0f) {
+        float before = s.wyrmRespawnT;
+        s.wyrmRespawnT -= dt;
+        if (before > 180.0f && s.wyrmRespawnT <= 180.0f) {
+            s.rivalBanner = "The ground shakes in the south-east...";
+            s.rivalBannerTimer = kRivalBannerTime;
+            Journal(s, "The ground shakes. Something vast stirs in the Cinder Caldera, far south-east (about 3 minutes).");
+        }
+        if (s.wyrmRespawnT <= 0.0f) {
+            s.wyrmRespawnT = 0.0f; s.wyrmHp = -1.0f; g_wyrmHeadsSeen = 3; g_wyrmCd[0] = 6.0f; g_wyrmCd[1] = 9.0f; g_wyrmCd[2] = 12.0f;
+            s.rivalBanner = "Vyrathax the Tri-Wyrm has awakened!";
+            s.rivalBannerTimer = kRivalBannerTime * 1.4f;
+            s.logLine = "Vyrathax the Tri-Wyrm has awakened in the Cinder Caldera (far south-east)! Bring friends.";
+            Journal(s, s.logLine);
+            PlaySfx(SfxId::Hunt);
+        }
+        s.wildSpotRespawn[kWyrmSpot] = std::max(0.0f, s.wyrmRespawnT);
+    } else if (s.wildSpotRespawn[kWyrmSpot] > 0.0f) { // it fell (the usual death code set a respawn)
+        WyrmSlain(s);
+        s.wyrmRespawnT = 5400.0f; // it wakes again after 90 minutes of play
+        s.wildSpotRespawn[kWyrmSpot] = s.wyrmRespawnT;
+        g_wyrmFx.clear();
+    }
+    for (float& a : g_wyrmHeadAtk) if (a >= 0.0f && (a += dt / 0.7f) > 1.0f) a = -1.0f;
+    const GameState::ActiveMonster* am = WyrmActive(s);
+    if (!am) {
+        g_wyrmHeadsSeen = -1; // re-synced when the next fight starts
+        g_wyrmFx.clear();
+        if (s.wyrmRespawnT <= 0.0f && s.wyrmHp > 0.0f) { // it licks its wounds
+            s.wyrmHp += kWyrmMaxHp * 0.001f * dt;
+            if (s.wyrmHp >= kWyrmMaxHp) s.wyrmHp = -1.0f;
+        }
+        return;
+    }
+    s.wyrmHp = am->hp;
+    float frac = WyrmHpFrac(s);
+    int up = WyrmHeadsUp(frac);
+    if (g_wyrmHeadsSeen < 0) g_wyrmHeadsSeen = up; // a fresh fight on an old wound: no news
+    if (up < g_wyrmHeadsSeen && up > 0) { // a head falls
+        int fell = up == 2 ? kWyHeadFire : kWyHeadStorm;
+        s.rivalBanner = std::string("The ") + kWyHeadName[fell] + " head falls!";
+        s.rivalBannerTimer = kRivalBannerTime * 0.8f;
+        Journal(s, std::string("You sever Vyrathax's ") + kWyHeadName[fell] + " head! The others rage.");
+        CombatShake(12.0f);
+    }
+    g_wyrmHeadsSeen = up;
+    bool fighting = s.screen == Screen::Wilderness && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
+                    Dist(s.wildernessPlayerPos, am->pos) < 560.0f;
+    if (!fighting) { g_wyrmFx.clear(); return; }
+    Vector2 me = s.wildernessPlayerPos, bp = am->pos;
+    float rage = 1.0f + 0.3f * (float)(3 - up); // fewer heads, faster breath
+    static const float baseCd[3] = { 9.0f, 7.5f, 12.0f };
+    for (int h = 0; h < 3; h++) {
+        if (!WyrmHeadAlive(h, frac)) continue;
+        if ((g_wyrmCd[h] -= dt * rage) > 0.0f) continue;
+        g_wyrmCd[h] = baseCd[h] * (0.85f + 0.3f * RandUnit());
+        g_wyrmHeadAtk[h] = 0.0f;
+        Vector2 d = { me.x - bp.x, me.y - bp.y };
+        float dl = std::max(1.0f, hypotf(d.x, d.y));
+        d = { d.x / dl, d.y / dl };
+        if (h == kWyHeadFire) {
+            WyrmFx f; f.kind = 0; f.pos = { bp.x + d.x * 20.0f, bp.y + d.y * 20.0f }; f.dir = d; f.warn = 1.4f; f.live = 0.8f;
+            g_wyrmFx.push_back(f);
+            Journal(s, "The fire head rears back - get out of its line!");
+        } else if (h == kWyHeadStorm) {
+            for (int k = 0; k < 3; k++) {
+                WyrmFx f; f.kind = 1; f.warn = 1.2f + 0.25f * k; f.live = 0.35f;
+                float a = RandUnit() * 6.2832f, r = k == 0 ? 0.0f : 60.0f + RandUnit() * 60.0f;
+                f.pos = { me.x + cosf(a) * r, me.y + sinf(a) * r };
+                g_wyrmFx.push_back(f);
+            }
+        } else {
+            WyrmFx f; f.kind = 2; f.pos = me; f.warn = 0.9f; f.live = 7.0f;
+            g_wyrmFx.push_back(f);
+        }
+    }
+    for (size_t i = 0; i < g_wyrmFx.size();) {
+        WyrmFx& f = g_wyrmFx[i];
+        f.t += dt;
+        if (f.t >= f.warn && !f.struck && f.kind != 2) {
+            f.struck = true;
+            bool in;
+            if (f.kind == 0) {
+                Vector2 v = { me.x - f.pos.x, me.y - f.pos.y };
+                float along = v.x * f.dir.x + v.y * f.dir.y, lat = fabsf(v.x * f.dir.y - v.y * f.dir.x);
+                in = along > -10.0f && along < kWyrmConeLen && lat < 18.0f + along * tanf(kWyrmConeHalf);
+            } else in = Dist(me, f.pos) < 58.0f + 12.0f;
+            if (in) WyrmHurtPlayer(s, f.kind, f.kind == 0 ? 24.0f + RandUnit() * 10.0f : 18.0f + RandUnit() * 8.0f);
+            else if (f.kind == 0) Journal(s, "The fire breath roars past you.");
+            if (s.hp <= 0) return;
+        }
+        if (f.kind == 2 && f.t >= f.warn && (f.tick -= dt) <= 0.0f) {
+            f.tick = 0.6f;
+            if (Dist(me, f.pos) < 95.0f) { WyrmHurtPlayer(s, 2, 3.0f + RandUnit() * 2.0f); if (s.hp <= 0) return; }
+        }
+        if (f.t > f.warn + f.live) { g_wyrmFx.erase(g_wyrmFx.begin() + (long)i); continue; }
+        i++;
+    }
+}
+
+// --- drawing ---
+static void WyrmGlow(Vector3 p, float r, Color c) { // additive, crossed quads
+    rlSetTexture(GlowTex().id);
+    rlBegin(RL_QUADS);
+    rlColor4ub(c.r, c.g, c.b, c.a);
+    rlTexCoord2f(0, 0); rlVertex3f(p.x - r, p.y - r, p.z); rlTexCoord2f(1, 0); rlVertex3f(p.x + r, p.y - r, p.z);
+    rlTexCoord2f(1, 1); rlVertex3f(p.x + r, p.y + r, p.z); rlTexCoord2f(0, 1); rlVertex3f(p.x - r, p.y + r, p.z);
+    rlTexCoord2f(0, 0); rlVertex3f(p.x, p.y - r, p.z - r); rlTexCoord2f(1, 0); rlVertex3f(p.x, p.y - r, p.z + r);
+    rlTexCoord2f(1, 1); rlVertex3f(p.x, p.y + r, p.z + r); rlTexCoord2f(0, 1); rlVertex3f(p.x, p.y + r, p.z - r);
+    rlEnd();
+    rlSetTexture(0);
+}
+// Built on the kit dragon ("winged"): its torso, legs, tail and wings, three
+// necks of serpent segments and three heads - fire in the middle, storm to its
+// left, venom to its right. A fallen head lies on the ground, dark.
+struct WyrmHeadModels { bool built = false; Model skull{}, jaw{}, acc{}; };
+static WyrmHeadModels g_wyrmHead;
+static void WyrmHeadBuild() { // a long wedge of a dragon head, +x forward; the jaw hinges at (2,-3)
+    if (g_wyrmHead.built) return;
+    g_wyrmHead.built = true;
+    const Color w = WHITE, ivory = { 236, 226, 196, 255 };
+    {
+        T3CMeshBuilder b;
+        T3CSphere(b, 0.0f, 0.5f, 0.0f, 8.5f, 6.0f, 6.8f, 6, 8, w);           // cranium
+        T3CBox(b, 10.5f, 0.2f, 0.0f, 13.0f, 4.6f, 7.2f, w);                    // upper snout
+        T3CBox(b, 17.5f, -0.2f, 0.0f, 3.5f, 3.8f, 5.6f, w);                    // nose
+        for (int sz = -1; sz <= 1; sz += 2) T3CBox(b, 5.0f, 4.6f, sz * 3.4f, 9.0f, 2.2f, 2.6f, w); // brow ridges
+        g_wyrmHead.skull = T3CFinish(b);
+    }
+    {
+        T3CMeshBuilder b;
+        T3CBox(b, 8.0f, -1.2f, 0.0f, 15.0f, 2.6f, 6.4f, w);                   // lower jaw (relative to the hinge)
+        g_wyrmHead.jaw = T3CFinish(b);
+    }
+    {
+        T3CMeshBuilder b;
+        for (int sz = -1; sz <= 1; sz += 2) {
+            float hb[3] = { -3.0f, 4.0f, sz * 4.0f }, hd[3] = { -1.0f, 0.55f, sz * 0.35f };
+            T3CConeDir(b, hb, hd, 15.0f, 2.4f, 6, ivory);                      // swept horns
+            float hb2[3] = { 1.0f, 3.5f, sz * 5.5f }, hd2[3] = { -0.8f, 0.3f, sz * 0.8f };
+            T3CConeDir(b, hb2, hd2, 7.0f, 1.3f, 5, ivory);
+            for (int i = 0; i < 5; i++) {                                      // teeth
+                float tb[3] = { 7.0f + i * 2.4f, -2.0f, sz * 3.0f }, td[3] = { 0.1f, -1.0f, 0.0f };
+                T3CConeDir(b, tb, td, 2.6f, 0.8f, 4, ivory);
+            }
+        }
+        for (int i = 0; i < 4; i++) { float sb[3] = { -6.0f + i * 3.5f, 6.0f, 0.0f }, sd[3] = { -0.4f, 1.0f, 0.0f }; T3CConeDir(b, sb, sd, 4.0f - i * 0.6f, 1.4f, 4, ivory); }
+        g_wyrmHead.acc = T3CFinish(b);
+    }
+    Town3DApplyLitShader(g_wyrmHead.skull); Town3DApplyLitShader(g_wyrmHead.jaw); Town3DApplyLitShader(g_wyrmHead.acc);
+}
+static void DrawTriWyrm(Vector2 pos, float yaw, float hurtT, float atkPhase, float hpFrac, float move, float shrink, bool shadowPass) {
+    T3CKitEnsure();
+    WyrmHeadBuild();
+    const T3CQuadParts& P = g_t3cQuads[6].parts;
+    const T3CQuadParts& S = g_t3cQuads[10].parts;
+    const float sc = 2.35f * shrink;
+    Color coat = CombatHitTint(hurtT, Color{ 72, 54, 48, 255 }, Color{ 220, 90, 90, 255 });
+    Color dark = ColorBrightness(coat, -0.4f), belly = { 150, 70, 40, 255 };
+    float t = (float)g_gameClock;
+    float gy = GroundY(pos.x, pos.y);
+    const float off = -P.neckP.x * sc * 0.75f; // the chest stands at the fight position, the bulk behind
+    if (!shadowPass) T3CDrawBlobShadow(P.merged, pos.x + cosf(yaw) * off * 0.5f, pos.y + sinf(yaw) * off * 0.5f, yaw, sc, 0.0f);
+    rlPushMatrix();
+    rlTranslatef(pos.x, gy, pos.y);
+    rlRotatef(-yaw * kT3CDeg, 0.0f, 1.0f, 0.0f);
+    rlTranslatef(off, 0.0f, 0.0f);
+    float bite = atkPhase >= 0.0f ? sinf(std::clamp(atkPhase, 0.0f, 1.0f) * 3.14159265f) : 0.0f;
+    rlScalef(sc, sc, sc);
+    float bob = sinf(t * 1.3f) * 0.8f;
+    DrawModel(P.torso, { 0.0f, bob, 0.0f }, 1.0f, coat);
+    const Vector3 piv[4] = { P.legFLP, P.legFRP, P.legBLP, P.legBRP };
+    const float phs[4] = { 0.0f, 3.14159265f, 3.14159265f, 0.0f };
+    for (int i = 0; i < 4; i++) {
+        float sw = sinf(t * 5.0f + phs[i]) * 0.4f * move;
+        rlPushMatrix();
+        rlTranslatef(piv[i].x, piv[i].y + bob, piv[i].z);
+        rlRotatef(sw * kT3CDeg, 0.0f, 0.0f, 1.0f);
+        DrawModel(P.leg, { 0.0f, 0.0f, 0.0f }, 1.0f, dark);
+        if (P.legAcc.meshCount > 0) DrawModel(P.legAcc, { 0.0f, 0.0f, 0.0f }, 1.0f, WHITE);
+        rlPopMatrix();
+    }
+    rlPushMatrix();
+    rlTranslatef(P.tailP.x, P.tailP.y + bob, 0.0f);
+    rlRotatef(sinf(t * 1.1f) * 22.0f, 0.0f, 1.0f, 0.0f);
+    rlScalef(1.4f, 1.2f, 1.2f);
+    DrawModel(P.tail, { 0.0f, 0.0f, 0.0f }, 1.0f, dark);
+    rlPopMatrix();
+    float flap = sinf(t * 1.7f) * 0.3f - 0.25f; // slow, menacing, spread high
+    rlPushMatrix(); rlTranslatef(P.wingLP.x, P.wingLP.y + bob, P.wingLP.z); rlRotatef(-flap * kT3CDeg, 1, 0, 0); rlScalef(1.25f, 1.25f, 1.25f);
+    DrawModel(P.wingL, { 0, 0, 0 }, 1.0f, dark); rlPopMatrix();
+    rlPushMatrix(); rlTranslatef(P.wingRP.x, P.wingRP.y + bob, P.wingRP.z); rlRotatef(flap * kT3CDeg, 1, 0, 0); rlScalef(1.25f, 1.25f, 1.25f);
+    DrawModel(P.wingR, { 0, 0, 0 }, 1.0f, dark); rlPopMatrix();
+    for (int h = 0; h < 3; h++) {
+        bool alive = WyrmHeadAlive(h, hpFrac);
+        float side = h == kWyHeadFire ? 0.0f : (h == kWyHeadStorm ? -1.0f : 1.0f);
+        float sway = sinf(t * (0.8f + 0.25f * h) + h * 2.1f);
+        float lunge = g_wyrmHeadAtk[h] >= 0.0f ? sinf(g_wyrmHeadAtk[h] * 3.14159265f) : 0.0f;
+        if (h == kWyHeadFire || !WyrmHeadAlive(kWyHeadFire, hpFrac)) lunge = std::max(lunge, bite);
+        Vector3 base = { P.neckP.x - 5.0f, P.neckP.y + bob - 3.0f, side * 5.0f };
+        Vector3 head = alive ? Vector3{ base.x + 15.0f + lunge * 9.0f, base.y + 19.0f - lunge * 7.0f + sway * 1.5f, side * 16.0f + sway * 3.0f }
+                             : Vector3{ base.x + 17.0f, 2.5f, side * 20.0f + 4.0f };
+        Vector3 ctrl = { base.x + 3.0f, alive ? base.y + 22.0f : base.y + 6.0f, side * 12.0f };
+        for (int i = 1; i <= 9; i++) { // neck: serpent segments on a curve
+            float u = i / 10.0f, a = (1 - u) * (1 - u), b = 2 * (1 - u) * u, c = u * u;
+            Vector3 q = { a * base.x + b * ctrl.x + c * head.x, a * base.y + b * ctrl.y + c * head.y, a * base.z + b * ctrl.z + c * head.z };
+            float k = (5.6f - 2.0f * u) / 7.0f;
+            DrawModelEx(S.segBody, q, { 0, 1, 0 }, 0.0f, { k, k, k }, alive ? coat : dark);
+        }
+        rlPushMatrix();
+        rlTranslatef(head.x, head.y, head.z);
+        rlRotatef(-side * 24.0f - sway * 10.0f, 0.0f, 1.0f, 0.0f);
+        rlRotatef(alive ? (6.0f - lunge * 28.0f) : -40.0f, 0.0f, 0.0f, 1.0f);
+        if (!alive) rlRotatef(side * 35.0f + 20.0f, 1.0f, 0.0f, 0.0f);
+        rlScalef(0.62f, 0.62f, 0.62f);
+        DrawModel(g_wyrmHead.skull, { 0, 0, 0 }, 1.0f, alive ? coat : dark);
+        DrawModel(g_wyrmHead.acc, { 0, 0, 0 }, 1.0f, alive ? WHITE : Color{ 150, 144, 130, 255 });
+        float charge = lunge;
+        for (const WyrmFx& f : g_wyrmFx) if (f.kind == h && f.t < f.warn) charge = std::max(charge, f.t / f.warn);
+        rlPushMatrix();
+        rlTranslatef(2.0f, -3.0f, 0.0f);
+        rlRotatef(alive ? -(4.0f + 26.0f * charge) : -18.0f, 0.0f, 0.0f, 1.0f); // the jaw drops as it breathes
+        DrawModel(g_wyrmHead.jaw, { 0, 0, 0 }, 1.0f, alive ? belly : dark);
+        rlPopMatrix();
+        rlPopMatrix();
+        // where the mouth is, in world space (for the glows below)
+        float mx = off + (head.x + 10.0f) * sc, my = (head.y - 1.0f) * sc, mz = (head.z + side * 3.0f) * sc;
+        g_wyrmHeadWorld[h] = { pos.x + mx * cosf(yaw) - mz * sinf(yaw), gy + my, pos.y + mx * sinf(yaw) + mz * cosf(yaw) };
+    }
+    rlPopMatrix();
+    if (shadowPass) return;
+    BeginBlendMode(BLEND_ADDITIVE);
+    rlDisableDepthMask();
+    for (int h = 0; h < 3; h++) {
+        if (!WyrmHeadAlive(h, hpFrac)) continue;
+        float charge = g_wyrmHeadAtk[h] >= 0.0f ? 1.0f : 0.0f;
+        for (const WyrmFx& f : g_wyrmFx) if (f.kind == h && f.t < f.warn) charge = std::max(charge, f.t / f.warn);
+        Color c = kWyHeadCol[h];
+        float pulse = 0.7f + 0.3f * sinf(t * 6.0f + h);
+        c.a = 255;
+        c.r = (unsigned char)(c.r * (0.45f + 0.55f * charge) * pulse); c.g = (unsigned char)(c.g * (0.45f + 0.55f * charge) * pulse);
+        c.b = (unsigned char)(c.b * (0.45f + 0.55f * charge) * pulse);
+        WyrmGlow(g_wyrmHeadWorld[h], 16.0f + 26.0f * charge, c);
+    }
+    rlEnableDepthMask();
+    EndBlendMode();
+}
+// Telegraphs and blasts on the ground (main pass).
+static void WyrmDrawFx() {
+    if (g_wyrmFx.empty()) return;
+    float T = (float)GetTime();
+    rlDisableDepthMask();
+    for (const WyrmFx& f : g_wyrmFx) {
+        float gy = GroundY(f.pos.x, f.pos.y) + 1.6f;
+        float w = std::clamp(f.t / f.warn, 0.0f, 1.0f);
+        bool live = f.t >= f.warn;
+        if (f.kind == 0) { // fire cone
+            float a0 = atan2f(f.dir.y, f.dir.x);
+            auto fan = [&](float len, Color c) {
+                rlBegin(RL_TRIANGLES);
+                rlColor4ub(c.r, c.g, c.b, c.a);
+                const int N = 12;
+                for (int i = 0; i < N; i++) {
+                    float b0 = a0 - kWyrmConeHalf + 2 * kWyrmConeHalf * i / N, b1 = a0 - kWyrmConeHalf + 2 * kWyrmConeHalf * (i + 1) / N;
+                    rlVertex3f(f.pos.x, gy, f.pos.y);
+                    rlVertex3f(f.pos.x + cosf(b1) * len, gy, f.pos.y + sinf(b1) * len);
+                    rlVertex3f(f.pos.x + cosf(b0) * len, gy, f.pos.y + sinf(b0) * len);
+                }
+                rlEnd();
+            };
+            BeginBlendMode(BLEND_ALPHA);
+            if (!live) {
+                fan(kWyrmConeLen, Color{ 255, 70, 30, (unsigned char)(50 + 40 * sinf(T * 12.0f)) });
+                fan(kWyrmConeLen * w, Color{ 255, 110, 40, 110 });
+            } else fan(kWyrmConeLen, Color{ 255, 150, 60, (unsigned char)(120 * (1.0f - (f.t - f.warn) / f.live)) });
+            EndBlendMode();
+            if (live) {
+                BeginBlendMode(BLEND_ADDITIVE);
+                for (int i = 0; i < 16; i++) {
+                    float u = fmodf(i / 16.0f + (f.t - f.warn) * 2.2f, 1.0f), sp = sinf(i * 7.3f) * kWyrmConeHalf * 0.8f;
+                    float L = u * kWyrmConeLen, a = a0 + sp;
+                    WyrmGlow({ f.pos.x + cosf(a) * L, gy + 14.0f + u * 20.0f, f.pos.y + sinf(a) * L }, 16.0f + u * 30.0f, Color{ 255, 140, 50, 255 });
+                }
+                EndBlendMode();
+            }
+        } else if (f.kind == 1) { // storm: shrinking ring, then the bolt
+            BeginBlendMode(BLEND_ALPHA);
+            float R = 58.0f;
+            rlBegin(RL_TRIANGLES);
+            const int N = 28;
+            for (int i = 0; i < N; i++) {
+                float b0 = 6.2832f * i / N, b1 = 6.2832f * (i + 1) / N;
+                float ri = live ? 0.0f : R * (1.0f - w);
+                Color c = live ? Color{ 200, 230, 255, 170 } : Color{ 90, 150, 255, (unsigned char)(60 + 50 * w) };
+                rlColor4ub(c.r, c.g, c.b, c.a);
+                rlVertex3f(f.pos.x + cosf(b0) * ri, gy, f.pos.y + sinf(b0) * ri); rlVertex3f(f.pos.x + cosf(b1) * R, gy, f.pos.y + sinf(b1) * R);
+                rlVertex3f(f.pos.x + cosf(b0) * R, gy, f.pos.y + sinf(b0) * R);
+                rlVertex3f(f.pos.x + cosf(b0) * ri, gy, f.pos.y + sinf(b0) * ri); rlVertex3f(f.pos.x + cosf(b1) * ri, gy, f.pos.y + sinf(b1) * ri);
+                rlVertex3f(f.pos.x + cosf(b1) * R, gy, f.pos.y + sinf(b1) * R);
+            }
+            rlEnd();
+            EndBlendMode();
+            if (live) {
+                BeginBlendMode(BLEND_ADDITIVE);
+                float y = gy;
+                Vector2 p = f.pos;
+                for (int k = 0; k < 8; k++) { // jagged bolt from the sky
+                    float ny = y + 60.0f;
+                    Vector2 q = { f.pos.x + sinf(k * 3.1f + T * 40.0f) * 14.0f, f.pos.y + cosf(k * 2.3f + T * 37.0f) * 14.0f };
+                    for (int j = 0; j < 4; j++) WyrmGlow({ p.x + (q.x - p.x) * j / 4.0f, y + 15.0f * j, p.y + (q.y - p.y) * j / 4.0f }, 9.0f, Color{ 180, 220, 255, 255 });
+                    p = q; y = ny;
+                }
+                WyrmGlow({ f.pos.x, gy + 10.0f, f.pos.y }, 70.0f, Color{ 140, 190, 255, 255 });
+                EndBlendMode();
+            }
+        } else { // venom cloud
+            float fade = live ? std::min(1.0f, (f.warn + f.live - f.t) / 1.0f) : w;
+            BeginBlendMode(BLEND_ALPHA);
+            rlBegin(RL_TRIANGLES);
+            const int N = 28;
+            float R = 95.0f * (live ? 1.0f : w);
+            for (int i = 0; i < N; i++) {
+                float b0 = 6.2832f * i / N, b1 = 6.2832f * (i + 1) / N;
+                rlColor4ub(90, 200, 60, (unsigned char)(70 * fade));
+                rlVertex3f(f.pos.x, gy, f.pos.y); rlVertex3f(f.pos.x + cosf(b1) * R, gy, f.pos.y + sinf(b1) * R);
+                rlVertex3f(f.pos.x + cosf(b0) * R, gy, f.pos.y + sinf(b0) * R);
+            }
+            rlEnd();
+            rlSetTexture(GlowTex().id);
+            rlBegin(RL_QUADS);
+            for (int i = 0; i < 12; i++) {
+                float a = i * 0.52f + T * 0.4f * (i % 2 ? 1 : -1), r = 20.0f + 60.0f * Town3DHash01((float)i, 3.0f);
+                Vector3 q = { f.pos.x + cosf(a) * r, gy + 16.0f + 10.0f * sinf(T + i), f.pos.y + sinf(a) * r };
+                float rr = 34.0f;
+                rlColor4ub(110, 200, 70, (unsigned char)(90 * fade));
+                rlTexCoord2f(0, 0); rlVertex3f(q.x - rr, q.y - rr, q.z); rlTexCoord2f(1, 0); rlVertex3f(q.x + rr, q.y - rr, q.z);
+                rlTexCoord2f(1, 1); rlVertex3f(q.x + rr, q.y + rr, q.z); rlTexCoord2f(0, 1); rlVertex3f(q.x - rr, q.y + rr, q.z);
+            }
+            rlEnd();
+            rlSetTexture(0);
+            EndBlendMode();
+        }
+    }
+    rlEnableDepthMask();
+}
+// The Cinder Caldera: scorched ground, a ring of black crags with a way in, old bones, lava seams.
+static const float kWyrmGateYaw = -2.36f; // the way in faces north-west, toward the roads
+static Model g_wyrmLairModel{};
+static bool g_wyrmLairBuilt = false;
+static void WyrmLairBuild() {
+    if (g_wyrmLairBuilt) return;
+    g_wyrmLairBuilt = true;
+    T3CMeshBuilder b;
+    const Color rock = { 52, 46, 44, 255 }, rock2 = { 70, 60, 56, 255 }, ash = { 60, 52, 48, 255 }, bone = { 214, 204, 180, 255 };
+    for (int i = 0; i < 40; i++) { // the ash floor
+        float a0 = 6.2832f * i / 40, a1 = 6.2832f * (i + 1) / 40, r = kWyrmLairR + 20.0f;
+        float o[3] = { 0, 0.5f, 0 }, p0[3] = { cosf(a0) * r, 0.5f, sinf(a0) * r }, p1[3] = { cosf(a1) * r, 0.5f, sinf(a1) * r };
+        T3CPushTri(b, o, p1, p0, (i % 2) ? ash : ColorBrightness(ash, -0.08f));
+    }
+    int n = 34;
+    for (int i = 0; i < n; i++) { // crags
+        float a = kWyrmGateYaw + 6.2832f * (i + 0.5f) / n;
+        if (fabsf(atan2f(sinf(a - kWyrmGateYaw), cosf(a - kWyrmGateYaw))) < 0.3f) continue;
+        float h = 60.0f + 70.0f * Town3DHash01((float)i, 11.0f), r = kWyrmLairR + 12.0f + 14.0f * Town3DHash01((float)i, 5.0f);
+        float x = cosf(a) * r, z = sinf(a) * r, w = 26.0f + 12.0f * Town3DHash01((float)i, 2.0f);
+        T3CCylinder(b, x, 0.0f, z, h, w, 3.0f, 6, (i % 3) ? rock : rock2, false, false);
+        T3CCylinder(b, x + 14.0f, 0.0f, z - 8.0f, h * 0.55f, w * 0.6f, 2.0f, 5, rock2, false, false);
+    }
+    // an old ribcage and skulls: those who came before
+    for (int k = 0; k < 7; k++) {
+        float x = -60.0f + k * 14.0f, z = 110.0f;
+        float p0[3] = { x, 0, z - 18 }, p1[3] = { x + 3, 0, z - 18 }, p2[3] = { x + 3, 34, z }, p3[3] = { x, 34, z };
+        T3CQuad(b, p0, p1, p2, p3, bone); T3CQuad(b, p1, p0, p3, p2, bone);
+        float q0[3] = { x, 0, z + 18 }, q1[3] = { x + 3, 0, z + 18 };
+        T3CQuad(b, q1, q0, p3, p2, bone); T3CQuad(b, q0, q1, p2, p3, bone);
+    }
+    T3CBox(b, -18.0f, 30.0f, 110.0f, 100.0f, 4.0f, 4.0f, bone); // spine
+    for (int k = 0; k < 5; k++) {
+        float a = 1.0f + k * 1.3f, r = 120.0f + 60.0f * Town3DHash01((float)k, 9.0f);
+        T3CSphere(b, cosf(a) * r, 5.0f, sinf(a) * r, 8.0f, 6.5f, 7.0f, 5, 6, bone);
+    }
+    g_wyrmLairModel = T3CFinish(b);
+    Town3DApplyLitShader(g_wyrmLairModel);
+}
+static void Wild3DDrawWyrmLair(bool shadowPass, const Town3DCam* cull) {
+    const Vector2 c = kWyrmLair;
+    if (cull && !Wild3DInView(*cull, c.x, c.y, kWyrmLairR + 90.0f)) return;
+    WyrmLairBuild();
+    float gy = GroundY(c.x, c.y);
+    DrawModel(g_wyrmLairModel, { c.x, gy, c.y }, 1.0f, WHITE);
+    if (shadowPass) return;
+    float t = (float)GetTime();
+    BeginBlendMode(BLEND_ADDITIVE);
+    rlDisableDepthMask();
+    for (int i = 0; i < 9; i++) { // lava seams glowing up through the ash
+        float a = i * 0.7f + 0.3f, r = 60.0f + 170.0f * Town3DHash01((float)i, 21.0f);
+        GlowPool(c.x + cosf(a) * r, c.y + sinf(a) * r, gy + 1.2f, 34.0f + 10.0f * sinf(t * 1.5f + i), Color{ 200, 80, 20, 255 });
+    }
+    for (int i = 0; i < 14; i++) { // embers rising
+        float ph = fmodf(t * 0.15f + i / 14.0f, 1.0f), a = i * 2.4f, r = 40.0f + 200.0f * Town3DHash01((float)i, 4.0f);
+        WyrmGlow({ c.x + cosf(a) * r, gy + ph * 160.0f, c.y + sinf(a) * r }, 5.0f, Color{ 255, (unsigned char)(150 * (1 - ph)), 40, 255 });
+    }
+    rlEnableDepthMask();
+    EndBlendMode();
+}
+static void WyrmLairResolve(Vector2& p, float r) {
+    const Vector2 c = kWyrmLair;
+    const float wallR = kWyrmLairR + 16.0f;
+    float d = Dist(p, c);
+    if (d < 1.0f || fabsf(d - wallR) > r + 22.0f) return;
+    float a = atan2f(p.y - c.y, p.x - c.x) - kWyrmGateYaw;
+    if (fabsf(atan2f(sinf(a), cosf(a))) < 0.26f) return; // the way in
+    float want = d < wallR ? wallR - r - 22.0f : wallR + r + 22.0f;
+    p = { c.x + (p.x - c.x) / d * want, c.y + (p.y - c.y) / d * want };
+}
+// Boss frame: its name and one bar per head, while you're near it.
+static void DrawWyrmFrame(const GameState& s, int screenW) {
+    if (s.wyrmRespawnT > 0.0f || s.screen != Screen::Wilderness) return;
+    const GameState::ActiveMonster* am = WyrmActive(s);
+    Vector2 bp = am ? am->pos : kWyrmLair;
+    if (!am && Dist(s.wildernessPlayerPos, bp) > 700.0f) return;
+    float frac = WyrmHpFrac(s);
+    Rectangle r = { 60.0f, 300.0f, (float)screenW - 120.0f, 58.0f };
+    DrawRectangleRounded(r, 0.2f, 6, Fade(Color{ 24, 14, 12, 255 }, 0.82f));
+    DrawRectangleRoundedLines(r, 0.2f, 6, Fade(Color{ 200, 120, 60, 255 }, 0.9f));
+    const char* nm = "VYRATHAX THE TRI-WYRM";
+    DrawUIText(nm, (int)(r.x + r.width / 2 - MeasureUIText(nm, 14) / 2.0f), (int)r.y + 6, 14, Color{ 255, 200, 150, 255 });
+    float bw = (r.width - 40.0f) / 3.0f;
+    static const char* lbl[3] = { "Fire", "Storm", "Venom" };
+    for (int h = 0; h < 3; h++) {
+        float lo = h == 0 ? 2.0f / 3.0f : (h == 1 ? 1.0f / 3.0f : 0.0f);
+        float f = std::clamp((frac - lo) * 3.0f, 0.0f, 1.0f);
+        Rectangle b = { r.x + 10.0f + h * (bw + 10.0f), r.y + 28.0f, bw, 14.0f };
+        DrawRectangleRec(b, Fade(BLACK, 0.6f));
+        DrawRectangleRec({ b.x, b.y, b.width * f, b.height }, f > 0.0f ? kWyHeadCol[h] : GRAY);
+        DrawRectangleLinesEx(b, 1.0f, Fade(WHITE, 0.4f));
+        DrawUIText(f > 0.0f ? lbl[h] : TextFormat("%s - fallen", lbl[h]), (int)b.x + 4, (int)b.y + 1, 11, f > 0.0f ? BLACK : WHITE);
+    }
+}
 static void Wild3DDrawHouse(GameState& s, bool shadowPass); // Housing 2.0 (below, with the room surfaces)
 static void Wild3DDrawSettlement(GameState& s, bool shadowPass, const Town3DCam* cull); // the Settlement (2026-09-27)
 static Vector3 g_houseSignPos = { 0, -1, 0 };                // the homestead's sign post (y < 0: none built)
@@ -18550,6 +19094,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     }
     Wild3DDrawRivalCamp(s, shadowPass, cull); // Murder Inc.'s war camp (2026-09-27)
     Wild3DDrawOrcFort(shadowPass, cull);      // Grimtusk Hold, the orc fortress (2026-09-27)
+    Wild3DDrawWyrmLair(shadowPass, cull);     // the Cinder Caldera, the Tri-Wyrm's lair (2026-09-27)
     if (s.notoriety > 1.0f || s.refugeKnown) { // the outlaw refuge: dark tent + red lantern
         if (vis(kOutlawRefuge.x, kOutlawRefuge.y, 90.0f)) {
             T3DLiftScope lift_(kOutlawRefuge.x, kOutlawRefuge.y);
@@ -18628,7 +19173,8 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         const GameState::ActiveMonster* extra = (!eng && !isDying) ? FindWildExtra(s, (int)i) : nullptr;
         if (!eng && !isDying && !extra && s.wildSpotRespawn[i] > 0.0f) continue;
         Vector2 mp = eng ? s.wildEngaged->pos : (isDying ? dying->pos : (extra ? extra->pos : WildernessMonsterLivePos((int)i, s.worldTime)));
-        if (!vis(mp.x, mp.y, 70.0f)) continue;
+        bool wyrm = kWildernessMonsterSpots[i].iconIdx == kWyrmIcon;
+        if (!vis(mp.x, mp.y, wyrm ? 300.0f : 70.0f)) continue;
         float face = (eng || extra) ? atan2f(s.wildernessPlayerPos.y - mp.y, s.wildernessPlayerPos.x - mp.x)
                          : Wild3DWanderFacing((int)i, mp.x, mp.y, s.worldTime);
         T3CMonLook mlook = T3CMonsterLook(kWildernessMonsterSpots[i].iconIdx);
@@ -18650,6 +19196,12 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                 mAtk = MonsterCombatPhase3D(fmodf(fsw + kGuildSwingPeriod * 0.5f, kGuildSwingPeriod));
                 if (fsw > 0.12f && fsw < 0.3f) mHurtT = 0.0f; // its swing lands
             }
+        }
+        if (wyrm) { // the world boss draws itself
+            float frac = isDying ? 0.0f : (eng ? s.wildEngaged->hp / std::max(1.0f, s.wildEngaged->maxHp)
+                                              : (extra ? extra->hp / std::max(1.0f, extra->maxHp) : WyrmHpFrac(s)));
+            DrawTriWyrm(mp, face, mHurtT, mAtk, frac, ma.move, shrink, shadowPass);
+            continue;
         }
         Color anRecolor = { 0, 0, 0, 0 }; float anScale = 1.0f;
         int anId = mlook.humanoid ? -1 : AnimalForMonster(kWildernessMonsterSpots[i].iconIdx, &anRecolor, &anScale);
@@ -18680,6 +19232,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                         mAtk);
         }
     }
+    if (!shadowPass) WyrmDrawFx(); // the Tri-Wyrm's telegraphs and blasts (2026-09-27)
     // The Rival Adventurer - while their death animation plays, the fading body at
     // the kill site is drawn instead of the patrolling rival (no double-draw);
     // they "retreat" (RivalFightEnded already put them back on patrol) rather
@@ -19187,6 +19740,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
         label3D(kWildernessTown3GatePos.x, 110, kWildernessTown3GatePos.y, kTown3Name);
         label3D(kWildernessTown4GatePos.x, 110, kWildernessTown4GatePos.y, kTown4Name); // Phase 4
         label3D(kOrcFortPos.x + cosf(kOrcFortGateYaw) * kOrcFortRadius, 170, kOrcFortPos.y + sinf(kOrcFortGateYaw) * kOrcFortRadius, "Grimtusk Hold");
+        label3D(kWyrmLair.x + cosf(kWyrmGateYaw) * kWyrmLairR, 150, kWyrmLair.y + sinf(kWyrmGateYaw) * kWyrmLairR, "Cinder Caldera");
         for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances)
             label3D(e.pos.x, 110, e.pos.y, kDungeons[e.dungeonIdx].name);
         for (size_t pi = 0; pi < kHousePlots.size(); pi++) {
@@ -23864,6 +24418,14 @@ static void SettleDrawBuilding(const GameState& s, int k, bool shadowPass) {
         int stories = B.level >= 6 ? 2 : 1;
         if (k == kSbHall) {
             Town3DDrawHouse(0, 0, w, wd, ww, M.roof46, 90.0f, 3, 2, B.level >= 5 ? 3 : 2, true, wallT, roofT);
+            if (s.wyrmKills > 0) { // Vyrathax's skull over the door (2026-09-27)
+                const Color bone = { 222, 212, 190, 255 };
+                float y = 2.0f + 3.125f * kT3DModScale * 0.9f, z = 2.0f * kT3DModScale + 8.0f;
+                DrawSphere({ 0, y, z }, 11.0f, bone);
+                DrawCube({ 0, y - 6, z + 12 }, 14, 8, 20, bone);
+                for (int sx = -1; sx <= 1; sx += 2) DrawCylinderEx({ sx * 7.0f, y + 6, z }, { sx * 22.0f, y + 22, z - 6 }, 3.5f, 0.5f, 6, Color{ 60, 50, 46, 255 });
+                DrawSphere({ -4, y + 2, z + 9 }, 2.2f, Color{ 255, 120, 40, 255 }); DrawSphere({ 4, y + 2, z + 9 }, 2.2f, Color{ 255, 120, 40, 255 });
+            }
             prop(kWPFlagBlue, -80.0f, 30.0f, 0.0f, 1.2f); prop(kWPFlagBlue, 80.0f, 30.0f, 0.0f, 1.2f);
         } else if (k == kSbYard) { // an open training ground: fence, dummies, racks
             for (int i = -2; i <= 2; i++) { piece(M.fenceSingle, i * 20.0f, 0, -46.0f, 0.0f); piece(M.fenceSingle, -46.0f, 0, i * 20.0f, 90.0f); piece(M.fenceSingle, 46.0f, 0, i * 20.0f, 90.0f); }
@@ -25537,8 +26099,8 @@ static void TransferWildPrimary(GameState& s, int newSpotIdx) {
         newPrimary.bladeIdx = -1;
         newPrimary.pos = WildernessMonsterLivePos(newSpotIdx, s.worldTime);
         newPrimary.spawnPos = spot.pos;
-        newPrimary.maxHp = std::max(1.0f, spot.level * 3.0f);
-        newPrimary.hp = newPrimary.maxHp;
+        newPrimary.maxHp = WildSpotMaxHp(newSpotIdx);
+        newPrimary.hp = (newSpotIdx == kWyrmSpot && s.wyrmHp > 0.0f) ? std::min(newPrimary.maxHp, s.wyrmHp) : newPrimary.maxHp;
     }
     if (hadPrimary) s.wildExtraAttackers.push_back(oldPrimary); // the old target keeps fighting
     s.wildEngaged = newPrimary;
@@ -25949,8 +26511,8 @@ static FlagTargetInfo GetFlagTargetInfo(const GameState& s, int zone) {
                 const auto& spot = kWildernessMonsterSpots[f.spotIdx];
                 if (const auto* ex = FindWildExtra(s, f.spotIdx))
                     return { spot.name, ex->hp, ex->maxHp, true };
-                float full = std::max(1.0f, spot.level * 3.0f);
-                return { spot.name, full, full, true };
+                float full = WildSpotMaxHp(f.spotIdx);
+                return { spot.name, (f.spotIdx == kWyrmSpot && s.wyrmHp > 0.0f) ? s.wyrmHp : full, full, true };
             }
             if (f.isRival || (f.bladeIdx >= 0 && f.bladeIdx < kBladeCount)) { // its wounds carry over - show them
                 float lvl = f.isRival ? s.rivalLevel : s.blades[f.bladeIdx].level;
@@ -27702,8 +28264,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         am.spotIdx = idx;
         am.pos = WildernessMonsterLivePos(idx, s.worldTime); // wherever it currently wandered to, not a snap back to spawn
         am.spawnPos = spot.pos;
-        am.maxHp = std::max(1.0f, spot.level * 3.0f);
-        am.hp = am.maxHp;
+        am.maxHp = WildSpotMaxHp(idx);
+        am.hp = (idx == kWyrmSpot && s.wyrmHp > 0.0f) ? std::min(am.maxHp, s.wyrmHp) : am.maxHp; // the wyrm's wounds carry over
         s.wildEngaged = am;
         s.logLine = "You engage the " + spot.name + "!";
     };
@@ -27843,7 +28405,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             float hitCh = MonsterHitChance(s) - (am.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
             bool parried = false; // (2026-09-26) Parrying
             if (RandUnit() * 100.0f < hitCh && !(parried = TryParry(s, 0, mname, false))) {
-                float raw = spot.level * (0.8f + RandUnit() * 0.6f);
+                float raw = spot.level * (0.8f + RandUnit() * 0.6f) * (IsWyrmName(mname) ? 0.3f : 1.0f); // the wyrm's heads do the real work
                 if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                 s.hp -= (dmg = NecroShield(s, 0, dmg)); // skeletons / Bone Armor take it first
@@ -28020,7 +28582,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             float hitCh = MonsterHitChance(s) - (am.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
             bool parried = false; // (2026-09-26) Parrying
             if (RandUnit() * 100.0f < hitCh && !(parried = TryParry(s, 0, mname, false))) {
-                float raw = spot.level * (0.8f + RandUnit() * 0.6f);
+                float raw = spot.level * (0.8f + RandUnit() * 0.6f) * (IsWyrmName(mname) ? 0.3f : 1.0f); // the wyrm's heads do the real work
                 if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                 s.hp -= (dmg = NecroShield(s, 0, dmg)); // skeletons / Bone Armor take it first
@@ -28150,7 +28712,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                     float hitCh = MonsterHitChance(s) - (ex.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
                     bool parried = false; // (2026-09-26) Parrying
                     if (RandUnit() * 100.0f < hitCh && !(parried = TryParry(s, 0, spot.name, false))) {
-                        float raw = spot.level * (0.8f + RandUnit() * 0.6f);
+                        float raw = spot.level * (0.8f + RandUnit() * 0.6f) * (IsWyrmName(spot.name) ? 0.3f : 1.0f);
                         if (ex.debuffKind == 1) raw *= 0.7f; // Sap Strength
                         int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                         s.hp -= (dmg = NecroShield(s, 0, dmg)); // skeletons / Bone Armor take it first
@@ -28500,6 +29062,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     RivalCampResolve(s, s.wildernessPlayerPos, kPlayerRadius); // the war camp's palisade (in through the gate)
     OrcFortResolve(s.wildernessPlayerPos, kPlayerRadius);     // Grimtusk Hold's walls
     SettleResolve(s, s.wildernessPlayerPos, kPlayerRadius);    // your settlement's buildings and palisade (2026-09-27)
+    WyrmLairResolve(s.wildernessPlayerPos, kPlayerRadius);     // the Cinder Caldera's crags
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessReturnGatePos, kNodeRadius);
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown2GatePos, kNodeRadius);
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown3GatePos, kNodeRadius); // Phase 3
@@ -28953,6 +29516,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     } // end else: 2D world view (3D renders via DrawWilderness3DWorld above)
     DrawVirtualJoystick();
     DrawTargetFrame(s, 0); // shared by the 2D and 3D views (tap it to cycle targets)
+    DrawWyrmFrame(s, screenW); // the world boss's three heads (2026-09-27)
     if (DrawTargetButton()) CycleFlagTarget(s); // thumb-friendly G for touch
     // Live check, not wasEngaged: the fight may have ended mid-frame (2026-09-25).
     if (s.wildEngaged.has_value()) {
@@ -32352,6 +32916,7 @@ static void UpdateDrawFrame() {
         if (IsPlayScreen(state.screen)) g_playScreen = state.screen; // remembered for "Play" (2026-09-27)
         for (float& cd : state.commissionCd) if (cd > 0.0f) cd -= dt; // commission offers (2026-09-27)
         SettleTick(state, dt); // the settlement works in real time (2026-09-27)
+        WyrmTick(state, dt);   // the world boss's wake timer and heads (2026-09-27)
         UpdateCombatAnim(state, dt);
         UpdateDeathAndRespawn(state, dt); // death anims, ghost timer, monster respawns, corpse fades
         UpdateGuildOffscreen(state, dt);  // the rival and Murder Inc. keep living while you're elsewhere
