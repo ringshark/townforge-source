@@ -9,6 +9,8 @@ cp "$here"/manifest.webmanifest "$here"/cloud.js "$here"/guildnet.js "$dst"/
 if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_ANON_KEY" ]; then
   printf 'window.TF_CLOUD = { url: "%s", key: "%s" };\n' "$SUPABASE_URL" "$SUPABASE_ANON_KEY" > "$dst"/cloud-config.js
   echo "cloud saves: ON"
+elif [ -f "$dst"/cloud-config.js ] && grep -q 'url:' "$dst"/cloud-config.js; then
+  echo "cloud saves: ON (kept the site's existing cloud-config.js)"
 else
   echo 'window.TF_CLOUD = null; // cloud saves not configured (set SUPABASE_URL + SUPABASE_ANON_KEY)' > "$dst"/cloud-config.js
   echo "cloud saves: off (SUPABASE_URL / SUPABASE_ANON_KEY not set)"
