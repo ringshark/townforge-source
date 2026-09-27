@@ -362,6 +362,7 @@ static const std::array<BuildingDef, 4> kCraftBuildings = {{
         {"Boots", ItemType::Clothing, "Cloth", "shoes", "", 25, 4, 2},
         {"Body Sash", ItemType::Clothing, "Cloth", "sash", "", 10, 1, 1},
         {"Bandana", ItemType::Clothing, "Cloth", "hat", "", 5, 1, 1},
+        {"Hood", ItemType::Clothing, "Cloth", "hat", "", 10, 2, 1},
         {"Wide-Brim Hat", ItemType::Clothing, "Cloth", "hat", "", 15, 3, 2},
         {"Wizard's Hat", ItemType::Clothing, "Cloth", "hat", "", 30, 3, 2},
         {"Feathered Hat", ItemType::Clothing, "Cloth", "hat", "", 55, 4, 3},
@@ -951,7 +952,7 @@ static const int kDyeHueCount = (int)(sizeof(kDyeHues) / sizeof(kDyeHues[0]));
 static const int kDyeCost = 15; // gold per dip at the Tailor
 // Garment styles, by the name the Tailor sells them under (slot = which layer).
 struct ClothDef { const char* name; const char* slot; Color natural; int style; };
-enum { kClStyleNone = 0, kClKilt = 1, kClWizardHat, kClWideBrim, kClBandana, kClFeatherHat };
+enum { kClStyleNone = 0, kClKilt = 1, kClWizardHat, kClWideBrim, kClBandana, kClFeatherHat, kClHood };
 static const ClothDef kClothDefs[] = {
     { "Shirt", "shirt", { 225, 215, 190, 255 }, 0 },       { "Fancy Shirt", "shirt", { 236, 234, 226, 255 }, 0 },
     { "Tunic", "shirt", { 112, 116, 78, 255 }, 0 },        { "Doublet", "shirt", { 120, 40, 50, 255 }, 0 },
@@ -961,6 +962,7 @@ static const ClothDef kClothDefs[] = {
     { "Robe", "robe", { 112, 96, 80, 255 }, 0 },           { "Body Sash", "sash", { 150, 40, 40, 255 }, 0 },
     { "Bandana", "hat", { 160, 40, 40, 255 }, kClBandana }, { "Wide-Brim Hat", "hat", { 130, 100, 70, 255 }, kClWideBrim },
     { "Wizard's Hat", "hat", { 70, 60, 130, 255 }, kClWizardHat }, { "Feathered Hat", "hat", { 60, 70, 110, 255 }, kClFeatherHat },
+    { "Hood", "hat", { 96, 84, 62, 255 }, kClHood }, // the Ranger outfit's hood (a real mesh, assets/outfits)
 };
 // The garment a (possibly quality-prefixed, e.g. "Fine Tunic") item is - longest name match wins.
 static const ClothDef* ClothDefFor(const Item& it) {
@@ -3366,6 +3368,8 @@ static void DrawClothingIcon(const Item& item, float x, float y, float size) {
     } else if (sl == "hat") {
         int st = def ? def->style : kClWideBrim;
         if (st == kClWizardHat) { DrawEllipse((int)cx, (int)(cy + 10 * u), 20 * u, 5 * u, d); T(-10, 9, 10, 9, 5, -18, c); DrawEllipse((int)cx, (int)(cy + 9 * u), 18 * u, 3.5f * u, c); }
+        else if (st == kClHood) { DrawCircleSector({ cx, cy + 2 * u }, 16 * u, 180, 360, 18, d); DrawCircleSector({ cx, cy + 2 * u }, 14 * u, 180, 360, 18, c);
+                                  R(-14, 2, 28, 12, c); DrawCircleSector({ cx, cy + 6 * u }, 8 * u, 180, 360, 12, Color{ 40, 30, 24, 255 }); T(-14, 14, 14, 14, 0, 20, d); }
         else if (st == kClBandana) { DrawCircleSector({ cx, cy + 6 * u }, 14 * u, 180, 360, 16, c); R(-14, 4, 28, 4, d); T(12, 6, 20, 14, 16, 2, c); }
         else {
             DrawEllipse((int)cx, (int)(cy + 8 * u), 21 * u, 6 * u, d); DrawEllipse((int)cx, (int)(cy + 7 * u), 20 * u, 5 * u, c);
@@ -11326,6 +11330,10 @@ enum HumanWeapon {
 enum HumanStyle { kHsUnarmed, kHsOneHand, kHsTwoHand, kHsPolearm, kHsDagger, kHsBow, kHsMagic };
 enum HumanHelm { kHhNone, kHhLeather, kHhChain, kHhPlate };
 
+// Real clothes (2026-09-27): Quaternius "Modular Character Outfits - Fantasy"
+// (CC0, assets/outfits) - skinned meshes retargeted by bone name onto our rig.
+enum OutfitPart { kOpRangerBody, kOpRangerArms, kOpRangerLegs, kOpRangerBoots, kOpRangerHood, kOpRangerPauldron,
+                  kOpPeasantBody, kOpPeasantArms, kOpPeasantLegs, kOpPeasantFeet, kOpCount };
 struct HumanOutfit {
     Color region[kHrCount];
     int weapon = kHwNone;
@@ -11342,6 +11350,9 @@ struct HumanOutfit {
     int hat = kClStyleNone;             // clothing hat style (kClWizardHat..), hidden under a helm
     bool robe = false;                  // a robe's hanging skirt (2026-09-27)
     float build = 1.0f;                 // side-to-side / front-to-back bulk (the player's hero build: 1.15)
+    unsigned outfitMask = 0;            // OutfitPart bits drawn over the body
+    Color outfitTint[kOpCount] = {};    // per part (dye); only read for parts in the mask
+    unsigned hideRegions = 0;           // HumanRegion bits of the mannequin body hidden under clothes
     bool skeleton = false;              // drawn as bones on the rig instead of the body (necro minions, 2026-09-27)
     Color robeCol = { 112, 96, 80, 255 };
     Color hatCol = { 90, 70, 120, 255 };
@@ -11384,6 +11395,9 @@ struct HumanRig {
     Model cloak{};     // procedural, chest-bone space
     Model hat[6]{};    // clothing hats, head-bone space (index = kClWizardHat..kClFeatherHat)
     Model robeSkirt{}; // chest-bone space, waist to ankles
+    Model outfit[kOpCount]{};                      // (2026-09-27) clothing meshes, loaded lazily
+    std::vector<int> outfitMap[kOpCount];          // outfit bone index -> our bone index
+    bool outfitOk[kOpCount]{}, outfitTried = false;
     Color painted[kHrCount]{};
     bool paintedOnce = false;
 };
@@ -11732,6 +11746,113 @@ static void HumanEnsure() {
     H.ok = true;
 }
 
+// ---- Outfit loading / drawing (2026-09-27) ----
+static std::string OutfitBoneToOurs(const std::string& n) {
+    static const std::pair<const char*, const char*> direct[] = {
+        { "root", "root" }, { "pelvis", "DEF-hips" }, { "spine_01", "DEF-spine.001" }, { "spine_02", "DEF-spine.002" },
+        { "spine_03", "DEF-spine.003" }, { "neck_01", "DEF-neck" }, { "Head", "DEF-head" },
+    };
+    for (auto& d : direct) if (n == d.first) return d.second;
+    size_t us = n.rfind('_');
+    if (us == std::string::npos) return "";
+    std::string side = n.substr(us + 1) == "l" ? ".L" : (n.substr(us + 1) == "r" ? ".R" : "");
+    if (side.empty()) return "";
+    std::string stem = n.substr(0, us);
+    static const std::pair<const char*, const char*> limb[] = {
+        { "clavicle", "shoulder" }, { "upperarm", "upper_arm" }, { "lowerarm", "forearm" }, { "hand", "hand" },
+        { "thigh", "thigh" }, { "calf", "shin" }, { "foot", "foot" }, { "ball", "toe" }, { "ball_leaf", "toe" },
+    };
+    for (auto& l : limb) if (stem == l.first) return std::string("DEF-") + l.second + side;
+    // fingers: index_01 -> f_index.01, thumb_02 -> thumb.02, *_04_leaf -> .03
+    static const char* fingers[] = { "index", "middle", "pinky", "ring", "thumb" };
+    for (const char* f : fingers) {
+        std::string fs = f;
+        if (stem.rfind(fs + "_", 0) != 0) continue;
+        std::string num = stem.substr(fs.size() + 1, 2);
+        if (num == "04") num = "03";
+        return std::string("DEF-") + (fs == "thumb" ? "thumb" : "f_" + fs) + "." + num + side;
+    }
+    return "";
+}
+static void OutfitEnsure(HumanRig& H) {
+    if (H.outfitTried) return;
+    H.outfitTried = true;
+    static const char* files[kOpCount] = {
+        "assets/outfits/Male_Ranger_Body.gltf", "assets/outfits/Male_Ranger_Arms.gltf", "assets/outfits/Male_Ranger_Legs.gltf",
+        "assets/outfits/Male_Ranger_Feet_Boots.gltf", "assets/outfits/Male_Ranger_Head_Hood.gltf", "assets/outfits/Male_Ranger_Acc_Pauldron.gltf",
+        "assets/outfits/Male_Peasant_Body.gltf", "assets/outfits/Male_Peasant_Arms.gltf", "assets/outfits/Male_Peasant_Legs.gltf",
+        "assets/outfits/Male_Peasant_Feet.gltf",
+    };
+    for (int k = 0; k < kOpCount; k++) {
+        if (!FileExists(files[k])) continue;
+        Model m = LoadModel(files[k]);
+        if (m.meshCount <= 0) continue;
+        std::vector<int> map((size_t)std::max(0, m.skeleton.boneCount), -1);
+        for (int b = 0; b < m.skeleton.boneCount; b++) {
+            std::string ours = OutfitBoneToOurs(m.skeleton.bones[b].name);
+            if (!ours.empty()) map[(size_t)b] = HumanFindBone(H.model, ours.c_str());
+        }
+        for (int b = 0; b < m.skeleton.boneCount; b++) // unmapped bones follow their nearest mapped ancestor
+            for (int a = b; map[(size_t)b] < 0 && a >= 0; a = m.skeleton.bones[a].parent) {
+                if (map[(size_t)a] >= 0) map[(size_t)b] = map[(size_t)a];
+                if (a == m.skeleton.bones[a].parent) break;
+            }
+        for (int i = 0; i < m.meshCount; i++) {
+            Mesh& me = m.meshes[i];
+            int n = me.vertexCount;
+            if (!me.animVertices) me.animVertices = (float*)MemAlloc((unsigned int)(n * 3 * sizeof(float)));
+            if (!me.animNormals) me.animNormals = (float*)MemAlloc((unsigned int)(n * 3 * sizeof(float)));
+        }
+        H.outfit[k] = m;
+        H.outfitMap[k] = map;
+        H.outfitOk[k] = true;
+    }
+}
+// Skin one outfit part with the rig's current bone matrices (outfit bone -> ours) and draw it.
+static void OutfitDraw(HumanRig& H, int k, const Matrix& world, Color tint, Shader sh) {
+    if (!H.outfitOk[k]) return;
+    Model& m = H.outfit[k];
+    const std::vector<int>& map = H.outfitMap[k];
+    const float u = H.unit;
+    for (int i = 0; i < m.meshCount; i++) {
+        Mesh& me = m.meshes[i];
+        if (!me.boneIndices || !me.boneWeights) continue;
+        int n = me.vertexCount;
+        const float* V = me.vertices; const float* N = me.normals;
+        for (int v = 0; v < n; v++) {
+            float x = V[v * 3] * u, y = V[v * 3 + 1] * u, z = V[v * 3 + 2] * u;
+            float nx = N ? N[v * 3] : 0.0f, ny = N ? N[v * 3 + 1] : 1.0f, nz = N ? N[v * 3 + 2] : 0.0f;
+            float px = 0, py = 0, pz = 0, qx = 0, qy = 0, qz = 0, wsum = 0;
+            for (int q = 0; q < 4; q++) {
+                float w = me.boneWeights[v * 4 + q];
+                if (w <= 0.0f) continue;
+                int ob = me.boneIndices[v * 4 + q];
+                int b = (ob >= 0 && ob < (int)map.size()) ? map[(size_t)ob] : -1;
+                if (b < 0) continue;
+                const Matrix& M = H.skin[(size_t)b];
+                px += w * (M.m0 * x + M.m4 * y + M.m8 * z + M.m12);
+                py += w * (M.m1 * x + M.m5 * y + M.m9 * z + M.m13);
+                pz += w * (M.m2 * x + M.m6 * y + M.m10 * z + M.m14);
+                qx += w * (M.m0 * nx + M.m4 * ny + M.m8 * nz);
+                qy += w * (M.m1 * nx + M.m5 * ny + M.m9 * nz);
+                qz += w * (M.m2 * nx + M.m6 * ny + M.m10 * nz);
+                wsum += w;
+            }
+            if (wsum < 0.001f) { px = x; py = y; pz = z; qx = nx; qy = ny; qz = nz; }
+            else if (wsum < 0.999f) { px /= wsum; py /= wsum; pz /= wsum; }
+            me.animVertices[v * 3] = px; me.animVertices[v * 3 + 1] = py; me.animVertices[v * 3 + 2] = pz;
+            me.animNormals[v * 3] = qx; me.animNormals[v * 3 + 1] = qy; me.animNormals[v * 3 + 2] = qz;
+        }
+        UpdateMeshBuffer(me, RL_DEFAULT_SHADER_ATTRIB_LOCATION_POSITION, me.animVertices, n * 3 * (int)sizeof(float), 0);
+        if (N) UpdateMeshBuffer(me, RL_DEFAULT_SHADER_ATTRIB_LOCATION_NORMAL, me.animNormals, n * 3 * (int)sizeof(float), 0);
+        int mi = (m.meshMaterial && i < m.meshCount) ? m.meshMaterial[i] : 0;
+        Material mat = m.materials[std::clamp(mi, 0, m.materialCount - 1)];
+        mat.shader = sh;
+        mat.maps[MATERIAL_MAP_DIFFUSE].color = tint;
+        DrawMesh(me, mat, world);
+    }
+}
+
 // Armor tier -> color, read from the item's name (the catalog's naming is
 // consistent: "Leather ...", "Studded ...", "Ring Mail ...", "Chain...", "Plate ...").
 static bool HumanArmorColor(const std::optional<Item>& it, Color* out) {
@@ -11834,6 +11955,32 @@ static HumanOutfit HumanOutfitFor(const Equipment& e) {
         o.region[kHrSleeve] = rc; o.region[kHrForearm] = ColorBrightness(rc, -0.04f);
         o.region[kHrLegs] = ColorBrightness(rc, -0.10f); o.region[kHrNeck] = skin;
         o.robe = true; o.robeCol = rc;
+    }
+    { // Real clothes (2026-09-27): the Quaternius Ranger/Peasant meshes replace the painted
+      // layers they cover; armor and robes still win (they're what's on top).
+        auto tintOf = [](const Item& it) {
+            return (it.hue >= 0 && it.hue < kDyeHueCount) ? ColorBrightness(kDyeHues[it.hue].c, 0.3f) : WHITE;
+        };
+        auto use = [&](int part, Color t) { o.outfitMask |= 1u << part; o.outfitTint[part] = t; };
+        if (!e.robe) {
+            if (e.shirt && !e.chest) {
+                bool ranger = e.shirt->name.find("Tunic") != std::string::npos;
+                use(ranger ? kOpRangerBody : kOpPeasantBody, tintOf(*e.shirt));
+                o.hideRegions |= (1u << kHrChest) | (1u << kHrBelt) | (1u << kHrSkirt);
+                if (!e.arms) { use(ranger ? kOpRangerArms : kOpPeasantArms, tintOf(*e.shirt)); o.hideRegions |= (1u << kHrSleeve) | (1u << kHrForearm); }
+            }
+            const ClothDef* pd = e.pants ? ClothDefFor(*e.pants) : nullptr;
+            if (e.pants && !e.legs && !(pd && pd->style == kClKilt)) { use(kOpPeasantLegs, tintOf(*e.pants)); o.hideRegions |= 1u << kHrLegs; }
+        }
+        if (e.shoes) {
+            bool boots = e.shoes->name.find("Boots") != std::string::npos;
+            use(boots ? kOpRangerBoots : kOpPeasantFeet, tintOf(*e.shoes));
+            o.hideRegions |= 1u << kHrBoots;
+        }
+        if (e.hat && !e.helmet) {
+            const ClothDef* hd = ClothDefFor(*e.hat);
+            if (hd && hd->style == kClHood) { use(kOpRangerHood, tintOf(*e.hat)); o.hat = kClStyleNone; o.hairStyle = 3; }
+        }
     }
     HumanArmWith(o, e.rightHand);
     if (o.weapon == kHwNone) HumanArmWith(o, e.leftHand);
@@ -11979,7 +12126,7 @@ static float HumanEase(float t, float a, float b) {
     float x = std::clamp((t - a) / (b - a), 0.0f, 1.0f);
     return x * x * (3.0f - 2.0f * x);
 }
-static void HumanSkin(HumanRig& H) {
+static void HumanSkin(HumanRig& H, unsigned hideRegions = 0) {
     int nb = H.model.skeleton.boneCount;
     for (int b = 0; b < nb; b++) {
         const Transform& t = H.pose[(size_t)b];
@@ -12010,6 +12157,12 @@ static void HumanSkin(HumanRig& H) {
                 qx += w * (M.m0 * nx + M.m4 * ny + M.m8 * nz); // bones are rigid: rotation part suffices
                 qy += w * (M.m1 * nx + M.m5 * ny + M.m9 * nz);
                 qz += w * (M.m2 * nx + M.m6 * ny + M.m10 * nz);
+            }
+            if (hideRegions && (hideRegions & (1u << H.region[(size_t)m][(size_t)v]))) {
+                // under the clothes: fold into the body so it never pokes through (2026-09-27)
+                int anchor = H.region[(size_t)m][(size_t)v] == kHrLegs || H.region[(size_t)m][(size_t)v] == kHrBoots ? H.boneHips
+                           : H.region[(size_t)m][(size_t)v] == kHrHair ? H.boneHead : H.boneSpine2;
+                if (anchor >= 0) { px = H.pose[(size_t)anchor].translation.x; py = H.pose[(size_t)anchor].translation.y; pz = H.pose[(size_t)anchor].translation.z; }
             }
             me.animVertices[v * 3] = px; me.animVertices[v * 3 + 1] = py; me.animVertices[v * 3 + 2] = pz;
             me.animNormals[v * 3] = qx; me.animNormals[v * 3 + 1] = qy; me.animNormals[v * 3 + 2] = qz;
@@ -12266,7 +12419,7 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
         if (procAttack >= 0) HumanAttackMove(H, o, st.atkVariant, atkT);
         if (procCast) HumanCastMove(H, o, castT);
     }
-    HumanSkin(H);
+    HumanSkin(H, o.hideRegions);
 
     HumanPaint(H, o);
     for (int i = 0; i < H.model.materialCount; i++) H.model.materials[i].maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
@@ -12279,6 +12432,11 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
     Matrix world = MatrixMultiply(MatrixMultiply(MatrixScale(bw, sc, bw), MatrixRotateY(rotDeg * DEG2RAD)),
                                   MatrixTranslate(x, 0.0f, z));
     if (!o.skeleton) DrawModelEx(H.model, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f }, rotDeg, { bw, sc, bw }, tint);
+    if (o.outfitMask && !o.skeleton) { // real clothes over the body (2026-09-27)
+        OutfitEnsure(H);
+        for (int k = 0; k < kOpCount; k++)
+            if (o.outfitMask & (1u << k)) OutfitDraw(H, k, world, HumanMul(o.outfitTint[k], tint), sh);
+    }
     else { // (2026-09-27) a real skeleton: bones between the animated joints, skull, ribs, pelvis
         const int nb2 = H.model.skeleton.boneCount;
         std::vector<Vector3> J((size_t)nb2);
