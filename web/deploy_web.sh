@@ -3,7 +3,7 @@
 set -e
 src=$1; dst=$2; here=$(cd "$(dirname "$0")" && pwd)
 cp "$src"/index.html "$src"/townforge.js "$src"/townforge.wasm "$src"/townforge.data "$dst"/
-cp "$here"/manifest.webmanifest "$here"/cloud.js "$dst"/
+cp "$here"/manifest.webmanifest "$here"/cloud.js "$here"/guildnet.js "$dst"/
 # Cloud saves: configured from the environment (never committed). The anon key is
 # Supabase's public browser key - row-level security is what protects the saves.
 if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_ANON_KEY" ]; then

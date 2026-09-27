@@ -1500,6 +1500,12 @@ struct GameState {
     float wyrmRespawnT = 600.0f; // seconds of play until Vyrathax wakes (0 = awake)
     float wyrmHp = -1.0f;        // its wounds while awake (-1 = unhurt)
     int wyrmKills = 0;
+    // War Week (2026-09-27) - PERSISTED: this week's points per day (0 = Monday),
+    // reported to the online guild. warWeek = weeks since Monday 1970-01-05 (UTC).
+    long long warWeek = -1;
+    std::array<int, 7> warPts{};
+    float warPlayAcc = 0.0f; // Muster: seconds played toward the next point
+    int warPlayMin = 0;      // Muster: minutes already counted today (cap 60) - PERSISTED
     // Commissions (2026-09-27) - PERSISTED.
     std::vector<CommissionDeed> commissions;
     float commissionCd[4] = { 0, 0, 0, 0 };
@@ -4285,10 +4291,45 @@ static void CheckWeeklyReset(GameState& s) {
         s.logLine = "The Hearthmoot posts a new set of weekly goals.";
     }
 }
+// ---- War Week (2026-09-27) ----
+// Guild vs guild, one theme a day (UTC): Mon Muster, Tue Harvest, Wed Forge,
+// Thu Hunt, Fri Hold the Walls, Sat The Wyrm, Sun Battle Day. Points only count
+// on their own day; the game reports each day's total to the online guild.
+static const int kWarDayCap = 5000;
+static const char* kWarDayName[7] = { "Muster", "Harvest", "Forge", "Hunt", "Hold the Walls", "The Wyrm", "Battle Day" };
+static const char* kWarDayShort[7] = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+static const char* kWarDayHow[7] = {
+    "Play: 1 point a minute (up to 60). Hire a guildmate: +10.",
+    "Gather wood, ore, fish and ice, or skin hides: 1 point each.",
+    "Craft or brew: 5 each. Turn in a commission: 25.",
+    "Slay monsters: 5 each. Tame: 10. Dungeon boss: 50.",
+    "Win a settlement raid at the gate: 60 (30 if you were away). Finish a building upgrade: 20.",
+    "Wound Vyrathax the Tri-Wyrm: 1 point per 10 damage. Slay it: 200.",
+    "Defeat rivals, Blades and bounty killers: 40 each.",
+};
+static long long WarWeekNow() { return ((long long)std::time(nullptr) - 345600LL) / 604800LL; }
+static int WarDayNow() { return (int)((((long long)std::time(nullptr) - 345600LL) / 86400LL) % 7); }
+static void WarCheckWeek(GameState& s) {
+    long long w = WarWeekNow();
+    if (s.warWeek != w) { s.warWeek = w; s.warPts.fill(0); s.warPlayAcc = 0.0f; s.warPlayMin = 0; }
+}
+static void WarAward(GameState& s, int day, int pts) {
+    if (pts <= 0) return;
+    WarCheckWeek(s);
+    if (day != WarDayNow()) return;
+    s.warPts[(size_t)day] = std::min(kWarDayCap, s.warPts[(size_t)day] + pts);
+}
 static void AddWeeklyProgress(GameState& s, int goalIdx, int amount) {
     if (amount <= 0) return;
     CheckWeeklyReset(s);
     s.weeklyProgress[goalIdx] += amount;
+    switch (goalIdx) { // War Week points ride on the same events
+        case kGoalGather: WarAward(s, 1, amount); break;
+        case kGoalCraft: case kGoalBrew: WarAward(s, 2, 5 * amount); break;
+        case kGoalDefeat: WarAward(s, 3, 5 * amount); break;
+        case kGoalTame: WarAward(s, 3, 10 * amount); break;
+        default: WarAward(s, 6, 40 * amount); break; // bounty killers
+    }
 }
 static void CheckAllWeeklyGoalsComplete(GameState& s) {
     bool allDone = true;
@@ -5216,6 +5257,7 @@ static void EndMurdererWin(GameState& s) {
     SpawnPanelKillCorpse(s, c.monster.name); // visible corpse at the player's position
     s.combat.reset();
     AddWeeklyProgress(s, kGoalDefeat, 1);
+    WarAward(s, 6, 40); // War Week: Battle Day
 }
 // JS endMurdererLoss(): outright defeat costs 40% gold + your whole backpack and
 // applies Shaken; breaking off mid-fight (fled=true) costs a lighter 15%/15% with
@@ -6842,6 +6884,7 @@ static void SettleFinishUpgrade(GameState& s) {
     if (k < 0 || k >= kSbCount) return;
     s.settle[(size_t)k].level++;
     s.settle[(size_t)k].damaged = false;
+    WarAward(s, 4, 20); // War Week: Hold the Walls
     SettleReport(s, std::string(kSettleDefs[k].name) + " is finished - now level " + std::to_string(s.settle[(size_t)k].level) + ".");
     PlaySfx(SfxId::Coin);
 }
@@ -6984,6 +7027,9 @@ static void SaveGame(const GameState& s) {
         << "\nsettleArrivalT=" << s.settleArrivalT << "\nsettleEpoch=" << (long long)std::time(nullptr) << "\n";
     out << "autoReagents=" << (s.autoReagents ? 1 : 0) << "\n";
     out << "wyrmRespawnT=" << s.wyrmRespawnT << "\nwyrmHp=" << s.wyrmHp << "\nwyrmKills=" << s.wyrmKills << "\n"; // world boss
+    out << "warWeek=" << s.warWeek << "\nwarPlayMin=" << s.warPlayMin << "\nwarPts=";
+    for (int d = 0; d < 7; d++) out << (d ? "," : "") << s.warPts[(size_t)d];
+    out << "\n";
     for (size_t i = 0; i < s.settlers.size(); i++) out << "settler." << i << "=" << s.settlers[i].name << "|" << s.settlers[i].trait << "|" << s.settlers[i].job << "\n";
     for (size_t i = 0; i < s.settleReports.size(); i++) out << "settleReport." << i << "=" << s.settleReports[i] << "\n";
     out << "commissionMarks=" << s.commissionMarks << "\nrareDyeCharges=" << s.rareDyeCharges << "\n";
@@ -7263,6 +7309,9 @@ static bool LoadGame(GameState& s) {
         else if (key == "autoReagents") s.autoReagents = std::atoi(val.c_str()) != 0;
         else if (key == "wyrmHp") s.wyrmHp = (float)std::atof(val.c_str());
         else if (key == "wyrmKills") s.wyrmKills = std::atoi(val.c_str());
+        else if (key == "warWeek") s.warWeek = std::atoll(val.c_str());
+        else if (key == "warPlayMin") s.warPlayMin = std::atoi(val.c_str());
+        else if (key == "warPts") { auto p = SplitStr(val, ','); for (size_t d = 0; d < p.size() && d < 7; d++) s.warPts[d] = std::atoi(p[d].c_str()); }
         else if (key.rfind("settler.", 0) == 0) { auto p = SplitStr(val, '|'); if (p.size() >= 3) s.settlers.push_back({ p[0], std::atoi(p[1].c_str()), std::atoi(p[2].c_str()) }); }
         else if (key.rfind("settleReport.", 0) == 0) s.settleReports.push_back(val);
         else if (key == "rareDyeCharges") s.rareDyeCharges = std::atoi(val.c_str());
@@ -18810,6 +18859,7 @@ static void WyrmHurtPlayer(GameState& s, int h, float raw) {
 }
 static void WyrmSlain(GameState& s) {
     s.wyrmKills++;
+    WarAward(s, 5, 200); // War Week: The Wyrm
     s.wyrmHp = -1.0f;
     int gold = 1200 + GetRandomValue(0, 400);
     s.gold += gold;
@@ -18871,6 +18921,11 @@ static void WyrmTick(GameState& s, float dt) {
             if (s.wyrmHp >= kWyrmMaxHp) s.wyrmHp = -1.0f;
         }
         return;
+    }
+    { // War Week: The Wyrm - 1 point per 10 damage dealt
+        static float acc = 0.0f;
+        float prev = s.wyrmHp > 0.0f ? s.wyrmHp : kWyrmMaxHp;
+        if (am->hp < prev) { acc += prev - std::max(0.0f, am->hp); int p = (int)(acc / 10.0f); acc -= p * 10.0f; WarAward(s, 5, p); }
     }
     s.wyrmHp = am->hp;
     float frac = WyrmHpFrac(s);
@@ -24275,6 +24330,7 @@ static const char* SettleFoeName(int faction) { return faction == 0 ? "A Grimtus
 static void SettleResolveRaidAway(GameState& s, float strength, int faction) {
     float D = SettleDefense(s) * (0.8f + 0.4f * RandUnit());
     if (D >= strength) {
+        WarAward(s, 4, 30); // War Week: Hold the Walls
         int g = (int)(strength * 3.0f);
         s.gold += g;
         SettleReport(s, std::string(SettleFoeName(faction)) + " hit the settlement and broke on your " +
@@ -24355,6 +24411,7 @@ static void SettleRaidBookkeeping(GameState& s) {
     bool fighting = s.wildEngaged.has_value() || !s.wildExtraAttackers.empty();
     if (alive == 0 || g_settleRaiders.empty()) {
         s.settleRaidLive = false;
+        WarAward(s, 4, 60); // War Week: Hold the Walls
         int g = s.settleRaidStrength * 3 + 40;
         s.gold += g; GainFame(s, 5.0f);
         s.rivalBanner = "The settlement holds!";
@@ -24837,6 +24894,7 @@ static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& 
         ? kWildernessMonsterSpots[am.spotIdx].iconIdx : -1;
     if (am.spotIdx >= 0) s.wildSpotRespawn[am.spotIdx] = RollWildRespawn();
     s.dyingMonsters.push_back(dm);
+    if (wasDuel) WarAward(s, 6, 40); // War Week: Battle Day
     if (clearEngagement) {
         s.wildEngaged.reset();
         if (wasDuel) {
@@ -24867,6 +24925,7 @@ static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeo
     dm.name = name; dm.level = level; dm.baseGold = baseGold; dm.baseLeather = baseLeather;
     s.dungeonSpawnRespawn[dungeonIdx][dm.monsterIdx] = RollDungeonRespawn(wasBoss);
     s.dyingMonsters.push_back(dm);
+    if (wasBoss) WarAward(s, 3, 50); // War Week: Hunt
     if (clearEngagement) {
         s.dungeonEngaged.reset();
         PromoteDungeonExtraOrAutoFlag(s, dungeonIdx);
@@ -27290,6 +27349,7 @@ static void FinishSkinning(GameState& s, GameState::WorldCorpse& c) {
     std::string note = gain > 0 ? " (Skinning +" + std::to_string(gain).substr(0, 4) + ")" : "";
     if (MaybeGainStat(s, &GameState::dex, 0.06f)) note += " (DEX +1)";
     Journal(s, "You skin the " + c.name + ": " + std::to_string(yield) + (c.furs ? " furs." : " hides.") + note);
+    WarAward(s, 1, yield); // War Week: Harvest
     PlaySfx(SfxId::Hit);
 }
 // Nearest corpse with something on it, within reach of you.
@@ -29910,6 +29970,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 // slim HP bar always visible beside it. The dropdown holds every tab (and, in
 // a dungeon, the Magery escape); picking one navigates and closes it.
 static float g_resetArmedTimer = 0.0f; // >0 while the Reset button is armed, waiting for a confirm click
+static bool g_warOpen = false;         // the War Week screen (over the House screen)
+static void OpenWarWeek(GameState& s); // (2026-09-27) defined with the Guildstone
 static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
     g_uiShieldBypass = true; // this panel's own buttons sit inside the shield
     { // (2026-09-27) readable over the world: dark plate, light text, HP and mana
@@ -29960,7 +30022,7 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         if (Button({ bx0, by, 152, 40 }, "Pets", tabsEnabled)) { s.screen = Screen::Pets; open = false; }
         if (Button({ bx1, by, 152, 40 }, "Bank", tabsEnabled)) { s.screen = Screen::Bank; open = false; }
         by += 48;
-        if (Button({ bx0, by, 152, 40 }, "House", tabsEnabled)) { s.screen = Screen::House; open = false; }
+        if (Button({ bx0, by, 152, 40 }, "House", tabsEnabled)) { s.screen = Screen::House; open = false; g_warOpen = false; }
         if (Button({ bx1, by, 152, 40 }, "Skills", tabsEnabled)) { s.screen = Screen::Skills; open = false; }
         by += 48;
         if (Button({ bx0, by, 152, 40 }, "Help", tabsEnabled)) { s.screen = Screen::Guide; s.guidePage = 0; open = false; }
@@ -29985,7 +30047,7 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
                 DrawCircle((int)(cb.x + cb.width - 10), (int)cb.y + 10, 5.0f, dot);
             }
 #endif
-            (void)ry;
+            if (Button({ bx1, ry, 152, 40 }, "War Week", tabsEnabled)) { s.screen = Screen::House; OpenWarWeek(s); open = false; }
         }
         by += 48;
         if (inDungeon) {
@@ -31244,6 +31306,7 @@ static void DrawCommissions(GameState& s, int y, int screenW, int screenH) {
         int gold = CommissionReward(d), marks = CommissionMarksFor(d);
         s.gold += gold; s.commissionMarks += marks;
         GainFame(s, 2.0f);
+        WarAward(s, 2, 25); // War Week: Forge
         s.logLine = "Commission complete! +" + std::to_string(gold) + " gold, +" + std::to_string(marks) + " marks.";
         Journal(s, s.logLine);
         PlaySfx(SfxId::Coin);
@@ -32501,6 +32564,210 @@ static std::string GuildTagFor(const std::string& name) {
     if (tag.size() < 2) { tag.clear(); for (char ch : name) if (isalpha((unsigned char)ch) && tag.size() < 3) tag += (char)toupper((unsigned char)ch); }
     return tag.empty() ? std::string("GLD") : tag;
 }
+// ---- Online guild + War Week screen (2026-09-27, web/guildnet.js) ----
+#ifdef __EMSCRIPTEN__
+EM_JS(int, JS_GuildNetState, (char* out, int len), {
+    if (!window.TFGuildNet) return 0;
+    stringToUTF8(window.TFGuildNet.state(), out, len);
+    return 1;
+});
+EM_JS(void, JS_GuildNetRefresh, (const char* week), { if (window.TFGuildNet) TFGuildNet.refresh(UTF8ToString(week)); });
+EM_JS(void, JS_GuildNetCreate, (const char* name, const char* tag, const char* ch, int power), {
+    if (window.TFGuildNet) TFGuildNet.create(UTF8ToString(name), UTF8ToString(tag), UTF8ToString(ch), power);
+});
+EM_JS(void, JS_GuildNetJoin, (const char* id, const char* ch, int power), {
+    if (window.TFGuildNet) TFGuildNet.join(UTF8ToString(id), UTF8ToString(ch), power);
+});
+EM_JS(void, JS_GuildNetLeave, (), { if (window.TFGuildNet) TFGuildNet.leave(); });
+EM_JS(void, JS_GuildNetSubmit, (const char* week, int day, int pts, const char* ch, int power), {
+    if (window.TFGuildNet) TFGuildNet.submit(UTF8ToString(week), day, pts, UTF8ToString(ch), power);
+});
+#else
+static int JS_GuildNetState(char*, int) { return 0; }
+static void JS_GuildNetRefresh(const char*) {}
+static void JS_GuildNetCreate(const char*, const char*, const char*, int) {}
+static void JS_GuildNetJoin(const char*, const char*, int) {}
+static void JS_GuildNetLeave() {}
+static void JS_GuildNetSubmit(const char*, int, int, const char*, int) {}
+#endif
+struct GuildNetRow { std::string id, name, tag; int members = 0; long long points = 0; };
+struct GuildNetMember { std::string name; int power = 0; int points = 0; };
+static struct {
+    bool cfg = false, ready = false, busy = false;
+    std::string msg, myId, myName, myTag;
+    std::vector<GuildNetRow> guilds;
+    std::vector<GuildNetMember> roster;
+} g_gnet;
+static float g_warScroll = 0.0f;
+static float g_leaveArmT = 0.0f;
+static std::string WarWeekKey(const GameState& s) { return "W" + std::to_string(s.warWeek); }
+static int WarPower(const GameState& s) { return (int)ActiveSkillTotal(s) + EffStr(s) + EffDex(s) + EffInt(s); }
+static std::string WarCharName(const GameState& s) { return s.characterName.empty() ? std::string("Adventurer") : s.characterName.substr(0, 24); }
+static void GuildNetPoll() {
+    static char buf[16384];
+    if (!JS_GuildNetState(buf, (int)sizeof(buf))) { g_gnet.cfg = g_gnet.ready = false; return; }
+    g_gnet.guilds.clear(); g_gnet.roster.clear(); g_gnet.myId.clear(); g_gnet.myName.clear(); g_gnet.myTag.clear();
+    std::string all(buf);
+    size_t a = 0;
+    while (a < all.size()) {
+        size_t e = all.find('\n', a); if (e == std::string::npos) e = all.size();
+        std::string line = all.substr(a, e - a); a = e + 1;
+        size_t eq = line.find('='); if (eq == std::string::npos) continue;
+        std::string k = line.substr(0, eq), v = line.substr(eq + 1);
+        auto p = SplitStr(v, '|');
+        if (k == "cfg") g_gnet.cfg = v == "1";
+        else if (k == "ready") g_gnet.ready = v == "1";
+        else if (k == "busy") g_gnet.busy = v == "1";
+        else if (k == "msg") g_gnet.msg = v;
+        else if (k == "my" && p.size() >= 3) { g_gnet.myId = p[0]; g_gnet.myName = p[1]; g_gnet.myTag = p[2]; }
+        else if (k == "g" && p.size() >= 5) g_gnet.guilds.push_back({ p[0], p[1], p[2], std::atoi(p[3].c_str()), std::atoll(p[4].c_str()) });
+        else if (k == "m" && p.size() >= 3) g_gnet.roster.push_back({ p[0], std::atoi(p[1].c_str()), std::atoi(p[2].c_str()) });
+    }
+}
+// Every frame: Muster minutes, then (online) keep the guild table fresh and report today's points.
+static void WarNetTick(GameState& s, float dt) {
+    WarCheckWeek(s);
+    int today = WarDayNow();
+    if (today == 0 && s.warPlayMin < 60 && (s.warPlayAcc += dt) >= 60.0f) {
+        s.warPlayAcc -= 60.0f; s.warPlayMin++; WarAward(s, 0, 1);
+    }
+    static float pollT = 0.0f, sendT = 5.0f, refreshT = 0.0f;
+    static int sentPts = -1, sentDay = -1;
+    if ((pollT -= dt) <= 0.0f) { pollT = g_warOpen ? 0.3f : 3.0f; GuildNetPoll(); }
+    if (!g_gnet.ready) return;
+    if ((refreshT -= dt) <= 0.0f) { refreshT = g_warOpen ? 20.0f : 300.0f; JS_GuildNetRefresh(WarWeekKey(s).c_str()); }
+    if (g_gnet.myId.empty()) return;
+    if ((sendT -= dt) <= 0.0f) {
+        sendT = 60.0f;
+        int pts = s.warPts[(size_t)today];
+        if (pts != sentPts || today != sentDay) {
+            sentPts = pts; sentDay = today;
+            JS_GuildNetSubmit(WarWeekKey(s).c_str(), today, pts, WarCharName(s).c_str(), WarPower(s));
+        }
+    }
+}
+static void OpenWarWeek(GameState& s) {
+    g_warOpen = true; g_warScroll = 0.0f; g_leaveArmT = 0.0f;
+    WarCheckWeek(s);
+    JS_GuildNetRefresh(WarWeekKey(s).c_str());
+}
+static void DrawWarWeek(GameState& s, int screenW, int screenH) {
+    Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
+    UODrawGump(G, kUoParchment);
+    UODrawTitle(G, "War Week", 15);
+    const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 }, gold = { 150, 100, 20, 255 }, bad = { 150, 40, 30, 255 };
+    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_warOpen = false; return; }
+    WarCheckWeek(s);
+    int today = WarDayNow();
+    Rectangle area = { G.x + 8, G.y + 30, G.width - 16, G.height - 40 };
+    g_warScroll -= ScrollDelta(area);
+    float x = G.x + 18, w = G.width - 36, y = area.y + 4 - g_warScroll;
+    auto vis = [&](Rectangle r) { return r.y >= area.y && r.y + r.height <= area.y + area.height; };
+    BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
+    // the week: one theme a day
+    long long secsLeft = 86400LL - ((long long)std::time(nullptr) - 345600LL) % 86400LL;
+    DrawUIText(TextFormat("Today: %s  -  %dh %02dm left (days turn at midnight UTC)", kWarDayName[today], (int)(secsLeft / 3600), (int)(secsLeft / 60 % 60)),
+               (int)x, (int)y, 14, ink);
+    y += 20;
+    DrawUIText(kWarDayHow[today], (int)x, (int)y, 12, soft);
+    y += 22;
+    float cw = std::min(90.0f, (w - 6 * 4) / 7.0f);
+    int weekTotal = 0;
+    for (int d = 0; d < 7; d++) {
+        weekTotal += s.warPts[(size_t)d];
+        Rectangle r = { x + d * (cw + 4), y, cw, 50 };
+        bool now = d == today;
+        DrawRectangleRounded(r, 0.18f, 6, now ? Color{ 255, 214, 110, 150 } : Fade(BLACK, d < today ? 0.10f : 0.04f));
+        DrawRectangleRoundedLines(r, 0.18f, 6, now ? gold : Fade(BLACK, 0.3f));
+        DrawUIText(kWarDayShort[d], (int)(r.x + r.width / 2 - MeasureUIText(kWarDayShort[d], 13) / 2), (int)r.y + 5, 13, now ? ink : soft);
+        const char* pt = d > today ? "-" : TextFormat("%d", s.warPts[(size_t)d]);
+        DrawUIText(pt, (int)(r.x + r.width / 2 - MeasureUIText(pt, 15) / 2), (int)r.y + 26, 15, ink);
+    }
+    y += 58;
+    DrawUIText(TextFormat("Your points this week: %d", weekTotal), (int)x, (int)y, 13, ink);
+    y += 18;
+    DrawUIText("Sunday is Battle Day: guild against guild. Every day adds to your guild's total.", (int)x, (int)y, 11, soft);
+    y += 26;
+    // online guild
+    DrawUIText("Online guild", (int)x, (int)y, 15, ink);
+    y += 22;
+    if (!g_gnet.cfg) {
+        DrawUIText("Online guilds use cloud saves, which aren't switched on for this version yet.", (int)x, (int)y, 12, soft);
+        y += 18;
+        DrawUIText("Your points still count up here - they'll be sent once it's live.", (int)x, (int)y, 12, soft);
+        y += 24;
+    } else if (!g_gnet.ready) {
+        DrawUIText("Sign in with Cloud save to join a guild and see the standings.", (int)x, (int)y, 12, soft);
+        y += 22;
+        Rectangle b = { x, y, 180, 34 };
+        if (UOButton(b, "Cloud save sign-in") && vis(b)) JS_CloudOpen();
+        y += 44;
+    } else if (g_gnet.myId.empty()) {
+        DrawUIText("Join a guild, or found your own. Guilds hold up to 30 players.", (int)x, (int)y, 12, soft);
+        y += 22;
+        std::string nm = s.guildName, tag = s.guildTag;
+        Rectangle fb = { x, y, 250, 34 };
+        if (UOButton(fb, nm.empty() ? "Found a new guild..." : ("Found \"" + nm + "\" online").c_str(), !g_gnet.busy) && vis(fb)) {
+            if (nm.empty()) { PromptTextInto("Name your guild (3-24 letters)", nm, 24); tag = GuildTagFor(nm); }
+            if (nm.size() >= 3) JS_GuildNetCreate(nm.c_str(), tag.c_str(), WarCharName(s).c_str(), WarPower(s));
+        }
+        y += 44;
+        if (g_gnet.guilds.empty()) { DrawUIText(g_gnet.busy ? "Loading guilds..." : "No guilds yet - be the first!", (int)x, (int)y, 12, soft); y += 20; }
+        for (size_t i = 0; i < g_gnet.guilds.size(); i++) {
+            const GuildNetRow& g = g_gnet.guilds[i];
+            Rectangle row = { x, y, w, 40 };
+            DrawRectangleRec(row, Fade(i % 2 ? WHITE : BLACK, 0.06f));
+            DrawUIText(TextFormat("%d. [%s] %s", (int)i + 1, g.tag.c_str(), g.name.c_str()), (int)x + 6, (int)y + 4, 14, ink);
+            DrawUIText(TextFormat("%d/30 members  -  %lld points this week", g.members, g.points), (int)x + 6, (int)y + 22, 11, soft);
+            Rectangle jb = { x + w - 84, y + 4, 80, 32 };
+            if (g.members < 30 && UOButton(jb, "Join", !g_gnet.busy) && vis(jb))
+                JS_GuildNetJoin(g.id.c_str(), WarCharName(s).c_str(), WarPower(s));
+            y += 44;
+        }
+    } else {
+        int rank = 0;
+        long long myPts = 0;
+        for (size_t i = 0; i < g_gnet.guilds.size(); i++) if (g_gnet.guilds[i].id == g_gnet.myId) { rank = (int)i + 1; myPts = g_gnet.guilds[i].points; }
+        DrawUIText(TextFormat("[%s] %s", g_gnet.myTag.c_str(), g_gnet.myName.c_str()), (int)x, (int)y, 16, gold);
+        y += 22;
+        DrawUIText(rank > 0 ? TextFormat("Rank %d of %d  -  %lld guild points this week", rank, (int)g_gnet.guilds.size(), myPts) : "Counting...",
+                   (int)x, (int)y, 13, ink);
+        y += 24;
+        for (size_t i = 0; i < g_gnet.roster.size(); i++) {
+            const GuildNetMember& m = g_gnet.roster[i];
+            DrawUIText(TextFormat("%s", m.name.c_str()), (int)x + 6, (int)y, 13, ink);
+            DrawUIText(TextFormat("power %d", m.power), (int)(x + w * 0.5f), (int)y, 12, soft);
+            const char* pp = TextFormat("%d pts", m.points);
+            DrawUIText(pp, (int)(x + w - 6 - MeasureUIText(pp, 13)), (int)y, 13, ink);
+            y += 18;
+        }
+        y += 12;
+        DrawUIText("Standings", (int)x, (int)y, 15, ink);
+        y += 22;
+        for (size_t i = 0; i < g_gnet.guilds.size() && i < 10; i++) {
+            const GuildNetRow& g = g_gnet.guilds[i];
+            bool mine = g.id == g_gnet.myId;
+            if (mine) DrawRectangleRec({ x, y - 2, w, 20 }, Color{ 255, 214, 110, 90 });
+            DrawUIText(TextFormat("%d. [%s] %s", (int)i + 1, g.tag.c_str(), g.name.c_str()), (int)x + 6, (int)y, 13, ink);
+            const char* pp = TextFormat("%lld", g.points);
+            DrawUIText(pp, (int)(x + w - 6 - MeasureUIText(pp, 13)), (int)y, 13, ink);
+            y += 20;
+        }
+        y += 14;
+        g_leaveArmT = std::max(0.0f, g_leaveArmT - GetFrameTime());
+        Rectangle lb = { x, y, 200, 32 };
+        if (UOButton(lb, g_leaveArmT > 0.0f ? "Tap again to leave" : "Leave guild", !g_gnet.busy) && vis(lb)) {
+            if (g_leaveArmT > 0.0f) { JS_GuildNetLeave(); g_leaveArmT = 0.0f; } else g_leaveArmT = 3.0f;
+        }
+        y += 40;
+        DrawUIText("Points you earned for a guild stay with it if you leave.", (int)x, (int)y, 11, soft);
+        y += 18;
+    }
+    if (!g_gnet.msg.empty()) { DrawUIText(g_gnet.msg.c_str(), (int)x, (int)y, 12, g_gnet.msg.back() == '!' ? Color{ 40, 110, 40, 255 } : bad); y += 18; }
+    float contentH = y + g_warScroll - area.y + 10;
+    EndScissorMode();
+    g_warScroll = std::clamp(g_warScroll, 0.0f, std::max(0.0f, contentH - area.height));
+}
 static void DrawGuildstone(GameState& s, int screenW, int screenH) {
     Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
     UODrawGump(G, kUoParchment);
@@ -32514,6 +32781,8 @@ static void DrawGuildstone(GameState& s, int screenW, int screenH) {
         DrawUIText("- hire up to three guildmates who fight at your side", (int)x, (int)y, 13, soft); y += 18;
         DrawUIText("- wear your guild's colors and tag", (int)x, (int)y, 13, soft); y += 18;
         DrawUIText("- declare war on Murder Inc. or the orcs of Grimtusk Hold", (int)x, (int)y, 13, soft); y += 30;
+        if (UOButton({ x, y, 260, 34 }, "Online guilds & War Week")) { OpenWarWeek(s); return; }
+        y += 46;
         if (s.housePlotIdx < 0) {
             DrawUIText("A guild needs a home: buy a house plot in the wilderness first.", (int)x, (int)y, 13, Color{ 150, 40, 30, 255 });
             return;
@@ -32541,7 +32810,8 @@ static void DrawGuildstone(GameState& s, int screenW, int screenH) {
     UODrawTitle(G, s.guildName + "  [" + s.guildTag + "]", 15);
     y += 8;
     DrawUIText(TextFormat("Renown %d    Wars won: %d", s.guildRenown, s.guildWarWins[0] + s.guildWarWins[1]), (int)x, (int)y, 13, soft);
-    y += 24;
+    if (UOButton({ x + w - 250, y - 6, 250, 32 }, "Online guild & War Week")) { OpenWarWeek(s); return; }
+    y += 30;
     // tabard color
     DrawUIText("Guild colors", (int)x, (int)y, 14, ink); y += 20;
     for (int k = 0; k < 21; k++) {
@@ -32586,6 +32856,7 @@ static void DrawGuildstone(GameState& s, int screenW, int screenH) {
                     if (!dup) break;
                 }
                 s.guildRecruits.push_back({ nm, k, 10.0f, true });
+                WarAward(s, 0, 10); // War Week: Muster
                 s.logLine = nm + " the " + GuildRecruitKindName(k) + " joins " + s.guildName + "!";
                 PlaySfx(SfxId::Buy);
             }
@@ -32631,6 +32902,7 @@ static void DrawGuildstone(GameState& s, int screenW, int screenH) {
 }
 
 static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
+    if (g_warOpen) { DrawWarWeek(s, screenW, screenH); return; }
     if (g_guildOpen) { DrawGuildstone(s, screenW, screenH); return; }
     if (g_settleOpen) { DrawSettlement(s, screenW, screenH); return; }
     UpdateTextInput(s.houseName, 24);
@@ -33343,6 +33615,7 @@ static void UpdateDrawFrame() {
             prevScr = state.screen;
         }
         WyrmTick(state, dt);   // the world boss's wake timer and heads (2026-09-27)
+        WarNetTick(state, dt); // War Week: Muster minutes, online guild sync (2026-09-27)
         { // stat buffs run out; HP and mana follow the effective stats (2026-09-27)
             for (float* t : { &state.blessT, &state.strPotT, &state.agiPotT }) if (*t > 0.0f && (*t -= dt) <= 0.0f) {
                 *t = 0.0f;

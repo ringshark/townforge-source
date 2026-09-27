@@ -237,6 +237,8 @@
   window.TFCloud = {
     configured: !!(CFG && CFG.url && CFG.key),
     open: open,
+    client: function () { return sb; },   // for the online guild (guildnet.js)
+    user: function () { return user; },
     // 0 not set up, 1 signed out, 2 synced, 3 syncing, 4 needs attention
     state: function () {
       if (!CFG) return 0;
