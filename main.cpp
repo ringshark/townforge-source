@@ -218,7 +218,7 @@ enum class Resource { Wood, Ore, Leather, None };
 // A craftable recipe (weapon or armor) - ported from each building's `recipes:[...]`
 // list in the JS BUILDINGS table. `slot` is only meaningful for armor; `handed` only
 // for weapons.
-enum class ItemType { Weapon, Armor, Potion, Clothing }; // (Clothing 2026-09-27: dyeable, no defense) Potion recipes store their effect in
+enum class ItemType { Weapon, Armor, Potion, Clothing, Jewelry }; // (Clothing 2026-09-27: dyeable, no defense) Potion recipes store their effect in
                                                  // `category` ("heal"/"stamina"/"poison"/
                                                  // "damage") and potency in `power`.
 struct Recipe {
@@ -384,15 +384,20 @@ static const std::array<BuildingDef, 4> kCraftBuildings = {{
         {"Lesser Heal Potion", ItemType::Potion, "heal", "", "", 0, 3, 15},
         {"Heal Potion", ItemType::Potion, "heal", "", "", 40, 6, 30},
         {"Greater Heal Potion", ItemType::Potion, "heal", "", "", 80, 10, 50},
-        {"Lesser Refresh Potion", ItemType::Potion, "stamina", "", "", 0, 3, 10},
-        {"Refresh Potion", ItemType::Potion, "stamina", "", "", 40, 6, 20},
-        {"Greater Refresh Potion", ItemType::Potion, "stamina", "", "", 80, 10, 35},
+        // (2026-09-27) the Refresh line had nothing to refresh - now Agility (+Dex for 3 min)
+        {"Lesser Agility Potion", ItemType::Potion, "agility", "", "", 10, 4, 5},
+        {"Agility Potion", ItemType::Potion, "agility", "", "", 45, 7, 10},
+        {"Greater Agility Potion", ItemType::Potion, "agility", "", "", 85, 11, 15},
         {"Lesser Poison Potion", ItemType::Potion, "poison", "", "", 20, 5, 3},
         {"Poison Potion", ItemType::Potion, "poison", "", "", 55, 8, 5},
         {"Greater Poison Potion", ItemType::Potion, "poison", "", "", 90, 12, 8},
         {"Lesser Explosion Potion", ItemType::Potion, "damage", "", "", 25, 6, 20},
         {"Explosion Potion", ItemType::Potion, "damage", "", "", 60, 10, 40},
         {"Greater Explosion Potion", ItemType::Potion, "damage", "", "", 95, 15, 65},
+        // (2026-09-27) Strength: +Str (and so HP) for 3 minutes
+        {"Lesser Strength Potion", ItemType::Potion, "strength", "", "", 10, 4, 5},
+        {"Strength Potion", ItemType::Potion, "strength", "", "", 45, 7, 10},
+        {"Greater Strength Potion", ItemType::Potion, "strength", "", "", 85, 11, 15},
     } },
 }};
 
@@ -923,6 +928,7 @@ struct Item {
     std::string category; // weapon only: "Swordsmanship"/"Fencing"/"Macing"/"Archery" -
                             // drives which combat skill trains/applies (see ActiveWeaponSkillField)
     int hue = -1;           // clothing dye (index into kDyeHues), -1 = the cloth's natural color
+    int bStr = 0, bDex = 0, bInt = 0; // (2026-09-27) stat bonuses while worn - past the trained cap of 100
 };
 
 // One weapon can occupy leftHand, rightHand, or both (2h); armor has one slot each.
@@ -931,6 +937,8 @@ struct Equipment {
     std::optional<Item> helmet, gorget, gloves, arms, legs, chest;
     // Clothing (2026-09-27): UO-style dyeable layers under/over the armor.
     std::optional<Item> hat, shirt, robe, cloak, sash, pants, shoes;
+    // Jewelry (2026-09-27): no defense, just stat bonuses.
+    std::optional<Item> ring, bracelet, amulet;
 };
 
 // ---- Clothing & dyes (2026-09-27) ----
@@ -1051,7 +1059,7 @@ struct Spell {
 // gate (added 2026-09-21, see its comment) doesn't lock a starting Magery-0
 // character out of practicing anything at all - a deliberate deviation from the
 // port, not a formula mismatch.
-static const std::array<Spell, 25> kSpells = {{
+static const std::array<Spell, 26> kSpells = {{
     {"Spark Dart", 1, SpellType::Offensive, 0, 50, 4, 1, 4},
     {"Mending Word", 1, SpellType::Utility, 0, 50, 4, 1, 4},
     {"Sap Strength", 1, SpellType::Debuff, 0, 50, 4, 1, 4},
@@ -1084,7 +1092,10 @@ static const std::array<Spell, 25> kSpells = {{
     {"Corpse Explosion", 5, SpellType::Offensive, 45, 95, 14, 0, 0, true},
     {"Raise Skeletal Mage", 6, SpellType::Summon, 55, 100, 16, 0, 0, true},
     {"Life Tap", 7, SpellType::Debuff, 65, 100, 16, 0, 0, true},
+    // (2026-09-27) UO's Bless: + Str/Dex/Int past the trained cap for 3 minutes.
+    {"Bless", 3, SpellType::Buff, 30, 70, 9, 2, 0},
 }};
+static const int kSpBless = 25;
 static const int kSpTeeth = 17, kSpRaiseSkeleton = 18, kSpAmplify = 19, kSpBoneArmor = 20,
                  kSpBoneSpear = 21, kSpCorpseExplosion = 22, kSpSkeletalMage = 23, kSpLifeTap = 24;
 static bool SpellNeedsCorpse(int idx) { return idx == kSpRaiseSkeleton || idx == kSpSkeletalMage || idx == kSpCorpseExplosion; }
@@ -1481,6 +1492,9 @@ struct GameState {
     std::vector<std::string> settleReports; // newest last, up to 6
     bool settleRaidLive = false; int settleRaidStrength = 0; int settleRaidFaction = 0; float settleMilitiaCd = 0.0f;
     float settleHpAcc = 0.0f;
+    // Stat buffs (2026-09-27) - transient: Bless, Strength and Agility potions.
+    float blessT = 0.0f, strPotT = 0.0f, agiPotT = 0.0f;
+    int blessAmt = 0, strPotAmt = 0, agiPotAmt = 0;
     // World boss (2026-09-27) - PERSISTED.
     float wyrmRespawnT = 600.0f; // seconds of play until Vyrathax wakes (0 = awake)
     float wyrmHp = -1.0f;        // its wounds while awake (-1 = unhurt)
@@ -2362,6 +2376,7 @@ static const std::vector<std::pair<std::string, std::string>> kItemIconManifest 
     // Potions (keyed by PotionStack::effect, looked up directly - not a suffix match)
     {"heal", "PotionHeal.bmp"}, {"stamina", "PotionStamina.bmp"},
     {"poison", "PotionPoison.bmp"}, {"damage", "PotionDamage.bmp"},
+    {"agility", "PotionStamina.bmp"}, {"strength", "PotionHeal.bmp"},
 };
 
 // ---------------------------------------------------------------------
@@ -3428,7 +3443,36 @@ static void DrawClothingIcon(const Item& item, float x, float y, float size) {
         }
     }
 }
+// Jewelry (2026-09-27): drawn, not textured - band/chain in the metal, a gem in the main stat's color.
+static void DrawJewelryIcon(const Item& it, float x, float y, float size) {
+    float k = size / 64.0f, cx = x + size / 2, cy = y + size / 2;
+    Color metal = it.name.rfind("Copper", 0) == 0 ? Color{ 196, 116, 70, 255 } : it.name.rfind("Silver", 0) == 0 ? Color{ 200, 204, 214, 255 }
+                : it.name.rfind("Starmetal", 0) == 0 ? Color{ 150, 170, 230, 255 } : Color{ 232, 190, 70, 255 };
+    Color dk = ColorBrightness(metal, -0.35f);
+    Color gem = it.bStr >= it.bDex && it.bStr >= it.bInt ? Color{ 210, 40, 50, 255 } : (it.bDex >= it.bInt ? Color{ 50, 190, 90, 255 } : Color{ 70, 110, 230, 255 });
+    if (it.name.find("Wyrm") != std::string::npos) gem = Color{ 255, 140, 40, 255 };
+    if (it.slot == "ring") {
+        DrawRing({ cx, cy + 6 * k }, 13 * k, 18 * k, 0, 360, 28, dk);
+        DrawRing({ cx, cy + 5 * k }, 13 * k, 17 * k, 0, 360, 28, metal);
+        DrawPoly({ cx, cy - 12 * k }, 6, 9 * k, 0, gem);
+        DrawCircleV({ cx - 3 * k, cy - 15 * k }, 2.5f * k, Fade(WHITE, 0.7f));
+    } else if (it.slot == "bracelet") {
+        DrawEllipse((int)cx, (int)cy, 22 * k, 14 * k, dk);
+        DrawEllipse((int)cx, (int)cy, 21 * k, 13 * k, metal);
+        DrawEllipse((int)cx, (int)cy, 15 * k, 8 * k, Color{ 0, 0, 0, 0 });
+        DrawEllipse((int)cx, (int)(cy - 1 * k), 15 * k, 8 * k, Fade(Color{ 60, 44, 30, 255 }, 0.9f));
+        for (int i = -1; i <= 1; i++) DrawCircleV({ cx + i * 12 * k, cy + 11 * k }, 3.5f * k, gem);
+    } else {
+        DrawLineEx({ cx - 18 * k, cy - 22 * k }, { cx, cy + 4 * k }, 2.5f * k, metal);
+        DrawLineEx({ cx + 18 * k, cy - 22 * k }, { cx, cy + 4 * k }, 2.5f * k, metal);
+        DrawCircleV({ cx, cy + 12 * k }, 11 * k, dk);
+        DrawCircleV({ cx, cy + 12 * k }, 9.5f * k, metal);
+        DrawCircleV({ cx, cy + 12 * k }, 6 * k, gem);
+        DrawCircleV({ cx - 2 * k, cy + 10 * k }, 2 * k, Fade(WHITE, 0.7f));
+    }
+}
 static void DrawItemIcon(const Item& item, float x, float y, float size) {
+    if (item.type == ItemType::Jewelry) { DrawJewelryIcon(item, x, y, size); return; }
     if (item.type == ItemType::Clothing) { DrawClothingIcon(item, x, y, size); return; }
     const Texture2D* tex = GearIconForItem(item);
     if (!tex) return;
@@ -4500,6 +4544,61 @@ static const float kStatGainRateMultiplier = 3.0f;
 static void Journal(GameState& s, const std::string& text); // defined with the float-text helpers below
 static Rectangle RecallPickerRect(); // UO-style travel (2026-09-25): defined with the travel helpers below
 
+// ---- Effective stats (2026-09-27) ----
+// Training caps each stat at 100 (260 total). Gear and magic add on top, up to
+// kStatCapEffective: jewelry and magic items (bStr/bDex/bInt), Bless, and the
+// Strength / Agility potions. Everything that reads a stat for combat - HP, swing
+// speed, damage, dodge, mana - reads the effective value.
+static const int kStatCapEffective = 150;
+enum { kStStr = 0, kStDex = 1, kStInt = 2 };
+static int GearStatBonus(const GameState& s, int which) {
+    const Equipment& e = s.equipped;
+    int sum = 0;
+    auto add = [&](const std::optional<Item>& it) {
+        if (it.has_value()) sum += which == kStStr ? it->bStr : (which == kStDex ? it->bDex : it->bInt);
+    };
+    add(e.rightHand);
+    if (!(e.leftHand && e.rightHand && e.leftHand->id == e.rightHand->id)) add(e.leftHand); // a 2h weapon counts once
+    for (const std::optional<Item>* it : { &e.helmet, &e.gorget, &e.gloves, &e.arms, &e.legs, &e.chest, &e.hat, &e.shirt, &e.robe,
+                                           &e.cloak, &e.sash, &e.pants, &e.shoes, &e.ring, &e.bracelet, &e.amulet })
+        add(*it);
+    return sum;
+}
+static int StatBonus(const GameState& s, int which) {
+    int b = GearStatBonus(s, which);
+    if (s.blessT > 0.0f) b += s.blessAmt;
+    if (which == kStStr && s.strPotT > 0.0f) b += s.strPotAmt;
+    if (which == kStDex && s.agiPotT > 0.0f) b += s.agiPotAmt;
+    return b;
+}
+static int EffStr(const GameState& s) { return std::clamp(s.str + StatBonus(s, kStStr), 1, kStatCapEffective); }
+static int EffDex(const GameState& s) { return std::clamp(s.dex + StatBonus(s, kStDex), 1, kStatCapEffective); }
+static int EffInt(const GameState& s) { return std::clamp(s.intStat + StatBonus(s, kStInt), 1, kStatCapEffective); }
+// "+3 Str +2 Dex" for an item's bonuses ("" if none).
+static std::string ItemBonusText(const Item& it) {
+    std::string t;
+    if (it.bStr) t += TextFormat("%s%+d Str", t.empty() ? "" : " ", it.bStr);
+    if (it.bDex) t += TextFormat("%s%+d Dex", t.empty() ? "" : " ", it.bDex);
+    if (it.bInt) t += TextFormat("%s%+d Int", t.empty() ? "" : " ", it.bInt);
+    return t;
+}
+// A piece of jewelry: kind 0 ring (Str), 1 bracelet (Dex), 2 amulet (Int); mag = total bonus.
+// Past a few points some of it spills into a second stat.
+static Item MakeJewel(GameState& s, int kind, int mag) {
+    static const char* kinds[3] = { "Ring", "Bracelet", "Amulet" }, *slots[3] = { "ring", "bracelet", "amulet" };
+    static const char* suffix[3] = { "Might", "Grace", "Wit" };
+    mag = std::clamp(mag, 1, 12);
+    const char* metal = mag <= 2 ? "Copper" : (mag <= 4 ? "Silver" : (mag <= 7 ? "Gold" : "Starmetal"));
+    int main = kind, second = (kind + 1 + GetRandomValue(0, 1)) % 3;
+    int mainAmt = mag, secondAmt = 0;
+    if (mag >= 4 && RandUnit() < 0.5f) { secondAmt = mag / 3; mainAmt = mag - secondAmt; }
+    Item it{ s.nextItemId++, std::string(metal) + " " + kinds[kind] + " of " + suffix[main], ItemType::Jewelry, slots[kind], "", 0, "" };
+    int* f[3] = { &it.bStr, &it.bDex, &it.bInt };
+    *f[main] += mainAmt;
+    *f[second] += secondAmt;
+    return it;
+}
+
 static bool MaybeGainStat(GameState& s, int GameState::*statField, float chance) {
     if (s.*statField >= kStatCapIndividual) return false;
     if (s.str + s.dex + s.intStat >= kStatCapTotal) return false;
@@ -4812,7 +4911,7 @@ static int CombatPower(const GameState& s) {
     float effAnatomy = EffectiveSkill(s, &GameState::anatomy);
     float tacticsBonusPct = effTactics / 1.6f + (effTactics >= 100.0f ? 6.25f : 0.0f);
     float anatomyBonusPct = effAnatomy / 2.0f + (effAnatomy >= 100.0f ? 5.0f : 0.0f);
-    float strengthBonusPct = s.str * 0.3f + (s.str >= 100 ? 5.0f : 0.0f);
+    float strengthBonusPct = EffStr(s) * 0.3f + (EffStr(s) >= 100 ? 5.0f : 0.0f);
     float power = basePower * (1.0f + (tacticsBonusPct + anatomyBonusPct + strengthBonusPct) / 100.0f);
 
     if (s.shaken > 0) power *= 0.85f; // JS isShaken(): -15% combat power
@@ -4851,7 +4950,7 @@ static float WinChancePreview(const GameState& s, int monsterLevel) {
 
 // JS: monsterHitChance() - 50 - dex*0.2, clamped 20-90.
 static float MonsterHitChance(const GameState& s) {
-    return std::clamp(50.0f - s.dex * 0.2f, 20.0f, 90.0f);
+    return std::clamp(50.0f - EffDex(s) * 0.2f, 15.0f, 90.0f);
 }
 
 // ---------------------------------------------------------------------
@@ -6086,7 +6185,7 @@ static void UseBandageInCombat(GameState& s) {
 static const int kLiveCombatReagentCost = 1;
 // Live reagent cost for a spell - the dark school needs none (2026-09-27).
 static int LiveReagentCost(int spellIdx) { return (spellIdx >= 0 && spellIdx < (int)kSpells.size() && kSpells[spellIdx].necro) ? 0 : kLiveCombatReagentCost; }
-static float MaxMana(const GameState& s) { return (float)s.intStat; } // JS currentMaxMana()
+static float MaxMana(const GameState& s) { return (float)EffInt(s); } // JS currentMaxMana(); gear/Bless count (2026-09-27)
 static float EvalIntMultiplier(const GameState& s) { return (EffectiveSkill(s, &GameState::evalInt) * 3.0f / 100.0f) + 1.0f; }
 // The skill a spell is cast (and trained) with: Necromancy for the dark school.
 static float SpellSkill(const GameState& s, const Spell& spell) {
@@ -6570,7 +6669,8 @@ static std::vector<std::string> SplitStr(const std::string& s, char delim) {
 // Item <-> "id|name|type|slot|handed|power|category" (type: 0=Weapon,1=Armor,2=Potion)
 static std::string ItemToLine(const Item& it) {
     return std::to_string(it.id) + "|" + it.name + "|" + std::to_string((int)it.type) + "|" +
-            it.slot + "|" + it.handed + "|" + std::to_string(it.power) + "|" + it.category + "|" + std::to_string(it.hue);
+            it.slot + "|" + it.handed + "|" + std::to_string(it.power) + "|" + it.category + "|" + std::to_string(it.hue) + "|" +
+            std::to_string(it.bStr) + "|" + std::to_string(it.bDex) + "|" + std::to_string(it.bInt);
 }
 static std::optional<Item> ItemFromLine(const std::string& line) {
     auto parts = SplitStr(line, '|');
@@ -6584,6 +6684,9 @@ static std::optional<Item> ItemFromLine(const std::string& line) {
     it.power = std::atoi(parts[5].c_str());
     it.category = parts.size() > 6 ? parts[6] : ""; // old saves before category existed
     it.hue = parts.size() > 7 ? std::atoi(parts[7].c_str()) : -1; // dye (2026-09-27)
+    if (parts.size() > 10) { // stat bonuses (2026-09-27)
+        it.bStr = std::atoi(parts[8].c_str()); it.bDex = std::atoi(parts[9].c_str()); it.bInt = std::atoi(parts[10].c_str());
+    }
     return it;
 }
 // Pet <-> "id|name|role|str|dex|int|hp|maxHp|mana|maxMana|wrestling|tactics|anatomy|magery|evalInt|meditation|active"
@@ -6858,6 +6961,9 @@ static void SaveGame(const GameState& s) {
     WriteEquipSlot(out, "equipped.rightHand", s.equipped.rightHand);
     WriteEquipSlot(out, "equipped.helmet", s.equipped.helmet);
     WriteEquipSlot(out, "equipped.gorget", s.equipped.gorget);
+    WriteEquipSlot(out, "equipped.ring", s.equipped.ring);
+    WriteEquipSlot(out, "equipped.bracelet", s.equipped.bracelet);
+    WriteEquipSlot(out, "equipped.amulet", s.equipped.amulet);
     WriteEquipSlot(out, "equipped.gloves", s.equipped.gloves);
     WriteEquipSlot(out, "equipped.arms", s.equipped.arms);
     WriteEquipSlot(out, "equipped.legs", s.equipped.legs);
@@ -7123,6 +7229,9 @@ static bool LoadGame(GameState& s) {
         else if (key == "equipped.rightHand") ReadEquipSlot(val, s.equipped.rightHand);
         else if (key == "equipped.helmet") ReadEquipSlot(val, s.equipped.helmet);
         else if (key == "equipped.gorget") ReadEquipSlot(val, s.equipped.gorget);
+        else if (key == "equipped.ring") ReadEquipSlot(val, s.equipped.ring);
+        else if (key == "equipped.bracelet") ReadEquipSlot(val, s.equipped.bracelet);
+        else if (key == "equipped.amulet") ReadEquipSlot(val, s.equipped.amulet);
         else if (key == "equipped.gloves") ReadEquipSlot(val, s.equipped.gloves);
         else if (key == "equipped.arms") ReadEquipSlot(val, s.equipped.arms);
         else if (key == "equipped.legs") ReadEquipSlot(val, s.equipped.legs);
@@ -7496,8 +7605,12 @@ static void DrinkPotion(GameState& s, int potionIdx) {
     if (p.effect == "heal") {
         s.hp = std::min(s.maxHp, s.hp + p.potency);
         s.logLine = "Drank " + p.name + " - healed " + std::to_string(p.potency) + ".";
-    } else { // "stamina"
-        s.logLine = "Drank " + p.name + " (no stamina system in this scaffold to restore).";
+    } else if (p.effect == "strength") { // (2026-09-27)
+        s.strPotAmt = std::min(15, p.potency); s.strPotT = 180.0f;
+        s.logLine = "Drank " + p.name + " - +" + std::to_string(s.strPotAmt) + " Strength for 3 minutes.";
+    } else { // "agility" (and old "stamina" Refresh potions)
+        s.agiPotAmt = std::clamp(p.potency, 5, 15); s.agiPotT = 180.0f;
+        s.logLine = "Drank " + p.name + " - +" + std::to_string(s.agiPotAmt) + " Dexterity for 3 minutes.";
     }
     p.count -= 1;
     if (p.count <= 0) s.potions.erase(s.potions.begin() + potionIdx);
@@ -7562,6 +7675,12 @@ static void EquipFromBackpack(GameState& s, int backpackIdx) {
         } else if (s.equipped.leftHand) s.backpack.push_back(*s.equipped.leftHand);
         s.equipped.leftHand = item;
         if (twoH) { PlaySfx(SfxId::Click); return; }
+    } else if (item.type == ItemType::Jewelry) { // (2026-09-27)
+        std::optional<Item>& target = item.slot == "ring" ? s.equipped.ring : (item.slot == "bracelet" ? s.equipped.bracelet : s.equipped.amulet);
+        if (target.has_value()) s.backpack.push_back(*target);
+        target = item;
+        s.logLine = "You put on the " + item.name + (ItemBonusText(item).empty() ? "." : " (" + ItemBonusText(item) + ").");
+        return;
     } else if (item.type == ItemType::Clothing) { // (2026-09-27) clothing layers
         auto field = ClothSlotField(item.slot);
         if (!field) { s.backpack.push_back(item); return; }
@@ -7585,7 +7704,7 @@ static void EquipFromBackpack(GameState& s, int backpackIdx) {
 static void SellFromBackpack(GameState& s, int backpackIdx) {
     if (backpackIdx < 0 || backpackIdx >= (int)s.backpack.size()) return;
     Item item = s.backpack[backpackIdx];
-    int value = std::max(1, (int)std::round(item.power * 2.0f));
+    int value = std::max(1, (int)std::round(item.power * 2.0f)) + 80 * (item.bStr + item.bDex + item.bInt); // magic sells (2026-09-27)
     s.backpack.erase(s.backpack.begin() + backpackIdx);
     s.gold += value;
     s.logLine = "Sold " + item.name + " for " + std::to_string(value) + " gold.";
@@ -8332,7 +8451,10 @@ static const float kCastEffectDuration = 0.35f;
 // than today's baseline - scaling down to 0.4s (2x speed) at DEX 100
 // (kStatCapIndividual, the individual stat cap), linear in between.
 static float PlayerSwingCooldown(const GameState& s) {
-    float t = std::clamp((s.dex - 10) / (float)(kStatCapIndividual - 10), 0.0f, 1.0f);
+    int dex = EffDex(s);
+    if (dex > kStatCapIndividual) // (2026-09-27) past 100 from gear/magic: a little faster, never below 0.35s
+        return std::max(0.35f, 0.4f - (dex - kStatCapIndividual) / 50.0f * 0.05f);
+    float t = std::clamp((dex - 10) / (float)(kStatCapIndividual - 10), 0.0f, 1.0f);
     return kWildPlayerAttackCooldown - t * (kWildPlayerAttackCooldown - 0.4f);
 }
 
@@ -9981,8 +10103,11 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
             if ((sp == kSpRaiseSkeleton || sp == kSpSkeletalMage) && CanPracticeSpell(s, kSpells[sp])) { raiseIdx = sp; break; }
         if (raiseIdx >= 0 && !NecroFindCorpse(s, oocZone, oocZone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos, 280.0f)) raiseIdx = -1;
     }
-    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
-    int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0);
+    bool blessUp = false; // (2026-09-27) Bless on your bar: recast it between fights
+    if (ooc && !s.playerIsGhost && s.blessT <= 0.0f)
+        for (int sp : s.combatHotbar) if (sp == kSpBless && CanPracticeSpell(s, kSpells[kSpBless])) blessUp = true;
+    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
+    int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0);
     const float sz = 42.0f, gap = 8.0f;
     Rectangle bar = { 166.0f, y - 6.0f, n * sz + (n - 1) * gap + 18.0f, sz + 12.0f };
     UODrawGump(bar, kUoDarkWood);
@@ -10040,6 +10165,20 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
             PlaySfx(SfxId::Click);
             g_oocHealCd = 1.0f;
             CastLiveUtilitySpell(s, raiseIdx, oocZone);
+        }
+    }
+    if (blessUp) { // a golden sunburst: Bless
+        int k = 2 + (int)potions.size() + (raiseIdx >= 0 ? 1 : 0);
+        bool can = s.mana >= kSpells[kSpBless].manaCost && s.reagents >= kLiveCombatReagentCost && g_oocHealCd <= 0.0f;
+        if (slot(k, can, 0, [&](Rectangle r) {
+                float cx = r.x + r.width / 2, cy = r.y + r.height / 2 - 3;
+                DrawCircleV({ cx, cy }, 15.0f, Fade(Color{ 255, 220, 120, 255 }, 0.25f));
+                for (int i = 0; i < 8; i++) { float a = i * 0.785f; DrawLineEx({ cx + cosf(a) * 6, cy + sinf(a) * 6 }, { cx + cosf(a) * 13, cy + sinf(a) * 13 }, 2.5f, Color{ 255, 214, 110, 255 }); }
+                DrawCircleV({ cx, cy }, 5.0f, Color{ 255, 236, 170, 255 });
+                DrawUIText(TextFormat("%d", kSpells[kSpBless].manaCost), (int)r.x + 3, (int)(r.y + r.height - 14), 11, Color{ 140, 190, 255, 255 }); })) {
+            PlaySfx(SfxId::Click);
+            g_oocHealCd = 1.0f;
+            CastLiveUtilitySpell(s, kSpBless, oocZone);
         }
     }
 }
@@ -18573,8 +18712,16 @@ static void WyrmSlain(GameState& s) {
     std::string extra;
     if (RandUnit() < 0.35f || s.wyrmKills == 1) { // the first kill always drops the blade
         Item it{ s.nextItemId++, "Wyrmfang Blade", ItemType::Weapon, "", "1h", 32, "Swordsmanship" };
+        it.bStr = 5; it.bDex = 3;
         s.backpack.push_back(it);
         extra = " The Wyrmfang Blade is yours!";
+    }
+    { // its heart-stone, set as an amulet: every stat past the cap (2026-09-27)
+        Item am{ s.nextItemId++, "Wyrmheart Amulet", ItemType::Jewelry, "amulet", "", 0, "" };
+        int m = s.wyrmKills == 1 ? 6 : GetRandomValue(4, 7);
+        am.bStr = m; am.bDex = m; am.bInt = m;
+        s.backpack.push_back(am);
+        extra += " And a Wyrmheart Amulet (+" + std::to_string(m) + " to every stat).";
     }
     s.rivalBanner = "VYRATHAX IS SLAIN!";
     s.rivalBannerTimer = kRivalBannerTime * 1.6f;
@@ -23630,6 +23777,7 @@ static void BeginPlayerDeath(GameState& s) {
     s.healGlowT = -1.0f;
     s.vigorT = 0.0f;
     s.fiendT = 0.0f;
+    s.blessT = s.strPotT = s.agiPotT = 0.0f; // (2026-09-27) buffs don't survive death
     s.minions.clear(); s.boneArmor = 0.0f; // the raised dead don't follow you out (2026-09-27)
     s.fiendTickT = 0.0f;
     // The ghost walks where it died. Panel-combat deaths (ambush panel over town,
@@ -24720,6 +24868,11 @@ static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
         if (RandUnit() < 0.5f)
             c.loot.push_back({ GameState::kClItem, 1, Item{ s.nextItemId++, "Grimtusk War Helm", ItemType::Armor, "helmet", "", 30, "" } });
     }
+    { // (2026-09-27) magic jewelry: rare off anything, likely off a boss
+        float chance = dm.isBoss ? 0.3f : (dm.name == "Orc Warlord" ? 0.35f : 0.03f);
+        if (!IsWyrmName(dm.name) && RandUnit() < chance)
+            c.loot.push_back({ GameState::kClItem, 1, MakeJewel(s, GetRandomValue(0, 2), 1 + dm.baseGold / 12 + (dm.isBoss ? 2 : 0) + GetRandomValue(0, 1)) });
+    }
     if (dm.isRival) { // your stolen gear rides on its body
         for (const Item& it : s.rivalStash) c.loot.push_back({ GameState::kClItem, 1, it });
         s.rivalStash.clear();
@@ -25047,7 +25200,7 @@ static bool TryParry(GameState& s, int zone, const std::string& attacker, bool r
     if (ranged && !shield) return false;
     float parry = EffectiveSkill(s, &GameState::parrying);
     float gain = SkillUseGain(s.parrying, 0.5f, shield ? 0.9f : 0.4f); // every blow you try to turn
-    float chance = shield ? 4.0f + parry * 0.30f + std::max(0, s.dex - 20) * 0.08f : parry * 0.12f;
+    float chance = shield ? 4.0f + parry * 0.30f + std::max(0, EffDex(s) - 20) * 0.08f : parry * 0.12f;
     if (ranged) chance *= 0.5f;
     chance = std::min(chance, shield ? 45.0f : 15.0f);
     if (RandUnit() * 100.0f >= chance) return false;
@@ -27273,6 +27426,18 @@ static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
         else s.logLine = spell.name + " fizzles!" + note;
         return;
     }
+    if (spellIdx == kSpBless) {
+        setCastPose();
+        if (success) {
+            s.blessAmt = std::clamp(5 + (int)(EffectiveSkill(s, &GameState::magery) / 10.0f), 5, 15);
+            s.blessT = 180.0f;
+            s.healGlowT = 0.0f; s.healGlowKind = 1;
+            Vector2 ppos = (zone == 0) ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+            SpawnSpellImpact(s, zone, ppos, -11, 0.9f);
+            s.logLine = "Blessed: +" + std::to_string(s.blessAmt) + " Str, Dex and Int for 3 minutes" + note;
+        } else s.logLine = spell.name + " fizzles!" + note;
+        return;
+    }
     if (spell.type == SpellType::Buff) {
         setCastPose();
         if (success) {
@@ -28405,7 +28570,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             float hitCh = MonsterHitChance(s) - (am.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
             bool parried = false; // (2026-09-26) Parrying
             if (RandUnit() * 100.0f < hitCh && !(parried = TryParry(s, 0, mname, false))) {
-                float raw = spot.level * (0.8f + RandUnit() * 0.6f) * (IsWyrmName(mname) ? 0.3f : 1.0f); // the wyrm's heads do the real work
+                float raw = spot.level * (0.8f + RandUnit() * 0.6f) * (IsWyrmName(mname) ? 0.25f : 1.0f); // the wyrm's heads do the real work
                 if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                 s.hp -= (dmg = NecroShield(s, 0, dmg)); // skeletons / Bone Armor take it first
@@ -28582,7 +28747,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             float hitCh = MonsterHitChance(s) - (am.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
             bool parried = false; // (2026-09-26) Parrying
             if (RandUnit() * 100.0f < hitCh && !(parried = TryParry(s, 0, mname, false))) {
-                float raw = spot.level * (0.8f + RandUnit() * 0.6f) * (IsWyrmName(mname) ? 0.3f : 1.0f); // the wyrm's heads do the real work
+                float raw = spot.level * (0.8f + RandUnit() * 0.6f) * (IsWyrmName(mname) ? 0.25f : 1.0f); // the wyrm's heads do the real work
                 if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                 s.hp -= (dmg = NecroShield(s, 0, dmg)); // skeletons / Bone Armor take it first
@@ -28712,7 +28877,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                     float hitCh = MonsterHitChance(s) - (ex.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
                     bool parried = false; // (2026-09-26) Parrying
                     if (RandUnit() * 100.0f < hitCh && !(parried = TryParry(s, 0, spot.name, false))) {
-                        float raw = spot.level * (0.8f + RandUnit() * 0.6f) * (IsWyrmName(spot.name) ? 0.3f : 1.0f);
+                        float raw = spot.level * (0.8f + RandUnit() * 0.6f) * (IsWyrmName(spot.name) ? 0.25f : 1.0f);
                         if (ex.debuffKind == 1) raw *= 0.7f; // Sap Strength
                         int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
                         s.hp -= (dmg = NecroShield(s, 0, dmg)); // skeletons / Bone Armor take it first
@@ -30967,6 +31132,15 @@ static void DrawCommissions(GameState& s, int y, int screenW, int screenH) {
         s.logLine = "A stoppered bottle of rare dye - use it at the Tailor's dye tub.";
         PlaySfx(SfxId::Buy);
     }
+    y += 38;
+    if (Button({ 20, (float)y, (float)screenW - 40, 32 }, "Jeweler's commission - magic jewelry, +3 to +5 (8 marks)", s.commissionMarks >= 8 &&
+               (int)s.backpack.size() < BackpackCap(s))) { // (2026-09-27)
+        s.commissionMarks -= 8;
+        Item it = MakeJewel(s, GetRandomValue(0, 2), GetRandomValue(3, 5));
+        s.backpack.push_back(it);
+        s.logLine = "The master's jeweler sends a " + it.name + " (" + ItemBonusText(it) + ").";
+        PlaySfx(SfxId::Buy);
+    }
     y += 44;
     DrawUIText("Craft (or buy) the pieces, hand them in, turn in the finished order.", 20, y, 11, Fade(kColorText, 0.8f));
     (void)screenH;
@@ -31124,7 +31298,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
             } else {
                 DrawUIText(line.c_str(), 20, (int)rowY + 6, 12, kColorText);
             }
-            if (p.effect == "heal" || p.effect == "stamina") {
+            if (p.effect == "heal" || p.effect == "stamina" || p.effect == "agility" || p.effect == "strength") {
                 if (Button({ (float)(screenW - 90), rowY, 70, 22 }, "Drink", true)) DrinkPotion(s, (int)i);
             } else if (p.effect == "poison") {
                 if (Button({ (float)(screenW - 120), rowY, 100, 22 }, "Poison Wpn", true)) PoisonWeapon(s, (int)i);
@@ -31218,7 +31392,24 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
         DrawInfoLine(TextFormat("Heal Potions: %d", healCount), 20, y + 6, 12, kColorText);
         if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, TextFormat("Buy 1 (%dg)", kProvisionerHealPotionCost),
                     s.gold >= kProvisionerHealPotionCost)) TryBuyHealPotion(s);
-        y += 34;
+        y += 44;
+        // Jewelry (2026-09-27): plain copper pieces; better ones are won, not bought.
+        DrawInfoLine("Jewelry - raises a stat past 100 while worn", 20, y, 13, kColorAccent);
+        y += 24;
+        static const char* jn[3] = { "Copper Ring of Might (+2 Str)", "Copper Bracelet of Grace (+2 Dex)", "Copper Amulet of Wit (+2 Int)" };
+        const int jewelCost = 450;
+        for (int k = 0; k < 3; k++) {
+            DrawInfoLine(jn[k], 20, y + 6, 12, kColorText);
+            bool room = (int)s.backpack.size() < BackpackCap(s);
+            if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, TextFormat("Buy (%dg)", jewelCost), s.gold >= jewelCost && room)) {
+                Item it = MakeJewel(s, k, 2);
+                it.bStr = k == 0 ? 2 : 0; it.bDex = k == 1 ? 2 : 0; it.bInt = k == 2 ? 2 : 0; // exactly as labelled
+                s.gold -= jewelCost; s.backpack.push_back(it);
+                s.logLine = "You buy a " + it.name + ". Wear it on your paperdoll's Jewels page.";
+                PlaySfx(SfxId::Buy);
+            }
+            y += 34;
+        }
         return;
     }
 
@@ -31734,7 +31925,7 @@ static void DrawInnocentPanel(GameState& s, int screenW) {
         int shown = 0;
         for (size_t bi = 0; bi < s.backpack.size() && shown < 4; bi++, shown++) {
             DrawUIText(s.backpack[bi].name.c_str(), 20, y + 4, 12, kColorText);
-            int val = std::max(1, (int)std::round(s.backpack[bi].power * 2.0f));
+            int val = std::max(1, (int)std::round(s.backpack[bi].power * 2.0f)) + 80 * (s.backpack[bi].bStr + s.backpack[bi].bDex + s.backpack[bi].bInt);
             if (Button({ (float)screenW - 140, (float)y, 120, 24 },
                        ("Sell (" + std::to_string(val) + "g)").c_str(), true))
                 SellFromBackpack(s, (int)bi);
@@ -32611,16 +32802,27 @@ static void PaperdollGlyph(int g, Rectangle r) {
         default: DrawRectangleRec({ cx - 12, cy - 18, 9, 36 }, c); DrawRectangleRec({ cx + 3, cy - 18, 9, 36 }, c); break; // legs
     }
 }
-static int g_pdPage = 0; // 0 armor & weapons, 1 clothing
+static int g_pdPage = 0; // 0 armor & weapons, 1 clothing, 2 jewelry
+struct PdJewelSlot { const char* label; std::optional<Item> Equipment::*field; const char* slot; int pos; };
+static const PdJewelSlot kPdJewelSlots[3] = {
+    { "Ring", &Equipment::ring, "ring", 0 }, { "Bracelet", &Equipment::bracelet, "bracelet", 1 }, { "Amulet", &Equipment::amulet, "amulet", 4 },
+};
 static bool PaperdollItemFits(const Item& it, int slot) {
     if (slot >= 20 && slot < 27) return it.type == ItemType::Clothing && it.slot == kPdClothSlots[slot - 20].slot;
+    if (slot >= 30 && slot < 33) return it.type == ItemType::Jewelry && it.slot == kPdJewelSlots[slot - 30].slot;
     if (slot == 4) return it.type == ItemType::Weapon;
     if (slot == 5) return it.slot == "shield" || (it.type == ItemType::Weapon && it.handed == "2h");
     if (it.type != ItemType::Armor) return false;
     static const char* names[8] = { "helmet", "gorget", "chest", "arms", "", "", "gloves", "legs" };
     return it.slot == names[slot] || (slot == 2 && it.slot.empty());
 }
+static std::string ItemStatLineBase(const Item& it);
 static std::string ItemStatLine(const Item& it) {
+    std::string b = ItemBonusText(it);
+    if (it.type == ItemType::Jewelry) return "Jewelry (" + it.slot + ")  -  " + (b.empty() ? std::string("plain") : b);
+    return ItemStatLineBase(it) + (b.empty() ? "" : "  -  " + b);
+}
+static std::string ItemStatLineBase(const Item& it) {
     if (it.type == ItemType::Clothing)
         return std::string("Clothing (") + it.slot + ")  -  " + (it.hue >= 0 && it.hue < kDyeHueCount ? kDyeHues[it.hue].name : "undyed") +
                "  -  dye it at the Tailor";
@@ -32659,9 +32861,9 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
 
     // Armor | Clothes page toggle over the figure (2026-09-27)
     {
-        const char* labs[2] = { "Armor", "Clothes" };
-        for (int k = 0; k < 2; k++) {
-            Rectangle tr = { kDollView.x + kDollView.width / 2 - 84 + k * 84, kDollView.y + 6, 82, 24 };
+        const char* labs[3] = { "Armor", "Clothes", "Jewels" };
+        for (int k = 0; k < 3; k++) {
+            Rectangle tr = { kDollView.x + kDollView.width / 2 - 114 + k * 76, kDollView.y + 6, 74, 24 };
             bool on = g_pdPage == k;
             DrawRectangleRounded(tr, 0.35f, 6, on ? Color{ 120, 84, 44, 255 } : Fade(Color{ 236, 220, 184, 255 }, 0.85f));
             DrawRectangleRoundedLines(tr, 0.35f, 6, kUoBronze);
@@ -32687,6 +32889,24 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
         if (sel) DrawRectangleLinesEx({ r.x - 3, r.y - 3, r.width + 6, r.height + 6 }, 2.0f, Color{ 255, 214, 110, 255 });
         int lw = MeasureUIText(kPdClothSlots[i].label, 11);
         DrawUIText(kPdClothSlots[i].label, (int)(r.x + r.width / 2 - lw / 2), (int)(r.y + r.height + 3), 11, Color{ 90, 60, 34, 255 });
+        if (UOTapped({ r.x - 4, r.y - 4, r.width + 8, r.height + 8 })) { g_pdSel = sel ? -1 : id; PlaySfx(SfxId::Click); }
+    }
+    // jewelry slots (page 2)
+    if (g_pdPage == 2) for (int i = 0; i < 3; i++) {
+        Rectangle r = PaperdollSlotRect(kPdJewelSlots[i].pos);
+        const std::optional<Item>& it = s.equipped.*(kPdJewelSlots[i].field);
+        int id = 30 + i;
+        bool sel = g_pdSel == id;
+        UODrawSlot(r, sel);
+        if (it.has_value()) DrawItemIcon(*it, r.x + 5, r.y + 5, r.width - 10);
+        else {
+            Item ghost{ 0, "Copper", ItemType::Jewelry, kPdJewelSlots[i].slot, "", 0, "" };
+            DrawItemIcon(ghost, r.x + 5, r.y + 5, r.width - 10);
+            DrawRectangleRec({ r.x + 3, r.y + 3, r.width - 6, r.height - 6 }, Fade(Color{ 60, 44, 30, 255 }, 0.72f));
+        }
+        if (sel) DrawRectangleLinesEx({ r.x - 3, r.y - 3, r.width + 6, r.height + 6 }, 2.0f, Color{ 255, 214, 110, 255 });
+        int lw = MeasureUIText(kPdJewelSlots[i].label, 11);
+        DrawUIText(kPdJewelSlots[i].label, (int)(r.x + r.width / 2 - lw / 2), (int)(r.y + r.height + 3), 11, Color{ 90, 60, 34, 255 });
         if (UOTapped({ r.x - 4, r.y - 4, r.width + 8, r.height + 8 })) { g_pdSel = sel ? -1 : id; PlaySfx(SfxId::Click); }
     }
     // gear slots down both edges
@@ -32734,7 +32954,10 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     };
     bar(st.x + 14, st.y + 11, 120, (float)s.hp / std::max(1, s.maxHp), Color{ 170, 40, 36, 255 }, TextFormat("HP %d/%d", s.hp, s.maxHp));
     bar(st.x + 146, st.y + 11, 110, s.mana / std::max(1.0f, MaxMana(s)), Color{ 50, 80, 170, 255 }, TextFormat("Mana %.0f/%.0f", s.mana, MaxMana(s)));
-    std::string st1 = TextFormat("Str %d  Dex %d  Int %d", s.str, s.dex, s.intStat);
+    auto statTxt = [&](const char* n, int base, int eff) {
+        return eff != base ? std::string(TextFormat("%s %d(%+d)", n, base, eff - base)) : std::string(TextFormat("%s %d", n, base));
+    };
+    std::string st1 = statTxt("Str", s.str, EffStr(s)) + "  " + statTxt("Dex", s.dex, EffDex(s)) + "  " + statTxt("Int", s.intStat, EffInt(s));
     std::string st2 = TextFormat("Power %d   Defense %d", CombatPower(s), TotalDefense(s));
     DrawUIText(st1.c_str(), (int)st.x + 274, (int)st.y + 10, 12, kUoGoldText);
     DrawUIText(st2.c_str(), (int)st.x + 274, (int)st.y + 27, 12, Color{ 226, 212, 180, 255 });
@@ -32766,6 +32989,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     // which bag items fit the selected empty slot - they glow
     int fitSlot = (g_pdSel >= 0 && g_pdSel < 8 && !(s.equipped.*(kPdSlots[g_pdSel].field)).has_value()) ? g_pdSel : -1;
     if (g_pdSel >= 20 && g_pdSel < 27 && !(s.equipped.*(kPdClothSlots[g_pdSel - 20].field)).has_value()) fitSlot = g_pdSel;
+    if (g_pdSel >= 30 && g_pdSel < 33 && !(s.equipped.*(kPdJewelSlots[g_pdSel - 30].field)).has_value()) fitSlot = g_pdSel;
     // The bag scrolls by dragging, so a pick is a press+release that barely moved.
     static Vector2 bagPress = { -1, -1 };
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) bagPress = CheckCollisionPointRec(mouse, inner) ? mouse : Vector2{ -1, -1 };
@@ -32797,12 +33021,15 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
         std::string head, line;
         const Item* item = nullptr;
         std::optional<Item>* eqSlot = nullptr;
-        if (g_pdSel < 8 || (g_pdSel >= 20 && g_pdSel < 27)) {
-            bool cl = g_pdSel >= 20;
-            eqSlot = cl ? &(s.equipped.*(kPdClothSlots[g_pdSel - 20].field)) : &(s.equipped.*(kPdSlots[g_pdSel].field));
-            const char* lab = cl ? kPdClothSlots[g_pdSel - 20].label : kPdSlots[g_pdSel].label;
+        if (g_pdSel < 8 || (g_pdSel >= 20 && g_pdSel < 27) || (g_pdSel >= 30 && g_pdSel < 33)) {
+            bool cl = g_pdSel >= 20 && g_pdSel < 27, jw = g_pdSel >= 30;
+            eqSlot = jw ? &(s.equipped.*(kPdJewelSlots[g_pdSel - 30].field))
+                        : (cl ? &(s.equipped.*(kPdClothSlots[g_pdSel - 20].field)) : &(s.equipped.*(kPdSlots[g_pdSel].field)));
+            const char* lab = jw ? kPdJewelSlots[g_pdSel - 30].label : (cl ? kPdClothSlots[g_pdSel - 20].label : kPdSlots[g_pdSel].label);
             if (eqSlot->has_value()) { item = &**eqSlot; head = item->name; line = ItemStatLine(*item); }
-            else { head = std::string(lab) + " - empty"; line = cl ? "Buy or sew clothes at the Tailor, then tap them here." : "Tap a glowing item in your backpack to wear it."; }
+            else { head = std::string(lab) + " - empty";
+                   line = jw ? "Jewelry raises your stats past 100 - buy it at the Provisioner or win it." :
+                          cl ? "Buy or sew clothes at the Tailor, then tap them here." : "Tap a glowing item in your backpack to wear it."; }
         } else if (g_pdSel < 200) {
             int bi = g_pdSel - 100;
             if (bi < (int)s.backpack.size()) { item = &s.backpack[(size_t)bi]; head = item->name; line = ItemStatLine(*item); }
@@ -32818,7 +33045,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
             DrawUIText(head.c_str(), (int)pop.x + 76, (int)pop.y + 16, 16, kUoGoldText);
             DrawUIText(line.c_str(), (int)pop.x + 76, (int)pop.y + 40, 12, Color{ 226, 212, 180, 255 });
             if (UOCloseButton(pop)) g_pdSel = -1;
-            else if ((g_pdSel < 8 || (g_pdSel >= 20 && g_pdSel < 27)) && item) {
+            else if ((g_pdSel < 8 || (g_pdSel >= 20 && g_pdSel < 27) || (g_pdSel >= 30 && g_pdSel < 33)) && item) {
                 if (UOButton({ pop.x + 76, pop.y + 68, 150, 32 }, "Take off")) { UnequipToBackpack(s, *eqSlot); g_pdSel = -1; }
             } else if (g_pdSel >= 100 && g_pdSel < 200 && item) {
                 if (UOButton({ pop.x + 76, pop.y + 68, 150, 32 }, "Equip")) {
@@ -32917,6 +33144,15 @@ static void UpdateDrawFrame() {
         for (float& cd : state.commissionCd) if (cd > 0.0f) cd -= dt; // commission offers (2026-09-27)
         SettleTick(state, dt); // the settlement works in real time (2026-09-27)
         WyrmTick(state, dt);   // the world boss's wake timer and heads (2026-09-27)
+        { // stat buffs run out; HP and mana follow the effective stats (2026-09-27)
+            for (float* t : { &state.blessT, &state.strPotT, &state.agiPotT }) if (*t > 0.0f && (*t -= dt) <= 0.0f) {
+                *t = 0.0f;
+                Journal(state, t == &state.blessT ? "The Bless fades." : (t == &state.strPotT ? "Your Strength potion wears off." : "Your Agility potion wears off."));
+            }
+            int mh = EffStr(state);
+            if (state.maxHp != mh) { state.maxHp = mh; if (state.hp > mh) state.hp = mh; }
+            if (state.mana > MaxMana(state)) state.mana = MaxMana(state);
+        }
         UpdateCombatAnim(state, dt);
         UpdateDeathAndRespawn(state, dt); // death anims, ghost timer, monster respawns, corpse fades
         UpdateGuildOffscreen(state, dt);  // the rival and Murder Inc. keep living while you're elsewhere
