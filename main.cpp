@@ -2178,6 +2178,20 @@ static void DrawVirtualJoystick() {
 // Moves `pos` per WASD/arrow keys held this frame (falling back to the virtual
 // joystick above if no key is held), updates `facing` if actually moving, and clamps
 // to the world. Returns true if the player moved at all this frame.
+// Tap to walk (2026-09-27): a tap on open ground in the 3D views sets a spot to
+// walk to; keys and the joystick always take over (and cancel it). It gives up
+// when something blocks the way for half a second.
+static bool g_walkOn = false;
+static Vector2 g_walkTarget = { 0, 0 };
+static float g_walkY = 0.0f;               // ground height at the spot (for the marker)
+static const Vector2* g_walkFor = nullptr; // which position it belongs to (town / wilds / dungeon)
+static Vector2 g_walkLastPos = { 0, 0 };
+static float g_walkStuckT = 0.0f;
+static void WalkTargetClear() { g_walkOn = false; g_walkFor = nullptr; }
+static void WalkTargetSet(const Vector2& who, Vector2 target, float groundY) {
+    g_walkOn = true; g_walkFor = &who; g_walkTarget = target; g_walkY = groundY;
+    g_walkLastPos = who; g_walkStuckT = 0.0f;
+}
 static bool UpdatePlayerMovement(Vector2& pos, Vector2& facing, float dt, float worldSize = kWorldSize) {
     Vector2 dir = {0, 0};
     if (IsKeyDown(KEY_W) || IsKeyDown(KEY_UP)) dir.y -= 1;
@@ -2185,15 +2199,29 @@ static bool UpdatePlayerMovement(Vector2& pos, Vector2& facing, float dt, float 
     if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) dir.x -= 1;
     if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) dir.x += 1;
     float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+    float step = kPlayerSpeed * dt;
+    if (g_walkOn && g_walkFor != &pos) WalkTargetClear(); // left that place
     if (len <= 0.0001f) {
         dir = VirtualJoystickDir();
         len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-        if (len <= 0.0001f) return false;
+        if (len > 0.0001f) WalkTargetClear();
+        else if (g_walkOn) { // tap to walk
+            Vector2 d = { g_walkTarget.x - pos.x, g_walkTarget.y - pos.y };
+            float dl = std::sqrt(d.x * d.x + d.y * d.y);
+            if (dl < 8.0f) { WalkTargetClear(); return false; }
+            float progress = hypotf(pos.x - g_walkLastPos.x, pos.y - g_walkLastPos.y);
+            g_walkStuckT = (progress < step * 0.25f && dt > 0.0f) ? g_walkStuckT + dt : 0.0f;
+            if (g_walkStuckT > 0.5f) { WalkTargetClear(); return false; } // blocked
+            g_walkLastPos = pos;
+            dir = { d.x / dl, d.y / dl };
+            step = std::min(step, dl);
+        } else return false;
     } else {
         dir.x /= len; dir.y /= len;
+        WalkTargetClear();
     }
-    pos.x += dir.x * kPlayerSpeed * dt;
-    pos.y += dir.y * kPlayerSpeed * dt;
+    pos.x += dir.x * step;
+    pos.y += dir.y * step;
     pos = ClampToWorld(pos, kPlayerEdgeMargin, worldSize);
     facing = dir;
     return true;
@@ -13397,7 +13425,7 @@ static float g_t3dDragDist = 0.0f;
 struct Town3DCam { Vector3 pos, target, fwd, right, up; float fovY, aspect, vw, vh; };
 // The camera the world was drawn with this frame, for HUD pointers (first-steps arrow).
 static Town3DCam g_hudCam = {};
-static int g_hudCamZone = -1; // 0 wilderness, 2 town, -1 none this frame
+static int g_hudCamZone = -1; // 0 wilderness, 1 dungeon, 2 town, -1 none this frame
 
 // Two-finger pinch zoom for touch (mobile): spread to zoom in, pinch to zoom
 // out. Tracked across frames; a pinch in progress cancels any orbit drag.
@@ -13494,6 +13522,25 @@ static Ray Town3DMouseRay(const Town3DCam& c, Vector2 m) {
     float ny = (1.0f - 2.0f * m.y / c.vh) * tanF;
     Vector3 dir = T3VNorm(T3VAdd(T3VAdd(c.fwd, T3VScale(c.right, nx)), T3VScale(c.up, ny)));
     return { c.pos, dir };
+}
+
+// Where a tap lands on the ground (2026-09-27, tap to walk). groundY gives the
+// terrain height (null = flat at 0); a few refinements settle onto hills.
+static bool Town3DGroundPoint(const Town3DCam& c, Vector2 m, float (*groundY)(float, float), Vector2* out, float* outY) {
+    Ray r = Town3DMouseRay(c, m);
+    if (r.direction.y > -0.02f) return false; // at or above the horizon
+    float y = 0.0f;
+    Vector3 p = r.position;
+    for (int it = 0; it < 5; it++) {
+        float t = (y - r.position.y) / r.direction.y;
+        if (t <= 0.0f) return false;
+        p = { r.position.x + r.direction.x * t, y, r.position.z + r.direction.z * t };
+        if (!groundY) break;
+        y = groundY(p.x, p.z);
+    }
+    *out = { p.x, p.z };
+    *outY = groundY ? groundY(p.x, p.z) : 0.0f;
+    return true;
 }
 
 // Project a world point to virtual-canvas 2D coords for overlay labels.
@@ -15399,6 +15446,9 @@ static void Town3DPick(GameState& s, Vector2 mouse, int screenW, int screenH) {
         ZoneArrive(RegionName(RegionAt(s.wildernessPlayerPos)));
     } else if (!bestKey.empty()) {
         s.selectedTile = bestKey;
+    } else { // open ground: walk there (2026-09-27)
+        Vector2 g; float gy;
+        if (Town3DGroundPoint(c, mouse, nullptr, &g, &gy)) WalkTargetSet(s.townPlayerPos, g, gy);
     }
 }
 
@@ -20734,6 +20784,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
     int torchCount = 0;
     Dungeon3DTorchSpots(di, torchSpots, &torchCount);
     Town3DCam c = Dungeon3DGetCam(s, screenW, screenH);
+    g_hudCam = c; g_hudCamZone = 1; // (2026-09-27) for the tap-to-walk marker
     T3DApplyShake(c); // combat camera kick (hit / hurt), zero when idle
     Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
     T3DUpdateDayNight(0.0f, true); // indoors / underground: always the noon palette
@@ -23780,7 +23831,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     // --- Detail / upgrade panel - opened by walking up + E, closed with [X]/[ESC] ---
     DrawBuildingDetailPanel(s, screenW);
     if (!s.selectedTile.has_value()) {
-        if (s.worldTime < 120.0f) DrawHudLine("Move with the stick (or WASD). Walk up to a building to go in.", 20, screenH - 66, 12); // (2026-09-27) early hint only
+        if (s.worldTime < 120.0f) DrawHudLine("Tap the ground to walk there, or use the stick (or WASD). Walk up to a building to go in.", 20, screenH - 66, 12); // (2026-09-27) early hint only
     }
     // Phase 3 - snowfall over Frostmere (both 2D and 3D town views).
     if (s.selectedTown == 2) DrawSnowfall(screenW, screenH, s.worldTime);
@@ -26675,8 +26726,11 @@ static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
     } else if (duelLocked) {
         s.logLine = "You're locked in - finish the duel first!";
     } else {
-        // Clicked empty ground: FULL disengage (2026-09-25), not just the flag.
+        // Clicked empty ground: FULL disengage (2026-09-25), not just the flag -
+        // and walk there (2026-09-27).
         DisengageFromNormals(s, 0);
+        Vector2 g; float gy;
+        if (Town3DGroundPoint(c, m, WildGroundY, &g, &gy)) WalkTargetSet(s.wildernessPlayerPos, g, gy);
     }
 }
 
@@ -26775,8 +26829,11 @@ static void Dungeon3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
     } else if (s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss) {
         s.logLine = "You're locked in - finish the boss first!";
     } else {
-        // Clicked empty ground: FULL disengage (2026-09-25), not just the flag.
+        // Clicked empty ground: FULL disengage (2026-09-25), not just the flag -
+        // and walk there (2026-09-27).
         DisengageFromNormals(s, 1);
+        Vector2 g; float gy;
+        if (Town3DGroundPoint(c, m, nullptr, &g, &gy)) WalkTargetSet(s.dungeonPlayerPos, g, gy);
     }
 }
 
@@ -27783,7 +27840,7 @@ static const char* kGuideBodies[5] = {
 // done. The old walkthrough pages live on under Help.
 enum StarterStep { kStWalk = 0, kStShop, kStLeave, kStGate, kStGather, kStFight, kStLoot, kStDone, kStCount };
 static const char* kStarterGoal[kStCount] = {
-    "Walk around! Drag the stick (or use WASD).",
+    "Walk around! Tap the ground, drag the stick, or use WASD.",
     "Visit a shop! Follow the gold arrow, then tap ENTER.",
     "Have a look around, then walk out the door.",
     "Time for adventure! Follow the arrow to the town gate.",
@@ -29972,6 +30029,25 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 static float g_resetArmedTimer = 0.0f; // >0 while the Reset button is armed, waiting for a confirm click
 static bool g_warOpen = false;         // the War Week screen (over the House screen)
 static void OpenWarWeek(GameState& s); // (2026-09-27) defined with the Guildstone
+// Tap to walk (2026-09-27): a pulsing gold ring on the ground where you're headed.
+static void DrawWalkMarker() {
+    if (!g_walkOn || g_hudCamZone < 0) return;
+    float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 6.0f);
+    float r = 16.0f + 5.0f * pulse;
+    Vector2 prev{}; bool havePrev = false;
+    for (int k = 0; k <= 20; k++) {
+        float a = k * (2.0f * PI / 20.0f);
+        Vector2 sp;
+        bool ok = Town3DProject(g_hudCam, { g_walkTarget.x + cosf(a) * r, g_walkY + 2.0f, g_walkTarget.y + sinf(a) * r }, &sp);
+        if (ok && havePrev) {
+            DrawLineEx(prev, sp, 4.0f, Fade(BLACK, 0.35f));
+            DrawLineEx(prev, sp, 2.5f, Color{ 255, 214, 110, (unsigned char)(170 + 80 * pulse) });
+        }
+        prev = sp; havePrev = ok;
+    }
+    Vector2 c;
+    if (Town3DProject(g_hudCam, { g_walkTarget.x, g_walkY + 2.0f, g_walkTarget.y }, &c)) DrawCircleV(c, 3.5f, Color{ 255, 214, 110, 230 });
+}
 static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
     g_uiShieldBypass = true; // this panel's own buttons sit inside the shield
     { // (2026-09-27) readable over the world: dark plate, light text, HP and mana
@@ -33940,6 +34016,7 @@ static void UpdateDrawFrame() {
         if (state.guideOpen && guideHome) DrawGuideOverlay(state);
         if (!guideBlocked || state.starterStep == kStFight || state.starterStep == kStLoot) UpdateDrawStarter(state, screenW, screenH);
         DrawDirectionsHud(state, screenW); // compass + world-boss timer (2026-09-27)
+        DrawWalkMarker();                  // tap to walk (2026-09-27)
         g_hudCamZone = -1;
         // UO-style travel (2026-09-25): arriving in a town marks it as a recall
         // destination. selectedTown only changes on real arrivals (gates, tabs,
