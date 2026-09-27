@@ -11098,6 +11098,7 @@ struct HumanOutfit {
     Color cloakCol = { 104, 70, 44, 255 };
     int hat = kClStyleNone;             // clothing hat style (kClWizardHat..), hidden under a helm
     bool robe = false;                  // a robe's hanging skirt (2026-09-27)
+    float build = 1.0f;                 // side-to-side / front-to-back bulk (the player's hero build: 1.15)
     Color robeCol = { 112, 96, 80, 255 };
     Color hatCol = { 90, 70, 120, 255 };
 };
@@ -11530,6 +11531,7 @@ static void HumanArmWith(HumanOutfit& o, const std::optional<Item>& it) {
 // boots, brown cloak) with every equipped piece painted over its region.
 static HumanOutfit HumanOutfitFor(const Equipment& e) {
     HumanOutfit o;
+    o.build = 1.16f; // the player is a hero, not the mannequin (2026-09-27: "looks a little wimpy")
     Color tunic = { 112, 116, 78, 255 }, pants = { 92, 78, 60, 255 };
     Color skin = { 226, 188, 152, 255 };
     o.region[kHrSkin] = skin;
@@ -12028,10 +12030,11 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
     // Blob shadow sized from the kit body (the mannequin's T-pose bounds are arm-wide).
     T3CDrawBlobShadow(g_t3cHumans[2].parts.merged, x, z, yawRad, scaleMul);
     float rotDeg = 90.0f - yawRad * RAD2DEG; // model faces +Z
-    DrawModelEx(H.model, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f }, rotDeg, { sc, sc, sc }, tint);
+    const float bw = sc * o.build; // broader shoulders, thicker limbs - same height
+    DrawModelEx(H.model, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f }, rotDeg, { bw, sc, bw }, tint);
 
     // ---- attachments ----
-    Matrix world = MatrixMultiply(MatrixMultiply(MatrixScale(sc, sc, sc), MatrixRotateY(rotDeg * DEG2RAD)),
+    Matrix world = MatrixMultiply(MatrixMultiply(MatrixScale(bw, sc, bw), MatrixRotateY(rotDeg * DEG2RAD)),
                                   MatrixTranslate(x, 0.0f, z));
     float u = H.unit;
     Material flat = H.model.materials[0]; // untextured material with the current shader
@@ -29875,7 +29878,8 @@ static void PaperdollRenderPass(const GameState& s) {
     }
     T3CKitUseSunShader();
     T3DUpdateDayNight(0.0f, true); // the noon palette, like interiors
-    Camera3D cam = { { 0.0f, 44.0f, 150.0f }, { 0.0f, 32.0f, 0.0f }, { 0, 1, 0 }, 29.0f, CAMERA_PERSPECTIVE };
+    // A low camera looking up a little (2026-09-27): the hero-shot angle.
+    Camera3D cam = { { 0.0f, 24.0f, 150.0f }, { 0.0f, 35.0f, 0.0f }, { 0, 1, 0 }, 30.0f, CAMERA_PERSPECTIVE };
     if (g_t3dLit.ready) {
         SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &cam.position, SHADER_UNIFORM_VEC3);
         float fr[2] = { 5000.0f, 9000.0f }; // no fog on the paperdoll
@@ -29886,7 +29890,7 @@ static void PaperdollRenderPass(const GameState& s) {
     BeginMode3D(cam);
     DrawCylinder({ 0, -4.0f, 0 }, 25.0f, 28.0f, 4.0f, 40, Color{ 96, 88, 80, 255 });   // stone plinth
     DrawCylinder({ 0, -0.2f, 0 }, 22.5f, 25.0f, 0.4f, 40, Color{ 132, 122, 108, 255 });
-    HumanPose hp; // relaxed idle
+    HumanPose hp; // standing idle (the engaged guard is a deep crouch - reads worse here)
     DrawHuman(kT3CTrackPaperdoll, 0.0f, 0.0f, 1.5708f + g_dollYaw, 1.0f, WHITE, HumanOutfitFor(s.equipped), hp, false);
     EndMode3D();
     EndTextureMode();
@@ -29963,6 +29967,12 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     DrawRectangleGradientV((int)kDollView.x, (int)kDollView.y, (int)kDollView.width, (int)kDollView.height,
                            Fade(Color{ 60, 44, 30, 255 }, 0.10f), Fade(Color{ 60, 44, 30, 255 }, 0.35f));
     DrawRectangleLinesEx(kDollView, 1.0f, Fade(kUoBronzeLo, 0.5f));
+    { // warm backlight behind the figure so it stands out from the parchment
+        Vector2 c = { kDollView.x + kDollView.width / 2, kDollView.y + kDollView.height * 0.46f };
+        BeginScissorMode((int)kDollView.x, (int)kDollView.y, (int)kDollView.width, (int)kDollView.height);
+        DrawCircleGradient(c, 175.0f, Fade(Color{ 255, 226, 160, 255 }, 0.55f), Fade(Color{ 255, 226, 160, 255 }, 0.0f));
+        EndScissorMode();
+    }
     if (g_dollRTReady)
         DrawTexturePro(g_dollRT.texture, { 0, 0, (float)g_dollRT.texture.width, -(float)g_dollRT.texture.height },
                        kDollView, { 0, 0 }, 0.0f, WHITE);
