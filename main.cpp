@@ -209,7 +209,7 @@ enum class Resource { Wood, Ore, Leather, None };
 // A craftable recipe (weapon or armor) - ported from each building's `recipes:[...]`
 // list in the JS BUILDINGS table. `slot` is only meaningful for armor; `handed` only
 // for weapons.
-enum class ItemType { Weapon, Armor, Potion }; // Potion recipes store their effect in
+enum class ItemType { Weapon, Armor, Potion, Clothing }; // (Clothing 2026-09-27: dyeable, no defense) Potion recipes store their effect in
                                                  // `category` ("heal"/"stamina"/"poison"/
                                                  // "damage") and potency in `power`.
 struct Recipe {
@@ -341,6 +341,23 @@ static const std::array<BuildingDef, 4> kCraftBuildings = {{
         {"Studded Sleeves", ItemType::Armor, "Studded Leather", "arms", "", 65, 14, 7},
         {"Studded Leggings", ItemType::Armor, "Studded Leather", "legs", "", 70, 18, 8},
         {"Studded Tunic", ItemType::Armor, "Studded Leather", "chest", "", 80, 24, 12},
+        // Clothing (2026-09-27) - no defense; dye it at the Tailor. Power 1 = sale value.
+        {"Shirt", ItemType::Clothing, "Cloth", "shirt", "", 0, 2, 1},
+        {"Tunic", ItemType::Clothing, "Cloth", "shirt", "", 5, 3, 1},
+        {"Fancy Shirt", ItemType::Clothing, "Cloth", "shirt", "", 20, 3, 2},
+        {"Doublet", ItemType::Clothing, "Cloth", "shirt", "", 35, 4, 2},
+        {"Long Pants", ItemType::Clothing, "Cloth", "pants", "", 0, 2, 1},
+        {"Kilt", ItemType::Clothing, "Cloth", "pants", "", 15, 2, 1},
+        {"Sandals", ItemType::Clothing, "Cloth", "shoes", "", 0, 1, 1},
+        {"Shoes", ItemType::Clothing, "Cloth", "shoes", "", 5, 2, 1},
+        {"Boots", ItemType::Clothing, "Cloth", "shoes", "", 25, 4, 2},
+        {"Body Sash", ItemType::Clothing, "Cloth", "sash", "", 10, 1, 1},
+        {"Bandana", ItemType::Clothing, "Cloth", "hat", "", 5, 1, 1},
+        {"Wide-Brim Hat", ItemType::Clothing, "Cloth", "hat", "", 15, 3, 2},
+        {"Wizard's Hat", ItemType::Clothing, "Cloth", "hat", "", 30, 3, 2},
+        {"Feathered Hat", ItemType::Clothing, "Cloth", "hat", "", 55, 4, 3},
+        {"Cloak", ItemType::Clothing, "Cloth", "cloak", "", 30, 5, 3},
+        {"Robe", ItemType::Clothing, "Cloth", "robe", "", 40, 6, 3},
     } },
     { "alchemy", "The Bitterroot Still", Resource::None, {100, 140, 60, 255}, {{
         // Reagents-based upgrade costs in the JS; folded into gold-only here for the
@@ -888,13 +905,96 @@ struct Item {
     int power;
     std::string category; // weapon only: "Swordsmanship"/"Fencing"/"Macing"/"Archery" -
                             // drives which combat skill trains/applies (see ActiveWeaponSkillField)
+    int hue = -1;           // clothing dye (index into kDyeHues), -1 = the cloth's natural color
 };
 
 // One weapon can occupy leftHand, rightHand, or both (2h); armor has one slot each.
 struct Equipment {
     std::optional<Item> leftHand, rightHand;
     std::optional<Item> helmet, gorget, gloves, arms, legs, chest;
+    // Clothing (2026-09-27): UO-style dyeable layers under/over the armor.
+    std::optional<Item> hat, shirt, robe, cloak, sash, pants, shoes;
 };
+
+// ---- Clothing & dyes (2026-09-27) ----
+// "Custom clothing is huge in UO": garments are their own item type, sold and
+// sewn at the Tailor, dyed there from this palette, and painted onto the body
+// on the paperdoll and in the world. The last few hues are rare - only a
+// Tailor of 80+ can mix them.
+struct DyeHue { const char* name; Color c; bool rare; };
+static const DyeHue kDyeHues[] = {
+    { "Snow White", { 236, 234, 226, 255 }, false }, { "Ash Grey", { 128, 128, 132, 255 }, false },
+    { "Charcoal", { 52, 50, 54, 255 }, false },       { "Crimson", { 170, 30, 36, 255 }, false },
+    { "Wine", { 110, 28, 48, 255 }, false },          { "Rust", { 160, 74, 36, 255 }, false },
+    { "Pumpkin", { 220, 120, 40, 255 }, false },      { "Mustard", { 204, 164, 52, 255 }, false },
+    { "Lemon", { 230, 214, 90, 255 }, false },        { "Moss", { 92, 112, 52, 255 }, false },
+    { "Forest", { 40, 92, 52, 255 }, false },         { "Leaf", { 96, 170, 70, 255 }, false },
+    { "Teal", { 40, 128, 128, 255 }, false },         { "Sky", { 110, 170, 220, 255 }, false },
+    { "Royal Blue", { 44, 76, 170, 255 }, false },    { "Navy", { 30, 40, 90, 255 }, false },
+    { "Violet", { 120, 80, 170, 255 }, false },       { "Plum", { 90, 40, 100, 255 }, false },
+    { "Rose", { 210, 110, 150, 255 }, false },        { "Chestnut", { 110, 70, 44, 255 }, false },
+    { "Tan", { 190, 160, 112, 255 }, false },
+    { "Blaze", { 255, 110, 20, 255 }, true },         { "Ice", { 200, 236, 255, 255 }, true },
+    { "Shadow", { 24, 18, 30, 255 }, true },          { "Gilded", { 240, 200, 70, 255 }, true },
+    { "Sea Foam", { 40, 200, 160, 255 }, true },
+};
+static const int kDyeHueCount = (int)(sizeof(kDyeHues) / sizeof(kDyeHues[0]));
+static const int kDyeCost = 15; // gold per dip at the Tailor
+// Garment styles, by the name the Tailor sells them under (slot = which layer).
+struct ClothDef { const char* name; const char* slot; Color natural; int style; };
+enum { kClStyleNone = 0, kClKilt = 1, kClWizardHat, kClWideBrim, kClBandana, kClFeatherHat };
+static const ClothDef kClothDefs[] = {
+    { "Shirt", "shirt", { 225, 215, 190, 255 }, 0 },       { "Fancy Shirt", "shirt", { 236, 234, 226, 255 }, 0 },
+    { "Tunic", "shirt", { 112, 116, 78, 255 }, 0 },        { "Doublet", "shirt", { 120, 40, 50, 255 }, 0 },
+    { "Long Pants", "pants", { 92, 78, 60, 255 }, 0 },     { "Kilt", "pants", { 70, 96, 64, 255 }, kClKilt },
+    { "Shoes", "shoes", { 84, 56, 36, 255 }, 0 },          { "Sandals", "shoes", { 150, 110, 70, 255 }, 0 },
+    { "Boots", "shoes", { 70, 48, 32, 255 }, 0 },          { "Cloak", "cloak", { 104, 70, 44, 255 }, 0 },
+    { "Robe", "robe", { 112, 96, 80, 255 }, 0 },           { "Body Sash", "sash", { 150, 40, 40, 255 }, 0 },
+    { "Bandana", "hat", { 160, 40, 40, 255 }, kClBandana }, { "Wide-Brim Hat", "hat", { 130, 100, 70, 255 }, kClWideBrim },
+    { "Wizard's Hat", "hat", { 70, 60, 130, 255 }, kClWizardHat }, { "Feathered Hat", "hat", { 60, 70, 110, 255 }, kClFeatherHat },
+};
+// The garment a (possibly quality-prefixed, e.g. "Fine Tunic") item is - longest name match wins.
+static const ClothDef* ClothDefFor(const Item& it) {
+    const ClothDef* best = nullptr; size_t bestLen = 0;
+    for (const ClothDef& d : kClothDefs) {
+        size_t n = strlen(d.name);
+        if (it.name.size() >= n && it.name.compare(it.name.size() - n, n, d.name) == 0 && n > bestLen) { best = &d; bestLen = n; }
+    }
+    return best;
+}
+static Color ClothColor(const Item& it) {
+    if (it.hue >= 0 && it.hue < kDyeHueCount) return kDyeHues[it.hue].c;
+    const ClothDef* d = ClothDefFor(it);
+    return d ? d->natural : Color{ 200, 190, 170, 255 };
+}
+static std::optional<Item> Equipment::* ClothSlotField(const std::string& slot) {
+    if (slot == "hat") return &Equipment::hat;
+    if (slot == "shirt") return &Equipment::shirt;
+    if (slot == "robe") return &Equipment::robe;
+    if (slot == "cloak") return &Equipment::cloak;
+    if (slot == "sash") return &Equipment::sash;
+    if (slot == "pants") return &Equipment::pants;
+    if (slot == "shoes") return &Equipment::shoes;
+    return nullptr;
+}
+// Every new adventurer starts dressed as the ranger of the concept art (the look
+// the body had before clothing existed); old saves get the same set once.
+static void DressStarterClothes(Equipment& e) {
+    auto mk = [](int id, const char* name, const char* slot) { Item it{ id, name, ItemType::Clothing, slot, "", 0, "Cloth" }; return it; };
+    if (!e.shirt) e.shirt = mk(-11, "Tunic", "shirt");
+    if (!e.pants) e.pants = mk(-12, "Long Pants", "pants");
+    if (!e.shoes) e.shoes = mk(-13, "Boots", "shoes");
+    if (!e.cloak) e.cloak = mk(-14, "Cloak", "cloak");
+}
+// The clothing layers in paperdoll order (the paperdoll's clothing page uses selection ids 20..26).
+struct PaperdollClothSlot { const char* label; std::optional<Item> Equipment::*field; const char* slot; const char* sample; };
+static const PaperdollClothSlot kPdClothSlots[7] = {
+    { "Hat", &Equipment::hat, "hat", "Wide-Brim Hat" },  { "Shirt", &Equipment::shirt, "shirt", "Shirt" },
+    { "Robe", &Equipment::robe, "robe", "Robe" },        { "Cloak", &Equipment::cloak, "cloak", "Cloak" },
+    { "Sash", &Equipment::sash, "sash", "Body Sash" },   { "Pants", &Equipment::pants, "pants", "Long Pants" },
+    { "Shoes", &Equipment::shoes, "shoes", "Shoes" },
+};
+
 
 // ---------------------------------------------------------------------
 // Magic / spellcasting - ported from SPELLS, spellSuccessChance(),
@@ -1267,7 +1367,7 @@ struct GameState {
     std::array<float, kCraftBuildings.size()> buildingSkill = {0, 0, 0, 0}; // smith/carpenter/tailor/(alchemy unused)
     std::vector<Item> backpack;
     int nextItemId = 1;
-    Equipment equipped;
+    Equipment equipped = [] { Equipment e; DressStarterClothes(e); return e; }(); // starts dressed (2026-09-27)
     int craftBuildingTab = 0;   // which of kCraftBuildings is open on the Craft screen
     int craftModeTab = 0;        // 0 = Craft (existing UI), 1 = Buy pre-made gear (2026-09-21)
     float craftScroll = 0;       // mouse-wheel scroll offset for the recipe list
@@ -3171,7 +3271,56 @@ static const Texture2D* GearIconForItem(const Item& item) {
     }
     return nullptr; // potions: no gear icon
 }
+// Clothing icons (2026-09-27): drawn as shapes in the garment's own dye, so a
+// crimson cloak looks crimson in the bag, on the paperdoll and in the world.
+static void DrawClothingIcon(const Item& item, float x, float y, float size) {
+    Color c = ClothColor(item), d = ColorBrightness(c, -0.35f), hi = ColorBrightness(c, 0.25f);
+    float u = size / 48.0f, cx = x + size / 2, cy = y + size / 2;
+    auto R = [&](float rx, float ry, float rw, float rh, Color col) { DrawRectangleRec({ cx + rx * u, cy + ry * u, rw * u, rh * u }, col); };
+    auto T = [&](float ax, float ay, float bx, float by, float qx, float qy, Color col) {
+        DrawTriangle({ cx + ax * u, cy + ay * u }, { cx + bx * u, cy + by * u }, { cx + qx * u, cy + qy * u }, col);
+        DrawTriangle({ cx + ax * u, cy + ay * u }, { cx + qx * u, cy + qy * u }, { cx + bx * u, cy + by * u }, col); // either winding
+    };
+    const ClothDef* def = ClothDefFor(item);
+    const std::string& sl = item.slot;
+    if (sl == "shirt") {
+        R(-11, -14, 22, 30, d); R(-10, -13, 20, 28, c);
+        T(-10, -13, -21, -4, -10, 2, c); T(10, -13, 21, -4, 10, 2, c); // sleeves
+        R(-4, -14, 8, 4, d);                                             // collar
+        R(-9, -8, 3, 20, hi);
+    } else if (sl == "robe") {
+        T(-9, -16, -17, 20, 17, 20, d); T(-8, -15, -16, 19, 16, 19, c); T(9, -16, -8, -15, 16, 19, c);
+        R(-8, -16, 16, 10, c); T(-8, -15, -20, 0, -8, -4, c); T(8, -15, 20, 0, 8, -4, c);
+        R(-2, -12, 4, 30, d);
+    } else if (sl == "pants") {
+        if (def && def->style == kClKilt) { T(-14, -8, -18, 14, 18, 14, d); T(-13, -7, -17, 13, 17, 13, c); T(-13, -7, 13, -7, 17, 13, c); R(-14, -10, 28, 4, d); }
+        else { R(-12, -16, 24, 6, d); R(-12, -12, 10, 30, c); R(2, -12, 10, 30, c); R(-12, -16, 24, 5, c); R(-1, -10, 2, 26, d); }
+    } else if (sl == "shoes") {
+        bool boots = def && strcmp(def->name, "Boots") == 0;
+        float top = boots ? -16.0f : -2.0f;
+        for (int k = 0; k < 2; k++) {
+            float ox = k ? 2.0f : -16.0f;
+            R(ox, top, 8, 14 - top, d); R(ox + 1, top + 1, 6, 13 - top, c); R(ox, 10, 14, 6, d); R(ox + 1, 11, 12, 4, c);
+        }
+    } else if (sl == "cloak") {
+        T(-6, -16, -18, 18, 18, 18, d); T(-5, -15, -17, 17, 17, 17, c); T(6, -16, -5, -15, 17, 17, c);
+        R(-6, -17, 12, 5, d); DrawCircleV({ cx, cy - 14 * u }, 2.4f * u, Color{ 220, 190, 90, 255 });
+    } else if (sl == "sash") {
+        T(-16, -14, -10, -18, 16, 12, d); T(-15, -14, -10, -16, 15, 11, c); T(-15, -14, 15, 11, 10, 14, c);
+        R(8, 8, 5, 12, c);
+    } else if (sl == "hat") {
+        int st = def ? def->style : kClWideBrim;
+        if (st == kClWizardHat) { DrawEllipse((int)cx, (int)(cy + 10 * u), 20 * u, 5 * u, d); T(-10, 9, 10, 9, 5, -18, c); DrawEllipse((int)cx, (int)(cy + 9 * u), 18 * u, 3.5f * u, c); }
+        else if (st == kClBandana) { DrawCircleSector({ cx, cy + 6 * u }, 14 * u, 180, 360, 16, c); R(-14, 4, 28, 4, d); T(12, 6, 20, 14, 16, 2, c); }
+        else {
+            DrawEllipse((int)cx, (int)(cy + 8 * u), 21 * u, 6 * u, d); DrawEllipse((int)cx, (int)(cy + 7 * u), 20 * u, 5 * u, c);
+            R(-9, -8, 18, 15, c); R(-9, 2, 18, 3, d);
+            if (st == kClFeatherHat) { T(4, -6, 22, -18, 8, -2, Color{ 236, 232, 220, 255 }); }
+        }
+    }
+}
 static void DrawItemIcon(const Item& item, float x, float y, float size) {
+    if (item.type == ItemType::Clothing) { DrawClothingIcon(item, x, y, size); return; }
     const Texture2D* tex = GearIconForItem(item);
     if (!tex) return;
     Rectangle src = { 0, 0, (float)tex->width, (float)tex->height };
@@ -6284,7 +6433,7 @@ static std::vector<std::string> SplitStr(const std::string& s, char delim) {
 // Item <-> "id|name|type|slot|handed|power|category" (type: 0=Weapon,1=Armor,2=Potion)
 static std::string ItemToLine(const Item& it) {
     return std::to_string(it.id) + "|" + it.name + "|" + std::to_string((int)it.type) + "|" +
-            it.slot + "|" + it.handed + "|" + std::to_string(it.power) + "|" + it.category;
+            it.slot + "|" + it.handed + "|" + std::to_string(it.power) + "|" + it.category + "|" + std::to_string(it.hue);
 }
 static std::optional<Item> ItemFromLine(const std::string& line) {
     auto parts = SplitStr(line, '|');
@@ -6297,6 +6446,7 @@ static std::optional<Item> ItemFromLine(const std::string& line) {
     it.handed = parts[4];
     it.power = std::atoi(parts[5].c_str());
     it.category = parts.size() > 6 ? parts[6] : ""; // old saves before category existed
+    it.hue = parts.size() > 7 ? std::atoi(parts[7].c_str()) : -1; // dye (2026-09-27)
     return it;
 }
 // Pet <-> "id|name|role|str|dex|int|hp|maxHp|mana|maxMana|wrestling|tactics|anatomy|magery|evalInt|meditation|active"
@@ -6463,6 +6613,14 @@ static void SaveGame(const GameState& s) {
     WriteEquipSlot(out, "equipped.arms", s.equipped.arms);
     WriteEquipSlot(out, "equipped.legs", s.equipped.legs);
     WriteEquipSlot(out, "equipped.chest", s.equipped.chest);
+    WriteEquipSlot(out, "equipped.hat", s.equipped.hat);     // clothing (2026-09-27)
+    WriteEquipSlot(out, "equipped.shirt", s.equipped.shirt);
+    WriteEquipSlot(out, "equipped.robe", s.equipped.robe);
+    WriteEquipSlot(out, "equipped.cloak", s.equipped.cloak);
+    WriteEquipSlot(out, "equipped.sash", s.equipped.sash);
+    WriteEquipSlot(out, "equipped.pants", s.equipped.pants);
+    WriteEquipSlot(out, "equipped.shoes", s.equipped.shoes);
+    out << "clothesInit=1\n";
 
     for (size_t i = 0; i < s.rivalStash.size(); i++) out << "rivalStash." << i << "=" << ItemToLine(s.rivalStash[i]) << "\n";
     out << "backpack.count=" << s.backpack.size() << "\n";
@@ -6540,6 +6698,7 @@ static bool LoadGame(GameState& s) {
     long long lastActiveEpoch = 0;
     int saveVersion = 1; // missing = pre-ladder seven-slot format
     bool wildScaled = false; // saved before the 1.5x wilderness: scale the persisted positions out
+    bool clothesInit = false; // saved before clothing existed: dress them in the starter set
     bool sawMarkedTowns = false; // UO-style travel (2026-09-25): pre-marking saves lack the key
     bool sawStarter = false;     // (2026-09-27) saves from before "first steps" are veterans: skip it
     bool sawYoung = false;       // (2026-09-27) ...and they aren't Young either
@@ -6698,6 +6857,14 @@ static bool LoadGame(GameState& s) {
         else if (key == "equipped.arms") ReadEquipSlot(val, s.equipped.arms);
         else if (key == "equipped.legs") ReadEquipSlot(val, s.equipped.legs);
         else if (key == "equipped.chest") ReadEquipSlot(val, s.equipped.chest);
+        else if (key == "equipped.hat") ReadEquipSlot(val, s.equipped.hat);
+        else if (key == "equipped.shirt") ReadEquipSlot(val, s.equipped.shirt);
+        else if (key == "equipped.robe") ReadEquipSlot(val, s.equipped.robe);
+        else if (key == "equipped.cloak") ReadEquipSlot(val, s.equipped.cloak);
+        else if (key == "equipped.sash") ReadEquipSlot(val, s.equipped.sash);
+        else if (key == "equipped.pants") ReadEquipSlot(val, s.equipped.pants);
+        else if (key == "equipped.shoes") ReadEquipSlot(val, s.equipped.shoes);
+        else if (key == "clothesInit") clothesInit = true;
         else if (key == "backpack.count") { s.backpack.clear(); s.backpack.reserve(std::atoi(val.c_str())); }
         else if (key.rfind("backpack.", 0) == 0) { if (auto it = ItemFromLine(val)) s.backpack.push_back(*it); }
         else if (key == "pets.count") { s.pets.clear(); s.pets.reserve(std::atoi(val.c_str())); }
@@ -6833,6 +7000,7 @@ static bool LoadGame(GameState& s) {
         s.ghostTimer = 0.0f;
         s.logLine = "You wake in Emberhold, whole once more.";
     }
+    if (!clothesInit) DressStarterClothes(s.equipped);
     if (!wildScaled) { // older save: its wilderness positions were on the 3200-unit map
         s.rivalPos = { s.rivalPos.x * kWS, s.rivalPos.y * kWS };
         s.rivalPatrolTarget = s.rivalPos;
@@ -6909,7 +7077,8 @@ static void TryCraftItem(GameState& s, int buildingIdx, int recipeIdx, int capOv
         if (MaybeGainStat(s, &GameState::dex, 0.06f)) gainNote += " (DEX +1)";
         if (MaybeGainStat(s, &GameState::intStat, 0.06f)) gainNote += " (INT +1)";
     }
-    s.logLine = "Crafted " + item.name + " (" + std::to_string(finalPower) +
+    s.logLine = r.type == ItemType::Clothing ? "Sewed " + item.name + " - dye it here if you like." + gainNote
+              : "Crafted " + item.name + " (" + std::to_string(finalPower) +
                  (r.type == ItemType::Armor ? " defense)" : " power)") + gainNote;
     AddWeeklyProgress(s, kGoalCraft, 1);
 }
@@ -7079,6 +7248,14 @@ static void EquipFromBackpack(GameState& s, int backpackIdx) {
         } else if (s.equipped.leftHand) s.backpack.push_back(*s.equipped.leftHand);
         s.equipped.leftHand = item;
         if (twoH) { PlaySfx(SfxId::Click); return; }
+    } else if (item.type == ItemType::Clothing) { // (2026-09-27) clothing layers
+        auto field = ClothSlotField(item.slot);
+        if (!field) { s.backpack.push_back(item); return; }
+        std::optional<Item>& target = s.equipped.*field;
+        if (target.has_value()) s.backpack.push_back(*target);
+        target = item;
+        s.logLine = "You put on the " + item.name + ".";
+        return;
     } else { // armor
         std::optional<Item>* target = item.slot == "helmet" ? &s.equipped.helmet
             : item.slot == "gorget" ? &s.equipped.gorget : item.slot == "gloves" ? &s.equipped.gloves
@@ -10919,6 +11096,10 @@ struct HumanOutfit {
     Color helmCol = { 190, 194, 202, 255 };
     bool cloak = true;
     Color cloakCol = { 104, 70, 44, 255 };
+    int hat = kClStyleNone;             // clothing hat style (kClWizardHat..), hidden under a helm
+    bool robe = false;                  // a robe's hanging skirt (2026-09-27)
+    Color robeCol = { 112, 96, 80, 255 };
+    Color hatCol = { 90, 70, 120, 255 };
 };
 
 struct HumanPose {
@@ -10956,6 +11137,8 @@ struct HumanRig {
     Model face{};      // eyes (baked colors) - head-bone space
     Model brows{}, beard{}, hair[3]{}; // tinted with the hair color
     Model cloak{};     // procedural, chest-bone space
+    Model hat[6]{};    // clothing hats, head-bone space (index = kClWizardHat..kClFeatherHat)
+    Model robeSkirt{}; // chest-bone space, waist to ankles
     Color painted[kHrCount]{};
     bool paintedOnce = false;
 };
@@ -11111,6 +11294,61 @@ static Model HumanBuildHair(int style) {
     return T3CFinish(b);
 }
 
+// Clothing hats (2026-09-27), head-bone space like the helms, white (tinted per draw).
+static Model HumanBuildHat(int style) {
+    T3CMeshBuilder b;
+    Color w = WHITE;
+    switch (style) {
+        case kClWizardHat: { // wide floppy brim + tall cone that leans back
+            T3CCylinder(b, 0.0f, 0.212f, -0.004f, 0.224f, 0.20f, 0.19f, 18, w);
+            float base[3] = { 0.0f, 0.22f, -0.01f }, dir[3] = { 0.0f, 1.0f, -0.32f };
+            T3CConeDir(b, base, dir, 0.31f, 0.108f, 14, w);
+            break;
+        }
+        case kClWideBrim: // flat brim + a round crown
+            T3CCylinder(b, 0.0f, 0.214f, -0.004f, 0.224f, 0.215f, 0.21f, 20, w);
+            T3CCylinder(b, 0.0f, 0.222f, -0.004f, 0.325f, 0.108f, 0.094f, 16, w);
+            break;
+        case kClBandana: // a snug cloth cap knotted at the back
+            T3CSphere(b, 0.0f, 0.176f, -0.008f, 0.101f, 0.110f, 0.124f, 6, 10, w);
+            T3CBox(b, 0.0f, 0.15f, -0.128f, 0.05f, 0.04f, 0.03f, w);
+            T3CBox(b, 0.012f, 0.10f, -0.13f, 0.024f, 0.07f, 0.012f, w);
+            break;
+        case kClFeatherHat: { // cavalier: upturned brim, low crown, a long plume swept back
+            T3CCylinder(b, 0.0f, 0.216f, -0.004f, 0.236f, 0.18f, 0.20f, 18, w);
+            T3CCylinder(b, 0.0f, 0.224f, -0.004f, 0.300f, 0.106f, 0.098f, 16, w);
+            float base[3] = { 0.06f, 0.29f, 0.02f }, dir[3] = { 0.25f, 0.55f, -1.0f };
+            T3CConeDir(b, base, dir, 0.30f, 0.028f, 6, w);
+            break;
+        }
+        default: break;
+    }
+    return T3CFinish(b);
+}
+
+// A robe's skirt (2026-09-27): a two-sided elliptical cone from the waist to
+// the ankles, chest-bone space (same frame as the cloak).
+static Model HumanBuildRobeSkirt() {
+    T3CMeshBuilder b;
+    Color c = WHITE;
+    const int sides = 14, rows = 3;
+    const float top = -0.16f, bot = -1.00f, kZ = 0.09f; // centred over the hips (the chest bone sits behind them)
+    for (int r = 0; r < rows; r++) {
+        float y0 = top + (bot - top) * r / rows, y1 = top + (bot - top) * (r + 1) / rows;
+        float t0 = (float)r / rows, t1 = (float)(r + 1) / rows;
+        float rx0 = 0.155f + 0.12f * t0, rz0 = 0.118f + 0.09f * t0;
+        float rx1 = 0.155f + 0.12f * t1, rz1 = 0.118f + 0.09f * t1;
+        for (int j = 0; j < sides; j++) {
+            float a0 = 6.2831853f * j / sides, a1 = 6.2831853f * (j + 1) / sides;
+            float p0[3] = { rx0 * cosf(a0), y0, kZ + rz0 * sinf(a0) }, p1[3] = { rx0 * cosf(a1), y0, kZ + rz0 * sinf(a1) };
+            float q0[3] = { rx1 * cosf(a0), y1, kZ + rz1 * sinf(a0) }, q1[3] = { rx1 * cosf(a1), y1, kZ + rz1 * sinf(a1) };
+            T3CQuad(b, p0, q0, q1, p1, c);
+            T3CQuad(b, p0, p1, q1, q0, ColorBrightness(c, -0.3f));
+        }
+    }
+    return T3CFinish(b);
+}
+
 static Model HumanBuildCloak() {
     // Chest-bone (spine.003) space in metres: hangs from the shoulders down the
     // back to mid-calf, flaring out. Two-sided so the lining shows when it swings.
@@ -11240,6 +11478,8 @@ static void HumanEnsure() {
     for (int g = kHwBow; g < kHwGearCount; g++) { H.gear[g] = HumanBuildWeapon(g); H.gearOk[g] = true; }
     for (int k = kHhLeather; k <= kHhPlate; k++) H.helm[k] = HumanBuildHelm(k);
     H.cloak = HumanBuildCloak();
+    H.robeSkirt = HumanBuildRobeSkirt();
+    for (int k = kClWizardHat; k <= kClFeatherHat; k++) H.hat[k] = HumanBuildHat(k);
     H.face = HumanBuildFace();
     H.brows = HumanBuildBrows();
     H.beard = HumanBuildBeard();
@@ -11303,6 +11543,31 @@ static HumanOutfit HumanOutfitFor(const Equipment& e) {
     o.region[kHrHands] = skin;
     o.region[kHrLegs] = pants;
     o.region[kHrBoots] = Color{ 84, 56, 36, 255 };
+    // Clothing (2026-09-27): what you wear is what shows. Undressed = plain
+    // undershirt and smallclothes, bare feet; each garment paints its layer in
+    // its dye, then armor goes over it and a robe over everything.
+    {
+        Color under = { 214, 204, 180, 255 }, small = { 176, 158, 128, 255 };
+        o.region[kHrChest] = under; o.region[kHrSkirt] = ColorBrightness(under, -0.08f);
+        o.region[kHrSleeve] = skin; o.region[kHrForearm] = skin;
+        o.region[kHrLegs] = small; o.region[kHrBoots] = ColorBrightness(skin, -0.12f);
+        o.cloak = false;
+        if (e.shirt) {
+            Color sc = ClothColor(*e.shirt);
+            o.region[kHrChest] = sc; o.region[kHrSkirt] = ColorBrightness(sc, -0.08f);
+            o.region[kHrSleeve] = sc; o.region[kHrForearm] = ColorBrightness(sc, -0.05f);
+        }
+        if (e.pants) {
+            Color pc = ClothColor(*e.pants);
+            const ClothDef* d = ClothDefFor(*e.pants);
+            if (d && d->style == kClKilt) { o.region[kHrSkirt] = pc; o.region[kHrLegs] = skin; }
+            else o.region[kHrLegs] = pc;
+        }
+        if (e.shoes) o.region[kHrBoots] = ClothColor(*e.shoes);
+        if (e.sash) o.region[kHrBelt] = ClothColor(*e.sash);
+        if (e.cloak) { o.cloak = true; o.cloakCol = ClothColor(*e.cloak); }
+        if (e.hat) { const ClothDef* d = ClothDefFor(*e.hat); if (d) { o.hat = d->style; o.hatCol = ClothColor(*e.hat); } }
+    }
     Color c;
     if (HumanArmorColor(e.chest, &c)) { o.region[kHrChest] = c; o.region[kHrSkirt] = ColorBrightness(c, -0.12f); }
     if (HumanArmorColor(e.arms, &c)) { o.region[kHrSleeve] = c; o.region[kHrForearm] = ColorBrightness(c, -0.06f); }
@@ -11316,6 +11581,13 @@ static HumanOutfit HumanOutfitFor(const Equipment& e) {
                : kHhLeather;
         HumanArmorColor(e.helmet, &o.helmCol);
         if (o.helm == kHhPlate) o.helmCol = Color{ 190, 194, 202, 255 };
+    }
+    if (e.robe) { // a robe goes over the armor, UO style (gloves, boots and helm still show)
+        Color rc = ClothColor(*e.robe);
+        o.region[kHrChest] = rc; o.region[kHrSkirt] = ColorBrightness(rc, -0.06f);
+        o.region[kHrSleeve] = rc; o.region[kHrForearm] = ColorBrightness(rc, -0.04f);
+        o.region[kHrLegs] = ColorBrightness(rc, -0.10f); o.region[kHrNeck] = skin;
+        o.robe = true; o.robeCol = rc;
     }
     HumanArmWith(o, e.rightHand);
     if (o.weapon == kHwNone) HumanArmWith(o, e.leftHand);
@@ -11835,6 +12107,10 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
     }
     if (o.helm != kHhNone && H.boneHead >= 0)
         HumanDrawAttached(H.helm[o.helm], &flat, metres, HumanBoneMatrix(H, H.boneHead), world, HumanMul(o.helmCol, tint));
+    else if (o.hat >= kClWizardHat && o.hat <= kClFeatherHat && H.boneHead >= 0) // clothing hat (2026-09-27)
+        HumanDrawAttached(H.hat[o.hat], &flat, metres, HumanBoneMatrix(H, H.boneHead), world, HumanMul(o.hatCol, tint));
+    if (o.robe && H.boneChest >= 0)
+        HumanDrawAttached(H.robeSkirt, &flat, metres, HumanBoneMatrix(H, H.boneChest), world, HumanMul(o.robeCol, tint));
     if (o.cloak && H.boneChest >= 0) {
         // Swing the hem back as the body speeds up (a rigid cape would clip the legs mid-stride).
         float lift = 0.06f + 0.30f * p.move;
@@ -28277,6 +28553,84 @@ static void DrawPillTabs(const std::vector<std::string>& labels, int* selected, 
     }
 }
 
+// ---- The Tailor's dye tub (2026-09-27) ----
+// Pick a garment (worn or in the pack), pick a hue, pay the dip. Rare hues
+// take a master's hand: Tailoring 80+.
+static int g_dyeSel = -1;  // 0..6 worn clothing slot (kPdClothSlots order), 100+i backpack item
+static int g_dyeHue = 3;   // index into kDyeHues, -1 = strip back to the natural cloth
+static void DrawDyeTub(GameState& s, int y, int screenW, int screenH) {
+    float tailoring = s.buildingSkill[2];
+    DrawInfoLine(TextFormat("Gold: %d    Tailoring: %.1f", s.gold, tailoring), 20, y, 13, kColorAccent);
+    y += 22;
+    DrawUIText("1. Pick something to dye", 20, y, 14, kColorHeading);
+    y += 20;
+    // garments: worn first, then the pack
+    struct G { int id; const Item* it; bool worn; };
+    std::vector<G> gs;
+    for (int i = 0; i < 7; i++) { const auto& o = s.equipped.*(kPdClothSlots[i].field); if (o) gs.push_back({ i, &*o, true }); }
+    for (size_t i = 0; i < s.backpack.size(); i++) if (s.backpack[i].type == ItemType::Clothing) gs.push_back({ 100 + (int)i, &s.backpack[i], false });
+    const float cell = 62.0f;
+    int cols = (screenW - 40) / (int)cell;
+    if (gs.empty()) { DrawUIText("You have no clothes to dye - buy or sew some first.", 20, y + 8, 13, kColorText); y += 40; }
+    bool selValid = false;
+    for (size_t k = 0; k < gs.size(); k++) {
+        Rectangle r = { 20 + (k % cols) * cell, (float)y + (k / cols) * (cell + 14), cell - 6, cell - 6 };
+        bool sel = g_dyeSel == gs[k].id;
+        if (sel) selValid = true;
+        DrawRectangleRounded(r, 0.15f, 6, sel ? Fade(kColorAccent, 0.35f) : Fade(WHITE, 0.25f));
+        DrawRectangleRoundedLines(r, 0.15f, 6, sel ? kColorHeading : Fade(BLACK, 0.3f));
+        DrawItemIcon(*gs[k].it, r.x + 4, r.y + 4, r.width - 8);
+        if (gs[k].worn) DrawUIText("worn", (int)r.x + 3, (int)(r.y + r.height + 1), 10, Fade(kColorText, 0.8f));
+        if (CheckCollisionPointRec(GetMousePosition(), r) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { g_dyeSel = gs[k].id; PlaySfx(SfxId::Click); }
+    }
+    if (!selValid) g_dyeSel = gs.empty() ? -1 : gs[0].id;
+    y += (int)(((gs.size() + cols - 1) / std::max(1, cols)) * (cell + 14)) + 6;
+    Item* target = nullptr;
+    if (g_dyeSel >= 0 && g_dyeSel < 7) { auto& o = s.equipped.*(kPdClothSlots[g_dyeSel].field); if (o) target = &*o; }
+    else if (g_dyeSel >= 100 && g_dyeSel - 100 < (int)s.backpack.size()) target = &s.backpack[(size_t)(g_dyeSel - 100)];
+
+    DrawUIText("2. Pick a color", 20, y, 14, kColorHeading);
+    y += 20;
+    const float sw = 44.0f;
+    int pcols = (screenW - 40) / (int)sw;
+    int n = kDyeHueCount + 1; // + natural
+    for (int k = 0; k < n; k++) {
+        int hue = k == 0 ? -1 : k - 1;
+        Rectangle r = { 20 + (k % pcols) * sw, (float)y + (k / pcols) * sw, sw - 6, sw - 6 };
+        bool rare = hue >= 0 && kDyeHues[hue].rare;
+        bool locked = rare && tailoring < 80.0f;
+        Color c = hue < 0 ? Color{ 200, 190, 170, 255 } : kDyeHues[hue].c;
+        DrawRectangleRounded(r, 0.25f, 6, c);
+        if (hue < 0) { DrawLineEx({ r.x + 4, r.y + r.height - 4 }, { r.x + r.width - 4, r.y + 4 }, 2.0f, Fade(BLACK, 0.4f)); }
+        if (rare) DrawUIText("*", (int)(r.x + r.width - 11), (int)r.y + 1, 14, locked ? Fade(BLACK, 0.5f) : Color{ 255, 240, 160, 255 });
+        if (locked) DrawRectangleRounded(r, 0.25f, 6, Fade(BLACK, 0.45f));
+        bool sel = g_dyeHue == hue;
+        DrawRectangleRoundedLines(r, 0.25f, 6, sel ? kColorHeading : Fade(BLACK, 0.35f));
+        if (sel) DrawRectangleRoundedLines({ r.x - 3, r.y - 3, r.width + 6, r.height + 6 }, 0.25f, 6, kColorHeading);
+        if (CheckCollisionPointRec(GetMousePosition(), r) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            if (locked) s.logLine = std::string(kDyeHues[hue].name) + " is a rare hue - only a Tailor of 80+ can mix it.";
+            else { g_dyeHue = hue; PlaySfx(SfxId::Click); }
+        }
+    }
+    y += ((n + pcols - 1) / pcols) * (int)sw + 8;
+    const char* hueName = g_dyeHue < 0 ? "Natural (undyed)" : kDyeHues[g_dyeHue].name;
+    // preview: the chosen garment in the chosen color
+    if (target) {
+        Item pv = *target; pv.hue = g_dyeHue;
+        DrawRectangleRounded({ 20, (float)y, 70, 70 }, 0.15f, 6, Fade(WHITE, 0.3f));
+        DrawItemIcon(pv, 26, (float)y + 6, 58);
+        DrawUIText(TextFormat("%s  ->  %s", target->name.c_str(), hueName), 100, y + 10, 14, kColorText);
+        bool same = target->hue == g_dyeHue;
+        if (Button({ 100, (float)y + 34, 170, 30 }, same ? "Already that color" : TextFormat("Dye it (%dg)", kDyeCost), !same && s.gold >= kDyeCost)) {
+            s.gold -= kDyeCost;
+            target->hue = g_dyeHue;
+            s.logLine = "You dip the " + target->name + " in the tub - it comes out " + (g_dyeHue < 0 ? std::string("its natural color") : std::string(kDyeHues[g_dyeHue].name)) + ".";
+            PlaySfx(SfxId::Buy);
+        }
+    }
+    DrawUIText("* rare hues need Tailoring 80+", 20, screenH - 36, 12, Fade(kColorText, 0.8f));
+}
+
 static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
     // Themed backdrop, keyed by which workshop is open - see DrawInteriorBackdrop.
     DrawInteriorBackdrop(g_assets.craftWallThemedOk[s.craftBuildingTab] ? &g_assets.craftWallThemed[s.craftBuildingTab] : nullptr,
@@ -28311,10 +28665,12 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
     // TryBuyPremadeItem/TryBuyPremadePotion. Reuses `b`/`isAlchemy` just resolved above.
     {
         int mode = s.craftModeTab;
-        DrawPillTabs({ "Craft", "Buy" }, &mode, 20, (float)y, 26);
+        if (s.craftBuildingTab == 2) DrawPillTabs({ "Craft", "Buy", "Dye" }, &mode, 20, (float)y, 26); // the Tailor dyes (2026-09-27)
+        else { DrawPillTabs({ "Craft", "Buy" }, &mode, 20, (float)y, 26); if (mode > 1) mode = 0; }
         s.craftModeTab = mode;
     }
     y += 34;
+    if (s.craftModeTab == 2 && s.craftBuildingTab == 2) { DrawDyeTub(s, y, screenW, screenH); return; }
     if (s.craftModeTab == 1) {
         DrawInfoLine(TextFormat("Gold: %d", s.gold), 20, y, 13, kColorAccent);
         y += 20;
@@ -28332,6 +28688,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
             int price = VendorPriceFor(r);
             std::string line = isAlchemy
                 ? TextFormat("%s  (%s %d)", r.name.c_str(), r.category.c_str(), r.power)
+                : r.type == ItemType::Clothing ? TextFormat("%s  (clothing - %s)", r.name.c_str(), r.slot.c_str())
                 : TextFormat("Standard %s  (%d %s)", r.name.c_str(), r.power, r.type == ItemType::Armor ? "def" : "pwr");
             DrawUIText(line.c_str(), 20, (int)rowY + 6, 12, kColorText);
             std::string priceLabel = TextFormat("Buy (%dg)", price);
@@ -28376,7 +28733,9 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
             std::string resName = b.resource == Resource::Wood ? "wood"
                                   : b.resource == Resource::Ore ? "ore"
                                   : b.resource == Resource::Leather ? "leather" : "";
-            std::string line = TextFormat("%s  (req %d, %d %s, %d %s)", r.name.c_str(), r.reqSkill,
+            std::string line = r.type == ItemType::Clothing
+                ? TextFormat("%s  (req %d, %d %s, clothing)", r.name.c_str(), r.reqSkill, r.cost, resName.c_str())
+                : TextFormat("%s  (req %d, %d %s, %d %s)", r.name.c_str(), r.reqSkill,
                                             r.cost, resName.c_str(), r.power, r.type == ItemType::Armor ? "def" : "pwr");
             DrawUIText(line.c_str(), 20, (int)rowY + 6, 12, kColorText);
             int haveResource = b.resource == Resource::Wood ? s.wood : b.resource == Resource::Ore ? s.ore : s.leather;
@@ -29573,7 +29932,9 @@ static void PaperdollGlyph(int g, Rectangle r) {
         default: DrawRectangleRec({ cx - 12, cy - 18, 9, 36 }, c); DrawRectangleRec({ cx + 3, cy - 18, 9, 36 }, c); break; // legs
     }
 }
+static int g_pdPage = 0; // 0 armor & weapons, 1 clothing
 static bool PaperdollItemFits(const Item& it, int slot) {
+    if (slot >= 20 && slot < 27) return it.type == ItemType::Clothing && it.slot == kPdClothSlots[slot - 20].slot;
     if (slot == 4) return it.type == ItemType::Weapon;
     if (slot == 5) return it.slot == "shield" || (it.type == ItemType::Weapon && it.handed == "2h");
     if (it.type != ItemType::Armor) return false;
@@ -29581,6 +29942,9 @@ static bool PaperdollItemFits(const Item& it, int slot) {
     return it.slot == names[slot] || (slot == 2 && it.slot.empty());
 }
 static std::string ItemStatLine(const Item& it) {
+    if (it.type == ItemType::Clothing)
+        return std::string("Clothing (") + it.slot + ")  -  " + (it.hue >= 0 && it.hue < kDyeHueCount ? kDyeHues[it.hue].name : "undyed") +
+               "  -  dye it at the Tailor";
     if (it.type == ItemType::Weapon)
         return std::string(it.handed == "2h" ? "Two-handed" : "One-handed") + " weapon  -  Power " + std::to_string(it.power) +
                (it.category.empty() ? "" : "  -  " + it.category);
@@ -29608,8 +29972,40 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     else g_dollDragging = false;
     DrawUIText("drag to turn", (int)(kDollView.x + kDollView.width - 76), (int)(kDollView.y + 6), 10, Fade(kUoBronzeLo, 0.7f));
 
+    // Armor | Clothes page toggle over the figure (2026-09-27)
+    {
+        const char* labs[2] = { "Armor", "Clothes" };
+        for (int k = 0; k < 2; k++) {
+            Rectangle tr = { kDollView.x + kDollView.width / 2 - 84 + k * 84, kDollView.y + 6, 82, 24 };
+            bool on = g_pdPage == k;
+            DrawRectangleRounded(tr, 0.35f, 6, on ? Color{ 120, 84, 44, 255 } : Fade(Color{ 236, 220, 184, 255 }, 0.85f));
+            DrawRectangleRoundedLines(tr, 0.35f, 6, kUoBronze);
+            int lw = MeasureUIText(labs[k], 12);
+            DrawUIText(labs[k], (int)(tr.x + tr.width / 2 - lw / 2), (int)tr.y + 6, 12, on ? Color{ 250, 236, 200, 255 } : Color{ 90, 60, 34, 255 });
+            if (UOTapped(tr) && !on) { g_pdPage = k; g_pdSel = -1; PlaySfx(SfxId::Click); }
+        }
+    }
+    // clothing slots (page 1) down both edges
+    if (g_pdPage == 1) for (int i = 0; i < 7; i++) {
+        Rectangle r = PaperdollSlotRect(i); // 0-3 left column, 4-6 right
+        const std::optional<Item>& it = s.equipped.*(kPdClothSlots[i].field);
+        int id = 20 + i;
+        bool sel = g_pdSel == id;
+        UODrawSlot(r, sel);
+        if (it.has_value()) DrawItemIcon(*it, r.x + 5, r.y + 5, r.width - 10);
+        else {
+            Item ghost{ 0, kPdClothSlots[i].sample, ItemType::Clothing, kPdClothSlots[i].slot, "", 0, "Cloth" };
+            ghost.hue = 1; // ash grey
+            DrawItemIcon(ghost, r.x + 5, r.y + 5, r.width - 10);
+            DrawRectangleRec({ r.x + 3, r.y + 3, r.width - 6, r.height - 6 }, Fade(Color{ 60, 44, 30, 255 }, 0.72f));
+        }
+        if (sel) DrawRectangleLinesEx({ r.x - 3, r.y - 3, r.width + 6, r.height + 6 }, 2.0f, Color{ 255, 214, 110, 255 });
+        int lw = MeasureUIText(kPdClothSlots[i].label, 11);
+        DrawUIText(kPdClothSlots[i].label, (int)(r.x + r.width / 2 - lw / 2), (int)(r.y + r.height + 3), 11, Color{ 90, 60, 34, 255 });
+        if (UOTapped({ r.x - 4, r.y - 4, r.width + 8, r.height + 8 })) { g_pdSel = sel ? -1 : id; PlaySfx(SfxId::Click); }
+    }
     // gear slots down both edges
-    for (int i = 0; i < 8; i++) {
+    if (g_pdPage == 0) for (int i = 0; i < 8; i++) {
         Rectangle r = PaperdollSlotRect(i);
         const std::optional<Item>& it = s.equipped.*(kPdSlots[i].field);
         bool sel = g_pdSel == i;
@@ -29684,6 +30080,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, std::max(0.0f, contentH - inner.height));
     // which bag items fit the selected empty slot - they glow
     int fitSlot = (g_pdSel >= 0 && g_pdSel < 8 && !(s.equipped.*(kPdSlots[g_pdSel].field)).has_value()) ? g_pdSel : -1;
+    if (g_pdSel >= 20 && g_pdSel < 27 && !(s.equipped.*(kPdClothSlots[g_pdSel - 20].field)).has_value()) fitSlot = g_pdSel;
     // The bag scrolls by dragging, so a pick is a press+release that barely moved.
     static Vector2 bagPress = { -1, -1 };
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) bagPress = CheckCollisionPointRec(mouse, inner) ? mouse : Vector2{ -1, -1 };
@@ -29715,10 +30112,12 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
         std::string head, line;
         const Item* item = nullptr;
         std::optional<Item>* eqSlot = nullptr;
-        if (g_pdSel < 8) {
-            eqSlot = &(s.equipped.*(kPdSlots[g_pdSel].field));
+        if (g_pdSel < 8 || (g_pdSel >= 20 && g_pdSel < 27)) {
+            bool cl = g_pdSel >= 20;
+            eqSlot = cl ? &(s.equipped.*(kPdClothSlots[g_pdSel - 20].field)) : &(s.equipped.*(kPdSlots[g_pdSel].field));
+            const char* lab = cl ? kPdClothSlots[g_pdSel - 20].label : kPdSlots[g_pdSel].label;
             if (eqSlot->has_value()) { item = &**eqSlot; head = item->name; line = ItemStatLine(*item); }
-            else { head = std::string(kPdSlots[g_pdSel].label) + " - empty"; line = "Tap a glowing item in your backpack to wear it."; }
+            else { head = std::string(lab) + " - empty"; line = cl ? "Buy or sew clothes at the Tailor, then tap them here." : "Tap a glowing item in your backpack to wear it."; }
         } else if (g_pdSel < 200) {
             int bi = g_pdSel - 100;
             if (bi < (int)s.backpack.size()) { item = &s.backpack[(size_t)bi]; head = item->name; line = ItemStatLine(*item); }
@@ -29734,7 +30133,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
             DrawUIText(head.c_str(), (int)pop.x + 76, (int)pop.y + 16, 16, kUoGoldText);
             DrawUIText(line.c_str(), (int)pop.x + 76, (int)pop.y + 40, 12, Color{ 226, 212, 180, 255 });
             if (UOCloseButton(pop)) g_pdSel = -1;
-            else if (g_pdSel < 8 && item) {
+            else if ((g_pdSel < 8 || (g_pdSel >= 20 && g_pdSel < 27)) && item) {
                 if (UOButton({ pop.x + 76, pop.y + 68, 150, 32 }, "Take off")) { UnequipToBackpack(s, *eqSlot); g_pdSel = -1; }
             } else if (g_pdSel >= 100 && g_pdSel < 200 && item) {
                 if (UOButton({ pop.x + 76, pop.y + 68, 150, 32 }, "Equip")) {
