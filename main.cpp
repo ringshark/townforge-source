@@ -182,6 +182,15 @@ static void CombatHitStop(float sec) { g_hitStopT = fmaxf(g_hitStopT, sec); }
 // Screen fade-in after walking between areas (2026-09-26), drawn last each frame.
 static const float kScreenFadeTime = 0.45f;
 static float g_screenFadeT = 0.0f;
+// Arriving somewhere (2026-09-27, "true entrances"): a slightly longer fade and
+// the place's name over the view, instead of a hard cut like a portal.
+static std::string g_zoneTitle;
+static float g_zoneTitleT = 0.0f;
+static const float kZoneFadeTime = 0.8f, kZoneTitleTime = 2.4f;
+static void ZoneArrive(const std::string& title) {
+    g_screenFadeT = kZoneFadeTime;
+    g_zoneTitle = title; g_zoneTitleT = kZoneTitleTime;
+}
 static void CombatShake(float amp) { g_shakeAmp = fminf(fmaxf(g_shakeAmp, amp), 14.0f); }
 
 // ---------------------------------------------------------------------
@@ -624,7 +633,7 @@ static Vector2 HousePlotInteractPos(int ownedPlotIdx, const std::string& layout,
 static std::string HousePlotPrompt(int ownedPlotIdx, const std::string& layout, int plotIdx) {
     const HousePlot& p = kHousePlots[plotIdx];
     if (plotIdx == ownedPlotIdx)
-        return HouseHasDoor(layout, p.cells) ? "Enter Homestead" : "Design House";
+        return HouseHasDoor(layout, p.cells) ? "Enter Homestead" : "Design House (add a Door to go inside)";
     return "Buy Plot (" + std::to_string(p.price) + "g)";
 }
 
@@ -1222,7 +1231,15 @@ struct UpgradeInProgress {
 // Wilderness is deliberately not in the Tab-cycle order and has no tab-bar button -
 // it's reached by walking to a gate at the edge of Town, not by clicking a tab, so
 // it's excluded wherever the other 8 screens are enumerated for that UI.
+enum class Screen; static bool IsPlayScreen(Screen sc);
 enum class Screen { Character, Town, Hunt, Craft, Magic, Pets, Bank, House, Skills, Wilderness, Provisioner, FurTrader, MinersGuild, Interior, Refuge, Guide }; // Phase 6: Refuge = outlaw black market; Guide = newbie walkthrough (2026-09-25)
+
+// Where "Play" takes you back to (2026-09-27): the world screen you were last
+// on - opening Me/Craft/Magic from the wilderness must not drop you in town.
+static bool IsPlayScreen(Screen sc) {
+    return sc == Screen::Town || sc == Screen::Wilderness || sc == Screen::Interior || sc == Screen::Hunt;
+}
+static Screen g_playScreen = Screen::Town;
 
 struct Corpse {
     std::string monsterName;
@@ -7514,7 +7531,14 @@ static void MarkTownVisited(GameState& s, int townIdx) {
     Journal(s, std::string("You have marked ") + ActiveTownName(townIdx) + " as a recall destination.");
 }
 // Where the player lands in the Wilderness when leaving a town's gate.
+static Vector2 TownGateFacing(int townIdx);
 static Vector2 TownWildernessSpawn(int townIdx) {
+    { // (2026-09-27) just outside the gatehouse, on the road side
+        townIdx = std::clamp(townIdx, 0, 3);
+        Vector2 g = townIdx == 0 ? WP(900, 1750) : townIdx == 1 ? WP(2900, 1750) : townIdx == 2 ? WP(1400, 640) : WP(300, 1050);
+        Vector2 f = TownGateFacing(townIdx);
+        return { g.x + f.x * 110.0f, g.y + f.y * 110.0f };
+    }
     // Offsets from each gate stay in plain world units (1.5x map, 2026-09-27).
     if (townIdx == 2) return { WP(1400, 640).x, WP(1400, 640).y + 100.0f }; // just south of the Frostmere gate
     if (townIdx == 3) return { WP(300, 1050).x, WP(300, 1050).y + 100.0f }; // just south of the Cragmoor gate (Phase 4)
@@ -11145,6 +11169,7 @@ struct HumanOutfit {
     int hat = kClStyleNone;             // clothing hat style (kClWizardHat..), hidden under a helm
     bool robe = false;                  // a robe's hanging skirt (2026-09-27)
     float build = 1.0f;                 // side-to-side / front-to-back bulk (the player's hero build: 1.15)
+    bool skeleton = false;              // drawn as bones on the rig instead of the body (necro minions, 2026-09-27)
     Color robeCol = { 112, 96, 80, 255 };
     Color hatCol = { 90, 70, 120, 255 };
 };
@@ -12077,11 +12102,71 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
     T3CDrawBlobShadow(g_t3cHumans[2].parts.merged, x, z, yawRad, scaleMul);
     float rotDeg = 90.0f - yawRad * RAD2DEG; // model faces +Z
     const float bw = sc * o.build; // broader shoulders, thicker limbs - same height
-    DrawModelEx(H.model, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f }, rotDeg, { bw, sc, bw }, tint);
-
     // ---- attachments ----
     Matrix world = MatrixMultiply(MatrixMultiply(MatrixScale(bw, sc, bw), MatrixRotateY(rotDeg * DEG2RAD)),
                                   MatrixTranslate(x, 0.0f, z));
+    if (!o.skeleton) DrawModelEx(H.model, { x, 0.0f, z }, { 0.0f, 1.0f, 0.0f }, rotDeg, { bw, sc, bw }, tint);
+    else { // (2026-09-27) a real skeleton: bones between the animated joints, skull, ribs, pelvis
+        const int nb2 = H.model.skeleton.boneCount;
+        std::vector<Vector3> J((size_t)nb2);
+        for (int b = 0; b < nb2; b++) J[(size_t)b] = Vector3Transform(H.model.currentPose[b].translation, world);
+        auto idx = [&](const char* n) { for (int b = 0; b < nb2; b++) if (strcmp(H.model.skeleton.bones[b].name, n) == 0) return b; return -1; };
+        static int bHips = -2, bNeck, bHead, bSp2, bSp3;
+        if (bHips == -2) { bHips = idx("DEF-hips"); bNeck = idx("DEF-neck"); bHead = idx("DEF-head"); bSp2 = idx("DEF-spine.002"); bSp3 = idx("DEF-spine.003"); }
+        Color bone = HumanMul(o.region[kHrSkin], tint), boneDk = HumanMul(ColorBrightness(o.region[kHrSkin], -0.25f), tint);
+        float L = (bHips >= 0 && bHead >= 0) ? Vector3Distance(J[(size_t)bHips], J[(size_t)bHead]) : 20.0f;
+        float r = L * 0.035f;
+        Vector3 right = Vector3Normalize({ world.m0, world.m1, world.m2 }), fwd = Vector3Normalize({ world.m8, world.m9, world.m10 });
+        for (int b = 0; b < nb2; b++) {
+            int pa = H.model.skeleton.bones[b].parent;
+            if (pa < 0) continue;
+            const char* nm = H.model.skeleton.bones[b].name;
+            const char* pn = H.model.skeleton.bones[pa].name;
+            if (strcmp(pn, "root") == 0 || strcmp(nm, "DEF-hips") == 0) continue;
+            bool finger = strstr(nm, "f_") || strstr(nm, "thumb");
+            if (finger && !strstr(nm, ".01") && !strstr(nm, "f_index") && !strstr(nm, "f_middle")) continue; // a few knuckles are plenty
+            bool spine = strstr(pn, "spine") || strstr(pn, "neck") || strstr(pn, "hips");
+            if (strstr(nm, "shoulder")) continue; // collarbones come from the ribs
+            float rr = finger ? r * 0.35f : (spine ? r * 0.8f : r);
+            DrawCylinderEx(J[(size_t)pa], J[(size_t)b], rr, rr * 0.85f, 5, bone);
+            if (!finger) DrawSphereEx(J[(size_t)b], rr * 1.35f, 5, 6, boneDk); // knobbly joints
+        }
+        if (bSp2 >= 0 && bNeck >= 0) { // ribcage: four hoops narrowing toward the top
+            for (int k = 0; k < 4; k++) {
+                float t = 0.15f + k * 0.22f;
+                Vector3 c = Vector3Lerp(J[(size_t)bSp2], J[(size_t)bNeck], t);
+                c = Vector3Add(c, Vector3Scale(fwd, L * 0.05f));
+                float rx = L * (0.17f - k * 0.02f), rz = L * (0.12f - k * 0.012f);
+                const int seg = 12;
+                for (int q = 0; q < seg; q++) {
+                    if (q == seg / 4) continue; // the sternum gap at the front
+                    float a0 = 6.2831853f * q / seg, a1 = 6.2831853f * (q + 1) / seg;
+                    Vector3 p0 = Vector3Add(c, Vector3Add(Vector3Scale(right, cosf(a0) * rx), Vector3Scale(fwd, sinf(a0) * rz)));
+                    Vector3 p1 = Vector3Add(c, Vector3Add(Vector3Scale(right, cosf(a1) * rx), Vector3Scale(fwd, sinf(a1) * rz)));
+                    DrawCylinderEx(p0, p1, r * 0.42f, r * 0.42f, 4, bone);
+                }
+            }
+            if (bSp3 >= 0) { // collarbones
+                Vector3 top = Vector3Lerp(J[(size_t)bSp3], J[(size_t)bNeck], 0.8f);
+                DrawCylinderEx(Vector3Add(top, Vector3Scale(right, -L * 0.22f)), Vector3Add(top, Vector3Scale(right, L * 0.22f)), r * 0.55f, r * 0.55f, 5, bone);
+            }
+        }
+        if (bHips >= 0) { // pelvis
+            Vector3 h = J[(size_t)bHips];
+            rlPushMatrix(); rlTranslatef(h.x, h.y, h.z); rlRotatef(-rotDeg + 90.0f, 0, 1, 0);
+            rlScalef(L * 0.17f, L * 0.08f, L * 0.1f); DrawSphereEx({ 0, 0, 0 }, 1.0f, 6, 8, boneDk); rlPopMatrix();
+        }
+        if (bHead >= 0 && bNeck >= 0) { // skull, eye sockets, jaw
+            Vector3 up = Vector3Normalize(Vector3Subtract(J[(size_t)bHead], J[(size_t)bNeck]));
+            Vector3 sk = Vector3Add(J[(size_t)bHead], Vector3Scale(up, L * 0.2f));
+            DrawSphereEx(sk, L * 0.17f, 8, 10, bone);
+            for (int sx = -1; sx <= 1; sx += 2)
+                DrawSphereEx(Vector3Add(sk, Vector3Add(Vector3Scale(fwd, L * 0.13f), Vector3Add(Vector3Scale(right, sx * L * 0.065f), Vector3Scale(up, L * 0.01f)))),
+                             L * 0.05f, 5, 6, Color{ 20, 14, 18, 255 });
+            Vector3 jaw = Vector3Add(sk, Vector3Add(Vector3Scale(fwd, L * 0.07f), Vector3Scale(up, -L * 0.14f)));
+            DrawCylinderEx(Vector3Add(jaw, Vector3Scale(right, -L * 0.08f)), Vector3Add(jaw, Vector3Scale(right, L * 0.08f)), L * 0.05f, L * 0.05f, 6, boneDk);
+        }
+    }
     float u = H.unit;
     Material flat = H.model.materials[0]; // untextured material with the current shader
     flat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
@@ -12146,7 +12231,7 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
         HumanDrawAttached(H.gear[kHwShield], nullptr, local, HumanBoneMatrix(H, H.boneForearmL), world, tint);
     }
     Matrix metres = MatrixScale(u, u, u);
-    if (H.boneHead >= 0) {
+    if (H.boneHead >= 0 && !o.skeleton) { // skeletons have a skull, not a face
         Matrix hb = HumanBoneMatrix(H, H.boneHead);
         Color hairT = HumanMul(o.region[kHrHair], tint);
         HumanDrawAttached(H.face, &flat, metres, hb, world, tint);
@@ -14435,6 +14520,7 @@ static std::string Town3DHitTest(const Town3DCam& c, Vector2 mouse, bool* outGat
 
 // Click (press+release without a drag) on a building box selects it, exactly like
 // walking up + E does in 2D. Clicking the Wilderness Gate walks through it.
+static Vector2 TownGateFacing(int townIdx);
 static void Town3DPick(GameState& s, Vector2 mouse, int screenW, int screenH) {
     Town3DCam c = Town3DGetCam(s, screenW, screenH);
     bool gate = false;
@@ -14443,6 +14529,8 @@ static void Town3DPick(GameState& s, Vector2 mouse, int screenW, int screenH) {
         s.screen = Screen::Wilderness;
         s.wildernessPlayerPos = TownWildernessSpawn(s.selectedTown);
         s.wild3DView = true; // clicked through from the 3D town: stay in 3D (view state only)
+        s.playerFacing = TownGateFacing(s.selectedTown);
+        ZoneArrive(RegionName(RegionAt(s.wildernessPlayerPos)));
     } else if (!bestKey.empty()) {
         s.selectedTile = bestKey;
     }
@@ -16986,21 +17074,180 @@ static void T3DDrawNightGlows(const Town3DCam& c, int town) {
     rlEnableDepthMask();
 }
 
-// Dungeon entrance: stone arch + glowing portal disc in the entrance's own color.
-static void Wild3DDrawEntrance(const WildernessDungeonEntrance& e) {
-    T3DLiftScope lift_(e.pos.x, e.pos.y); // onto the terrain (wilderness hills)
-    Color stone = { 150, 148, 142, 255 }, dark = { 110, 108, 102, 255 };
-    DrawCube({ e.pos.x - 30, 32, e.pos.y }, 18, 64, 18, stone);
-    DrawCube({ e.pos.x + 30, 32, e.pos.y }, 18, 64, 18, stone);
-    DrawCube({ e.pos.x, 70, e.pos.y }, 84, 16, 22, dark);
-    DrawCylinder({ e.pos.x, 5, e.pos.y }, 24, 24, 4, 20, e.color);
+// ---- True entrances (2026-09-27): "it feels like hitting a portal" ----
+// Each dungeon mouth is now a place - a crypt, a web-choked cave, a flooded
+// stair, a lava-lit cave, a frozen barrow, a timbered mine - with a dark
+// doorway you walk into. It faces the road that leads to it.
+static Vector2 EntranceFacing(int i) {
+    static Vector2 cache[8]; static bool done[8] = {};
+    if (i < 0 || i >= 8) return { 0, 1 };
+    if (done[i]) return cache[i];
+    WildTerrainEnsure();
+    Vector2 c = kWildernessDungeonEntrances[(size_t)i].pos, best = { 0, 1 };
+    float bestD = 1e9f;
+    for (const auto& road : g_wtRoads)
+        for (const Vector2& p : road) {
+            float d = Dist(p, c);
+            if (d >= 90.0f && d < bestD) { bestD = d; best = { p.x - c.x, p.y - c.y }; }
+        }
+    float L = hypotf(best.x, best.y);
+    cache[i] = (bestD < 400.0f && L > 1.0f) ? Vector2{ best.x / L, best.y / L } : Vector2{ 0, 1 };
+    done[i] = true;
+    return cache[i];
 }
-// Travel gate: two posts + beam.
-static void Wild3DDrawGate(float x, float z, Color post, Color beam) {
+static Vector2 EntranceDoorPoint(int i) { Vector2 f = EntranceFacing(i), c = kWildernessDungeonEntrances[(size_t)i].pos; return { c.x + f.x * 18.0f, c.y + f.y * 18.0f }; }
+static Vector2 EntranceBodyCenter(int i) { Vector2 f = EntranceFacing(i), c = kWildernessDungeonEntrances[(size_t)i].pos; return { c.x - f.x * 42.0f, c.y - f.y * 42.0f }; }
+static Vector2 EntranceStepOut(int i) { Vector2 f = EntranceFacing(i), c = kWildernessDungeonEntrances[(size_t)i].pos; return { c.x + f.x * 90.0f, c.y + f.y * 90.0f }; }
+static int EntranceIndexForDungeon(int dungeonIdx) {
+    for (size_t i = 0; i < kWildernessDungeonEntrances.size(); i++) if (kWildernessDungeonEntrances[i].dungeonIdx == dungeonIdx) return (int)i;
+    return -1;
+}
+static void EntMound(float x, float y, float z, float rx, float ry, float rz, Color c) {
+    rlPushMatrix(); rlTranslatef(x, y, z); rlScalef(rx, ry, rz); DrawSphereEx({ 0, 0, 0 }, 1.0f, 8, 12, c); rlPopMatrix();
+}
+static void EntTorch(float x, float z, float h, float t) {
+    DrawCylinder({ x, 0, z }, 2.5f, 3.0f, h, 6, Color{ 60, 42, 28, 255 });
+    float fl = 1.0f + 0.15f * sinf(t * 11.0f + x);
+    DrawSphereEx({ x, h + 4.0f, z }, 4.5f * fl, 6, 6, Color{ 255, 170, 60, 255 });
+    DrawSphereEx({ x, h + 7.0f, z }, 2.6f * fl, 6, 6, Color{ 255, 236, 160, 255 });
+}
+static void Wild3DDrawEntrance(const WildernessDungeonEntrance& e, int idx, float t) {
+    T3DLiftScope lift_(e.pos.x, e.pos.y); // onto the terrain (wilderness hills)
+    Vector2 f = EntranceFacing(idx);
+    rlPushMatrix();
+    rlTranslatef(e.pos.x, 0.0f, e.pos.y);
+    rlRotatef(atan2f(f.x, f.y) * RAD2DEG, 0, 1, 0); // local +z = facing
+    Color black = { 12, 10, 12, 255 };
+    switch (e.dungeonIdx % 6) {
+        case 0: { // The Whisper Crypt: a mausoleum, steps down to a black door
+            Color st = { 150, 150, 156, 255 }, dk = { 112, 112, 120, 255 }, lt = { 176, 176, 182, 255 };
+            DrawCube({ 0, 4, -30 }, 120, 8, 110, dk);                 // plinth
+            DrawCube({ 0, 38, -40 }, 96, 62, 76, st);                 // hall
+            DrawCube({ 0, 72, -40 }, 106, 8, 86, lt);                 // cornice
+            for (int k = 0; k < 4; k++) DrawCube({ 0, 80.0f + k * 6.0f, -40 }, 96.0f - k * 24.0f, 6, 80, k % 2 ? st : lt); // stepped roof
+            for (int sx = -1; sx <= 1; sx += 2) DrawCylinder({ sx * 34.0f, 8, 2 }, 6, 6, 62, 10, lt); // columns
+            DrawCube({ 0, 72, 4 }, 88, 8, 16, lt);                    // portico lintel
+            DrawCube({ 0, 30, -1.5f }, 34, 48, 2, black);             // the doorway
+            for (int k = 0; k < 3; k++) DrawCube({ 0, 1.0f + k * 2.0f, 16.0f - k * 6.0f }, 44, 2, 8, dk); // steps up to it
+            EntTorch(-50, 14, 30, t); EntTorch(50, 14, 30, t);
+            break;
+        }
+        case 1: { // The Weavers' Nest: a dark rock hill, a cave mouth strung with webs
+            Color rk = { 70, 66, 70, 255 }, rk2 = { 88, 84, 86, 255 };
+            EntMound(0, 10, -44, 78, 62, 60, rk); EntMound(-46, 4, -26, 40, 36, 38, rk2); EntMound(48, 2, -30, 42, 32, 36, rk2);
+            EntMound(0, 18, -8, 26, 30, 14, black);                   // the mouth
+            Color web = { 235, 235, 240, 170 };
+            for (int k = -2; k <= 2; k++) DrawLine3D({ -24, 44, 4 }, { k * 10.0f, 4, 6 }, web);
+            for (int k = -2; k <= 2; k++) DrawLine3D({ 24, 44, 4 }, { k * 10.0f, 8, 6 }, web);
+            for (int r = 1; r <= 3; r++) DrawLine3D({ -20.0f + r * 3, 12.0f + r * 9, 5 }, { 20.0f - r * 3, 12.0f + r * 9, 5 }, web);
+            break;
+        }
+        case 2: { // The Sunken Vault: a broken stone stair going down into black water
+            Color st = { 132, 140, 138, 255 }, moss = { 92, 120, 96, 255 };
+            DrawCylinder({ 0, 0.6f, -18 }, 58, 58, 1.2f, 24, Color{ 24, 44, 52, 255 }); // flooded well
+            DrawCube({ -48, 22, -18 }, 16, 44, 70, st); DrawCube({ 48, 18, -18 }, 16, 36, 70, st); // side walls
+            DrawCube({ 0, 50, -52 }, 112, 12, 16, moss);              // fallen lintel
+            DrawCube({ 0, 26, -54 }, 40, 44, 2, black);
+            for (int k = 0; k < 4; k++) DrawCube({ 0, 3.0f - k * 1.2f, 14.0f - k * 10.0f }, 50, 2, 10, k % 2 ? st : moss);
+            DrawCylinder({ -30, 0, 26 }, 5, 5, 26, 8, st); DrawCylinder({ 34, 0, 24 }, 5, 4, 14, 8, st); // broken columns
+            break;
+        }
+        case 3: { // The Ember Depths: a scorched hill with a glowing mouth
+            Color rk = { 76, 52, 42, 255 }, ash = { 60, 56, 54, 255 };
+            EntMound(0, 8, -44, 80, 64, 62, rk); EntMound(-44, 2, -26, 38, 34, 36, ash); EntMound(46, 2, -30, 40, 30, 36, ash);
+            float g = 0.8f + 0.2f * sinf(t * 3.0f);
+            EntMound(0, 18, -8, 26, 30, 14, Color{ (unsigned char)(200 * g), (unsigned char)(70 * g), 20, 255 });
+            EntMound(0, 18, -6, 18, 24, 12, Color{ 30, 12, 8, 255 });
+            DrawCube({ -8, 0.8f, 20 }, 4, 1.2f, 40, Color{ 255, 120, 30, 255 }); // lava crack
+            break;
+        }
+        case 4: { // The Frostbound Tomb: an icy barrow with a stone door frame
+            Color sn = { 226, 234, 244, 255 }, ic = { 170, 200, 230, 255 }, st = { 150, 156, 166, 255 };
+            EntMound(0, 4, -40, 84, 52, 64, sn); EntMound(-30, 26, -48, 30, 30, 30, ic);
+            DrawCube({ -24, 26, -4 }, 12, 52, 12, st); DrawCube({ 24, 26, -4 }, 12, 52, 12, st); DrawCube({ 0, 56, -4 }, 62, 10, 14, st);
+            DrawCube({ 0, 25, -8 }, 36, 50, 2, black);
+            for (int k = 0; k < 5; k++) DrawCube({ -20.0f + k * 10.0f, 49.0f - (k % 2) * 4.0f, 4 }, 3, 8.0f + (k % 3) * 4.0f, 3, ic); // icicles
+            break;
+        }
+        default: { // The Hollow: a mine in the hillside - timber frame, rails
+            Color rk = { 104, 96, 86, 255 }, wd = { 110, 78, 48, 255 };
+            EntMound(0, 8, -46, 86, 66, 62, rk); EntMound(50, 2, -28, 40, 30, 34, Color{ 118, 110, 98, 255 });
+            DrawCube({ 0, 24, -9 }, 40, 48, 2, black);
+            DrawCube({ -24, 26, -4 }, 8, 52, 8, wd); DrawCube({ 24, 26, -4 }, 8, 52, 8, wd); DrawCube({ 0, 54, -4 }, 60, 8, 10, wd);
+            for (int sx = -1; sx <= 1; sx += 2) DrawCube({ sx * 8.0f, 0.8f, 20 }, 2, 1.6f, 56, Color{ 90, 90, 96, 255 }); // rails
+            for (int k = 0; k < 5; k++) DrawCube({ 0, 0.5f, -2.0f + k * 12.0f }, 24, 1, 4, wd);                        // sleepers
+            EntTorch(-34, 6, 34, t);
+            break;
+        }
+    }
+    rlPopMatrix();
+}
+// Town gatehouse (2026-09-27): towers, an open archway and wall running off to
+// both sides - the town reads as a place you walk into, not a frame to tap.
+// wildSide: +1 when the wilderness is on the gate's +z side, -1 when -z.
+static void Wild3DDrawGate(float x, float z, Color post, Color beam, Vector2 facing) {
     T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
-    DrawCube({ x - 42, 32, z }, 20, 64, 20, post);
-    DrawCube({ x + 42, 32, z }, 20, 64, 20, post);
-    DrawCube({ x, 70, z }, 108, 16, 24, beam);
+    rlPushMatrix();
+    rlTranslatef(x, 0, z);
+    rlRotatef(atan2f(facing.x, facing.y) * RAD2DEG, 0, 1, 0); // local +z = out toward the wilds
+    Color wall = post, dark = beam, roof = { 120, 60, 44, 255 };
+    for (int sx = -1; sx <= 1; sx += 2) {
+        DrawCube({ sx * 170.0f, 30, -6 }, 230, 60, 18, wall);                            // curtain wall
+        for (int k = 0; k < 9; k++) DrawCube({ sx * (66.0f + k * 25.0f), 64, -6 }, 12, 10, 20, dark); // crenels
+        DrawCylinder({ sx * 50.0f, 0, -4 }, 24, 22, 88, 14, wall);                       // gate towers
+        DrawCylinder({ sx * 50.0f, 88, -4 }, 27, 27, 6, 14, dark);
+        DrawCylinderEx({ sx * 50.0f, 94, -4 }, { sx * 50.0f, 132, -4 }, 26, 0, 14, roof); // conical roofs
+        DrawCylinder({ sx * 286.0f, 0, -6 }, 16, 15, 70, 10, wall);                      // end towers
+        DrawCylinderEx({ sx * 286.0f, 70, -6 }, { sx * 286.0f, 96, -6 }, 18, 0, 10, roof);
+        DrawCube({ sx * 30.0f, 3, 22 }, 8, 6, 8, dark);                                  // bollards
+    }
+    DrawCube({ 0, 70, -4 }, 60, 26, 26, wall);        // over the arch
+    DrawCube({ 0, 84, -4 }, 64, 6, 30, dark);
+    DrawCube({ -24, 30, 8 }, 6, 60, 3, Color{ 92, 64, 40, 255 }); // gate leaves, swung open
+    DrawCube({ 24, 30, 8 }, 6, 60, 3, Color{ 92, 64, 40, 255 });
+    DrawCube({ -38, 58, 8 }, 10, 22, 1, Color{ 160, 40, 36, 255 }); // banners
+    DrawCube({ 38, 58, 8 }, 10, 22, 1, Color{ 160, 40, 36, 255 });
+    rlPopMatrix();
+}
+// Gatehouse collision: the walls and towers are solid; only the archway is open.
+// Local gate frame: +z = facing (out to the wilds), +x = facing rotated to the right.
+static Vector2 GateLocal(Vector2 p, Vector2 gate, Vector2 f) {
+    Vector2 d = { p.x - gate.x, p.y - gate.y };
+    return { d.x * f.y - d.y * f.x, d.x * f.x + d.y * f.y };
+}
+static Vector2 GateWorld(Vector2 l, Vector2 gate, Vector2 f) {
+    return { gate.x + l.x * f.y + l.y * f.x, gate.y - l.x * f.x + l.y * f.y };
+}
+static void GateCollide(Vector2& p, Vector2 gate, Vector2 f) {
+    Vector2 l = GateLocal(p, gate, f);
+    const float r = 17.0f; // kPlayerRadius
+    if (fabsf(l.x) > 34.0f && fabsf(l.x) < 300.0f && fabsf(l.y + 6.0f) < 9.0f + r) { // curtain wall band
+        l.y = (l.y + 6.0f >= 0 ? 1.0f : -1.0f) * (9.0f + r) - 6.0f;
+        p = GateWorld(l, gate, f);
+    }
+    for (int sx = -1; sx <= 1; sx += 2) {
+        Vector2 t = GateWorld({ sx * 50.0f, -4.0f }, gate, f);
+        float d = Dist(p, t);
+        if (d < 24.0f + r && d > 0.01f) { p.x = t.x + (p.x - t.x) / d * (24.0f + r); p.y = t.y + (p.y - t.y) / d * (24.0f + r); }
+    }
+}
+// Which way a town's gatehouse faces: along the road that leaves it (unit vector,
+// pointing out into the wilds). The town lies behind it.
+static Vector2 TownGateFacing(int townIdx) {
+    static Vector2 cache[4]; static bool done[4] = {};
+    townIdx = std::clamp(townIdx, 0, 3);
+    if (done[townIdx]) return cache[townIdx];
+    WildTerrainEnsure();
+    Vector2 c = kTownGates[(size_t)townIdx].wildernessPos, sum = { 0, 0 };
+    for (const auto& road : g_wtRoads) // average direction of road points 80-200 out from the gate
+        for (const Vector2& p : road) {
+            float d = Dist(p, c);
+            if (d >= 80.0f && d <= 200.0f) { sum.x += (p.x - c.x) / d; sum.y += (p.y - c.y) / d; }
+        }
+    float L = hypotf(sum.x, sum.y);
+    cache[townIdx] = L > 0.01f ? Vector2{ sum.x / L, sum.y / L } : Vector2{ 0, 1 };
+    done[townIdx] = true;
+    return cache[townIdx];
 }
 
 // (Phase 3 removed the old primitive stand-ins - Wild3DDrawAnimal,
@@ -17741,9 +17988,10 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         DrawCoastProp3D(d.kind, d.pos.x, d.pos.y, d.size, s.worldTime);
     }
     // Dungeon entrances.
-    for (const WildernessDungeonEntrance& e : kWildernessDungeonEntrances) {
-        if (!vis(e.pos.x, e.pos.y, 90.0f)) continue;
-        Wild3DDrawEntrance(e);
+    for (size_t ei = 0; ei < kWildernessDungeonEntrances.size(); ei++) {
+        const WildernessDungeonEntrance& e = kWildernessDungeonEntrances[ei];
+        if (!vis(e.pos.x, e.pos.y, 130.0f)) continue;
+        Wild3DDrawEntrance(e, (int)ei, (float)GetTime());
     }
     // Phase 6 - connective tissue landmarks, 3D.
     for (size_t si = 0; si < kShrines.size(); si++) { // virtue shrines: stone dais + light beam
@@ -17777,20 +18025,20 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         }
     }
     // Travel gates.
-    if (vis(kWildernessReturnGatePos.x, kWildernessReturnGatePos.y, 90.0f))
+    if (vis(kWildernessReturnGatePos.x, kWildernessReturnGatePos.y, 320.0f))
         Wild3DDrawGate(kWildernessReturnGatePos.x, kWildernessReturnGatePos.y,
-                       Color{ 140, 110, 80, 255 }, Color{ 110, 85, 60, 255 });
-    if (vis(kWildernessTown2GatePos.x, kWildernessTown2GatePos.y, 90.0f))
+                       Color{ 168, 150, 124, 255 }, Color{ 128, 110, 88, 255 }, TownGateFacing(0));
+    if (vis(kWildernessTown2GatePos.x, kWildernessTown2GatePos.y, 320.0f))
         Wild3DDrawGate(kWildernessTown2GatePos.x, kWildernessTown2GatePos.y,
-                       Color{ 150, 148, 142, 255 }, Color{ 118, 116, 110, 255 });
-    // Phase 3 - Frostmere gate: icy pale-blue gate.
-    if (vis(kWildernessTown3GatePos.x, kWildernessTown3GatePos.y, 90.0f))
+                       Color{ 184, 176, 160, 255 }, Color{ 140, 134, 122, 255 }, TownGateFacing(1));
+    // Phase 3 - Frostmere gate: icy pale-blue stone.
+    if (vis(kWildernessTown3GatePos.x, kWildernessTown3GatePos.y, 320.0f))
         Wild3DDrawGate(kWildernessTown3GatePos.x, kWildernessTown3GatePos.y,
-                       Color{ 190, 210, 228, 255 }, Color{ 150, 175, 200, 255 });
-    // Phase 4 - Cragmoor gate: granite gray gate.
-    if (vis(kWildernessTown4GatePos.x, kWildernessTown4GatePos.y, 90.0f))
+                       Color{ 196, 212, 228, 255 }, Color{ 150, 175, 200, 255 }, TownGateFacing(2));
+    // Phase 4 - Cragmoor gate: granite.
+    if (vis(kWildernessTown4GatePos.x, kWildernessTown4GatePos.y, 320.0f))
         Wild3DDrawGate(kWildernessTown4GatePos.x, kWildernessTown4GatePos.y,
-                       Color{ 150, 142, 128, 255 }, Color{ 115, 108, 96, 255 });
+                       Color{ 150, 142, 128, 255 }, Color{ 115, 108, 96, 255 }, TownGateFacing(3));
 
     // Custom housing (2026-09-25) - for-sale signs on unowned plots; floor slab +
     // wall/door boxes on owned ones. DrawCube rides the active sun/shadow shader
@@ -19211,11 +19459,21 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         }
     }
     {
-        // Exit portal at the exact 2D exit position.
-        float pulse = 0.6f + 0.25f * sinf((float)GetTime() * 3.0f);
-        DrawCylinder({ kDung3DExitPos.x, 5, kDung3DExitPos.y }, 30, 30, 8, 20, Color{ 70, 190, 160, 255 });
-        Town3DDrawGroundRing(kDung3DExitPos.x, kDung3DExitPos.y, 6.0f, 34.0f, 46.0f, 28,
-                             Fade(Color{ 120, 255, 210, 255 }, pulse));
+        // The way out (2026-09-27): stone stairs climbing to a square of daylight -
+        // no more glowing portal disc. Their foot is the spawn/exit spot.
+        const float x = kDung3DExitPos.x, z0 = kDung3DExitPos.y;
+        Color st = { 120, 116, 110, 255 }, st2 = { 100, 96, 92, 255 };
+        for (int k = 0; k < 6; k++) {
+            float h = 8.0f + k * 8.0f, z = z0 - 18.0f - k * 9.0f;
+            DrawCube({ x, h * 0.5f, z }, 60, h, 9.5f, k % 2 ? st : st2);
+        }
+        DrawCube({ x - 36, 34, z0 - 40 }, 12, 68, 58, st2); DrawCube({ x + 36, 34, z0 - 40 }, 12, 68, 58, st2); // cheek walls
+        DrawCube({ x, 78, z0 - 70 }, 84, 20, 12, st2);                                                       // lintel
+        DrawCube({ x, 60, z0 - 74 }, 56, 34, 2, Color{ 255, 244, 205, 255 });                                // daylight
+        rlDisableDepthMask();
+        float breathe = 0.85f + 0.15f * sinf((float)GetTime() * 1.3f);
+        DrawCylinderEx({ x, 70, z0 - 70 }, { x, 2, z0 - 20 }, 22, 40, 12, Fade(Color{ 255, 236, 180, 255 }, 0.16f * breathe)); // light spilling down
+        rlEnableDepthMask();
     }
     {
         float pulse = 0.60f + 0.18f * sinf((float)GetTime() * 4.0f);
@@ -19249,7 +19507,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
             DrawRectangle(sx - 4, sy - 2, w + 8, fsz + 5, Fade(BLACK, 0.55f * a));
             DrawUIText(text.c_str(), sx, sy, fsz, Fade(WHITE, a));
         };
-        label3D(kDung3DExitPos.x, 80, kDung3DExitPos.y, "Exit");
+        label3D(kDung3DExitPos.x, 96, kDung3DExitPos.y - 40, "Stairs up - walk up to leave");
         if (s.dungeonXP[di] >= kDungeons[di].bossUnlockXp) {
             Vector2 bp = DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime);
             label3D(bp.x, 90, bp.y, kDungeons[di].boss.name + " (Boss)");
@@ -21758,6 +22016,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
                 s.screen = Screen::Wilderness;
                 s.wildernessPlayerPos = WildNearestFree(dst);
                 s.playerFacing = out;
+                ZoneArrive(RegionName(RegionAt(s.wildernessPlayerPos)));
                 s.wild3DView = s.town3DView; // same view mode on the other side
                 s.selectedTile.reset();
                 s.greetedNPC.reset();
@@ -21771,6 +22030,8 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
                 s.screen = Screen::Wilderness;
                 s.wildernessPlayerPos = TownWildernessSpawn(s.selectedTown);
                 s.wild3DView = s.town3DView; // entering from the 3D town stays 3D (view state only)
+                s.playerFacing = TownGateFacing(s.selectedTown); // out through the gatehouse (2026-09-27)
+                ZoneArrive(RegionName(RegionAt(s.wildernessPlayerPos)));
             }
             else EnterInterior(s, nearestKey);
         }
@@ -22086,6 +22347,8 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
             s.screen = Screen::Wilderness;
             s.wildernessPlayerPos = TownWildernessSpawn(s.selectedTown);
             s.wild3DView = s.town3DView; // entering from the 3D town stays 3D (view state only)
+            s.playerFacing = TownGateFacing(s.selectedTown); // out through the gatehouse (2026-09-27)
+            ZoneArrive(RegionName(RegionAt(s.wildernessPlayerPos)));
         }
         else EnterInterior(s, nearestKey);
     }
@@ -23218,6 +23481,13 @@ static void ExitDungeonToWilderness(GameState& s) {
     s.minions.clear(); s.boneArmor = 0.0f; // the raised dead don't follow you out (2026-09-27)
     s.vigorT = 0.0f;
     s.leaveDungT = -1.0f;
+    // Out through the doorway you came in by, a few steps down the path (2026-09-27).
+    int ei = s.selectedDungeon.has_value() ? EntranceIndexForDungeon(*s.selectedDungeon) : -1;
+    if (ei >= 0) {
+        s.wildernessPlayerPos = EntranceStepOut(ei);
+        s.playerFacing = EntranceFacing(ei);
+    }
+    ZoneArrive(RegionName(RegionAt(s.wildernessPlayerPos)));
 }
 
 static void TryStartLeaveDungeon(GameState& s) {
@@ -24656,6 +24926,7 @@ static HumanOutfit HumanOutfitSkeleton(int kind) {
     HumanOutfit o = HumanOutfitPlain(bone, boneDk, bone, boneDk, bone);
     o.hairStyle = 3; o.beard = false;
     o.region[kHrBelt] = Color{ 90, 70, 50, 255 }; // a rotted belt is all that's left
+    o.skeleton = true; // bones, not a painted body (2026-09-27)
     if (kind == 0) { HumanGive(o, kHwSword, kHsOneHand); o.shield = true; }
     else { HumanGive(o, kHwStaff, kHsMagic); o.cloak = true; o.cloakCol = Color{ 64, 34, 84, 255 }; }
     return o;
@@ -25827,10 +26098,23 @@ static void DrawHouseDesigner(GameState& s, int screenW, int screenH) {
     Rectangle G = { 8, 116, (float)screenW - 16, (float)screenH - 124 };
     UODrawGump(G, kUoParchment);
     UODrawTitle(G, "House Designer - " + std::string(p.name), 14);
-    if (UOCloseButton(G)) { s.houseDesignerOpen = false; s.houseDemolishArmed = false; return; }
     const Color ink = { 60, 40, 24, 255 };
     int nF = 0, nW = 0, nN = 0, nD = 0;
     for (char c : s.houseLayout) { nF += c == 'F'; nW += c == 'W'; nN += c == 'N'; nD += c == 'D'; }
+    if (UOCloseButton(G)) {
+        s.houseDesignerOpen = false; s.houseDemolishArmed = false;
+        if (nD == 0 && (nW > 0 || nF > 0)) s.logLine = "Your house has no door yet - add one in the designer to go inside.";
+        else if (nD > 0) s.logLine = "Walk up to your door and press E to go inside.";
+        return;
+    }
+    if (nD == 0 && (nW > 0 || nF > 0)) { // (2026-09-27) the missing step: without a door you can't get in
+        Rectangle hb = { G.x + 12, G.y + G.height - 46, G.width - 24, 34 };
+        float pulse = 0.75f + 0.25f * sinf((float)GetTime() * 4.0f);
+        DrawRectangleRounded(hb, 0.3f, 6, Fade(Color{ 150, 40, 28, 255 }, 0.92f * pulse));
+        const char* msg = "Pick the Door tool and tap a wall - that's how you get inside!";
+        int mw = MeasureUIText(msg, 13);
+        DrawUIText(msg, (int)(hb.x + hb.width / 2 - mw / 2), (int)hb.y + 10, 13, Color{ 255, 240, 220, 255 });
+    }
     UODrawIcon(kUoiGold, G.x + 30, G.y + 34, 22);
     DrawUIText(TextFormat("%d", s.gold), (int)G.x + 46, (int)G.y + 26, 15, ink);
     DrawUIText(TextFormat("%d floor  %d wall  %d window  %s", nF, nW, nN, nD ? "door set" : "no door yet"),
@@ -26887,6 +27171,16 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         s.fiendT = 0.0f;
         s.minions.clear(); s.boneArmor = 0.0f; // the raised dead don't follow you out (2026-09-27)
         s.vigorT = 0.0f;
+        ZoneArrive(kDungeons[(size_t)idx].name);
+    };
+    auto enterTown = [&](int t) { // through a gate into a town (2026-09-27: shared + arrival fade)
+        CancelEscort(s, "parts ways at the gate - the escort is broken.");
+        s.selectedTown = t;
+        s.screen = Screen::Town;
+        s.townPlayerPos = TS(450, 830); // same relative spawn every town uses, just inside its own gate
+        if (s.wild3DView) s.town3DView = true; // stay in 3D across the gate (view state only)
+        s.wildEngaged.reset(); s.wildExtraAttackers.clear(); s.flagTarget.reset();
+        ZoneArrive(ActiveTownName(t));
     };
     auto tryInteract = [&]() {
         // Phase 6 - shrines are the one thing a ghost CAN touch: the virtuous dead
@@ -26900,27 +27194,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         else if (nearestKind == WildNodeKind::Blade) tryEngageBlade(nearestIdx);
         else if (nearestKind == WildNodeKind::Innocent) tryEngageInnocentSpot(nearestIdx);
         else if (nearestKind == WildNodeKind::DungeonEntrance) tryEnterDungeon(kWildernessDungeonEntrances[nearestIdx].dungeonIdx);
-        else if (nearestKind == WildNodeKind::Town2Gate) {
-            CancelEscort(s, "parts ways at the gate - the escort is broken.");
-            s.selectedTown = 1;
-            s.screen = Screen::Town;
-            s.townPlayerPos = TS(450, 830); // same relative spawn every town uses, just south of its own gate
-            if (s.wild3DView) s.town3DView = true; // stay in 3D across the gate (view state only)
-        }
-        else if (nearestKind == WildNodeKind::Town3Gate) {
-            CancelEscort(s, "parts ways at the gate - the escort is broken.");
-            s.selectedTown = 2;
-            s.screen = Screen::Town;
-            s.townPlayerPos = TS(450, 830); // same relative spawn every town uses, just south of its own gate
-            if (s.wild3DView) s.town3DView = true; // stay in 3D across the gate (view state only)
-        }
-        else if (nearestKind == WildNodeKind::Town4Gate) { // Phase 4: Cragmoor
-            CancelEscort(s, "parts ways at the gate - the escort is broken.");
-            s.selectedTown = 3;
-            s.screen = Screen::Town;
-            s.townPlayerPos = TS(450, 830); // same relative spawn every town uses, just south of its own gate
-            if (s.wild3DView) s.town3DView = true; // stay in 3D across the gate (view state only)
-        }
+        else if (nearestKind == WildNodeKind::Town2Gate) enterTown(1);
+        else if (nearestKind == WildNodeKind::Town3Gate) enterTown(2);
+        else if (nearestKind == WildNodeKind::Town4Gate) enterTown(3); // Phase 4: Cragmoor
         else if (nearestKind == WildNodeKind::HousePlot) {
             int pi = nearestIdx;
             if (pi == s.housePlotIdx) {
@@ -26954,11 +27230,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 s.logLine = "Nothing here but cold rocks and old ashes. (The upstanding see nothing.)";
             }
         }
-        else {
-            CancelEscort(s, "parts ways at the gate - the escort is broken.");
-            s.selectedTown = 0; s.screen = Screen::Town; s.townPlayerPos = TS(450, 830);
-            if (s.wild3DView) s.town3DView = true; // walking back through the gate returns to 3D town
-        } // just south of kWildernessGatePos
+        else enterTown(0); // the Emberhold gate
     };
     // Being engaged in a live fight takes over the prompt/E-press entirely - same
     // "combat blocks other actions" convention the old panel-based system already had
@@ -27053,8 +27325,27 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // Live check, not wasEngaged - see the comment in the monster loop above (2026-09-25).
     if (s.wildEngaged.has_value())
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, s.wildEngaged->pos, kNodeRadius * 0.6f);
-    for (auto& entrance : kWildernessDungeonEntrances)
-        ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, entrance.pos, kNodeRadius * 0.8f);
+    // Entrances (2026-09-27): the hill/crypt behind the doorway is solid, the doorway
+    // is open; town gatehouses block everywhere but the archway.
+    for (size_t ei = 0; ei < kWildernessDungeonEntrances.size(); ei++)
+        ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, EntranceBodyCenter((int)ei), 62.0f);
+    for (int ti = 0; ti < (int)kTownGates.size(); ti++)
+        if (Dist(s.wildernessPlayerPos, kTownGates[(size_t)ti].wildernessPos) < 340.0f)
+            GateCollide(s.wildernessPlayerPos, kTownGates[(size_t)ti].wildernessPos, TownGateFacing(ti));
+    // Walk in (2026-09-27): stepping into a doorway or through a town's archway takes
+    // you inside - no E, no portal. (E still works as before.)
+    if (!s.playerIsGhost && s.playerDeathAnimT <= 0.0f && s.screen == Screen::Wilderness) {
+        for (size_t ei = 0; ei < kWildernessDungeonEntrances.size(); ei++)
+            if (Dist(s.wildernessPlayerPos, EntranceDoorPoint((int)ei)) < 26.0f && Dist(wildPrevPos, EntranceDoorPoint((int)ei)) >= 20.0f) {
+                tryEnterDungeon(kWildernessDungeonEntrances[ei].dungeonIdx);
+                break;
+            }
+        for (int ti = 0; ti < (int)kTownGates.size() && s.screen == Screen::Wilderness; ti++) {
+            Vector2 g = kTownGates[(size_t)ti].wildernessPos, f = TownGateFacing(ti);
+            Vector2 now = GateLocal(s.wildernessPlayerPos, g, f), prev = GateLocal(wildPrevPos, g, f);
+            if (fabsf(now.x) < 34.0f && prev.y >= -4.0f && now.y < -4.0f) enterTown(ti); // crossed the gate line, town side
+        }
+    }
     // Custom house blocks movement (2026-09-25; Housing 2.0: roofed, so every cell is solid -
     // the door is used from the step outside it).
     if (s.housePlotIdx >= 0 && s.housePlotIdx < (int)kHousePlots.size()) {
@@ -27677,10 +27968,10 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         // Same gating as the main tab bar: no tab-travel mid-fight, as a
         // ghost, or mid-death-animation.
         bool tabsEnabled = !s.combat.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f;
-        std::string townLabel = ActiveTownName(s.selectedTown);
+        std::string townLabel = "Back to game"; // (2026-09-27) was the town's name - it teleported you home from the wilds
         float bx0 = 24.0f, bx1 = 188.0f;
         if (Button({ bx0, by, 152, 40 }, "Me (gear & bag)", tabsEnabled)) { s.screen = Screen::Character; open = false; }
-        if (Button({ bx1, by, 152, 40 }, townLabel, tabsEnabled)) { s.screen = Screen::Town; open = false; }
+        if (Button({ bx1, by, 152, 40 }, townLabel, tabsEnabled)) { s.screen = g_playScreen; open = false; }
         by += 48;
         if (Button({ bx0, by, 152, 40 }, "Craft", tabsEnabled)) {
             Screen target = Screen::Craft;
@@ -28088,19 +28379,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
 
     auto tryDungeonInteract = [&]() {
         if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
-        if (nearestIsExit) {
-            s.screen = Screen::Wilderness;
-            s.wild3DView = s.hunt3DView; // leaving in 3D returns to the 3D wilderness (view state only)
-            // Zone change - the flag and in-flight spells don't cross over.
-            s.flagTarget.reset();
-            s.dungeonEngaged.reset();      // the fight doesn't follow you out
-            s.dungeonExtraAttackers.clear(); // the pack melts back to ambient (2026-09-25)
-            for (auto& p : s.spellProjectiles) p.active = false;
-            for (auto& im : s.spellImpacts) im.active = false;
-            s.fiendT = 0.0f;
-            s.minions.clear(); s.boneArmor = 0.0f; // the raised dead don't follow you out (2026-09-27)
-            s.vigorT = 0.0f;
-        }
+        if (nearestIsExit) ExitDungeonToWilderness(s); // up the stairs, out the doorway (2026-09-27)
         else if (nearestIsBoss) tryEngageDungeonMonster(kDungeonBossSlot, true);
         else tryEngageDungeonMonster(std::stoi(nearestKey), false);
     };
@@ -28365,6 +28644,18 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                                                 s.dungeonEngaged.has_value() ? &s.dungeonEngaged->pos : nullptr);
     }
     UpdateLiveSpellFX(s, GameDt()); // combat anim timers, projectiles, debuffs, fiend
+    { // The way out is a stair up to daylight (2026-09-27): walk up it to leave. You
+      // arrive at its foot, so it arms once you've stepped away from it.
+        static bool stairArmed = false;
+        const Vector2 stairTop = { 900.0f, 1262.0f };
+        float d = Dist(s.dungeonPlayerPos, stairTop);
+        if (d > 75.0f) stairArmed = true;
+        if (stairArmed && d < 22.0f && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f) {
+            stairArmed = false;
+            ExitDungeonToWilderness(s);
+            return;
+        }
+    }
     for (int i = 0; i < kDungeonRegularSlots; i++) {
         // The engaged one collides against its live position (below); the rest
         // wander (DungeonMonsterLivePos) and auto-engage the player on contact - same
@@ -28433,7 +28724,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         const DungeonMonster& m = s.dungeonEngaged->isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, s.dungeonEngaged->monsterIdx);
         prompt = "Fighting " + m.name;
     } else if (inRange) {
-        if (nearestIsExit) prompt = "[E] Leave dungeon";
+        if (nearestIsExit) prompt = "Walk up the stairs to leave  [E]";
         else prompt = nearestIsBoss ? "[E] Fight " + dungeon.boss.name
                                       : "[E] Fight " + DungeonSlotMonster(dungeon, std::stoi(nearestKey)).name;
     }
@@ -30597,6 +30888,7 @@ static void UpdateDrawFrame() {
         state.worldTime += dt;
         if (state.disengageGraceT > 0.0f) state.disengageGraceT -= dt; // manual-disengage grace (2026-09-25)
         if (state.wildAlertT >= 0.0f && (state.wildAlertT += dt) > 1.6f) state.wildAlertT = -1.0f; // "!" pop (2026-09-27)
+        if (IsPlayScreen(state.screen)) g_playScreen = state.screen; // remembered for "Play" (2026-09-27)
         UpdateCombatAnim(state, dt);
         UpdateDeathAndRespawn(state, dt); // death anims, ghost timer, monster respawns, corpse fades
         UpdateGuildOffscreen(state, dt);  // the rival and Murder Inc. keep living while you're elsewhere
@@ -30692,15 +30984,14 @@ static void UpdateDrawFrame() {
         // --- Input: switch screens with Tab (cycles Character -> Town -> Hunt -> Craft -> Magic -> Pets -> Bank -> House -> Skills -> Guide -> Character) ---
         if (!encounterPending && IsKeyPressed(KEY_TAB)) {
             if (!(state.screen == Screen::Hunt && state.combat.has_value())) { // don't tab away mid-fight
-                Screen next = (state.screen == Screen::Character) ? Screen::Town
-                            : (state.screen == Screen::Town) ? Screen::Hunt
-                            : (state.screen == Screen::Hunt) ? Screen::Craft
+                Screen next = IsPlayScreen(state.screen) ? Screen::Character // (2026-09-27) the world, then the menus, then back
+                            : (state.screen == Screen::Character) ? Screen::Craft
                             : (state.screen == Screen::Craft) ? Screen::Magic
                             : (state.screen == Screen::Magic) ? Screen::Pets
                             : (state.screen == Screen::Pets) ? Screen::Bank
                             : (state.screen == Screen::Bank) ? Screen::House
                             : (state.screen == Screen::House) ? Screen::Skills
-                            : (state.screen == Screen::Skills) ? Screen::Guide : Screen::Character;
+                            : (state.screen == Screen::Skills) ? Screen::Guide : g_playScreen;
                 GuardZoneConfiscateIfMurderer(state, next); // JS switchTab(): Murderer tier gets bounced from Craft
                 state.screen = next;
                 if (next == Screen::Guide) state.guidePage = 0;
@@ -30817,7 +31108,7 @@ static void UpdateDrawFrame() {
         // (2026-09-27) the way back into the game, made obvious: a glowing gold "Play"
         DrawRectangleRounded({ townTab.x - 3, townTab.y - 3, townTab.width + 6, townTab.height + 6 }, 0.35f, 6,
                              Fade(Color{ 255, 196, 70, 255 }, 0.55f + 0.25f * sinf((float)GetTime() * 3.0f)));
-        if (Button(townTab, "> Play", tabsEnabled)) state.screen = Screen::Town;
+        if (Button(townTab, "> Play", tabsEnabled)) state.screen = g_playScreen; // back where you were, not a teleport to town
         if (Button(craftTab, "Craft", tabsEnabled)) {
             Screen target = Screen::Craft;
             GuardZoneConfiscateIfMurderer(state, target);
@@ -30879,9 +31170,21 @@ static void UpdateDrawFrame() {
         }
         // 3D exploration MENU (2026-09-26), drawn over the world like the
         // dungeon's. Skipped on the frame a screen switch happened.
-        if (g_screenFadeT > 0.0f) { // area-change fade-in (walked out of town)
-            DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, g_screenFadeT / kScreenFadeTime));
+        if (g_screenFadeT > 0.0f) { // area-change fade-in (walked out of town / through a gate or doorway)
+            DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, std::min(1.0f, g_screenFadeT / kScreenFadeTime)));
             g_screenFadeT = fmaxf(0.0f, g_screenFadeT - GetFrameTime());
+        }
+        if (g_zoneTitleT > 0.0f) { // the place's name as you arrive
+            float t = kZoneTitleTime - g_zoneTitleT;
+            float a = std::min(std::clamp((t - 0.2f) / 0.4f, 0.0f, 1.0f), std::clamp(g_zoneTitleT / 0.6f, 0.0f, 1.0f));
+            int fs = 30;
+            int tw = MeasureUIText(g_zoneTitle.c_str(), fs);
+            int ty = screenH / 3;
+            DrawRectangleGradientH(screenW / 2 - tw / 2 - 90, ty - 10, tw / 2 + 90, fs + 20, Fade(BLACK, 0.0f), Fade(BLACK, 0.55f * a));
+            DrawRectangleGradientH(screenW / 2, ty - 10, tw / 2 + 90, fs + 20, Fade(BLACK, 0.55f * a), Fade(BLACK, 0.0f));
+            DrawUIText(g_zoneTitle.c_str(), screenW / 2 - tw / 2 + 2, ty + 2, fs, Fade(BLACK, 0.6f * a));
+            DrawUIText(g_zoneTitle.c_str(), screenW / 2 - tw / 2, ty, fs, Fade(Color{ 244, 222, 160, 255 }, a));
+            g_zoneTitleT = fmaxf(0.0f, g_zoneTitleT - GetFrameTime());
         }
         if (state.screen == Screen::Wilderness && state.worldMapOpen) {
             DrawWorldMap(state); // full map (tap the minimap): above everything, any tap closes
