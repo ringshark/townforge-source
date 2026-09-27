@@ -26583,8 +26583,16 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         float dt = GameDt();
         // Murder Inc.'s camp relocates every so often - the rumor mill tracks it.
         s.rivalCampTimer -= dt;
-        if (s.rivalCampTimer <= 0.0f) {
-            s.rivalCampIdx = std::rand() % (int)kRivalCampSpots.size();
+        // (2026-09-27) never on your doorstep: a camp spot within 1000 of your house
+        // is off-limits, and a camp that ends up there packs up at once.
+        auto campOk = [&](int ci) {
+            if (s.housePlotIdx < 0 || s.housePlotIdx >= (int)kHousePlots.size()) return true;
+            return Dist(kRivalCampSpots[(size_t)ci], kHousePlots[(size_t)s.housePlotIdx].pos) >= 1000.0f;
+        };
+        if (s.rivalCampTimer <= 0.0f || !campOk(s.rivalCampIdx)) {
+            std::vector<int> ok;
+            for (int ci = 0; ci < (int)kRivalCampSpots.size(); ci++) if (campOk(ci) && ci != s.rivalCampIdx) ok.push_back(ci);
+            if (!ok.empty()) s.rivalCampIdx = ok[(size_t)(std::rand() % (int)ok.size())];
             s.rivalCampTimer = 1800.0f; // ~30 minutes of play
         }
         if (s.sorrowCooldown > 0.0f) s.sorrowCooldown -= dt;
