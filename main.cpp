@@ -1059,7 +1059,7 @@ struct Spell {
 // gate (added 2026-09-21, see its comment) doesn't lock a starting Magery-0
 // character out of practicing anything at all - a deliberate deviation from the
 // port, not a formula mismatch.
-static const std::array<Spell, 26> kSpells = {{
+static const std::array<Spell, 27> kSpells = {{
     {"Spark Dart", 1, SpellType::Offensive, 0, 50, 4, 1, 4},
     {"Mending Word", 1, SpellType::Utility, 0, 50, 4, 1, 4},
     {"Sap Strength", 1, SpellType::Debuff, 0, 50, 4, 1, 4},
@@ -1094,8 +1094,14 @@ static const std::array<Spell, 26> kSpells = {{
     {"Life Tap", 7, SpellType::Debuff, 65, 100, 16, 0, 0, true},
     // (2026-09-27) UO's Bless: + Str/Dex/Int past the trained cap for 3 minutes.
     {"Bless", 3, SpellType::Buff, 30, 70, 9, 2, 0},
+    // (2026-09-27) UO's Teleport: cast, then tap the ground within reach to blink there.
+    {"Teleport", 3, SpellType::Utility, 30, 70, 9, 2, 0},
 }};
 static const int kSpBless = 25;
+static const int kSpTeleport = 26;
+static const float kTeleportRange = 380.0f; // world units (about 1.7 s of walking)
+static int g_teleAimZone = -1;              // aiming a Teleport: 0 wilds, 1 dungeon, -1 not
+static float g_teleAimT = 0.0f;             // the aim lapses after a while
 static const int kSpTeeth = 17, kSpRaiseSkeleton = 18, kSpAmplify = 19, kSpBoneArmor = 20,
                  kSpBoneSpear = 21, kSpCorpseExplosion = 22, kSpSkeletalMage = 23, kSpLifeTap = 24;
 static bool SpellNeedsCorpse(int idx) { return idx == kSpRaiseSkeleton || idx == kSpSkeletalMage || idx == kSpCorpseExplosion; }
@@ -10212,6 +10218,11 @@ static int BestHealSpell(const GameState& s) {
     return 1;                                        // Mending Word (circle 1, anyone may try)
 }
 static float g_oocHealCd = 0.0f; // out-of-combat heal spell recast delay
+// Where the belt was drawn (2026-09-27): taps on it must not also land on the
+// ground below (tap to walk, Teleport). Valid for a moment after each draw.
+static Rectangle g_beltRect = { 0, 0, 0, 0 };
+static double g_beltDrawnAt = -10.0;
+static bool BeltPointIn(Vector2 m) { return GetTime() - g_beltDrawnAt < 0.25 && CheckCollisionPointRec(m, g_beltRect); }
 // Out-of-combat self-heal (2026-09-27): the heal spell away from a fight - same
 // cast path and costs as in combat, with a short recast delay.
 static void CastHealOutOfCombat(GameState& s, int zone) {
@@ -10245,10 +10256,14 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     bool blessUp = false; // (2026-09-27) Bless on your bar: recast it between fights
     if (ooc && !s.playerIsGhost && s.blessT <= 0.0f)
         for (int sp : s.combatHotbar) if (sp == kSpBless && CanPracticeSpell(s, kSpells[kSpBless])) blessUp = true;
-    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
-    int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0);
+    bool teleUp = false; // (2026-09-27) Teleport on your bar: blink about between fights too
+    if (ooc && !s.playerIsGhost)
+        for (int sp : s.combatHotbar) if (sp == kSpTeleport && CanPracticeSpell(s, kSpells[kSpTeleport])) teleUp = true;
+    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
+    int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0) + (teleUp ? 1 : 0);
     const float sz = 42.0f, gap = 8.0f;
     Rectangle bar = { 166.0f, y - 6.0f, n * sz + (n - 1) * gap + 18.0f, sz + 12.0f };
+    g_beltRect = bar; g_beltDrawnAt = GetTime();
     UODrawGump(bar, kUoDarkWood);
     auto slot = [&](int k, bool enabled, int count, auto drawIcon) {
         Rectangle r = { 175.0f + k * (sz + gap), y, sz, sz };
@@ -10318,6 +10333,20 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
             PlaySfx(SfxId::Click);
             g_oocHealCd = 1.0f;
             CastLiveUtilitySpell(s, kSpBless, oocZone);
+        }
+    }
+    if (teleUp) { // a blue swirl: Teleport (then tap the ground)
+        int k = 2 + (int)potions.size() + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0);
+        bool aiming = g_teleAimZone == oocZone;
+        bool can = s.mana >= kSpells[kSpTeleport].manaCost && s.reagents >= kLiveCombatReagentCost;
+        if (slot(k, can, 0, [&](Rectangle r) {
+                float cx = r.x + r.width / 2, cy = r.y + r.height / 2 - 3;
+                DrawCircleV({ cx, cy }, 15.0f, Fade(Color{ 150, 190, 255, 255 }, aiming ? 0.55f : 0.25f));
+                for (int i = 0; i < 3; i++) DrawRing({ cx, cy }, 4.0f + i * 4.0f, 5.5f + i * 4.0f, i * 120.0f + (float)GetTime() * 90.0f, i * 120.0f + 200.0f + (float)GetTime() * 90.0f, 12, Color{ 170, 200, 255, 255 });
+                DrawUIText(TextFormat("%d", kSpells[kSpTeleport].manaCost), (int)r.x + 3, (int)(r.y + r.height - 14), 11, Color{ 140, 190, 255, 255 }); })) {
+            PlaySfx(SfxId::Click);
+            if (aiming) { g_teleAimZone = -1; s.logLine = "Teleport cancelled."; }
+            else CastLiveUtilitySpell(s, kSpTeleport, oocZone);
         }
     }
 }
@@ -19897,6 +19926,7 @@ static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
     if (s.minimapOpen && CheckCollisionPointRec(m, MinimapRect())) return true; // minimap (tap opens the full map)
     if (!s.minimapOpen && CheckCollisionPointRec(m, MinimapToggleRect())) return true; // MAP button
     if (CheckCollisionPointRec(m, kJoystickZone)) return true;
+    if (BeltPointIn(m)) return true; // bandages / potions / spells belt (2026-09-27)
     if (CheckCollisionPointRec(m, JournalWildButtonRect())) return true; // LOG button
     if (s.journalOpen && CheckCollisionPointRec(m, JournalPanelRect())) return true; // journal panel
     if (s.recallPickerOpen && CheckCollisionPointRec(m, RecallPickerRect())) return true; // recall modal
@@ -20717,6 +20747,7 @@ static void Dungeon3DDrawPlayer(const GameState& s) {
 static Rectangle JournalHuntButtonRect(); // defined with the journal UI below
 static bool Dung3DPointInUI(Vector2 m, const GameState& s) {
     if (CorpseUIPointIn(m)) return true; // corpse window / Loot button
+    if (BeltPointIn(m)) return true;     // bandages / potions / spells belt (2026-09-27)
     if (CheckCollisionPointRec(m, { 20, 56, 104, 40 })) return true; // in-dungeon MENU toggle
     if (s.dungeonMenuOpen && s.selectedDungeon.has_value() &&
         CheckCollisionPointRec(m, { 12, 104, 336, 328 })) return true; // MENU dropdown panel
@@ -25260,6 +25291,7 @@ static SpellFX SpellFXFor(int spellIdx) {
         case 23: return { Color{170,120,255,255},  0, 1000, Color{160,110,240,255},  64 }; // Raise mage
         case 24: return { Color{180,20,50,255},    8,  700, Color{160,10,40,255},    46 }; // Life Tap wisp
         case -13: return { Color{236,230,205,255}, 0, 1200, Color{236,230,205,255},  60 }; // bone burst
+        case -14: return { Color{150,190,255,255}, 0, 1200, Color{190,160,255,255},  70 }; // teleport flash
         default: return { Color{255,255,255,255},  9, 1200, Color{255,255,255,255}, 44 };
     }
 }
@@ -26692,8 +26724,40 @@ static bool Wild3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
     return found;
 }
 
+// Teleport (2026-09-27): after casting, the next tap on the ground in reach is
+// where you appear. Mana and reagents are paid here, on landing.
+static bool TryTeleportLand(GameState& s, const Town3DCam& c, Vector2 m, int zone) {
+    if (g_teleAimZone != zone) return false;
+    g_teleAimZone = -1;
+    Vector2& pos = zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    Vector2 g; float gy;
+    if (!Town3DGroundPoint(c, m, zone == 0 ? WildGroundY : nullptr, &g, &gy)) { s.logLine = "You can't teleport there."; return true; }
+    g = ClampToWorld(g, kPlayerEdgeMargin, zone == 0 ? kWildernessWorldSize : kDungeonWorldSize);
+    auto deny = [&](const std::string& why) { SpawnFloatText(s, zone, pos, why, kFloatDenyColor); s.logLine = why; return true; };
+    if (Dist(pos, g) > kTeleportRange) return deny("That is too far away.");
+    if (zone == 0 && WildBlocked(g)) return deny("You can't teleport onto water or cliffs.");
+    if (zone == 1 && s.selectedDungeon.has_value() && !DungeonIsFloor(*s.selectedDungeon, g)) return deny("You can't teleport into the rock.");
+    const Spell& sp = kSpells[kSpTeleport];
+    if (s.mana < sp.manaCost || s.reagents < LiveReagentCost(kSpTeleport)) return deny("Not enough mana or reagents.");
+    s.mana -= sp.manaCost;
+    s.reagents -= LiveReagentCost(kSpTeleport);
+    std::string note;
+    bool ok = RandUnit() * 100.0f < SpellSuccessChance(s, sp);
+    ApplySpellTraining(s, sp, note);
+    PlaySfx(SfxId::Cast);
+    if (zone == 0 && s.wildEngaged.has_value()) { s.wildEngaged->spellCooldowns[kSpTeleport] = kSpellCooldown; s.wildEngaged->castLockT = kCastLockTime; }
+    if (zone == 1 && s.dungeonEngaged.has_value()) { s.dungeonEngaged->spellCooldowns[kSpTeleport] = kSpellCooldown; s.dungeonEngaged->castLockT = kCastLockTime; }
+    if (!ok) { s.logLine = "Teleport fizzles!" + note; return true; }
+    SpawnSpellImpact(s, zone, pos, -14, 1.0f);
+    pos = g;
+    SpawnSpellImpact(s, zone, pos, -14, 1.3f);
+    WalkTargetClear();
+    s.logLine = "You blink across the ground." + note;
+    return true;
+}
 static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
     if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    if (TryTeleportLand(s, c, m, 0)) return;
     // Tapping the target frame cycles targets (2026-09-25).
     if ((s.flagTarget.has_value() || s.wildEngaged.has_value()) &&
         CheckCollisionPointRec(m, TargetFrameRect())) {
@@ -26801,6 +26865,7 @@ static bool Dungeon3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
 }
 
 static void Dungeon3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
+    if (TryTeleportLand(s, c, m, 1)) return; // (2026-09-27)
     if (!s.selectedDungeon.has_value()) return;
     if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
     int di = *s.selectedDungeon;
@@ -27593,6 +27658,12 @@ static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
     // UO-style travel: Recall never casts directly - the hotbar/Magic/R-key paths
     // open the town picker instead (costs are paid on destination select).
     if (spellIdx == kRecallSpellIdx) { s.recallPickerOpen = true; return; }
+    if (spellIdx == kSpTeleport) { // (2026-09-27) aim first; mana and reagents go on landing
+        if (s.mana < spell.manaCost || s.reagents < LiveReagentCost(spellIdx)) { s.logLine = "Not enough mana or reagents for Teleport."; return; }
+        g_teleAimZone = zone; g_teleAimT = 12.0f;
+        s.logLine = "Teleport: tap the ground where you want to appear.";
+        return;
+    }
     // Per-spell cooldown + cast lock, same as the offensive live casts - without
     // this a tap during another spell's lock would eat mana for a queued cast.
     if (zone == 0 && s.wildEngaged.has_value()) {
@@ -30030,7 +30101,27 @@ static float g_resetArmedTimer = 0.0f; // >0 while the Reset button is armed, wa
 static bool g_warOpen = false;         // the War Week screen (over the House screen)
 static void OpenWarWeek(GameState& s); // (2026-09-27) defined with the Guildstone
 // Tap to walk (2026-09-27): a pulsing gold ring on the ground where you're headed.
-static void DrawWalkMarker() {
+static void DrawWalkMarker(const GameState& s) {
+    if (g_teleAimZone >= 0) { // Teleport aim: a blue ring shows how far you can reach
+        g_teleAimT -= GetFrameTime();
+        bool here = (g_teleAimZone == 0 && s.screen == Screen::Wilderness) || (g_teleAimZone == 1 && s.screen == Screen::Hunt);
+        if (g_teleAimT <= 0.0f || !here || s.playerIsGhost) g_teleAimZone = -1;
+        else if (g_hudCamZone == g_teleAimZone) {
+            Vector2 pp = g_teleAimZone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+            float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 5.0f);
+            Vector2 prev{}; bool havePrev = false;
+            for (int k = 0; k <= 48; k++) {
+                float a = k * (2.0f * PI / 48.0f);
+                float x = pp.x + cosf(a) * kTeleportRange, z = pp.y + sinf(a) * kTeleportRange;
+                float gy = g_teleAimZone == 0 ? WildGroundY(x, z) : 0.0f;
+                Vector2 sp;
+                bool ok = Town3DProject(g_hudCam, { x, gy + 3.0f, z }, &sp);
+                if (ok && havePrev) DrawLineEx(prev, sp, 3.0f, Color{ 150, 190, 255, (unsigned char)(140 + 90 * pulse) });
+                prev = sp; havePrev = ok;
+            }
+            DrawHudLine("Teleport: tap the ground inside the blue ring", 20, 226, 13);
+        }
+    }
     if (!g_walkOn || g_hudCamZone < 0) return;
     float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 6.0f);
     float r = 16.0f + 5.0f * pulse;
@@ -34016,7 +34107,7 @@ static void UpdateDrawFrame() {
         if (state.guideOpen && guideHome) DrawGuideOverlay(state);
         if (!guideBlocked || state.starterStep == kStFight || state.starterStep == kStLoot) UpdateDrawStarter(state, screenW, screenH);
         DrawDirectionsHud(state, screenW); // compass + world-boss timer (2026-09-27)
-        DrawWalkMarker();                  // tap to walk (2026-09-27)
+        DrawWalkMarker(state);             // tap to walk + Teleport aim (2026-09-27)
         g_hudCamZone = -1;
         // UO-style travel (2026-09-25): arriving in a town marks it as a recall
         // destination. selectedTown only changes on real arrivals (gates, tabs,
