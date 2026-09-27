@@ -1310,6 +1310,35 @@ enum { kGuildWarMurderInc = 0, kGuildWarOrcs = 1 };
 // Commissions (2026-09-27): UO's bulk order deeds, our way. A workshop's master
 // hands you an order - "10 Longswords", "8 Leather Tunics, Well-crafted or
 // better" - you fill it from your pack and turn it in for gold and Marks.
+// ---- The Settlement (2026-09-27): WOS-style city building on your homestead ----
+// A Great Hall gates everything; producers stack resources over real time (also
+// offline, up to their storage), boosters give lasting buffs, settlers earned
+// from the road work the buildings or stand guard, and Grimtusk Hold / Murder
+// Inc. raid it - live if you're there, decided by walls + militia if not.
+enum SettleKind { kSbHall, kSbLumber, kSbMine, kSbTannery, kSbHerbs, kSbFishery, kSbForge, kSbYard, kSbChapel,
+                  kSbLibrary, kSbStable, kSbStore, kSbWalls, kSbBarracks, kSbCount };
+struct SettleDef { const char* name; int unlockHall; int gold, wood, ore; float minutes; int res; float perHour; const char* buff; };
+// res: 0 none, 1 wood, 2 ore, 3 leather, 4 reagents, 5 fish
+static const SettleDef kSettleDefs[kSbCount] = {
+    { "Great Hall",   0, 300, 60, 30, 5.0f, 0, 0,  "Sets how many buildings you can raise and how high; houses 2 settlers per level" },
+    { "Lumber Camp",  1, 120, 20,  0, 2.0f, 1, 12, "Cuts logs for you" },
+    { "Mine",         1, 150, 30,  0, 2.0f, 2, 10, "Digs ore for you" },
+    { "Tannery",      2, 150, 40, 10, 3.0f, 3, 6,  "Cures leather for you" },
+    { "Herb Garden",  3, 160, 30,  0, 3.0f, 4, 6,  "Grows reagents for you" },
+    { "Fishery",      4, 160, 50,  0, 3.0f, 5, 10, "Brings in fish for you" },
+    { "Forge",        3, 250, 40, 60, 4.0f, 0, 0,  "+2 crafting quality per level (every workshop)" },
+    { "Training Yard",4, 250, 60, 20, 4.0f, 0, 0,  "+6% weapon skill gains per level" },
+    { "Chapel",       5, 300, 60, 40, 5.0f, 0, 0,  "Heals you out of combat (+0.05 HP/s per level)" },
+    { "Library",      5, 300, 80, 20, 5.0f, 0, 0,  "+8% mana regeneration per level" },
+    { "Stable",       5, 280, 90,  0, 5.0f, 0, 0,  "+2% travel speed in the wilds per level" },
+    { "Storehouse",   2, 180, 60, 10, 3.0f, 0, 0,  "+2 backpack slots per level" },
+    { "Walls",        1, 150, 60, 20, 3.0f, 0, 0,  "Raid defense (palisade, then stone, then towers)" },
+    { "Barracks",     2, 200, 50, 30, 3.5f, 0, 0,  "2 guard posts per level; guards fight harder per level" },
+};
+struct SettleBuilding { int level = 0; float stored = 0.0f; int workers = 0; bool damaged = false; };
+struct Settler { std::string name; int trait = kSbLumber; int job = -1; }; // job: building kind, 100 = guard, -1 idle
+static const int kSettlerGuard = 100;
+
 struct CommissionDeed { int building = 0; int recipe = 0; int amount = 10; int filled = 0; int minTier = 0; };
 static const int kCommissionMax = 6;
 static const float kCommissionCooldown = 600.0f; // a new order per workshop every ten minutes of play
@@ -1435,6 +1464,16 @@ struct GameState {
 
     // --- Custom wilderness housing (2026-09-25) ---
     int housePlotIdx = -1;          // index into kHousePlots; -1 = no plot owned (one house max)
+    // Settlement (2026-09-27) - PERSISTED except settleRaidLive/raider list.
+    std::array<SettleBuilding, kSbCount> settle{};
+    int settleUpgrading = -1; float settleUpgradeT = 0.0f; // one build queue
+    std::vector<Settler> settlers;
+    float settleRaidT = 3600.0f;       // seconds until the next raid roll
+    float settleArrivalT = 1800.0f;    // seconds until a wanderer may join (Great Hall 3+)
+    long long settleEpoch = 0;          // last save's wall clock, for offline progress
+    std::vector<std::string> settleReports; // newest last, up to 6
+    bool settleRaidLive = false; int settleRaidStrength = 0; int settleRaidFaction = 0; float settleMilitiaCd = 0.0f;
+    float settleHpAcc = 0.0f;
     // Commissions (2026-09-27) - PERSISTED.
     std::vector<CommissionDeed> commissions;
     float commissionCd[4] = { 0, 0, 0, 0 };
@@ -5422,6 +5461,8 @@ static void StartEscort(GameState& s, int id, Vector2 fromPos) {
     s.logLine = InnocentName(id) + " falls in beside you. \"Walk me to the town gate.\"";
     PlaySfx(SfxId::Quest);
 }
+static float SettleEff(const GameState& s, int k);         // the Settlement (2026-09-27), below
+static bool SettleGainSettler(GameState& s, const char* why);
 static void CompleteEscort(GameState& s) {
     int id = s.escortInnocent;
     s.escortInnocent = -1;
@@ -5434,6 +5475,8 @@ static void CompleteEscort(GameState& s) {
     GainKarma(s, 8.0f); GainFame(s, 5.0f);
     s.logLine = "You see " + InnocentName(id) + " safely to the gate. \"" +
                 InnocentRequestThanks(id) + "\" (+" + std::to_string(pay) + " gold, Karma and Fame rise.)";
+    std::string line = s.logLine;
+    if (RandUnit() < 0.6f && SettleGainSettler(s, "heard how you keep the roads safe")) s.logLine = line + " " + s.logLine; // (2026-09-27)
 }
 // Per-frame escort follow - declared here, defined after kWildernessReturnGatePos.
 static void UpdateEscort(GameState& s, float dt);
@@ -5553,6 +5596,8 @@ static void SpareInnocent(GameState& s) {
     s.innocentEncounter->farewell = "\"" + InnocentThanks(id) + "\" " + reward;
     s.logLine = "You let " + InnocentName(id) + " pass unharmed." +
                  (reduced ? " Your conscience eases slightly." : "");
+    std::string line = s.logLine;
+    if (RandUnit() < 0.25f && SettleGainSettler(s, "saw your mercy on the road")) s.logLine = line + " " + s.logLine; // (2026-09-27)
 }
 static void MurderInnocent(GameState& s) {
     if (!s.innocentEncounter.has_value() || s.innocentEncounter->resolved) return;
@@ -5779,6 +5824,8 @@ static void LiveApplyWeaponTraining(GameState& s, float hitChance01 = 0.5f) {
     // a swing lands every second or so: small weights, and a fair fight teaches most
     float GameState::* skillField = ActiveWeaponSkillField(s);
     SkillUseGain(s.*skillField, hitChance01, 0.7f);
+    if (float yard = SettleEff(s, kSbYard); yard > 0.0f && RandUnit() < 0.06f * yard) // Training Yard (2026-09-27)
+        SkillUseGain(s.*skillField, hitChance01, 0.7f);
     SkillUseGain(s.tactics, hitChance01, 0.55f);
     SkillUseGain(s.anatomy, hitChance01, 0.45f);
     MaybeGainStat(s, &GameState::str, 0.06f);
@@ -6064,6 +6111,7 @@ static void RegenMana(GameState& s, float dt) {
     float regenPerSec = 0.15f + s.meditation * 0.004f;
     if (IsShaken(s)) regenPerSec *= 0.5f;
     if (HasWeeklyBlessing(s)) regenPerSec *= 1.25f;
+    regenPerSec *= 1.0f + 0.08f * SettleEff(s, kSbLibrary); // Library (2026-09-27)
     s.mana = std::min(MaxMana(s), s.mana + regenPerSec * dt);
 }
 
@@ -6585,8 +6633,120 @@ static void ReadEquipSlot(const std::string& value, std::optional<Item>& slot) {
     slot = (value == "none" || value.empty()) ? std::nullopt : ItemFromLine(value);
 }
 
+// ---- Settlement economy (2026-09-27) - see the SettleDef table ----
+static int SettleLv(const GameState& s, int k) { return s.settle[(size_t)k].level; }
+static int SettleHall(const GameState& s) { return s.settle[kSbHall].level; }
+// A damaged building works at half strength until it's repaired.
+static float SettleEff(const GameState& s, int k) {
+    const SettleBuilding& b = s.settle[(size_t)k];
+    return b.damaged ? b.level * 0.5f : (float)b.level;
+}
+static bool SettleUnlocked(const GameState& s, int k) { return k == kSbHall || (SettleHall(s) > 0 && SettleHall(s) >= kSettleDefs[k].unlockHall); }
+static int SettleMaxLevel(const GameState& s, int k) { return k == kSbHall ? 10 : SettleHall(s); }
+static int SettleMaxWorkers(const GameState& s, int k) {
+    int L = SettleLv(s, k);
+    return (kSettleDefs[k].res == 0 || L <= 0) ? 0 : std::min(5, 1 + L / 2);
+}
+static int SettleHousing(const GameState& s) { int h = SettleHall(s); return h > 0 ? 2 + 2 * h : 0; }
+static int SettleGuardPosts(const GameState& s) { return 2 * SettleLv(s, kSbBarracks); }
+static int SettleCountJob(const GameState& s, int job) {
+    int n = 0;
+    for (const Settler& st : s.settlers) n += st.job == job;
+    return n;
+}
+static float SettleRatePerHour(const GameState& s, int k) {
+    const SettleDef& d = kSettleDefs[k];
+    float L = SettleEff(s, k);
+    if (d.res == 0 || L <= 0.0f) return 0.0f;
+    float wf = 0.5f; // the building runs itself at half pace; each hand adds a quarter, a natural a half
+    for (const Settler& st : s.settlers)
+        if (st.job == k) wf += st.trait == k ? 0.5f : 0.25f;
+    return d.perHour * L * wf;
+}
+static float SettleCap(const GameState& s, int k) { return std::max(4.0f, SettleRatePerHour(s, k) * 8.0f); }
+static const char* SettleResName(int res) {
+    switch (res) { case 1: return "wood"; case 2: return "ore"; case 3: return "leather"; case 4: return "reagents"; case 5: return "fish"; }
+    return "";
+}
+static int* SettleResPtr(GameState& s, int res) {
+    switch (res) { case 1: return &s.wood; case 2: return &s.ore; case 3: return &s.leather; case 4: return &s.reagents; case 5: return &s.fish; }
+    return nullptr;
+}
+// Cost of the next level; Carpentry shortens the build (up to 40% at 100).
+static void SettleCost(const GameState& s, int k, int& gold, int& wood, int& ore, float& secs) {
+    const SettleDef& d = kSettleDefs[k];
+    float L = (float)(SettleLv(s, k) + 1);
+    gold = (int)std::round(d.gold * powf(L, 1.6f));
+    wood = (int)std::round(d.wood * powf(L, 1.5f));
+    ore = (int)std::round(d.ore * powf(L, 1.5f));
+    secs = d.minutes * 60.0f * powf(L, 1.35f) * (1.0f - std::clamp(s.buildingSkill[1], 0.0f, 100.0f) * 0.004f);
+}
+static int SettleRepairCost(const GameState& s, int k) {
+    int g, w, o; float t;
+    SettleCost(s, k, g, w, o, t);
+    return std::max(40, (int)(g * 0.3f));
+}
+static float SettleDefense(const GameState& s) {
+    float d = SettleHall(s) * 6.0f + // the Hall's own folk turn out with pitchforks
+              SettleEff(s, kSbWalls) * 14.0f + SettleCountJob(s, kSettlerGuard) * (6.0f + SettleEff(s, kSbBarracks) * 2.0f);
+    for (const GuildRecruit& r : s.guildRecruits) if (!r.along) d += r.level * 0.8f; // guildmates left at home stand guard
+    return d;
+}
+static float SettleRaidStrength(const GameState& s) {
+    int sum = 0;
+    for (const SettleBuilding& b : s.settle) sum += b.level;
+    bool war = s.guildWarOn[kGuildWarOrcs] || s.guildWarOn[kGuildWarMurderInc];
+    return 8.0f + SettleHall(s) * 8.0f + sum * 1.5f + (war ? 20.0f : 0.0f);
+}
+static float SettleTravelMult(const GameState& s) { return 1.0f + 0.02f * SettleEff(s, kSbStable); }
+static void SettleReport(GameState& s, const std::string& text) {
+    s.settleReports.push_back(text);
+    while (s.settleReports.size() > 6) s.settleReports.erase(s.settleReports.begin());
+    s.logLine = text;
+    Journal(s, text);
+}
+static void SettleProduce(GameState& s, float hours) {
+    for (int k = 0; k < kSbCount; k++) {
+        if (kSettleDefs[k].res == 0) continue;
+        SettleBuilding& b = s.settle[(size_t)k];
+        float cap = SettleCap(s, k);
+        if (b.stored < cap) b.stored = std::min(cap, b.stored + SettleRatePerHour(s, k) * hours);
+    }
+}
+static int SettleCollect(GameState& s, int k) {
+    SettleBuilding& b = s.settle[(size_t)k];
+    int n = (int)b.stored, *p = SettleResPtr(s, kSettleDefs[k].res);
+    if (n <= 0 || !p) return 0;
+    *p += n; b.stored -= (float)n;
+    return n;
+}
+static void SettleFinishUpgrade(GameState& s) {
+    int k = s.settleUpgrading;
+    s.settleUpgrading = -1; s.settleUpgradeT = 0.0f;
+    if (k < 0 || k >= kSbCount) return;
+    s.settle[(size_t)k].level++;
+    s.settle[(size_t)k].damaged = false;
+    SettleReport(s, std::string(kSettleDefs[k].name) + " is finished - now level " + std::to_string(s.settle[(size_t)k].level) + ".");
+    PlaySfx(SfxId::Coin);
+}
+static const char* kSettlerFirst[] = { "Aldric", "Maren", "Tobin", "Elsa", "Garrick", "Wren", "Osric", "Hilde", "Bram", "Ysolde",
+                                       "Corwin", "Nessa", "Dunstan", "Petra", "Lorn", "Agnes", "Fenwick", "Isolde", "Rowan", "Mirabel" };
+// Someone asks to settle on your land. Returns false when there's no room (or no Hall).
+static bool SettleGainSettler(GameState& s, const char* why) {
+    if (SettleHall(s) <= 0 || (int)s.settlers.size() >= SettleHousing(s)) return false;
+    Settler st;
+    st.name = kSettlerFirst[GetRandomValue(0, (int)(sizeof(kSettlerFirst) / sizeof(kSettlerFirst[0])) - 1)];
+    static const int traits[5] = { kSbLumber, kSbMine, kSbTannery, kSbHerbs, kSbFishery };
+    st.trait = traits[GetRandomValue(0, 4)];
+    s.settlers.push_back(st);
+    SettleReport(s, st.name + " " + why + " and settles on your land (a natural at the " + kSettleDefs[st.trait].name + ").");
+    return true;
+}
+// Where it all stands: buildings ring the house plot, the palisade rings them.
+static float SettleRingR(int cells) { return cells * kHouseCellSize * 0.7071f + 82.0f; }
+static float SettleWallR(int cells) { return SettleRingR(cells) + 118.0f; }
 static int BackpackCap(const GameState& s) {
-    return GameState::kBackpackCap + kHouseTiers[s.houseTierIdx].capBonus;
+    return GameState::kBackpackCap + kHouseTiers[s.houseTierIdx].capBonus + 2 * (int)SettleEff(s, kSbStore); // Storehouse (2026-09-27)
 }
 
 static void SaveGame(const GameState& s) {
@@ -6699,6 +6859,12 @@ static void SaveGame(const GameState& s) {
     WriteEquipSlot(out, "equipped.pants", s.equipped.pants);
     WriteEquipSlot(out, "equipped.shoes", s.equipped.shoes);
     out << "clothesInit=1\n";
+    for (int k = 0; k < kSbCount; k++)
+        out << "settle" << k << "=" << s.settle[(size_t)k].level << "|" << s.settle[(size_t)k].stored << "|" << s.settle[(size_t)k].workers << "|" << (s.settle[(size_t)k].damaged ? 1 : 0) << "\n";
+    out << "settleQueue=" << s.settleUpgrading << "|" << s.settleUpgradeT << "\nsettleRaidT=" << s.settleRaidT
+        << "\nsettleArrivalT=" << s.settleArrivalT << "\nsettleEpoch=" << (long long)std::time(nullptr) << "\n";
+    for (size_t i = 0; i < s.settlers.size(); i++) out << "settler." << i << "=" << s.settlers[i].name << "|" << s.settlers[i].trait << "|" << s.settlers[i].job << "\n";
+    for (size_t i = 0; i < s.settleReports.size(); i++) out << "settleReport." << i << "=" << s.settleReports[i] << "\n";
     out << "commissionMarks=" << s.commissionMarks << "\nrareDyeCharges=" << s.rareDyeCharges << "\n";
     for (int b = 0; b < 4; b++) out << "commissionCd" << b << "=" << s.commissionCd[b] << "\nmasterwork" << b << "=" << s.masterworkUses[b] << "\n";
     for (size_t i = 0; i < s.commissions.size(); i++) {
@@ -6958,6 +7124,19 @@ static bool LoadGame(GameState& s) {
         else if (key == "equipped.shoes") ReadEquipSlot(val, s.equipped.shoes);
         else if (key == "clothesInit") clothesInit = true;
         else if (key == "commissionMarks") s.commissionMarks = std::atoi(val.c_str());
+        else if (key.rfind("settle", 0) == 0 && key.size() <= 8 && isdigit((unsigned char)key[6])) {
+            int k = std::atoi(key.c_str() + 6); auto p = SplitStr(val, '|');
+            if (k >= 0 && k < kSbCount && p.size() >= 4) {
+                SettleBuilding& b = s.settle[(size_t)k];
+                b.level = std::atoi(p[0].c_str()); b.stored = (float)std::atof(p[1].c_str()); b.workers = std::atoi(p[2].c_str()); b.damaged = p[3] == "1";
+            }
+        }
+        else if (key == "settleQueue") { auto p = SplitStr(val, '|'); if (p.size() >= 2) { s.settleUpgrading = std::atoi(p[0].c_str()); s.settleUpgradeT = (float)std::atof(p[1].c_str()); } }
+        else if (key == "settleRaidT") s.settleRaidT = (float)std::atof(val.c_str());
+        else if (key == "settleArrivalT") s.settleArrivalT = (float)std::atof(val.c_str());
+        else if (key == "settleEpoch") s.settleEpoch = std::atoll(val.c_str());
+        else if (key.rfind("settler.", 0) == 0) { auto p = SplitStr(val, '|'); if (p.size() >= 3) s.settlers.push_back({ p[0], std::atoi(p[1].c_str()), std::atoi(p[2].c_str()) }); }
+        else if (key.rfind("settleReport.", 0) == 0) s.settleReports.push_back(val);
         else if (key == "rareDyeCharges") s.rareDyeCharges = std::atoi(val.c_str());
         else if (key.rfind("commissionCd", 0) == 0 && key.size() == 13) s.commissionCd[std::clamp(key[12] - '0', 0, 3)] = (float)std::atof(val.c_str());
         else if (key.rfind("masterwork", 0) == 0 && key.size() == 11) s.masterworkUses[std::clamp(key[10] - '0', 0, 3)] = std::atoi(val.c_str());
@@ -7181,6 +7360,7 @@ static void TryCraftItem(GameState& s, int buildingIdx, int recipeIdx, int capOv
     float qualitySkill = effectiveSkill;
     bool masterwork = buildingIdx >= 0 && buildingIdx < 4 && s.masterworkUses[buildingIdx] > 0;
     if (masterwork) { qualitySkill += 10.0f; s.masterworkUses[buildingIdx]--; } // Masterwork tools (2026-09-27)
+    qualitySkill += 2.0f * SettleEff(s, kSbForge); // the settlement's Forge (2026-09-27)
     auto [qualityLabel, qualityMult] = QualityFor(qualitySkill);
     int finalPower = std::max(1, (int)std::round(r.power * qualityMult));
     Item item{ s.nextItemId++, qualityLabel + " " + r.name, r.type, r.slot, r.handed, finalPower, r.category };
@@ -15607,7 +15787,7 @@ static void WildHeightEnsure() {
     std::vector<Flat> flats;
     for (const auto& e : kWildernessDungeonEntrances) flats.push_back({ e.pos.x, e.pos.y, 130.0f });
     for (const auto& g : kTownGates) flats.push_back({ g.wildernessPos.x, g.wildernessPos.y, 220.0f });
-    for (const auto& hp : kHousePlots) flats.push_back({ hp.pos.x, hp.pos.y, 60.0f + hp.cells * kHouseCellSize * 0.75f });
+    for (const auto& hp : kHousePlots) flats.push_back({ hp.pos.x, hp.pos.y, SettleWallR(hp.cells) + 30.0f }); // room for the settlement (2026-09-27)
     for (const auto& cp : kRivalCampSpots) flats.push_back({ cp.x, cp.y, 250.0f }); // Murder Inc.'s war camps (2026-09-27)
     flats.push_back({ kOrcFortPos.x, kOrcFortPos.y, kOrcFortRadius + 70.0f }); // Grimtusk Hold
     for (const auto& sh : kShrines) flats.push_back({ sh.pos.x, sh.pos.y, 110.0f });
@@ -16231,6 +16411,8 @@ static void Wild3DBuildScatter() {
         for (const Vector2& p : kRivalCampSpots) // war camps stand in cleared ground
             if (Dist({ x, z }, p) < 215.0f) return false;
         if (Dist({ x, z }, kOrcFortPos) < kOrcFortRadius + 70.0f) return false; // and so does Grimtusk Hold
+        for (const auto& hp : kHousePlots) // settlement grounds (2026-09-27)
+            if (Dist({ x, z }, hp.pos) < SettleWallR(hp.cells) + 25.0f) return false;
         return true;
     };
     struct Zone { float x0, x1, z0, z1, step, density; int kind; };
@@ -16421,7 +16603,7 @@ static void Wild3DBuildDressing() {
     for (const auto& e : kWildernessDungeonEntrances) keep.push_back({ e.pos, 120.0f });
     for (const auto& f : kWildernessFoliage) keep.push_back({ f.pos, 40.0f });
     for (const auto& ip : kWildernessInnocentSpots) keep.push_back({ ip.pos, 80.0f });
-    for (const auto& hp : kHousePlots) keep.push_back({ hp.pos, 40.0f + hp.cells * kHouseCellSize * 0.5f });
+    for (const auto& hp : kHousePlots) keep.push_back({ hp.pos, SettleWallR(hp.cells) + 25.0f }); // the settlement grounds (2026-09-27)
     for (const auto& cp : kRivalCampSpots) keep.push_back({ cp, 215.0f });
     keep.push_back({ kOrcFortPos, kOrcFortRadius + 70.0f });
     for (const auto& sh : kShrines) keep.push_back({ sh.pos, 100.0f });
@@ -18299,6 +18481,7 @@ static void Wild3DDrawOrcFort(bool shadowPass, const Town3DCam* cull) {
     EndBlendMode();
 }
 static void Wild3DDrawHouse(GameState& s, bool shadowPass); // Housing 2.0 (below, with the room surfaces)
+static void Wild3DDrawSettlement(GameState& s, bool shadowPass, const Town3DCam* cull); // the Settlement (2026-09-27)
 static Vector3 g_houseSignPos = { 0, -1, 0 };                // the homestead's sign post (y < 0: none built)
 static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DCam* cull) {
     Wild3DLoadModels();
@@ -18407,6 +18590,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         }
         Wild3DDrawHouse(s, shadowPass); // textured shell + roof (Housing 2.0)
     }
+    Wild3DDrawSettlement(s, shadowPass, cull); // buildings, palisade and settlers (2026-09-27)
 
     bool wasEngaged = s.wildEngaged.has_value();
     // Phase 3 procedural creatures (kit shader matches the sun/shadow pipeline).
@@ -23230,6 +23414,602 @@ static void GuildWarCredit(GameState& s, const GameState::ActiveMonster& am, con
     }
 }
 
+// ---- The Settlement: layout, raids, settlers (2026-09-27) ----
+static bool SettleOwned(const GameState& s) { return s.housePlotIdx >= 0 && s.housePlotIdx < (int)kHousePlots.size(); }
+static bool SettleActive(const GameState& s) { return SettleOwned(s) && SettleHall(s) > 0; }
+static Vector2 SettleCenter(const GameState& s) { return kHousePlots[(size_t)std::max(0, s.housePlotIdx)].pos; }
+static int SettleCells(const GameState& s) { return kHousePlots[(size_t)std::max(0, s.housePlotIdx)].cells; }
+// The gateway faces the nearest town, so the road home runs straight in.
+static float SettleGateAngle(int plotIdx) {
+    static float cache[16]; static bool done[16] = {};
+    plotIdx = std::clamp(plotIdx, 0, 15);
+    if (done[plotIdx]) return cache[plotIdx];
+    Vector2 c = kHousePlots[(size_t)std::min(plotIdx, (int)kHousePlots.size() - 1)].pos, best = { c.x, c.y + 1 };
+    float bd = 1e9f;
+    for (const auto& g : kTownGates) { float d = Dist(g.wildernessPos, c); if (d < bd) { bd = d; best = g.wildernessPos; } }
+    cache[plotIdx] = atan2f(best.y - c.y, best.x - c.x);
+    done[plotIdx] = true;
+    return cache[plotIdx];
+}
+// Ring order: the Great Hall straight across from the gate, trades either side.
+static const int kSettleSlotOrder[13] = { kSbLumber, kSbMine, kSbTannery, kSbHerbs, kSbFishery, kSbBarracks, kSbHall,
+                                          kSbForge, kSbYard, kSbChapel, kSbLibrary, kSbStable, kSbStore };
+static const float kSettleGateGap = 0.45f; // radians either side of the gate kept open as the lane in
+static Vector2 SettleSlotPos(const GameState& s, int kind, float* yawDeg = nullptr) {
+    int slot = 6;
+    for (int i = 0; i < 13; i++) if (kSettleSlotOrder[i] == kind) slot = i;
+    float g = SettleGateAngle(s.housePlotIdx);
+    float a = g + kSettleGateGap + slot * (6.2831853f - 2.0f * kSettleGateGap) / 12.0f;
+    float R = SettleRingR(SettleCells(s)) + (kind == kSbHall ? 22.0f : 0.0f);
+    Vector2 c = SettleCenter(s), p = { c.x + cosf(a) * R, c.y + sinf(a) * R };
+    if (yawDeg) *yawDeg = atan2f(c.x - p.x, c.y - p.y) * RAD2DEG; // local +z (the door) toward the house
+    return p;
+}
+static float SettleBodyR(int kind) { return kind == kSbHall ? 66.0f : 50.0f; }
+// Built (or going up): solid on the ground.
+static bool SettleStands(const GameState& s, int k) { return s.settle[(size_t)k].level > 0 || s.settleUpgrading == k; }
+static void SettleResolve(const GameState& s, Vector2& p, float r) {
+    if (!SettleOwned(s)) return;
+    Vector2 c = SettleCenter(s);
+    float d = Dist(p, c), wallR = SettleWallR(SettleCells(s));
+    if (d > wallR + 60.0f) return;
+    for (int k = 0; k < kSbCount; k++) {
+        if (k == kSbWalls || !SettleStands(s, k)) continue;
+        ResolveCircleCollision(p, r, SettleSlotPos(s, k), SettleBodyR(k));
+    }
+    if (SettleLv(s, kSbWalls) > 0 && d > 1.0f && fabsf(d - wallR) < r + 9.0f) {
+        float a = atan2f(p.y - c.y, p.x - c.x) - SettleGateAngle(s.housePlotIdx);
+        if (fabsf(atan2f(sinf(a), cosf(a))) > 0.17f) {
+            float want = d < wallR ? wallR - r - 9.0f : wallR + r + 9.0f;
+            p = { c.x + (p.x - c.x) / d * want, c.y + (p.y - c.y) / d * want };
+        }
+    }
+}
+
+// --- Raids ---
+static std::vector<int> g_settleRaiders; // wilderness spot indices in the live raid (transient)
+struct SettlerLive { Vector2 pos{}, target{}; float wait = 0.0f, yaw = 0.0f, atkT = -1.0f; int phase = 0; bool init = false; };
+static const int kSettlerDrawMax = 14;
+static SettlerLive g_settlerLive[kSettlerDrawMax];
+static bool SettleIsRaider(int spotIdx) { return std::find(g_settleRaiders.begin(), g_settleRaiders.end(), spotIdx) != g_settleRaiders.end(); }
+static const char* SettleFoeName(int faction) { return faction == 0 ? "A Grimtusk war band" : "Murder Inc.'s hired cutthroats"; }
+static void SettleResolveRaidAway(GameState& s, float strength, int faction) {
+    float D = SettleDefense(s) * (0.8f + 0.4f * RandUnit());
+    if (D >= strength) {
+        int g = (int)(strength * 3.0f);
+        s.gold += g;
+        SettleReport(s, std::string(SettleFoeName(faction)) + " hit the settlement and broke on your " +
+                        (SettleLv(s, kSbWalls) > 0 ? "walls" : "militia") + ". (+" + std::to_string(g) + " gold in spoils)");
+        return;
+    }
+    int lost = 0;
+    for (int k = 0; k < kSbCount; k++) {
+        SettleBuilding& b = s.settle[(size_t)k];
+        int take = (int)(b.stored * 0.35f);
+        b.stored -= (float)take; lost += take;
+    }
+    std::vector<int> can;
+    for (int k = 1; k < kSbCount; k++) if (s.settle[(size_t)k].level > 0 && !s.settle[(size_t)k].damaged) can.push_back(k);
+    std::string hurt;
+    if (!can.empty()) {
+        int k = can[(size_t)GetRandomValue(0, (int)can.size() - 1)];
+        s.settle[(size_t)k].damaged = true;
+        hurt = std::string(" The ") + kSettleDefs[k].name + " was set alight - repair it at the Great Hall.";
+    }
+    SettleReport(s, std::string(SettleFoeName(faction)) + " overran the settlement and made off with " + std::to_string(lost) +
+                    " goods." + hurt + " More walls and guards would have held.");
+}
+static void SettleStartRaid(GameState& s) {
+    bool wo = s.guildWarOn[kGuildWarOrcs], wm = s.guildWarOn[kGuildWarMurderInc];
+    int faction = (wo && !wm) ? 0 : ((wm && !wo) ? 1 : GetRandomValue(0, 1));
+    float S = SettleRaidStrength(s) * (0.8f + 0.4f * RandUnit());
+    s.settleRaidFaction = faction; s.settleRaidStrength = (int)S;
+    Vector2 c = SettleCenter(s);
+    bool here = s.screen == Screen::Wilderness && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && !s.wildEngaged.has_value() &&
+                s.wildExtraAttackers.empty() && Dist(s.wildernessPlayerPos, c) < 900.0f;
+    if (here) {
+        int want = std::clamp(1 + (int)(S / 60.0f), 1, 4); // Hall 1: a lone raider; a great settlement draws a war band
+        std::vector<int> band;
+        for (size_t i = 0; i < kWildernessMonsterSpots.size() && (int)band.size() < want; i++) {
+            const std::string& n = kWildernessMonsterSpots[i].name;
+            bool fits = faction == 0 ? (MonsterFaction(n) == "Orc" && n != "Orc Warlord") : (n == "Highway Bandit" || n == "Mountain Bandit");
+            if (!fits || s.wildSpotRespawn[i] > 0.0f || FindWildExtra(s, (int)i)) continue;
+            band.push_back((int)i);
+        }
+        if (!band.empty()) {
+            // they come in through the gate - toward you, from the gate side
+            float g = SettleGateAngle(s.housePlotIdx), R = SettleWallR(SettleCells(s)) + 40.0f;
+            Vector2 gate = { c.x + cosf(g) * R, c.y + sinf(g) * R }, me = s.wildernessPlayerPos;
+            Vector2 dir = { gate.x - me.x, gate.y - me.y };
+            float dl = hypotf(dir.x, dir.y);
+            dir = dl > 1.0f ? Vector2{ dir.x / dl, dir.y / dl } : Vector2{ cosf(g), sinf(g) };
+            Vector2 n = { -dir.y, dir.x }, origin = { me.x + dir.x * std::min(230.0f, std::max(dl, 150.0f)), me.y + dir.y * std::min(230.0f, std::max(dl, 150.0f)) };
+            for (size_t k = 0; k < band.size(); k++) {
+                GameState::ActiveMonster am;
+                am.spotIdx = band[k];
+                float side = (k % 2 ? 1.0f : -1.0f) * 45.0f * (float)((k + 1) / 2), back = 30.0f * (float)(k / 2);
+                am.pos = { origin.x + dir.x * back + n.x * side, origin.y + dir.y * back + n.y * side };
+                if (WildBlocked(am.pos)) am.pos = WildNearestFree(am.pos);
+                am.spawnPos = am.pos;
+                am.maxHp = std::max(1.0f, kWildernessMonsterSpots[(size_t)band[k]].level * 3.0f);
+                am.hp = am.maxHp;
+                if (k == 0) s.wildEngaged = am; else s.wildExtraAttackers.push_back(am);
+            }
+            g_settleRaiders = band;
+            s.settleRaidLive = true;
+            s.settleMilitiaCd = 1.5f;
+            s.rivalBanner = "RAID! Defend the settlement!";
+            s.rivalBannerTimer = kRivalBannerTime;
+            s.logLine = std::string(SettleFoeName(faction)) + (faction == 0 ? " is" : " are") + " at your gate!";
+            Journal(s, s.logLine);
+            PlaySfx(SfxId::Hunt);
+            return;
+        }
+    }
+    SettleResolveRaidAway(s, S, faction);
+}
+// Guards join a live raid fight: returns their damage this frame (applied like a guildmate's).
+static void SettleRaidBookkeeping(GameState& s) {
+    if (!s.settleRaidLive) return;
+    int alive = 0;
+    for (int i : g_settleRaiders) if (s.wildSpotRespawn[(size_t)i] <= 0.0f) alive++;
+    bool fighting = s.wildEngaged.has_value() || !s.wildExtraAttackers.empty();
+    if (alive == 0 || g_settleRaiders.empty()) {
+        s.settleRaidLive = false;
+        int g = s.settleRaidStrength * 3 + 40;
+        s.gold += g; GainFame(s, 5.0f);
+        s.rivalBanner = "The settlement holds!";
+        s.rivalBannerTimer = kRivalBannerTime;
+        SettleReport(s, std::string("You threw back ") + (s.settleRaidFaction == 0 ? "the Grimtusk war band" : "Murder Inc.'s cutthroats") +
+                        " at your own gate! (+" + std::to_string(g) + " gold, Fame rises)");
+        PlaySfx(SfxId::Victory);
+        g_settleRaiders.clear();
+    } else if (!fighting || s.screen != Screen::Wilderness || s.playerIsGhost || Dist(s.wildernessPlayerPos, SettleCenter(s)) > 1400.0f) {
+        s.settleRaidLive = false; // you left them to it: walls and guards decide the rest
+        float frac = (float)alive / (float)std::max<size_t>(1, g_settleRaiders.size());
+        SettleResolveRaidAway(s, s.settleRaidStrength * frac, s.settleRaidFaction);
+        g_settleRaiders.clear();
+    }
+}
+
+// --- Settlers on the ground ---
+static Vector2 SettleWorkSpot(const GameState& s, int kind, int n) {
+    float yaw; Vector2 p = SettleSlotPos(s, kind, &yaw), c = SettleCenter(s);
+    Vector2 in = { c.x - p.x, c.y - p.y };
+    float l = std::max(1.0f, hypotf(in.x, in.y)); in = { in.x / l, in.y / l };
+    Vector2 side = { -in.y, in.x };
+    float off = (float)(n % 3 - 1) * 26.0f;
+    return { p.x + in.x * (SettleBodyR(kind) + 22.0f) + side.x * off, p.y + in.y * (SettleBodyR(kind) + 22.0f) + side.y * off };
+}
+static Vector2 SettleGuardPost(const GameState& s, int n) {
+    Vector2 c = SettleCenter(s);
+    float g = SettleGateAngle(s.housePlotIdx), R = SettleWallR(SettleCells(s)) - 34.0f;
+    float a = g + ((n % 2) ? 1.0f : -1.0f) * (0.2f + 0.07f * (float)(n / 2));
+    return { c.x + cosf(a) * R, c.y + sinf(a) * R };
+}
+static Vector2 SettleIdleSpot(const GameState& s, int i) {
+    Vector2 c = SettleCenter(s);
+    float in = SettleCells(s) * kHouseCellSize * 0.75f + 16.0f, out = SettleRingR(SettleCells(s)) - 58.0f;
+    float a = RandUnit() * 6.2831853f, r = in + RandUnit() * std::max(10.0f, out - in);
+    (void)i;
+    return { c.x + cosf(a) * r, c.y + sinf(a) * r };
+}
+static void SettlersLiveUpdate(GameState& s, float dt) {
+    bool near = SettleActive(s) && s.screen == Screen::Wilderness && Dist(s.wildernessPlayerPos, SettleCenter(s)) < 1600.0f;
+    if (!near) { for (auto& L : g_settlerLive) L.init = false; return; }
+    Vector2 c = SettleCenter(s);
+    float half = SettleCells(s) * kHouseCellSize * 0.5f + 14.0f;
+    std::vector<const GameState::ActiveMonster*> foes; // raiders inside (or at) the walls
+    if (s.settleRaidLive) {
+        float lim = SettleWallR(SettleCells(s)) + 320.0f;
+        if (s.wildEngaged.has_value() && Dist(s.wildEngaged->pos, c) < lim) foes.push_back(&*s.wildEngaged);
+        for (const auto& ex : s.wildExtraAttackers) if (SettleIsRaider(ex.spotIdx) && Dist(ex.pos, c) < lim) foes.push_back(&ex);
+    }
+    int guardN = 0;
+    std::array<int, kSbCount> jobN{};
+    for (size_t i = 0; i < s.settlers.size() && i < (size_t)kSettlerDrawMax; i++) {
+        const Settler& st = s.settlers[i];
+        SettlerLive& L = g_settlerLive[i];
+        if (!L.init) {
+            L = SettlerLive{};
+            L.init = true;
+            L.pos = st.job == kSettlerGuard ? SettleGuardPost(s, guardN) : (st.job >= 0 ? SettleWorkSpot(s, st.job, jobN[(size_t)st.job]) : SettleIdleSpot(s, (int)i));
+            L.target = L.pos; L.wait = RandUnit() * 4.0f;
+        }
+        float speed = 55.0f;
+        if (L.atkT >= 0.0f && (L.atkT += dt) > 0.5f) L.atkT = -1.0f;
+        const GameState::ActiveMonster* foe = foes.empty() ? nullptr : foes[(size_t)guardN % foes.size()];
+        if (st.job == kSettlerGuard) {
+            Vector2 post = SettleGuardPost(s, guardN++);
+            if (foe) {
+                float a = (float)i * 1.7f;
+                L.target = { foe->pos.x + cosf(a) * 30.0f, foe->pos.y + sinf(a) * 30.0f };
+                speed = 170.0f;
+                if (Dist(L.pos, foe->pos) < 48.0f && L.atkT < 0.0f && RandUnit() < dt * 1.2f) L.atkT = 0.0f;
+            } else L.target = post;
+        } else if (L.wait > 0.0f) {
+            L.wait -= dt;
+        } else if (Dist(L.pos, L.target) < 6.0f) {
+            L.phase = (L.phase + 1) % 2;
+            if (st.job >= 0 && st.job < kSbCount) { // work at the building, then carry to the Hall
+                L.target = L.phase == 1 ? SettleWorkSpot(s, st.job, jobN[(size_t)st.job]) : SettleWorkSpot(s, kSbHall, (int)i);
+                L.wait = L.phase == 0 ? 8.0f + RandUnit() * 8.0f : 1.5f + RandUnit() * 2.0f;
+            } else {
+                L.target = SettleIdleSpot(s, (int)i);
+                L.wait = 2.0f + RandUnit() * 6.0f;
+            }
+        }
+        if (st.job >= 0 && st.job < kSbCount) jobN[(size_t)st.job]++;
+        Vector2 d = { L.target.x - L.pos.x, L.target.y - L.pos.y };
+        float len = hypotf(d.x, d.y);
+        if (len > 2.0f && (L.wait <= 0.0f || st.job == kSettlerGuard)) {
+            float step = std::min(len, speed * dt);
+            Vector2 np = { L.pos.x + d.x / len * step, L.pos.y + d.y / len * step };
+            // walk round the house, not through it
+            if (fabsf(np.x - c.x) < half && fabsf(np.y - c.y) < half) {
+                Vector2 o = { np.x - c.x, np.y - c.y };
+                float ol = std::max(1.0f, hypotf(o.x, o.y));
+                np = { np.x + (-o.y / ol) * step * 1.5f, np.y + (o.x / ol) * step * 1.5f };
+                if (fabsf(np.x - c.x) < half && fabsf(np.y - c.y) < half) np = { c.x + o.x / ol * half * 1.42f, c.y + o.y / ol * half * 1.42f };
+            }
+            L.yaw = atan2f(np.y - L.pos.y, np.x - L.pos.x);
+            L.pos = np;
+        } else if (foe && st.job == kSettlerGuard) {
+            L.yaw = atan2f(foe->pos.y - L.pos.y, foe->pos.x - L.pos.x);
+        }
+    }
+}
+static void BeginWildExtraDeath(GameState& s, const GameState::ActiveMonster& ex); // (with the death handling below)
+// The guards' blows: every 1.1s each guard next to a raider lands one.
+static void SettleMilitiaTick(GameState& s, float dt) {
+    if (!s.settleRaidLive || (s.settleMilitiaCd -= dt) > 0.0f) return;
+    s.settleMilitiaCd = 1.1f;
+    auto near = [&](Vector2 p) {
+        int n = 0;
+        for (size_t i = 0; i < s.settlers.size() && i < (size_t)kSettlerDrawMax; i++)
+            if (s.settlers[i].job == kSettlerGuard && g_settlerLive[i].init && Dist(g_settlerLive[i].pos, p) < 62.0f) n++;
+        return n;
+    };
+    float per = 2.5f + 0.8f * SettleEff(s, kSbBarracks);
+    auto hit = [&](GameState::ActiveMonster& am) {
+        int n = near(am.pos);
+        if (n == 0) return false;
+        float dmg = n * per * (0.8f + RandUnit() * 0.4f);
+        am.hp -= dmg; am.monsterHurtT = 0.0f;
+        SpawnFloatText(s, 0, am.pos, std::to_string((int)std::round(dmg)), Color{ 120, 200, 255, 255 });
+        return am.hp <= 0.0f;
+    };
+    for (size_t i = s.wildExtraAttackers.size(); i-- > 0;) { // pack members first (erasing from the back)
+        GameState::ActiveMonster& ex = s.wildExtraAttackers[i];
+        if (!SettleIsRaider(ex.spotIdx) || !hit(ex)) continue;
+        BeginWildExtraDeath(s, ex);
+        s.wildExtraAttackers.erase(s.wildExtraAttackers.begin() + (long)i);
+    }
+    if (s.wildEngaged.has_value() && SettleIsRaider(s.wildEngaged->spotIdx) && hit(*s.wildEngaged)) {
+        const WildernessMonsterSpot& sp = kWildernessMonsterSpots[(size_t)s.wildEngaged->spotIdx];
+        BeginWildMonsterDeath(s, *s.wildEngaged, sp.name, sp.baseGold, sp.baseLeather);
+    }
+}
+
+// Real-time upkeep of the whole settlement; runs on every screen.
+static void SettleTick(GameState& s, float dt) {
+    if (s.settleUpgrading >= 0 && (s.settleUpgradeT -= dt) <= 0.0f) SettleFinishUpgrade(s);
+    if (!SettleActive(s)) return;
+    SettleProduce(s, dt / 3600.0f);
+    if (SettleHall(s) >= 3 && (s.settleArrivalT -= dt) <= 0.0f) {
+        s.settleArrivalT = 1800.0f;
+        SettleGainSettler(s, "wanders in off the road");
+    }
+    if (float ch = SettleEff(s, kSbChapel); ch > 0.0f && !s.wildEngaged.has_value() && !s.playerIsGhost && s.hp < s.maxHp) {
+        s.settleHpAcc += 0.05f * ch * dt;
+        if (s.settleHpAcc >= 1.0f) { int n = (int)s.settleHpAcc; s.hp = std::min(s.maxHp, s.hp + n); s.settleHpAcc -= (float)n; }
+    }
+    bool young = s.youngT > 0.0f || s.starterStep >= 0;
+    if (!young && !s.settleRaidLive && (s.settleRaidT -= dt) <= 0.0f) {
+        bool war = s.guildWarOn[kGuildWarOrcs] || s.guildWarOn[kGuildWarMurderInc];
+        s.settleRaidT = 3600.0f * (1.0f + RandUnit()) * (war ? 0.4f : 1.0f);
+        SettleStartRaid(s);
+    }
+    SettlersLiveUpdate(s, dt);
+    SettleMilitiaTick(s, dt);
+    SettleRaidBookkeeping(s);
+}
+// Time away: production, the build queue, newcomers and at most one raid catch up (24h cap).
+static void SettleCatchUp(GameState& s) {
+    if (s.settleEpoch <= 0) return;
+    float el = (float)std::clamp((long long)std::time(nullptr) - s.settleEpoch, 0LL, 86400LL);
+    s.settleEpoch = 0;
+    if (el < 10.0f) return;
+    if (s.settleUpgrading >= 0 && (s.settleUpgradeT -= el) <= 0.0f) SettleFinishUpgrade(s);
+    if (!SettleActive(s)) return;
+    SettleProduce(s, el / 3600.0f);
+    if (SettleHall(s) >= 3) {
+        s.settleArrivalT -= el;
+        for (int n = 0; s.settleArrivalT <= 0.0f && n < 3; n++) { s.settleArrivalT += 1800.0f; SettleGainSettler(s, "arrived while you were away"); }
+        if (s.settleArrivalT <= 0.0f) s.settleArrivalT = 1800.0f;
+    }
+    if (s.youngT <= 0.0f && s.starterStep < 0 && (s.settleRaidT -= el) <= 0.0f) {
+        s.settleRaidT = 3600.0f * (1.0f + RandUnit());
+        bool wo = s.guildWarOn[kGuildWarOrcs], wm = s.guildWarOn[kGuildWarMurderInc];
+        int faction = (wo && !wm) ? 0 : ((wm && !wo) ? 1 : GetRandomValue(0, 1));
+        SettleResolveRaidAway(s, SettleRaidStrength(s) * (0.8f + 0.4f * RandUnit()), faction);
+    }
+    int h = (int)(el / 3600.0f), m = ((int)el % 3600) / 60;
+    s.logLine = "Welcome back - your settlement worked " + (h > 0 ? std::to_string(h) + "h " : std::string()) +
+                std::to_string(m) + "m while you were away.";
+}
+// --- The settlement in 3D ---
+static void SettleOBox(T3CMeshBuilder& b, float cx, float cy, float cz, float sx, float sy, float sz, float yaw, Color col) {
+    size_t n0 = b.pos.size();
+    T3CBox(b, 0.0f, cy, 0.0f, sx, sy, sz, col);
+    float cs = cosf(yaw), sn = sinf(yaw);
+    for (size_t i = n0; i < b.pos.size(); i += 3) {
+        float x = b.pos[i], z = b.pos[i + 2];
+        b.pos[i] = cx + x * cs - z * sn; b.pos[i + 2] = cz + x * sn + z * cs;
+        float nx = b.nor[i], nz = b.nor[i + 2];
+        b.nor[i] = nx * cs - nz * sn; b.nor[i + 2] = nx * sn + nz * cs;
+    }
+}
+struct SettleWallModel { int key = -1; Model m{}; };
+static SettleWallModel g_settleWall[3]; // one per tier, rebuilt if the plot changes
+static int SettleWallTier(int lv) { return lv <= 0 ? 0 : (lv <= 3 ? 1 : (lv <= 7 ? 2 : 3)); }
+static const Model& SettleWallBuild(const GameState& s, int tier) {
+    SettleWallModel& W = g_settleWall[std::clamp(tier, 1, 3) - 1];
+    int key = s.housePlotIdx;
+    if (W.key == key) return W.m;
+    W.key = key;
+    T3CMeshBuilder b;
+    const float R = SettleWallR(SettleCells(s)), g = SettleGateAngle(s.housePlotIdx), gap = 0.17f;
+    const Color log = { 112, 80, 52, 255 }, logDk = { 86, 62, 42, 255 }, tip = { 150, 120, 86, 255 };
+    const Color stone = { 150, 144, 132, 255 }, stoneDk = { 118, 112, 102, 255 }, roof = { 120, 60, 44, 255 };
+    auto rel = [&](float a) { return fabsf(atan2f(sinf(a - g), cosf(a - g))); };
+    if (tier == 1) {
+        int n = (int)(6.2832f * R / 9.0f);
+        for (int i = 0; i < n; i++) {
+            float a = g + 6.2832f * i / n;
+            if (rel(a) < gap) continue;
+            float h = 46.0f + Town3DHash01((float)i, 7.0f) * 12.0f, x = cosf(a) * R, z = sinf(a) * R;
+            T3CCylinder(b, x, 0.0f, z, h, 4.6f, 4.2f, 6, (i % 3) ? log : logDk, false, false);
+            T3CCylinder(b, x, h, z, h + 9.0f, 4.2f, 0.3f, 6, tip, false, false);
+        }
+        for (int ring = 0; ring < 2; ring++) {
+            float y = 16.0f + ring * 20.0f;
+            for (int i = 0; i < n; i++) {
+                float a0 = g + 6.2832f * i / n, a1 = g + 6.2832f * (i + 1) / n;
+                if (rel(a0) < gap || rel(a1) < gap) continue;
+                float r = R + 4.5f;
+                float p0[3] = { cosf(a0) * r, y, sinf(a0) * r }, p1[3] = { cosf(a1) * r, y, sinf(a1) * r };
+                float p2[3] = { p1[0], y + 2.5f, p1[2] }, p3[3] = { p0[0], y + 2.5f, p0[2] };
+                T3CQuad(b, p0, p1, p2, p3, logDk);
+            }
+        }
+    } else {
+        int n = (int)(6.2832f * R / 34.0f);
+        float seg = 6.2832f * R / n;
+        for (int i = 0; i < n; i++) {
+            float a = g + 6.2832f * (i + 0.5f) / n;
+            if (rel(a) < gap + 0.02f) continue;
+            float x = cosf(a) * R, z = sinf(a) * R, yaw = a + 1.5707963f;
+            SettleOBox(b, x, 29.0f, z, seg + 2.0f, 58.0f, 16.0f, yaw, (i % 2) ? stone : ColorBrightness(stone, -0.05f));
+            SettleOBox(b, cosf(a) * (R + 6.0f), 64.0f, sinf(a) * (R + 6.0f), seg * 0.45f, 12.0f, 5.0f, yaw, stoneDk); // merlons
+            SettleOBox(b, x, 3.0f, z, seg + 3.0f, 6.0f, 20.0f, yaw, stoneDk);                                           // plinth
+        }
+        int towers = tier == 3 ? 7 : 0;
+        for (int t = 1; t <= towers; t++) {
+            float a = g + 6.2832f * t / (towers + 1);
+            float x = cosf(a) * R, z = sinf(a) * R;
+            T3CCylinder(b, x, 0.0f, z, 96.0f, 22.0f, 20.0f, 12, stone);
+            T3CCylinder(b, x, 96.0f, z, 102.0f, 24.0f, 24.0f, 12, stoneDk);
+            T3CCylinder(b, x, 102.0f, z, 138.0f, 25.0f, 0.5f, 12, roof, false, false);
+        }
+    }
+    // the gateway: two towers and a beam over the lane
+    for (int side = -1; side <= 1; side += 2) {
+        float a = g + side * (gap + 0.035f);
+        float x = cosf(a) * R, z = sinf(a) * R;
+        if (tier == 1) {
+            for (int px = -1; px <= 1; px += 2)
+                for (int pz = -1; pz <= 1; pz += 2) T3CBox(b, x + px * 9.0f, 42.0f, z + pz * 9.0f, 4.5f, 84.0f, 4.5f, logDk);
+            T3CBox(b, x, 66.0f, z, 24.0f, 3.0f, 24.0f, log);
+            float r0[3] = { x - 14, 84, z - 14 }, r1[3] = { x + 14, 84, z - 14 }, r2[3] = { x + 14, 84, z + 14 }, r3[3] = { x - 14, 84, z + 14 };
+            float apex[3] = { x, 100, z };
+            T3CPushTri(b, r0, r1, apex, roof); T3CPushTri(b, r1, r2, apex, ColorBrightness(roof, -0.1f));
+            T3CPushTri(b, r2, r3, apex, roof); T3CPushTri(b, r3, r0, apex, ColorBrightness(roof, -0.1f));
+        } else {
+            SettleOBox(b, x, 50.0f, z, 34.0f, 100.0f, 34.0f, a, stone);
+            SettleOBox(b, x, 104.0f, z, 40.0f, 8.0f, 40.0f, a, stoneDk);
+            T3CCylinder(b, x, 108.0f, z, 140.0f, 26.0f, 0.5f, 4, roof, false, false);
+        }
+    }
+    {
+        float a0 = g - gap, a1 = g + gap, y = tier == 1 ? 72.0f : 86.0f;
+        float p0[3] = { cosf(a0) * R, y, sinf(a0) * R }, p1[3] = { cosf(a1) * R, y, sinf(a1) * R };
+        float mx = (p0[0] + p1[0]) * 0.5f, mz = (p0[2] + p1[2]) * 0.5f, len = hypotf(p1[0] - p0[0], p1[2] - p0[2]);
+        SettleOBox(b, mx, y, mz, len, tier == 1 ? 8.0f : 16.0f, tier == 1 ? 8.0f : 18.0f, g + 1.5707963f, tier == 1 ? log : stone);
+    }
+    W.m = T3CFinish(b);
+    Town3DApplyLitShader(W.m);
+    return W.m;
+}
+static Color SettleClothes(int i) {
+    static const Color c[8] = { { 120, 84, 60, 255 }, { 70, 96, 70, 255 }, { 140, 120, 90, 255 }, { 90, 90, 120, 255 },
+                                { 150, 70, 60, 255 }, { 110, 110, 100, 255 }, { 160, 140, 100, 255 }, { 80, 70, 90, 255 } };
+    return c[i & 7];
+}
+static void SettleDrawBuilding(const GameState& s, int k, bool shadowPass) {
+    Town3DModels& M = g_t3dModels;
+    const SettleBuilding& B = s.settle[(size_t)k];
+    bool going = s.settleUpgrading == k;
+    if (B.level <= 0 && !going) return;
+    float yaw; Vector2 p = SettleSlotPos(s, k, &yaw);
+    T3DLiftScope lift_(p.x, p.y);
+    rlPushMatrix();
+    rlTranslatef(p.x, 0.0f, p.y);
+    rlRotatef(yaw, 0, 1, 0);
+    Wild3DBuildDressing();
+    const Wild3DDressing& D = g_wild3dDress;
+    auto prop = [&](int id, float x, float z, float rot, float sc = 1.0f, Color tint = WHITE) {
+        if (D.ok[id]) DrawModelEx(D.models[id], { x, 0.0f, z }, { 0, 1, 0 }, rot, { kWPScaleProp * sc, kWPScaleProp * sc, kWPScaleProp * sc }, tint);
+    };
+    auto piece = [&](const Model& m, float x, float y, float z, float rot) {
+        if (m.meshCount > 0) DrawModelEx(m, { x, y, z }, { 0, 1, 0 }, rot, { kT3DModScale, kT3DModScale, kT3DModScale }, WHITE);
+    };
+    if (B.level > 0) {
+        bool brick = k == kSbForge || k == kSbMine || k == kSbBarracks || k == kSbChapel || k == kSbStore;
+        const Model& w = brick ? M.wallBrick : M.wallPlaster;
+        const Model& wd = brick ? M.wallBrickDoor : M.wallPlasterDoor;
+        const Model& ww = brick ? M.wallBrickWin : M.wallPlasterWin;
+        Color wallT = Town3DTintFor(kSettleDefs[k].name, false), roofT = Town3DTintFor(kSettleDefs[k].name, true);
+        if (B.damaged) { wallT = { 128, 116, 104, 255 }; roofT = { 90, 80, 74, 255 }; }
+        int stories = B.level >= 6 ? 2 : 1;
+        if (k == kSbHall) {
+            Town3DDrawHouse(0, 0, w, wd, ww, M.roof46, 90.0f, 3, 2, B.level >= 5 ? 3 : 2, true, wallT, roofT);
+            prop(kWPFlagBlue, -80.0f, 30.0f, 0.0f, 1.2f); prop(kWPFlagBlue, 80.0f, 30.0f, 0.0f, 1.2f);
+        } else if (k == kSbYard) { // an open training ground: fence, dummies, racks
+            for (int i = -2; i <= 2; i++) { piece(M.fenceSingle, i * 20.0f, 0, -46.0f, 0.0f); piece(M.fenceSingle, -46.0f, 0, i * 20.0f, 90.0f); piece(M.fenceSingle, 46.0f, 0, i * 20.0f, 90.0f); }
+            for (int i = 0; i < 3; i++) {
+                float x = -30.0f + i * 30.0f, z = -8.0f + (i % 2) * 16.0f;
+                DrawCube({ x, 22, z }, 4, 44, 4, Color{ 86, 62, 42, 255 });
+                DrawCube({ x, 34, z }, 26, 3.5f, 3.5f, Color{ 86, 62, 42, 255 });
+                DrawCylinder({ x, 18, z }, 7, 6, 18, 8, Color{ 196, 170, 100, 255 });
+                DrawSphere({ x, 43, z }, 6.0f, Color{ 180, 160, 120, 255 });
+            }
+            prop(kWPWeaponRack, -30.0f, -30.0f, 0.0f); prop(kWPWeaponRack, 30.0f, -30.0f, 0.0f);
+            if (B.level >= 4) prop(kWPTent, 0.0f, -70.0f, 180.0f, 0.9f);
+        } else if (k == kSbStable) {
+            Town3DDrawHouse(0, 0, w, wd, ww, M.roof46, 90.0f, 3, 2, 1, false, wallT, roofT);
+            piece(M.wagon, 80.0f, 0, 30.0f, 90.0f);
+        } else {
+            Town3DDrawHouse(0, 0, w, wd, ww, M.roof44, 0.0f, 2, 2, k == kSbLibrary ? std::max(2, stories) : stories,
+                            k == kSbForge || k == kSbTannery, wallT, roofT);
+        }
+        switch (k) {
+            case kSbLumber:
+                prop(kWPLumber, 66.0f, 10.0f, 90.0f); prop(kWPLumber, -66.0f, -10.0f, 90.0f); prop(kWPWheelbarrow, 40.0f, 60.0f, 30.0f);
+                DrawCylinder({ -30, 0, 62 }, 9, 9, 10, 10, Color{ 120, 88, 58, 255 }); // chopping block
+                break;
+            case kSbMine:
+                prop(kWPStonePile, 68.0f, 0.0f, 0.0f); prop(kWPStonePile, -66.0f, 24.0f, 60.0f); prop(kWPBucket, 36.0f, 60.0f, 0.0f);
+                DrawCube({ -30, 5, 64 }, 22, 10, 22, Color{ 120, 118, 116, 255 });
+                break;
+            case kSbTannery:
+                for (int sx = -1; sx <= 1; sx += 2) { // drying frames with hides
+                    DrawCube({ sx * 66.0f, 20, -16 }, 3, 40, 3, Color{ 86, 62, 42, 255 }); DrawCube({ sx * 66.0f, 20, 16 }, 3, 40, 3, Color{ 86, 62, 42, 255 });
+                    DrawCube({ sx * 66.0f, 38, 0 }, 3, 3, 36, Color{ 86, 62, 42, 255 });
+                    DrawCube({ sx * 66.0f, 26, 0 }, 1.5f, 22, 26, Color{ 150, 106, 70, 255 });
+                }
+                break;
+            case kSbHerbs:
+                for (int i = 0; i < 3; i++) {
+                    float x = -34.0f + i * 34.0f;
+                    DrawCube({ x, 3, 68 }, 26, 6, 30, Color{ 86, 64, 44, 255 });
+                    for (int j = 0; j < 3; j++) DrawSphere({ x - 8 + j * 8, 9, 62.0f + (j % 2) * 10 }, 5.0f, Color{ (unsigned char)(70 + j * 20), 140, 70, 255 });
+                }
+                break;
+            case kSbFishery:
+                piece(M.barrel, 62.0f, 0, 20.0f, 0.0f); piece(M.barrel, 62.0f, 0, -8.0f, 40.0f); piece(M.barrel, -62.0f, 0, 10.0f, 10.0f);
+                DrawCube({ -40, 22, 62 }, 50, 3, 3, Color{ 86, 62, 42, 255 });
+                for (int j = 0; j < 4; j++) DrawCube({ -58.0f + j * 12.0f, 14, 62 }, 3, 12, 6, Color{ 150, 160, 170, 255 });
+                break;
+            case kSbForge:
+                DrawCube({ 30, 8, 62 }, 18, 16, 10, Color{ 60, 60, 66, 255 });  // anvil
+                DrawCube({ 30, 18, 62 }, 24, 5, 12, Color{ 74, 74, 80, 255 });
+                DrawCube({ -30, 10, 62 }, 26, 20, 22, Color{ 110, 100, 92, 255 }); // hearth
+                break;
+            case kSbChapel:
+                DrawCube({ -60, 60, -10 }, 24, 120, 24, Color{ 170, 160, 146, 255 });
+                DrawCylinderEx({ -60, 120, -10 }, { -60, 156, -10 }, 18, 0, 4, Color{ 110, 70, 60, 255 });
+                DrawCube({ -60, 104, 2.5f }, 8, 12, 1, Color{ 200, 170, 80, 255 });
+                break;
+            case kSbStore:
+                piece(M.crate, 62.0f, 0, 10.0f, 15.0f); piece(M.crate, 62.0f, 1.06f * kT3DModScale, 10.0f, 40.0f);
+                prop(kWPCrateBig, -64.0f, 0.0f, 20.0f); prop(kWPSack, -58.0f, 40.0f, 0.0f);
+                break;
+            case kSbBarracks:
+                prop(kWPFlagRed, -56.0f, 44.0f, 0.0f); prop(kWPFlagRed, 56.0f, 44.0f, 0.0f); prop(kWPWeaponRack, 62.0f, 0.0f, 90.0f);
+                if (B.level >= 3) prop(kWPTent, -70.0f, -20.0f, 90.0f, 0.8f);
+                break;
+            default: break;
+        }
+    }
+    if (going) { // scaffolding and a stack of materials while the work goes on
+        const Color sc = { 150, 118, 80, 255 };
+        float hx = k == kSbHall ? 72.0f : 50.0f, hz = 50.0f, h = B.level > 0 ? 90.0f : 50.0f;
+        for (int px = -1; px <= 1; px += 2)
+            for (int pz = -1; pz <= 1; pz += 2) DrawCube({ px * hx, h / 2, pz * hz }, 4, h, 4, sc);
+        for (int lv = 1; lv <= 2; lv++) {
+            DrawCube({ 0, h * lv / 2.2f, hz }, hx * 2, 3, 6, sc); DrawCube({ 0, h * lv / 2.2f, -hz }, hx * 2, 3, 6, sc);
+            DrawCube({ hx, h * lv / 2.2f, 0 }, 6, 3, hz * 2, sc); DrawCube({ -hx, h * lv / 2.2f, 0 }, 6, 3, hz * 2, sc);
+        }
+        if (B.level <= 0) DrawCube({ 0, 2, 0 }, hx * 1.8f, 4, hz * 1.8f, Color{ 160, 150, 130, 255 }); // footings
+        prop(kWPLumber, hx + 24.0f, hz + 10.0f, 0.0f); prop(kWPStonePile, -hx - 20.0f, hz + 10.0f, 0.0f);
+    }
+    rlPopMatrix();
+    if (!shadowPass && B.damaged) { // smoke from the burned roof
+        float t = (float)GetTime(), gy = GroundY(p.x, p.y);
+        BeginBlendMode(BLEND_ALPHA);
+        rlSetTexture(GlowTex().id);
+        rlBegin(RL_QUADS);
+        for (int i = 0; i < 6; i++) {
+            float ph = fmodf(t * 0.2f + i / 6.0f, 1.0f);
+            Vector3 q = { p.x + ph * 26.0f + sinf(t + i) * 4.0f, gy + 80.0f + ph * 110.0f, p.y + ph * 10.0f };
+            float r = 10.0f + ph * 24.0f;
+            unsigned char al = (unsigned char)(110 * (1.0f - ph) * std::min(1.0f, ph * 8.0f));
+            rlColor4ub(70, 66, 64, al);
+            rlTexCoord2f(0, 0); rlVertex3f(q.x - r, q.y - r, q.z); rlTexCoord2f(1, 0); rlVertex3f(q.x + r, q.y - r, q.z);
+            rlTexCoord2f(1, 1); rlVertex3f(q.x + r, q.y + r, q.z); rlTexCoord2f(0, 1); rlVertex3f(q.x - r, q.y + r, q.z);
+        }
+        rlEnd();
+        rlSetTexture(0);
+        EndBlendMode();
+    }
+}
+static void Wild3DDrawSettlement(GameState& s, bool shadowPass, const Town3DCam* cull) {
+    if (!SettleOwned(s)) return;
+    Vector2 c = SettleCenter(s);
+    float wallR = SettleWallR(SettleCells(s));
+    if (cull && !Wild3DInView(*cull, c.x, c.y, wallR + 60.0f)) return;
+    for (int k = 0; k < kSbCount; k++) {
+        if (k == kSbWalls) continue;
+        Vector2 p = SettleSlotPos(s, k);
+        if (cull && !Wild3DInView(*cull, p.x, p.y, 110.0f)) continue;
+        SettleDrawBuilding(s, k, shadowPass);
+    }
+    if (int tier = SettleWallTier(SettleLv(s, kSbWalls)); tier > 0) {
+        const Model& m = SettleWallBuild(s, tier);
+        DrawModel(m, { c.x, GroundY(c.x, c.y), c.y }, 1.0f, s.settle[kSbWalls].damaged ? Color{ 150, 140, 130, 255 } : WHITE);
+    }
+    if (shadowPass) return;
+    static const Color skins[4] = { { 220, 180, 142, 255 }, { 176, 128, 92, 255 }, { 236, 200, 168, 255 }, { 140, 100, 72, 255 } };
+    static const Color hairs[4] = { { 60, 40, 28, 255 }, { 150, 110, 60, 255 }, { 30, 26, 24, 255 }, { 190, 180, 170, 255 } };
+    for (size_t i = 0; i < s.settlers.size() && i < (size_t)kSettlerDrawMax; i++) {
+        const Settler& st = s.settlers[i];
+        const SettlerLive& L = g_settlerLive[i];
+        if (!L.init) continue;
+        if (cull && !Wild3DInView(*cull, L.pos.x, L.pos.y, 40.0f)) continue;
+        HumanOutfit o = HumanOutfitPlain(skins[i % 4], SettleClothes((int)i * 3 + 1), SettleClothes((int)i + 5), Color{ 64, 44, 30, 255 }, hairs[(i / 2) % 4]);
+        o.cloak = false; o.hairStyle = (int)(i % 3); o.beard = i % 4 == 1;
+        HumanPose hp;
+        T3CAnim a = T3CMakeAnim(240 + (int)i, L.pos.x, L.pos.y, true);
+        hp.move = a.move;
+        float yaw = L.yaw;
+        if (st.job == kSettlerGuard) {
+            HumanGive(o, kHwSword, kHsOneHand); o.shield = true; o.helm = kHhChain;
+            o.region[kHrSleeve] = o.region[kHrForearm] = Color{ 150, 154, 162, 255 };
+            o.cloak = true; o.cloakCol = Color{ 60, 80, 130, 255 };
+            hp.engaged = s.settleRaidLive;
+            if (L.atkT >= 0.0f) hp.attackT = std::clamp(L.atkT / 0.5f, 0.0f, 1.0f);
+            if (!s.settleRaidLive && hp.move < 0.05f) { Vector2 c2 = SettleCenter(s); yaw = atan2f(L.pos.y - c2.y, L.pos.x - c2.x); } // eyes on the road
+        } else if (st.job >= 0 && L.phase == 0 && L.wait > 0.0f && hp.move < 0.05f) {
+            Vector2 b = SettleSlotPos(s, st.job);
+            yaw = atan2f(b.y - L.pos.y, b.x - L.pos.x);
+            if (st.job == kSbLumber) { hp.gather = 1; hp.gatherAt = b; hp.gatherAtValid = true; }
+            else if (st.job == kSbMine) { hp.gather = 2; hp.gatherAt = b; hp.gatherAtValid = true; }
+        }
+        DrawHuman(240 + (int)i, L.pos.x, L.pos.y, yaw, 0.95f, WHITE, o, hp, false);
+    }
+}
+
 static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& am,
                                   const std::string& name, int baseGold, int baseLeather,
                                   bool clearEngagement) {
@@ -27633,7 +28413,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // No movement during the death animation - the body isn't going anywhere.
     const Vector2 wildPrevPos = s.wildernessPlayerPos; // for the terrain check below (2026-09-26)
     if (s.playerDeathAnimT <= 0.0f) {
-        bool moved = UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GameDt(), kWildernessWorldSize);
+        bool moved = UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GameDt() * SettleTravelMult(s), kWildernessWorldSize); // Stable (2026-09-27)
         // UO-style attack flagging (2026-09-24): when the player isn't driving,
         // steer toward the flagged target until contact auto-engages. Manual
         // input always wins - steering only fills the idle gap.
@@ -27719,6 +28499,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     }
     RivalCampResolve(s, s.wildernessPlayerPos, kPlayerRadius); // the war camp's palisade (in through the gate)
     OrcFortResolve(s.wildernessPlayerPos, kPlayerRadius);     // Grimtusk Hold's walls
+    SettleResolve(s, s.wildernessPlayerPos, kPlayerRadius);    // your settlement's buildings and palisade (2026-09-27)
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessReturnGatePos, kNodeRadius);
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown2GatePos, kNodeRadius);
     ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown3GatePos, kNodeRadius); // Phase 3
@@ -30619,6 +31400,192 @@ static void UpdateTextInput(std::string& text, size_t maxLen) {
 // ---- The Guildstone (2026-09-27) ----
 // Found a guild (house owners only), hire guildmates, pick the tabard color,
 // declare or end wars with Murder Inc. and Grimtusk Hold.
+// ---- Settlement gump (House screen, 2026-09-27) ----
+static bool g_settleOpen = false;
+static int g_settleTab = 0;
+static float g_settleScroll = 0.0f;
+static std::string SettleClock(float secs) {
+    int t = std::max(0, (int)secs);
+    if (t >= 3600) return TextFormat("%dh %02dm", t / 3600, (t % 3600) / 60);
+    return TextFormat("%d:%02d", t / 60, t % 60);
+}
+static std::string SettleJobName(int job) {
+    if (job == kSettlerGuard) return "Guard";
+    if (job >= 0 && job < kSbCount) return kSettleDefs[job].name;
+    return "Idle";
+}
+// Next job in the cycle Idle -> each built producer with room -> Guard (if a post is free) -> Idle.
+static int SettleNextJob(const GameState& s, int cur) {
+    std::vector<int> jobs = { -1 };
+    for (int k = 0; k < kSbCount; k++)
+        if (kSettleDefs[k].res && SettleLv(s, k) > 0 && (SettleCountJob(s, k) < SettleMaxWorkers(s, k) || cur == k)) jobs.push_back(k);
+    if (SettleGuardPosts(s) > 0 && (SettleCountJob(s, kSettlerGuard) < SettleGuardPosts(s) || cur == kSettlerGuard)) jobs.push_back(kSettlerGuard);
+    for (size_t i = 0; i < jobs.size(); i++) if (jobs[i] == cur) return jobs[(i + 1) % jobs.size()];
+    return -1;
+}
+static void DrawSettlement(GameState& s, int screenW, int screenH) {
+    Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
+    UODrawGump(G, kUoParchment);
+    UODrawTitle(G, "Your Settlement", 15);
+    const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 }, good = { 40, 110, 40, 255 }, bad = { 150, 40, 30, 255 };
+    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_settleOpen = false; return; }
+    float x = G.x + 18, y = G.y + 22, w = G.width - 36;
+    if (!SettleOwned(s)) {
+        DrawUIText("Buy a house plot in the wilds first - your settlement grows around it.", (int)x, (int)y + 10, 13, ink);
+        return;
+    }
+    int hall = SettleHall(s);
+    // header: people, defense, queue, next raid
+    DrawUIText(TextFormat("Great Hall %d   Settlers %d/%d   Gold %d   Wood %d   Ore %d", hall, (int)s.settlers.size(), SettleHousing(s), s.gold, s.wood, s.ore),
+               (int)x, (int)y, 12, ink);
+    y += 18;
+    if (s.settleUpgrading >= 0)
+        DrawUIText(TextFormat("Builders: %s to level %d - %s left", kSettleDefs[s.settleUpgrading].name, SettleLv(s, s.settleUpgrading) + 1,
+                              SettleClock(s.settleUpgradeT).c_str()), (int)x, (int)y, 12, soft);
+    else DrawUIText(hall > 0 ? "Builders: free - pick something to raise." : "Raise the Great Hall to found your settlement.", (int)x, (int)y, 12, soft);
+    y += 18;
+    bool young = s.youngT > 0.0f || s.starterStep >= 0;
+    float def = SettleDefense(s), str = SettleRaidStrength(s);
+    std::string raidLine = hall <= 0 ? "No one will raid an empty field." :
+        young ? "Raiders leave the Young alone - for now." :
+        s.settleRaidLive ? "RAID IN PROGRESS at your gate!" :
+        TextFormat("Next raid in ~%s.  Defense %d vs raiders ~%d", SettleClock(s.settleRaidT).c_str(), (int)def, (int)str);
+    DrawUIText(raidLine.c_str(), (int)x, (int)y, 12, (!young && hall > 0 && def < str) ? bad : good);
+    y += 22;
+    // tabs
+    const char* tabs[3] = { "Buildings", "Settlers", "Raids" };
+    for (int t = 0; t < 3; t++) {
+        Rectangle tb = { x + t * (w / 3.0f), y, w / 3.0f - 6, 28 };
+        if (Button(tb, tabs[t], true)) { g_settleTab = t; g_settleScroll = 0.0f; }
+        if (g_settleTab == t) DrawRectangleLinesEx({ tb.x - 2, tb.y - 2, tb.width + 4, tb.height + 4 }, 2.0f, kUoBronzeHi);
+    }
+    y += 38;
+    float listTop = y, listH = G.y + G.height - 14 - listTop;
+    Rectangle area = { G.x, listTop, G.width, listH };
+    g_settleScroll -= ScrollDelta(area);
+    float contentH = 0;
+    BeginScissorMode((int)G.x, (int)listTop, (int)G.width, (int)listH);
+    float yy = listTop - g_settleScroll;
+    auto visible = [&](float top, float h) { return top + h > listTop && top < listTop + listH; };
+    if (g_settleTab == 0) {
+        bool anyStored = false;
+        for (int k = 0; k < kSbCount; k++) anyStored |= kSettleDefs[k].res && s.settle[(size_t)k].stored >= 1.0f;
+        if (Button({ x, yy, 160, 28 }, "Collect all", anyStored) && anyStored) {
+            std::string got;
+            for (int k = 0; k < kSbCount; k++)
+                if (int n = SettleCollect(s, k); n > 0) got += (got.empty() ? "" : ", ") + std::to_string(n) + " " + SettleResName(kSettleDefs[k].res);
+            s.logLine = "Collected " + got + ".";
+            PlaySfx(SfxId::Coin);
+        }
+        DrawUIText("Buildings work while you're away (up to their storage).", (int)(x + 172), (int)yy + 8, 11, soft);
+        yy += 38;
+        static const int order[kSbCount] = { kSbHall, kSbLumber, kSbMine, kSbTannery, kSbHerbs, kSbFishery, kSbStore, kSbWalls, kSbBarracks,
+                                             kSbForge, kSbYard, kSbChapel, kSbLibrary, kSbStable };
+        for (int oi = 0; oi < kSbCount; oi++) {
+            int k = order[oi];
+            const SettleDef& d = kSettleDefs[k];
+            SettleBuilding& B = s.settle[(size_t)k];
+            const float rh = 70.0f;
+            if (visible(yy, rh)) {
+                Rectangle row = { x, yy, w, rh - 6 };
+                DrawRectangleRec(row, Fade(Color{ 120, 90, 50, 255 }, 0.12f));
+                DrawRectangleLinesEx(row, 1.0f, Fade(soft, 0.5f));
+                bool unlocked = SettleUnlocked(s, k);
+                std::string title = std::string(d.name) + (B.level > 0 ? TextFormat("  Lv %d", B.level) : "");
+                DrawUIText(title.c_str(), (int)row.x + 8, (int)row.y + 6, 14, unlocked ? ink : Fade(ink, 0.5f));
+                if (B.damaged) DrawUIText("DAMAGED", (int)row.x + 12 + MeasureUIText(title.c_str(), 14), (int)row.y + 8, 11, bad);
+                std::string line2;
+                if (!unlocked) line2 = TextFormat("Needs Great Hall %d", std::max(1, d.unlockHall));
+                else if (d.res && B.level > 0)
+                    line2 = TextFormat("%d/%d %s  (+%.1f/h)  workers %d/%d", (int)B.stored, (int)SettleCap(s, k), SettleResName(d.res),
+                                       SettleRatePerHour(s, k), SettleCountJob(s, k), SettleMaxWorkers(s, k));
+                else if (k == kSbBarracks && B.level > 0) line2 = TextFormat("Guards %d/%d posted - assign them on the Settlers tab", SettleCountJob(s, kSettlerGuard), SettleGuardPosts(s));
+                else line2 = d.buff;
+                DrawUIText(line2.c_str(), (int)row.x + 8, (int)row.y + 26, 11, soft);
+                // actions
+                float bx = row.x + row.width - 8;
+                if (unlocked && B.damaged) {
+                    int rc = SettleRepairCost(s, k);
+                    bx -= 110;
+                    if (Button({ bx, row.y + 34, 104, 24 }, TextFormat("Repair %dg", rc), s.gold >= rc) && s.gold >= rc) {
+                        s.gold -= rc; B.damaged = false; s.logLine = std::string(d.name) + " repaired.";
+                        PlaySfx(SfxId::Buy);
+                    }
+                } else if (unlocked && B.level < SettleMaxLevel(s, k)) {
+                    int g, wd, o; float secs; SettleCost(s, k, g, wd, o, secs);
+                    bool afford = s.gold >= g && s.wood >= wd && s.ore >= o, free = s.settleUpgrading < 0;
+                    std::string cost = TextFormat("%dg %dw", g, wd) + (o ? std::string(TextFormat(" %do", o)) : std::string()) + "  " + SettleClock(secs);
+                    DrawUIText(cost.c_str(), (int)row.x + 8, (int)row.y + 44, 11, afford ? ink : bad);
+                    bx -= 110;
+                    const char* lbl = s.settleUpgrading == k ? "Building..." : (B.level == 0 ? "Build" : "Upgrade");
+                    if (Button({ bx, row.y + 34, 104, 24 }, lbl, afford && free) && afford && free) {
+                        s.gold -= g; s.wood -= wd; s.ore -= o;
+                        s.settleUpgrading = k; s.settleUpgradeT = secs;
+                        s.logLine = std::string("Builders start on the ") + d.name + " (" + SettleClock(secs) + ").";
+                        PlaySfx(SfxId::Buy);
+                    }
+                } else if (unlocked && B.level > 0 && k != kSbHall) {
+                    DrawUIText("Raise the Great Hall to go higher", (int)row.x + 8, (int)row.y + 44, 11, soft);
+                } else if (k == kSbHall && B.level >= 10) DrawUIText("At its greatest", (int)row.x + 8, (int)row.y + 44, 11, good);
+                if (d.res && B.level > 0) {
+                    bx -= 86;
+                    if (Button({ bx, row.y + 34, 80, 24 }, TextFormat("Take %d", (int)B.stored), B.stored >= 1.0f)) {
+                        int n = SettleCollect(s, k);
+                        if (n > 0) { s.logLine = TextFormat("Collected %d %s.", n, SettleResName(d.res)); PlaySfx(SfxId::Coin); }
+                    }
+                }
+            }
+            yy += rh;
+        }
+    } else if (g_settleTab == 1) {
+        DrawUIText(TextFormat("Homes for %d. Settlers come from travelers you escort or spare%s.", SettleHousing(s),
+                              hall >= 3 ? ", and wanderers drawn by the Hall" : " (Hall 3+: wanderers too)"), (int)x, (int)yy, 11, soft);
+        yy += 20;
+        DrawUIText("Tap a settler's job to change it. Naturals work a building at double pace.", (int)x, (int)yy, 11, soft);
+        yy += 24;
+        if (s.settlers.empty()) { DrawUIText(hall > 0 ? "No settlers yet." : "Raise the Great Hall first.", (int)x, (int)yy + 4, 13, ink); yy += 30; }
+        for (size_t i = 0; i < s.settlers.size(); i++) {
+            Settler& st = s.settlers[i];
+            if (visible(yy, 40)) {
+                DrawUIText(st.name.c_str(), (int)x + 4, (int)yy + 4, 14, ink);
+                DrawUIText(TextFormat("natural at the %s", kSettleDefs[std::clamp(st.trait, 0, kSbCount - 1)].name), (int)x + 4, (int)yy + 22, 10, soft);
+                if (Button({ x + w - 190, yy + 4, 150, 28 }, SettleJobName(st.job), true)) st.job = SettleNextJob(s, st.job);
+                if (st.job == st.trait) DrawUIText("*", (int)(x + w - 30), (int)yy + 8, 16, good);
+            }
+            yy += 40;
+        }
+    } else {
+        int guards = SettleCountJob(s, kSettlerGuard);
+        float mates = 0; for (const GuildRecruit& r : s.guildRecruits) if (!r.along) mates += r.level * 0.8f;
+        DrawUIText(TextFormat("Great Hall townsfolk: %d", hall * 6), (int)x, (int)yy, 13, ink); yy += 20;
+        DrawUIText(TextFormat("Walls (level %d): %d", SettleLv(s, kSbWalls), (int)(SettleEff(s, kSbWalls) * 14.0f)), (int)x, (int)yy, 13, ink); yy += 20;
+        DrawUIText(TextFormat("Guards (%d, Barracks %d): %d", guards, SettleLv(s, kSbBarracks), (int)(guards * (6.0f + SettleEff(s, kSbBarracks) * 2.0f))), (int)x, (int)yy, 13, ink); yy += 20;
+        DrawUIText(TextFormat("Guildmates left at home: %d", (int)mates), (int)x, (int)yy, 13, ink); yy += 20;
+        DrawUIText(TextFormat("Total defense %d  -  raiders come ~%d strong%s", (int)def, (int)str,
+                              (s.guildWarOn[0] || s.guildWarOn[1]) ? " (and often: you're at war)" : ""), (int)x, (int)yy, 13, def >= str ? good : bad);
+        yy += 26;
+        DrawUIText("If you're near home when they come, fight them at the gate - your", (int)x, (int)yy, 11, soft); yy += 15;
+        DrawUIText("guards join in. Away, walls and guards decide it: a win pays spoils,", (int)x, (int)yy, 11, soft); yy += 15;
+        DrawUIText("a loss costs stored goods and burns a building until repaired.", (int)x, (int)yy, 11, soft); yy += 26;
+        DrawUIText("Recent news", (int)x, (int)yy, 14, ink); yy += 22;
+        if (s.settleReports.empty()) { DrawUIText("Quiet so far.", (int)x, (int)yy, 12, soft); yy += 20; }
+        for (int i = (int)s.settleReports.size() - 1; i >= 0; i--) {
+            // simple word wrap
+            std::string t = s.settleReports[(size_t)i], cur;
+            std::istringstream ws(t); std::string word;
+            while (ws >> word) {
+                std::string trial = cur.empty() ? word : cur + " " + word;
+                if (MeasureUIText(trial.c_str(), 11) > w - 10) { DrawUIText(cur.c_str(), (int)x + 4, (int)yy, 11, ink); yy += 14; cur = word; }
+                else cur = trial;
+            }
+            if (!cur.empty()) { DrawUIText(cur.c_str(), (int)x + 4, (int)yy, 11, ink); yy += 14; }
+            yy += 8;
+        }
+    }
+    contentH = yy + g_settleScroll - listTop;
+    EndScissorMode();
+    g_settleScroll = std::clamp(g_settleScroll, 0.0f, std::max(0.0f, contentH - listH));
+}
 static bool g_guildOpen = false;
 static std::string g_guildDraft;
 static std::string GuildTagFor(const std::string& name) {
@@ -30762,6 +31729,7 @@ static void DrawGuildstone(GameState& s, int screenW, int screenH) {
 
 static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     if (g_guildOpen) { DrawGuildstone(s, screenW, screenH); return; }
+    if (g_settleOpen) { DrawSettlement(s, screenW, screenH); return; }
     UpdateTextInput(s.houseName, 24);
     const HouseTier& tier = kHouseTiers[s.houseTierIdx];
 
@@ -30769,6 +31737,8 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     DrawUIText(("Your House - " + tier.name).c_str(), 20, y, 18, kColorHeading);
     if (Button({ (float)screenW - 150, (float)y - 4, 130, 28 }, s.guildName.empty() ? "Guildstone" : ("Guild [" + s.guildTag + "]").c_str(), true))
         g_guildOpen = true; // (2026-09-27)
+    if (Button({ (float)screenW - 290, (float)y - 4, 130, 28 }, SettleHall(s) > 0 ? TextFormat("Settlement %d", SettleHall(s)) : "Settlement", true))
+        { g_settleOpen = true; g_settleScroll = 0.0f; } // (2026-09-27)
     y += 24;
 
     // Name entry - same always-live pattern as the Character screen's name field.
@@ -31356,6 +32326,7 @@ static void UpdateDrawFrame() {
         bool hadSave = LoadGame(g_state);
         if (hadSave && !g_state.logLine.empty() && g_state.logLine == "Welcome to Town Forge.")
             g_state.logLine = "Welcome back.";
+        if (hadSave) SettleCatchUp(g_state); // the settlement kept working (2026-09-27)
         if (hadSave && !g_state.characterName.empty() && g_state.screen == Screen::Character)
             g_state.screen = Screen::Town; // returning adventurers open straight into the (3D) town
     }
@@ -31380,6 +32351,7 @@ static void UpdateDrawFrame() {
         if (state.wildAlertT >= 0.0f && (state.wildAlertT += dt) > 1.6f) state.wildAlertT = -1.0f; // "!" pop (2026-09-27)
         if (IsPlayScreen(state.screen)) g_playScreen = state.screen; // remembered for "Play" (2026-09-27)
         for (float& cd : state.commissionCd) if (cd > 0.0f) cd -= dt; // commission offers (2026-09-27)
+        SettleTick(state, dt); // the settlement works in real time (2026-09-27)
         UpdateCombatAnim(state, dt);
         UpdateDeathAndRespawn(state, dt); // death anims, ghost timer, monster respawns, corpse fades
         UpdateGuildOffscreen(state, dt);  // the rival and Murder Inc. keep living while you're elsewhere
@@ -31842,6 +32814,7 @@ int main() {
     bool hadSave = LoadGame(g_state); // applies offline Auto-Gather catch-up internally
     if (hadSave && !g_state.logLine.empty() && g_state.logLine == "Welcome to Town Forge.")
         g_state.logLine = "Welcome back.";
+    if (hadSave) SettleCatchUp(g_state);
     while (!WindowShouldClose()) UpdateDrawFrame();
     CleanupAndClose();
 #endif
