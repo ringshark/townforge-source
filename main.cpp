@@ -7149,7 +7149,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "mining") s.mining = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "skinning") s.skinning = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "fishing") s.fishing = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves // Phase 2: Salt Coast fishery
-        else if (key == "autoGather") s.autoGather = std::atoi(val.c_str()) != 0;
+        else if (key == "autoGather") s.autoGather = false; // (2026-09-27) retired - the Settlement replaces it
         else if (key == "magery") s.magery = std::min(100.0f, (float)std::atof(val.c_str())); // retroactively clamp existing saves grown past the new 100 cap
         else if (key == "evalInt") s.evalInt = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "meditation") s.meditation = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
@@ -7789,6 +7789,14 @@ static void BuyHouseTier(GameState& s, int targetIdx) {
 static void SetHouseHue(GameState& s, int hueIdx) {
     if (hueIdx < 0 || hueIdx >= kHouseTiers[s.houseTierIdx].hueOptions) return;
     s.houseHue = hueIdx;
+}
+// (2026-09-27) The home workshop stations open with the matching settlement buildings -
+// Forge -> Blacksmith, Lumber Camp -> Carpenter, Tannery -> Tailor, Herb Garden -> Alchemist -
+// at half their level (up to 5). Wings bought the old way still count.
+static const int kWingSettleKind[4] = { kSbForge, kSbLumber, kSbTannery, kSbHerbs };
+static int HomeWingLevel(const GameState& s, int m) {
+    if (m < 0 || m > 3) return 0;
+    return std::max(s.houseModuleLevel[(size_t)m], std::min(5, (SettleLv(s, kWingSettleKind[m]) + 1) / 2));
 }
 static int BuiltHouseModuleCount(const GameState& s) {
     int n = 0;
@@ -15930,8 +15938,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
             DrawPromptLabel(prompt, screenW, screenH); // (2026-09-27) readability
         }
     }
-    DrawUIText("3D view: drag to orbit, wheel to zoom, click a building. [V] toggles 2D.", 20, 196, 12,
-               Color{ 90, 74, 52, 255 });
+    if (GetTime() < 120.0) DrawHudLine("Drag to turn the view, pinch or wheel to zoom", 20, 196, 12); // (2026-09-27) early hint only
 }
 
 // ---------------------------------------------------------------------
@@ -22778,7 +22785,7 @@ static HdPlace HouseResolvePlace(const GameState& s, int kind, Vector2 p, int ro
     return r;
 }
 static bool HouseDecorAfford(const GameState& s, const HouseDecorDef& k, std::string* why) {
-    if (k.module >= 0 && s.houseModuleLevel[k.module] <= 0) { if (why) *why = "Needs your " + kHomeModuleDefs[k.module].label + " (House screen)."; return false; }
+    if (k.module >= 0 && HomeWingLevel(s, k.module) <= 0) { if (why) *why = std::string("Needs a ") + kSettleDefs[kWingSettleKind[k.module]].name + " in your settlement."; return false; }
     if (s.gold < k.gold) { if (why) *why = "Not enough gold."; return false; }
     if (s.wood < k.wood) { if (why) *why = "Not enough wood."; return false; }
     return true;
@@ -22865,7 +22872,7 @@ static void HouseFurnishOnEnter(GameState& s) {
         HouseAutoPlace(s, HouseDecorFind("Single Bed"));
         HouseAutoPlace(s, HouseDecorFind("Chest"));
         const int stations[4] = { HouseDecorFind("Anvil"), HouseDecorFind("Carpenter's Bench"), HouseDecorFind("Dress Form"), HouseDecorFind("Brewing Cauldron") };
-        for (int m = 0; m < 4; m++) if (s.houseModuleLevel[m] > 0) HouseAutoPlace(s, stations[m]);
+        for (int m = 0; m < 4; m++) if (HomeWingLevel(s, m) > 0) HouseAutoPlace(s, stations[m]);
         if (HouseAutoPlace(s, HouseDecorFind("Square Table"))) {
             int t = (int)s.houseDecor.size() - 1;
             HouseAutoPlace(s, HouseDecorFind("Oval Rug"), t);
@@ -23081,7 +23088,7 @@ static void DrawHouseDecorateUI(GameState& s, int screenW, int screenH) {
         DrawUIText(k.name, (int)r.x + 34, (int)r.y + 5, 12, ok ? Color{ 250, 240, 220, 255 } : Color{ 160, 150, 140, 255 });
         std::string price = std::to_string(k.gold) + "g" + (k.wood > 0 ? " " + std::to_string(k.wood) + "w" : "");
         if (k.storage > 0) price += "  +" + std::to_string(k.storage) + " slots";
-        if (k.module >= 0 && s.houseModuleLevel[k.module] <= 0) price = "needs " + kHomeModuleDefs[k.module].label;
+        if (k.module >= 0 && HomeWingLevel(s, k.module) <= 0) price = std::string("needs ") + kSettleDefs[kWingSettleKind[k.module]].name;
         DrawUIText(price.c_str(), (int)r.x + 34, (int)r.y + 22, 11, ok ? kUoGoldText : Color{ 200, 120, 100, 255 });
         if (tap && CheckCollisionPointRec(m, r)) {
             if (!ok) g_hdMsg = why;
@@ -23107,10 +23114,10 @@ static void DrawHouseCraftGump(GameState& s) {
     const HomeModuleDef& def = kHomeModuleDefs[mIdx];
     UODrawTitle(G, def.label, 14);
     if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_X)) { s.houseCraftModule = -1; return; }
-    int level = s.houseModuleLevel[mIdx];
+    int level = HomeWingLevel(s, mIdx);
     Color ink = { 60, 40, 24, 255 };
     if (level <= 0) {
-        DrawUIText(("Build the " + def.label + " on the House screen").c_str(), (int)G.x + 24, (int)G.y + 40, 14, ink);
+        DrawUIText((std::string("Raise a ") + kSettleDefs[kWingSettleKind[mIdx]].name + " in your settlement").c_str(), (int)G.x + 24, (int)G.y + 40, 14, ink);
         DrawUIText("to work at this station.", (int)G.x + 24, (int)G.y + 60, 14, ink);
         return;
     }
@@ -23202,7 +23209,7 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
 
     // Title + view/camera buttons (same placement language as the town HUD).
     DrawInfoLine(TileNameFor(s.interiorKey).c_str(), 20, 118, 14);
-    if (Button({ 452, 120, 68, 30 }, s.interior3DView ? "2D [V]" : "3D [V]", true))
+    if (!s.interior3DView && Button({ 452, 120, 68, 30 }, "3D [V]", true)) // (2026-09-27) 2D is legacy: only the way back
         s.interior3DView = !s.interior3DView;
     if (s.interior3DView && Button({ 528, 120, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
         g_t3dFollowMode = !g_t3dFollowMode;
@@ -23655,16 +23662,14 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     // Gather HUD strip - drawn AFTER (not before) the world render, so the tiled ground
     // fill doesn't paint over it. kViewport starts at y=110, overlapping this strip's
     // y=120-156, so draw order here matters: whichever is drawn last wins the pixels.
-    if (Button({ 20, 120, 130, 30 }, "Gather Wood [1]", canGather)) TryStartGather(s, "wood");
-    if (Button({ 160, 120, 120, 30 }, "Gather Ore [2]", canGather)) TryStartGather(s, "ore");
-    std::string autoLabel = s.autoGather ? "Auto-Gather: ON" : "Auto-Gather: OFF";
-    if (Button({ 290, 120, 150, 30 }, autoLabel, true)) ToggleAutoGather(s);
+    // (2026-09-27) the town's old Gather/Auto-Gather buttons are gone: gathering is done
+    // at nodes in the wilds, and the Settlement brings resources in while you're away.
+    (void)canGather;
     // 3D view toggle (2026-09-24 milestone) - same view switch as the V key below.
-    if (Button({ 452, 120, 68, 30 }, s.town3DView ? "2D [V]" : "3D [V]", true)) s.town3DView = !s.town3DView;
+    if (!s.town3DView && Button({ 452, 120, 68, 30 }, "3D [V]", true)) s.town3DView = true; // (2026-09-27) 2D is legacy
     // Camera mode button (2026-09-24): Diablo-style follow is the 3D default;
     // C key or this button switches back to the old free-orbit camera.
-    if (s.town3DView && Button({ 528, 120, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
-        g_t3dFollowMode = !g_t3dFollowMode;
+    // (2026-09-27) the camera-mode button hung off the screen edge; the C key still switches it
     // Solid-backed (DrawInfoLine, not bare DrawUIText) and split across two short lines
     // instead of one concatenated one - 2026-09-22 fix: this text sits directly on the
     // tiled ground with nothing else guaranteeing contrast (same class of bug already
@@ -23678,7 +23683,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     // --- Detail / upgrade panel - opened by walking up + E, closed with [X]/[ESC] ---
     DrawBuildingDetailPanel(s, screenW);
     if (!s.selectedTile.has_value()) {
-        DrawUIText("WASD/arrows (or drag bottom-left) to move. Walk up to a building and press [E].", 20, screenH - 66, 13, Fade(DARKGRAY, 0.8f));
+        if (s.worldTime < 120.0f) DrawHudLine("Move with the stick (or WASD). Walk up to a building to go in.", 20, screenH - 66, 12); // (2026-09-27) early hint only
     }
     // Phase 3 - snowfall over Frostmere (both 2D and 3D town views).
     if (s.selectedTown == 2) DrawSnowfall(screenW, screenH, s.worldTime);
@@ -29806,7 +29811,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     DrawJournalUI(s, JournalWildButtonRect(), true);
 
     // 3D view toggle (2026-09-24, Phase 1) - same view switch as the V key below.
-    if (Button({ 452, 120, 68, 30 }, s.wild3DView ? "2D [V]" : "3D [V]", true)) s.wild3DView = !s.wild3DView;
+    if (!s.wild3DView && Button({ 452, 120, 68, 30 }, "3D [V]", true)) s.wild3DView = true; // (2026-09-27) 2D is legacy
     // Camera mode button (2026-09-24): Diablo-style follow is the 3D default;
     // C key or this button switches back to the old free-orbit camera.
     if (s.wild3DView && Button({ 528, 120, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
@@ -30255,7 +30260,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // 3D dungeon view toggle (2026-09-24, Phase 2) - same V-key/button switch as
     // the Town/Wilderness views. Only the explorable arena below goes 3D; the
     // picker tabs, combat panel, and HUD stay 2D.
-    if (Button({ 452, 116, 68, 30 }, s.hunt3DView ? "2D [V]" : "3D [V]", true)) s.hunt3DView = !s.hunt3DView;
+    if (!s.hunt3DView && Button({ 452, 116, 68, 30 }, "3D [V]", true)) s.hunt3DView = true; // (2026-09-27) 2D is legacy
     // Camera mode button (2026-09-24): Diablo-style follow is the 3D default;
     // C key or this button switches back to the old free-orbit camera.
     if (s.hunt3DView && Button({ 528, 116, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
@@ -32587,7 +32592,7 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     const HouseTier& tier = kHouseTiers[s.houseTierIdx];
 
     int y = 116;
-    DrawUIText(("Your House - " + tier.name).c_str(), 20, y, 18, kColorHeading);
+    DrawUIText("Your Home", 20, y, 18, kColorHeading); (void)tier;
     if (Button({ (float)screenW - 150, (float)y - 4, 130, 28 }, s.guildName.empty() ? "Guildstone" : ("Guild [" + s.guildTag + "]").c_str(), true))
         g_guildOpen = true; // (2026-09-27)
     if (Button({ (float)screenW - 290, (float)y - 4, 130, 28 }, SettleHall(s) > 0 ? TextFormat("Settlement %d", SettleHall(s)) : "Settlement", true))
@@ -32608,12 +32613,11 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     }
     y += 32;
 
-    DrawUIText(TextFormat("Backpack capacity: %d (base %d + %d from house)",
-                            BackpackCap(s), GameState::kBackpackCap, tier.capBonus), 20, y, 12, kColorText);
+    DrawUIText(TextFormat("Backpack capacity: %d (base %d, more from your settlement's Storehouse)",
+                            BackpackCap(s), GameState::kBackpackCap), 20, y, 12, kColorText);
     y += 22;
 
-    // --- Homestead (2026-09-25): the town house building is retired; the tier, hue,
-    // workshop wings, and name above now apply to the wilderness homestead instead.
+    // --- Homestead (2026-09-25): your wilderness plot and house.
     DrawUIText("Homestead:", 20, y, 13, kColorAccent);
     y += 18;
     if (s.housePlotIdx < 0) {
@@ -32652,103 +32656,21 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
         y += 32;
     }
 
-    // --- Tiers ---
-    DrawUIText("Tiers:", 20, y, 13, kColorAccent);
-    y += 18;
-    for (size_t i = 1; i < kHouseTiers.size(); i++) {
-        const HouseTier& t = kHouseTiers[i];
-        bool owned = (int)i <= s.houseTierIdx;
-        int cost = t.cost - kHouseTiers[s.houseTierIdx].cost;
-        std::string line = TextFormat("%s  (+%d cap, %d hues, %d wing%s)", t.name.c_str(), t.capBonus,
-                                        t.hueOptions, t.moduleSlots, t.moduleSlots == 1 ? "" : "s");
-        DrawUIText(line.c_str(), 20, y + 5, 12, owned ? Fade(kColorText, 0.6f) : kColorText);
-        std::string btnLabel = owned ? "Owned" : TextFormat("Buy (%dg)", cost);
-        if (Button({ (float)(screenW - 110), (float)y, 90, 22 }, btnLabel, !owned && s.gold >= cost))
-            BuyHouseTier(s, (int)i);
-        y += 26;
-    }
-    y += 4;
-
-    // --- Hue swatches ---
-    if (tier.hueOptions > 0) {
-        DrawUIText("Color:", 20, y, 13, kColorAccent);
-        y += 18;
-        for (int i = 0; i < tier.hueOptions; i++) {
-            Rectangle sw = { (float)(20 + i * 30), (float)y, 24, 24 };
-            DrawRectangleRec(sw, kHouseHues[i].color);
-            DrawRectangleLinesEx(sw, s.houseHue == i ? 3.0f : 1.0f, s.houseHue == i ? kColorHeading : Fade(BLACK, 0.4f));
-            if (CheckCollisionPointRec(GetMousePosition(), sw) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
-                SetHouseHue(s, i);
-        }
-        y += 32;
-    }
-
-    // --- Workshop wings (scrollable - 4 modules, each with its recipe list once built) ---
-    DrawUIText(TextFormat("Home Workshop - %d/%d wings built (each stays one tier behind town)",
-                            BuiltHouseModuleCount(s), tier.moduleSlots), 20, y, 12, kColorAccent);
+    // (2026-09-27) The old house tiers, colors and workshop-wing shop are retired: your
+    // Settlement's Storehouse adds pack space, and its Forge, Lumber Camp, Tannery and
+    // Herb Garden open the matching workshop stations in your house.
+    DrawUIText("Home workshop stations", 20, y, 13, kColorAccent);
     y += 20;
-    if (tier.moduleSlots <= 0) {
-        DrawUIText("Buy a house to unlock personal workshop wings.", 20, y, 12, DARKGRAY);
-        return;
+    for (int m = 0; m < 4; m++) {
+        int lv = HomeWingLevel(s, m);
+        std::string line = lv > 0 ? TextFormat("%s - level %d (works up to skill %d)", kHomeModuleDefs[(size_t)m].label.c_str(), lv, kHomeModuleLevels[(size_t)lv - 1].cap)
+                                  : kHomeModuleDefs[(size_t)m].label + " - raise a " + kSettleDefs[kWingSettleKind[m]].name + " in your settlement";
+        DrawUIText(line.c_str(), 20, y, 12, lv > 0 ? kColorText : Fade(kColorText, 0.6f));
+        y += 18;
     }
-
-    int listTop = y;
-    int listHeight = screenH - listTop - 20;
-    Rectangle listArea = { 0, (float)listTop, (float)screenW, (float)listHeight };
-    s.houseScroll -= ScrollDelta(listArea);
-
-    // Precompute each module's row height (recipe rows for built modules push it out)
-    // so scrolling/clamping accounts for the real content height, not a flat row size.
-    auto moduleRowHeight = [&](int idx) -> float {
-        int level = s.houseModuleLevel[idx];
-        if (level <= 0) return 56.0f;
-        const BuildingDef& b = kCraftBuildings[kHomeModuleDefs[idx].buildingIdx];
-        return 56.0f + (float)b.recipes.size() * 28.0f;
-    };
-    float totalHeight = 0;
-    for (size_t i = 0; i < kHomeModuleDefs.size(); i++) totalHeight += moduleRowHeight((int)i) + 8;
-    s.houseScroll = std::clamp(s.houseScroll, 0.0f, std::max(0.0f, totalHeight - listHeight));
-
-    BeginScissorMode(0, listTop, screenW, listHeight);
-    float rowY = listTop - s.houseScroll;
-    for (size_t i = 0; i < kHomeModuleDefs.size(); i++) {
-        const HomeModuleDef& def = kHomeModuleDefs[i];
-        int level = s.houseModuleLevel[i];
-        float rh = moduleRowHeight((int)i);
-        if (rowY + rh >= listTop && rowY <= listTop + listHeight) {
-            if (level <= 0) {
-                DrawUIText((def.label + "  (not built)").c_str(), 20, (int)rowY + 4, 13, kColorText);
-                bool canBuild = BuiltHouseModuleCount(s) < tier.moduleSlots && s.gold >= kHomeModuleLevels[0].cost;
-                if (Button({ 20, rowY + 24, 200, 24 }, TextFormat("Build Wing (%dg)", kHomeModuleLevels[0].cost), canBuild))
-                    BuildHouseModule(s, (int)i);
-            } else {
-                int cap = kHomeModuleLevels[level - 1].cap;
-                DrawUIText(TextFormat("%s  (level %d/5, cap %d)", def.label.c_str(), level, cap),
-                           20, (int)rowY + 4, 13, kColorText);
-                if (level < (int)kHomeModuleLevels.size()) {
-                    int upCost = kHomeModuleLevels[level].cost;
-                    if (Button({ (float)(screenW - 190), rowY, 170, 22 }, TextFormat("Upgrade (%dg)", upCost), s.gold >= upCost))
-                        UpgradeHouseModule(s, (int)i);
-                }
-                const BuildingDef& b = kCraftBuildings[def.buildingIdx];
-                float skillVal = s.buildingSkill[def.buildingIdx];
-                for (size_t r = 0; r < b.recipes.size(); r++) {
-                    const Recipe& recipe = b.recipes[r];
-                    float recipeY = rowY + 30 + (float)r * 28;
-                    bool skillOk = std::min(skillVal, (float)cap) >= recipe.reqSkill;
-                    std::string line = TextFormat("  %s  (req %d, %d %s)", recipe.name.c_str(), recipe.reqSkill,
-                                                    recipe.cost, def.buildingIdx == 3 ? "reagents" : "resource");
-                    DrawUIText(line.c_str(), 20, (int)recipeY + 4, 12, skillOk ? kColorText : Fade(DARKGRAY, 0.8f));
-                    if (Button({ (float)(screenW - 90), recipeY, 70, 22 }, def.buildingIdx == 3 ? "Brew" : "Craft", skillOk)) {
-                        if (def.buildingIdx == 3) TryCraftPotion(s, (int)r, cap);
-                        else TryCraftItem(s, def.buildingIdx, (int)r, cap);
-                    }
-                }
-            }
-        }
-        rowY += rh + 8;
-    }
-    EndScissorMode();
+    y += 6;
+    DrawUIText("Use them at their benches inside your house.", 20, y, 12, Fade(kColorText, 0.75f));
+    (void)screenH;
 }
 
 // ---------------------------------------------------------------------
@@ -33391,9 +33313,6 @@ static void UpdateDrawFrame() {
         // panel (ESC); movement (WASD/arrows) and interaction (E) are handled inside
         // DrawTownScreen itself, since they need the frame's nearest-node lookup. ---
         if (!encounterPending && state.screen == Screen::Town) {
-            if (IsKeyPressed(KEY_ONE))   TryStartGather(state, "wood");
-            if (IsKeyPressed(KEY_TWO))   TryStartGather(state, "ore");
-            if (IsKeyPressed(KEY_THREE)) ToggleAutoGather(state);
             if (IsKeyPressed(KEY_ESCAPE)) state.selectedTile.reset();
             if (IsKeyPressed(KEY_V)) state.town3DView = !state.town3DView; // 3D town view toggle
         }
