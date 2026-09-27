@@ -6041,6 +6041,14 @@ static int SpellPowerFor(const GameState& s, const Spell& spell) {
 // JS spellSuccessChance(): 1% below minSkill, then scales 2%-100% across [minSkill,maxSkill].
 static float SpellSuccessChance(const GameState& s, const Spell& spell) {
     float magery = SpellSkill(s, spell);
+    if (!spell.necro) {
+        // (2026-09-27, "at 51 Magery a heal shouldn't fizzle") UO-style by circle, a
+        // touch friendlier than UO: each circle's range starts 14.3 higher and is 40
+        // wide - 4th circle (Greater Mending, Recall) is sure by ~53, 8th ~75% at GM.
+        float lo = (spell.circle - 1) * 14.3f - 30.0f, hi = lo + 40.0f;
+        float pct = (magery - lo) / (hi - lo) * 100.0f;
+        return std::clamp(pct, magery < lo ? 0.0f : 1.0f, 100.0f);
+    }
     if (magery < spell.minSkill) return 1.0f;
     float pct = 2.0f + (magery - spell.minSkill) / (float)(spell.maxSkill - spell.minSkill) * 98.0f;
     return std::clamp(pct, 1.0f, 100.0f);
