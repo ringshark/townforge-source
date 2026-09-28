@@ -13949,6 +13949,7 @@ struct Town3DLit {
     bool ready = false, tried = false;
     Shader shader{};
     int viewPosLoc = -1, fogRangeLoc = -1;
+    int walkLoc = -1, walkBoxLoc = -1; // the sculpted monsters' gait (lit.vs)
 };
 static Town3DLit g_t3dLit;
 static void T3DSetLightUniforms(Shader sh); // with the ground shader below
@@ -13961,6 +13962,8 @@ static void Town3DEnsureLit() {
     L.shader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(L.shader, "viewPos");
     L.viewPosLoc = L.shader.locs[SHADER_LOC_VECTOR_VIEW];
     L.fogRangeLoc = GetShaderLocation(L.shader, "fogRange");
+    L.walkLoc = GetShaderLocation(L.shader, "walk");
+    L.walkBoxLoc = GetShaderLocation(L.shader, "walkBox");
     T3DSetLightUniforms(L.shader); // sun, sky fill and fog shared with the grass + ground shaders
     L.ready = true;
 }
@@ -18876,7 +18879,7 @@ static void CorpseDrawGlint(const GameState::WorldCorpse& c) {
 // Textured, unrigged models (Meshy image-to-3D, shrunk for the web). They move
 // in code: a walking bob and lean (a skittering jitter for spiders), a lunge on
 // the attack, the usual hit flash, and a topple-and-sink when they die.
-struct MeshMonDef { const char* name; const char* file; float height; bool spider; float yawOff = 0.0f; }; // yawOff: models that don't face -Z
+struct MeshMonDef { const char* name; const char* file; float height; bool spider; float yawOff = 0.0f; }; // yawOff: models that don't face +Z
 static const MeshMonDef kMeshMons[] = {
     { "Web Spinner", "web_spinner", 38.0f, true },   { "Silk Stalker", "silk_stalker", 44.0f, true },
     { "Venom Weaver", "venom_weaver", 50.0f, true }, { "Brood Hunter", "brood_hunter", 56.0f, true },
@@ -18894,9 +18897,9 @@ static const MeshMonDef kMeshMons[] = {
     { "Scalekin Raider", "scalekin_raider_scout", 64.0f, false }, // + four variants, picked per raider below
     { "Scalekin Raider~1", "scalekin_raider_archer", 64.0f, false }, { "Scalekin Raider~2", "scalekin_raider_huntress", 64.0f, false },
     { "Scalekin Raider~3", "scalekin_raider_shaman", 66.0f, false }, { "Scalekin Raider~4", "scalekin_raider_warlord", 72.0f, false },
-    { "Vyrathax", "vyrathax", 150.0f, false, 180.0f }, // the world boss (DrawTriWyrm)
+    { "Vyrathax", "vyrathax", 150.0f, false }, // the world boss (DrawTriWyrm)
 };
-struct MeshMonModel { bool tried = false, ok = false; Model model{}; float baseH = 1.0f; float halfW = 1.0f; };
+struct MeshMonModel { bool tried = false, ok = false; Model model{}; float baseH = 1.0f; float halfW = 1.0f; float minY = 0.0f; };
 static MeshMonModel g_meshMon[sizeof(kMeshMons) / sizeof(kMeshMons[0])];
 static int MeshMonIndex(const std::string& name) {
     for (int i = 0; i < (int)(sizeof(kMeshMons) / sizeof(kMeshMons[0])); i++) if (name == kMeshMons[i].name) return i;
@@ -18915,6 +18918,7 @@ static MeshMonModel* MeshMonGet(int i) {
         BoundingBox bb = GetModelBoundingBox(M.model);
         M.baseH = std::max(0.01f, bb.max.y - bb.min.y);
         M.halfW = std::max(bb.max.x - bb.min.x, bb.max.z - bb.min.z) * 0.5f;
+        M.minY = bb.min.y;
         // stand it on the ground, centred
         M.model.transform = MatrixTranslate(-(bb.min.x + bb.max.x) * 0.5f, -bb.min.y, -(bb.min.z + bb.max.z) * 0.5f);
         Town3DApplyLitShader(M.model);
@@ -18935,7 +18939,7 @@ static bool MeshMonDraw(const std::string& name, float x, float z, float yawRad,
     if (!M->ok) return false;
     const MeshMonDef& d = kMeshMons[i];
     float s = d.height * sizeMul / M->baseH;
-    float rotDeg = -90.0f - yawRad * RAD2DEG; // Meshy's models face -Z
+    float rotDeg = 90.0f - yawRad * RAD2DEG; // Meshy's models face +Z (toes and heads point that way)
     float t = a.t + a.seed * 0.37f, mv = std::clamp(a.move, 0.0f, 1.0f);
     float bob = 0.0f, pitch = 0.0f, roll = 0.0f, fwd = 0.0f, sink = 0.0f;
     if (deathT >= 0.0f) { // topple onto its side (spiders flip over) and settle
@@ -18948,7 +18952,7 @@ static bool MeshMonDraw(const std::string& name, float x, float z, float yawRad,
             bob = fabsf(sinf(t * 16.0f)) * 1.6f * mv + sinf(t * 2.1f) * 0.6f;
             roll = sinf(t * 16.0f) * 3.0f * mv;
         } else {        // heavy stride: rise and fall, sway, lean into the walk
-            bob = fabsf(sinf(t * 5.5f)) * 3.0f * mv + sinf(t * 1.7f) * 0.5f;
+            bob = fabsf(cosf(t * 5.5f)) * 3.0f * mv + sinf(t * 1.7f) * 0.5f; // highest as the legs pass
             roll = sinf(t * 5.5f) * 4.0f * mv;
             pitch = 7.0f * mv;
         }
@@ -18968,7 +18972,18 @@ static bool MeshMonDraw(const std::string& name, float x, float z, float yawRad,
     rlRotatef(roll, 0, 0, 1);
     if (deathT >= 0.0f && d.spider && roll > 90.0f) rlTranslatef(0.0f, -d.height * sizeMul * (roll / 180.0f), 0.0f);
     if (d.yawOff != 0.0f) rlRotatef(d.yawOff, 0, 1, 0);
+    // Legs that step (lit.vs Gait): the model is unrigged, so the stride is a
+    // vertex bend - each leg swings fore and aft below the hips (spiders step
+    // in two alternating sets) in time with the bob above, not a slide.
+    bool gait = g_t3dLit.ready && g_t3dLit.walkLoc >= 0 && deathT < 0.0f && mv > 0.02f;
+    if (gait) {
+        float w[4] = { t * (d.spider ? 16.0f : 5.5f), mv, d.spider ? 1.0f : 0.0f, 0.0f };
+        float box[4] = { M->minY, M->baseH, M->halfW, d.spider ? M->halfW * 0.16f : M->baseH * 0.13f };
+        SetShaderValue(g_t3dLit.shader, g_t3dLit.walkLoc, w, SHADER_UNIFORM_VEC4);
+        SetShaderValue(g_t3dLit.shader, g_t3dLit.walkBoxLoc, box, SHADER_UNIFORM_VEC4);
+    }
     DrawModelEx(M->model, { 0, 0, 0 }, { 0, 1, 0 }, 0.0f, { s, s, s }, tint);
+    if (gait) { float off[4] = { 0, 0, 0, 0 }; SetShaderValue(g_t3dLit.shader, g_t3dLit.walkLoc, off, SHADER_UNIFORM_VEC4); }
     rlPopMatrix();
     return true;
 }
