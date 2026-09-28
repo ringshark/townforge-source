@@ -12063,6 +12063,8 @@ enum OutfitPart { kOpRangerBody, kOpRangerArms, kOpRangerLegs, kOpRangerBoots, k
 struct HumanOutfit {
     Color region[kHrCount];
     int weapon = kHwNone;
+    int meshWeapon = -1;      // (2026-09-28) a sculpted weapon from assets/weapons3d (MeshWeaponFor), -1 = the kit's
+    bool meshShield = false;  // the sculpted buckler instead of the kit's round shield
     int style = kHsUnarmed;
     float weaponScale = 1.0f;
     bool shield = false;
@@ -12634,9 +12636,55 @@ static bool HumanArmorColor(const std::optional<Item>& it, Color* out) {
 }
 
 // Weapon item -> the gear drawn in hand and the fighting style it animates with.
+// ---- Sculpted weapons (2026-09-28, assets/weapons3d/) ----
+// Meshy weapon models, normalised offline (tools/characters3d/weapon.mjs): grip at
+// the origin, business end along +Y, true length in metres - so they hang off the
+// same hand grip as the kit's gear, scaled by the body's units per metre.
+static const char* const kMeshWeaponFiles[] = {
+    "longsword", "broadsword", "scimitar", "dagger", "mace", "war_hammer", "cleaver", "halberd",
+    "spear", "quarterstaff", "wizard_staff", "bow", "crossbow", "buckler" };
+static const int kMeshWeaponCount = (int)(sizeof(kMeshWeaponFiles) / sizeof(kMeshWeaponFiles[0]));
+static const int kMwBuckler = 13;
+static Model g_meshWeapons[kMeshWeaponCount];
+static bool g_meshWeaponTried[kMeshWeaponCount] = {};
+static void Town3DApplyLitShader(Model& m);
+static const Model* MeshWeaponModel(int i) {
+    if (i < 0 || i >= kMeshWeaponCount) return nullptr;
+    if (!g_meshWeaponTried[i]) {
+        g_meshWeaponTried[i] = true;
+        std::string f = std::string("assets/weapons3d/") + kMeshWeaponFiles[i] + ".glb";
+        if (FileExists(f.c_str())) { g_meshWeapons[i] = LoadModel(f.c_str()); Town3DApplyLitShader(g_meshWeapons[i]); }
+    }
+    return g_meshWeapons[i].meshCount > 0 ? &g_meshWeapons[i] : nullptr;
+}
+// Which sculpted weapon an item shows as (-1: keep the kit's model).
+// Long weapons (hammer, halberd, spear, staves) and the bow are carried upright,
+// not levelled like a sword: an extra tilt about the hand's knuckle axis.
+#ifndef TF_POLETILT
+#define TF_POLETILT -70.0f
+#endif
+static float MeshWeaponTilt(int i) { return i == 11 ? -TF_POLETILT : (i == 5 || (i >= 7 && i <= 10)) ? TF_POLETILT : 0.0f; } // the bow rides the left hand: mirrored
+static int MeshWeaponFor(const std::string& n) {
+    auto has = [&](const char* s) { return n.find(s) != std::string::npos; };
+    if (has("Cleaver") || has("War Axe") || has("Double Axe") || has("Battle Axe")) return 6;
+    if (has("Heavy Crossbow") || has("Crossbow")) return 12;
+    if (has("Bow")) return 11;
+    if (has("Gnarled Staff") || has("Wizard")) return 10;
+    if (has("Quarterstaff") || has("Black Staff")) return 9;
+    if (has("Halberd") || has("Bardiche")) return 7;
+    if (has("Spear")) return 8;
+    if (has("War Hammer") || has("Maul")) return 5;
+    if (has("Mace")) return 4;
+    if (has("Dagger") || has("Kryss")) return 3;
+    if (has("Scimitar") || has("Cutlass")) return 2;
+    if (has("Broadsword")) return 1;
+    if (has("Longsword") || has("Viking Sword") || has("Katana") || has("Sword")) return 0;
+    return -1;
+}
 static void HumanArmWith(HumanOutfit& o, const std::optional<Item>& it) {
-    o.weapon = kHwNone; o.style = kHsUnarmed; o.weaponScale = 1.0f; o.staffCaster = false;
+    o.weapon = kHwNone; o.style = kHsUnarmed; o.weaponScale = 1.0f; o.staffCaster = false; o.meshWeapon = -1;
     if (!it.has_value() || it->type != ItemType::Weapon) return;
+    o.meshWeapon = MeshWeaponFor(it->name);
     const std::string& n = it->name;
     const std::string& c = it->category;
     auto has = [&](const char* s) { return n.find(s) != std::string::npos; };
@@ -12760,6 +12808,10 @@ static HumanOutfit HumanOutfitFor(const Equipment& e) {
     HumanArmWith(o, e.rightHand);
     if (o.weapon == kHwNone) HumanArmWith(o, e.leftHand);
     if (e.leftHand.has_value() && e.leftHand->slot == "shield") o.shield = true;
+    if (o.shield && e.leftHand.has_value()) {
+        const std::string& sn = e.leftHand->name;
+        o.meshShield = sn.find("Buckler") != std::string::npos || sn == "Wooden Shield" || sn.find("Round") != std::string::npos;
+    }
     else if (e.leftHand.has_value()) {
         const std::string& n = e.leftHand->name;
         o.shield = n.find("Shield") != std::string::npos || n.find("Buckler") != std::string::npos;
@@ -12820,6 +12872,11 @@ static Vector3 g_skinGripRot = TF_GRIP, g_skinGripOff = { -0.02f, 0.085f, 0.0f }
 static Vector3 g_skinGripRot = { -90.0f, 0.0f, 0.0f }, g_skinGripOff = { -0.02f, 0.085f, 0.0f };
 #endif
 static Vector3 g_skinShieldRot = { 0.0f, -90.0f, 0.0f }, g_skinShieldOff = { -0.09f, 0.14f, 0.0f };
+#ifdef TF_BUCKLER
+static Vector3 g_skinBucklerRot = TF_BUCKLER;
+#else
+static Vector3 g_skinBucklerRot = { 0.0f, -90.0f, 0.0f };
+#endif
 
 static void HumanDrawAttached(const Model& gear, const Material* matOverride, const Matrix& local,
                               const Matrix& bone, const Matrix& world, Color tint) {
@@ -13289,7 +13346,20 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
     // While gathering, the tool replaces the weapon in hand.
     int wpn = gathering ? (p.gather == 1 ? kHwAxe : p.gather == 2 ? kHwPickaxe : kHwRod) : o.weapon;
     float wScale = gathering ? (p.gather == 1 ? 1.15f : 1.0f) : o.weaponScale;
-    if (wpn >= 0 && H.gearOk[wpn]) {
+    const Model* mwC = gathering ? nullptr : MeshWeaponModel(o.meshWeapon);
+    if (mwC) { // (2026-09-28) the sculpted weapon, true size, same grip
+        bool leftHand = o.meshWeapon == 11;
+        int hb = leftHand ? H.boneHandL : H.boneHandR;
+        if (hb >= 0) {
+            Vector3 off = g_humanGripOff;
+            if (leftHand) off.x = -off.x;
+            Vector3 rot = g_humanGripRot; rot.x -= MeshWeaponTilt(o.meshWeapon) * 0.0f; // the classic grip already carries poles upright
+            Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(u, u, u), MatrixRotateXYZ(Vector3Scale(rot, DEG2RAD))),
+                                          MatrixTranslate(off.x * u, off.y * u, off.z * u));
+            for (int i = 0; i < mwC->materialCount; i++) mwC->materials[i].shader = sh;
+            HumanDrawAttached(*mwC, nullptr, local, HumanBoneMatrix(H, hb), world, tint);
+        }
+    } else if (wpn >= 0 && H.gearOk[wpn]) {
         static const float gearScale[kHwGearCount] = { 0.56f, 0.56f, 0.42f, 0.80f, 0.50f, 0.56f,
                                                        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
         bool leftHand = wpn == kHwBow;
@@ -13962,7 +14032,20 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         float u = C.unit;
         int wpn = gathering ? (p.gather == 1 ? kHwAxe : p.gather == 2 ? kHwPickaxe : kHwRod) : gear->weapon;
         float wScale = gathering ? (p.gather == 1 ? 1.15f : 1.0f) : gear->weaponScale;
-        if (wpn >= 0 && wpn < kHwGearCount && H.gearOk[wpn]) {
+        const Model* mw = gathering ? nullptr : MeshWeaponModel(gear->meshWeapon);
+        if (mw) { // a sculpted weapon: already true size, grip at its origin
+            bool left = gear->meshWeapon == 11; // the bow
+            int hb = left ? C.handL : C.handR;
+            if (hb >= 0) {
+                Vector3 off = g_skinGripOff;
+                if (left) off.x = -off.x;
+                Vector3 rot = g_skinGripRot; rot.x += MeshWeaponTilt(gear->meshWeapon);
+                Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(u, u, u), MatrixRotateXYZ(Vector3Scale(rot, DEG2RAD))),
+                                              MatrixTranslate(off.x * u, off.y * u, off.z * u));
+                for (int i = 0; i < mw->materialCount; i++) mw->materials[i].shader = sh;
+                HumanDrawAttached(*mw, nullptr, local, boneM(hb), world, tint);
+            }
+        } else if (wpn >= 0 && wpn < kHwGearCount && H.gearOk[wpn]) {
             static const float gearScale[kHwGearCount] = { 0.56f, 0.56f, 0.42f, 0.80f, 0.50f, 0.56f,
                                                            1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
             bool left = wpn == kHwBow;
@@ -13981,7 +14064,13 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
                 HumanDrawAttached(H.gear[wpn], procedural ? &flat : nullptr, local, boneM(hb), world, tint);
             }
         }
-        if (gear->shield && H.gearOk[kHwShield] && C.foreArmL >= 0 && !gathering) {
+        const Model* ms = (gear->shield && gear->meshShield && !gathering) ? MeshWeaponModel(kMwBuckler) : nullptr;
+        if (ms && C.foreArmL >= 0) { // the sculpted buckler, face out on the forearm
+            Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(u, u, u), MatrixRotateXYZ(Vector3Scale(g_skinBucklerRot, DEG2RAD))),
+                                          MatrixTranslate(g_skinShieldOff.x * u, g_skinShieldOff.y * u, g_skinShieldOff.z * u));
+            for (int i = 0; i < ms->materialCount; i++) ms->materials[i].shader = sh;
+            HumanDrawAttached(*ms, nullptr, local, boneM(C.foreArmL), world, tint);
+        } else if (gear->shield && H.gearOk[kHwShield] && C.foreArmL >= 0 && !gathering) {
             float gs = 0.56f * u;
             Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(gs, gs, gs), MatrixRotateXYZ(Vector3Scale(g_skinShieldRot, DEG2RAD))),
                                           MatrixTranslate(g_skinShieldOff.x * u, g_skinShieldOff.y * u, g_skinShieldOff.z * u));
@@ -14018,6 +14107,26 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     return true;
 }
 
+// Which sculpted hero you appear as (2026-09-28): what you wear picks the outfit -
+// a robe (the archmage's, or the necromancer's if Necromancy leads your Magery),
+// plate (the knight's, or the paladin's once you walk the path of Chivalry), mail
+// (the footman's) or leather (the ranger's). With no body armor, a life of theft
+// or song shows too (the thief, the bard). nullptr: the base hero, who takes dyes.
+static const char* HeroLookFor(const GameState& s) {
+    const Equipment& e = s.equipped;
+    if (e.robe) return s.necromancy > s.magery ? "hero_necromancer" : "hero_archmage";
+    if (e.chest) {
+        const std::string& n = e.chest->name;
+        if (n.find("Plate") != std::string::npos) return s.chivalry >= 40.0f ? "hero_paladin" : "hero_knight";
+        if (n.find("Chain") != std::string::npos || n.find("Ring") != std::string::npos) return "hero_footman";
+        return "hero_ranger";
+    }
+    float rogue = s.stealing + s.snooping + s.hiding + s.stealth + s.lockpicking;
+    float bard = s.musicianship + s.peacemaking + s.provocation;
+    if (rogue >= 100.0f && rogue >= bard) return "hero_thief";
+    if (bard >= 100.0f) return "hero_bard";
+    return nullptr;
+}
 static void PlayerCombatPhases3D(const GameState& s, float* atk, float* cast);
 // The player on the animated body: swing/cast/hit/death clips ride the same
 // timers the kit poses did; red flash + knockback on a hit, translucent blue
@@ -14084,7 +14193,17 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
         if (e.shirt) dye.c[2] = dyed(*e.shirt);
         if (e.pants) dye.c[3] = dyed(*e.pants);
         if (e.robe) dye.c[1] = dye.c[2] = dye.c[3] = dyed(*e.robe);
-        if (DrawSkinChar(kScHero, trackId, x, z, yawRad, 66.0f, tint, sp, shadowPass, &outfit, 0.0f, &dye)) return true;
+        int heroId = kScHero;
+        HumanOutfit held = outfit;
+        if (const char* look = HeroLookFor(s)) {
+            int id = SkinCharFor(look);
+            if (SkinCharGet(id)) { // its armor is its own: keep the weapon and shield, drop the kit's pieces
+                heroId = id;
+                held.armChest = held.armArms = held.armLegs = held.armGorget = 0;
+                held.helm = kHhNone;
+            }
+        }
+        if (DrawSkinChar(heroId, trackId, x, z, yawRad, 66.0f, tint, sp, shadowPass, &held, 0.0f, heroId == kScHero ? &dye : nullptr)) return true;
     }
     return DrawHuman(trackId, x, z, yawRad, 1.0f, tint, outfit, hp, shadowPass);
 }

@@ -19,3 +19,10 @@ Monster rigs (2026-09-28): `PERMISSIVE=1 node merge_anims.mjs out.glb 4000 512 r
 then `node pal2.mjs out.glb` (palette PNG; raylib's web build reads PNG only). Meshy
 gave these walk, run and death; DrawSkinChar stands them in the walk's planted frame
 and lunges them on the run clip to attack.
+
+Hero outfits (2026-09-28): the eight `hero_<look>.glb` are Meshy rigs of the hero
+redrawn in other armor. `merge_anims.mjs` retargets the hero's clips onto each rig
+(world-space rotation deltas from each rig's rest pose, hips translation scaled by
+hip height), so one set of animations drives every outfit. `RESAMPLE=0.004` keeps
+them under 1 MB. Weapons: `node weapon.mjs in.glb out.glb lengthM gripFraction`
+(grip at origin, +Y up the blade, metres) into assets/weapons3d/.
