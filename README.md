@@ -1,16 +1,19 @@
-# Town Forge (2D source reference)
+# Town Forge — 3D game source
 
-This is the current 2D version of Town Forge, an idle RPG built with C++ and
-[raylib](https://www.raylib.com/). It's shared here as a reference for building
-a 3D version.
+The active 3D game source lives on `ringshark-patch-1`. The `main` branch is
+an older 2D reference snapshot. The playable web build is published separately
+in `ringshark/townforge-3d-preview`.
+
+The classic 2D world renderer and its dedicated art have already been removed.
+Keep UI icons, fonts, textures and sprite-based effects: the 3D game still uses them.
 
 ## What's here
 
-- `main.cpp` — the entire game (~8,600 lines, single file). Covers world
-  state, save/load, town/craft/combat/wilderness screens, and all sprite
-  rendering.
-- `assets/` — the game's current 2D art (sprite sheets, icons, tiles,
-  backgrounds) as actually used in the running game.
+- `main.cpp` — game logic, 3D rendering, UI, save/load and guild integration.
+- `assets/` — runtime models, textures, shaders, sound and UI art.
+- `web/` — cloud/guild client, database setup, player wiki and deployment helper.
+- `shell_3d.html` — Emscripten web shell.
+- `docs/guild-settlement-review.md` — guild review and proposed cooperative loop.
 
 ## Building it (desktop, Windows)
 

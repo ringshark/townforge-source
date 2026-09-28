@@ -95,7 +95,12 @@ void main()
         float fres = pow(1.0 - clamp(viewD.y, 0.0, 1.0), 3.0);
         vec3 wcol = col * (0.85 + (rip - 1.0) * 0.35);
         wcol = mix(wcol, pow(skyColor, vec3(2.2)) * shade, 0.18 + 0.45 * fres);
-        wcol += lightColor.rgb * smoothstep(1.28, 1.45, rip) * 0.55 * shade;    // glints
+        // Gate sun glints by the ripple normal and eye direction so the entire
+        // surface does not sparkle equally when viewed away from the sun.
+        vec3 rippleN = normalize(vec3((texture2D(texture2, r1).g - 0.5) * 0.35,
+                                     1.0, (texture2D(texture2, r2).g - 0.5) * 0.35));
+        float glint = pow(max(dot(reflect(-l, rippleN), viewD), 0.0), 48.0);
+        wcol += lightColor.rgb * glint * 0.40 * shade;
         col = mix(col, wcol, wWater);
     }
 

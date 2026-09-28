@@ -56,8 +56,10 @@ void main()
     vec3 amb = ambient.rgb*0.75*mix(vec3(0.55, 0.50, 0.45), vec3(1.05, 1.08, 1.18), up);
     vec3 light = lightColor.rgb*0.80*NdotL + amb;
 
+    // Broad, restrained highlights suit the shared wood/stone/cloth shader.
+    // The previous narrow white highlight made every surface look polished.
     float spec = 0.0;
-    if (NdotL > 0.0) spec = pow(max(0.0, dot(viewD, reflect(-l, normal))), 24.0)*0.10;
+    if (NdotL > 0.0) spec = pow(max(0.0, dot(viewD, reflect(-l, normal))), 16.0)*0.035*NdotL;
 
     vec3 col = albedo*light + lightColor.rgb*spec;
 
