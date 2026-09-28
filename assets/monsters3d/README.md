@@ -67,7 +67,7 @@ Raider monster.
 | `frostbite_husk_animated.glb` | Frostbite Husk, rigged (Walk, Run, Death), with axe |
 | `vyrathax.glb` | Vyrathax the Tri-Wyrm (world boss) \*\* |
 | `hero.glb` | Main hero (static, full PBR) |
-| `hero_animated.glb` | Main hero (rigged, 19 animation clips) |
+| `hero_animated.glb` | Main hero (rigged, 21 animation clips) |
 
 \* The ice lineup's figures overlap too much to crop apart, so each was redrawn in
 isolation from the lineup with Meshy image-to-image (`nano-banana-pro`) before 3D
@@ -89,7 +89,7 @@ triangle target instead of 30k.
 - `hero.glb` was built with Meshy multi-image-to-3D from all three turnaround views
   (`source/hero_front|side|back.jpg`), so the backpack and cape match the art.
 - `hero_animated.glb` is the same character run through Meshy auto-rigging: a
-  24-bone humanoid skeleton (`Armature`) with 19 clips from Meshy's animation library,
+  24-bone humanoid skeleton (`Armature`) with 21 clips from Meshy's animation library,
   merged into one file. Load it with raylib's `LoadModel` + `LoadModelAnimations`.
   Meshy's rigging output keeps only the base color texture (no normal/metallic-roughness
   maps), so it looks slightly flatter than `hero.glb`.
@@ -114,7 +114,11 @@ triangle target instead of 30k.
 | `Gather` | 6.0s | gathering, harvesting | 284 Collect Object |
 | `Drink` | 8.9s | potions, bandaging | 342 Stand and Drink |
 | `Sneak` | 2.9s | Hiding and Stealth | 559 Sneaky Walk |
+| `Jump` | 1.9s | deliberate standing jump only, never inside attacks | 466 Regular Jump |
+| `RunJump` | 2.4s | deliberate jump while moving | 463 Run and Jump |
 | `Kneel` | 2.6s | Meditation, praying at shrines | 365 Kneel on One Knee and Stand |
+
+None of the attack clips contain a jump (the biggest hip rise in one is `HammerSwing`'s small hop of about 12 cm). Use `Jump` and `RunJump` only when the player jumps on purpose.
 
 Some library clips are long (`AxeChop`, `BowShot`, `PickUp`, `Drink`), so play part of
 the clip or speed it up to fit the game's action timing. Fishing, playing instruments and
