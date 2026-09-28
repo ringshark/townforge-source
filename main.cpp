@@ -1818,6 +1818,8 @@ struct GameState {
     float hiding = 0, stealth = 0; // (2026-09-28) vanish, and move while unseen; capped at 100
     float chivalry = 0;            // (2026-09-28) holy magic, powered by Karma; capped at 100
     float cartography = 0, lockpicking = 0; // (2026-09-28) treasure hunting; capped at 100
+    float musicianship = 0, peacemaking = 0, provocation = 0; // (2026-09-28) bard skills; capped at 100
+    float bardCd = 0.0f; // a moment between songs (transient)
     // Treasure hunting (2026-09-28) - maps PERSISTED; the dig and the chest are transient.
     struct TreasureMap { int tier = 1; bool decoded = false; Vector2 spot{}; };
     std::vector<TreasureMap> tmaps;
@@ -1843,9 +1845,9 @@ struct GameState {
     // --- The Echo system - mirrors state.skillActive. true = contributing to
     // gameplay right now; false = benched (still fully trained, just inactive).
     // Indexed by WeeklyGoalIdx... no - indexed by position in kCappedSkills below. ---
-    std::array<bool, 26> skillActive = { true, true, true, true, true, true, true, true,
+    std::array<bool, 29> skillActive = { true, true, true, true, true, true, true, true,
                                           true, true, true, true, true, true, true, true, true, true, true, true, true,
-                                          true, true, true, true, true };
+                                          true, true, true, true, true, true, true, true };
 
     // --- The Bloodstained Road - mirrors state.bloodstainedProgress/bloodstainedLoop/
     // bloodstainedBossDefeated/grayEncounter. Tier index 0-4 = current rung; reaching
@@ -1897,6 +1899,7 @@ struct GameState {
     // panel-based state.combat system. ---
     struct ActiveMonster {
         int spotIdx; // index into kWildernessMonsterSpots
+        float provokedT = 0.0f; int provokeFoe = -1; // (2026-09-28) Provocation: fighting that spot instead of you
         Vector2 pos, spawnPos;
         float hp, maxHp;
         float monsterAttackCooldown = 0.0f; // counts down; monster can swing when <= 0
@@ -4474,7 +4477,7 @@ static bool HasWeeklyBlessing(const GameState& s) {
 // ---------------------------------------------------------------------
 
 struct CappedSkillDef { const char* label; float GameState::* field; };
-static const std::array<CappedSkillDef, 26> kCappedSkills = {{
+static const std::array<CappedSkillDef, 29> kCappedSkills = {{
     {"Swordsmanship", &GameState::swordsmanship}, {"Fencing", &GameState::fencing},
     {"Macing", &GameState::macing}, {"Archery", &GameState::archery}, {"Wrestling", &GameState::wrestling},
     {"Tactics", &GameState::tactics}, {"Anatomy", &GameState::anatomy},
@@ -4489,6 +4492,7 @@ static const std::array<CappedSkillDef, 26> kCappedSkills = {{
     {"Hiding", &GameState::hiding}, {"Stealth", &GameState::stealth}, // (2026-09-28)
     {"Chivalry", &GameState::chivalry}, // (2026-09-28)
     {"Cartography", &GameState::cartography}, {"Lockpicking", &GameState::lockpicking}, // (2026-09-28)
+    {"Musicianship", &GameState::musicianship}, {"Peacemaking", &GameState::peacemaking}, {"Provocation", &GameState::provocation}, // (2026-09-28)
 }};
 static const float kTotalSkillCap = 700.0f;
 
@@ -4735,6 +4739,7 @@ static void TryHide(GameState& s, bool inFight, bool foesNear) {
 // Each frame while hidden: moving needs Stealth. Returns false if you were revealed.
 static void StealthTick(GameState& s, float dt, bool moved) {
     s.hideCd = std::max(0.0f, s.hideCd - dt);
+    s.bardCd = std::max(0.0f, s.bardCd - dt); // bard songs (2026-09-28)
     s.surpriseT = std::max(0.0f, s.surpriseT - dt);
     if (!s.hidden || !moved) return;
     if (EffectiveSkill(s, &GameState::stealth) <= 0.0f && s.stealth <= 0.0f) { RevealFromHiding(s, "You step out of hiding."); return; }
@@ -7193,6 +7198,7 @@ static void SaveGame(const GameState& s) {
     out << "tracking=" << s.tracking << "\nnecromancy=" << s.necromancy << "\n";
     out << "hiding=" << s.hiding << "\nstealth=" << s.stealth << "\nchivalry=" << s.chivalry << "\n";
     out << "cartography=" << s.cartography << "\nlockpicking=" << s.lockpicking << "\ntmapTrack=" << s.tmapTrack << "\n";
+    out << "musicianship=" << s.musicianship << "\npeacemaking=" << s.peacemaking << "\nprovocation=" << s.provocation << "\n";
     for (size_t i = 0; i < s.tmaps.size(); i++)
         out << "tmap." << i << "=" << s.tmaps[i].tier << "|" << (s.tmaps[i].decoded ? 1 : 0) << "|" << s.tmaps[i].spot.x << "|" << s.tmaps[i].spot.y << "\n";
     out << "tactics=" << s.tactics << "\nanatomy=" << s.anatomy << "\nmagicResist=" << s.magicResist <<
@@ -7475,6 +7481,9 @@ static bool LoadGame(GameState& s) {
         else if (key == "stealth") s.stealth = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "chivalry") s.chivalry = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "cartography") s.cartography = std::min(100.0f, (float)std::atof(val.c_str()));
+        else if (key == "musicianship") s.musicianship = std::min(100.0f, (float)std::atof(val.c_str()));
+        else if (key == "peacemaking") s.peacemaking = std::min(100.0f, (float)std::atof(val.c_str()));
+        else if (key == "provocation") s.provocation = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "lockpicking") s.lockpicking = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "tmapTrack") s.tmapTrack = std::atoi(val.c_str());
         else if (key.rfind("tmap.", 0) == 0) {
@@ -10427,6 +10436,8 @@ static void CastHealOutOfCombat(GameState& s, int zone) {
     g_oocHealCd = 1.5f;
     CastLiveUtilitySpell(s, sp, zone);
 }
+static void BardPeace(GameState& s, int zone); // bard songs (2026-09-28), defined with the combat helpers
+static void BardProvoke(GameState& s);
 static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     // Belt pouch (2026-09-26): bandages and heal potions as framed slots in the
     // spell bar's style, stack counts in the corner. Out of combat (oocZone >= 0,
@@ -10453,8 +10464,14 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     bool teleUp = false; // (2026-09-27) Teleport on your bar: blink about between fights too
     if (ooc && !s.playerIsGhost)
         for (int sp : s.combatHotbar) if (sp == kSpTeleport && CanPracticeSpell(s, kSpells[kSpTeleport])) teleUp = true;
-    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp && !hideUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
-    int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0) + (teleUp ? 1 : 0) + (hideUp ? 1 : 0);
+    // (2026-09-28) Bard: Peace any time (with Peacemaking equipped), Provoke in a fight in the wilds
+    const int bardZone = ooc ? oocZone : (s.screen == Screen::Wilderness ? 0 : 1);
+    bool peaceUp = !s.playerIsGhost && s.skillActive[27] && (!PlayerYoung(s) || s.peacemaking > 0.0f);
+    bool provoUp = !ooc && bardZone == 0 && !s.playerIsGhost && s.skillActive[28] && (!PlayerYoung(s) || s.provocation > 0.0f) &&
+                   s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0;
+    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp && !hideUp && !peaceUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
+    int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0) + (teleUp ? 1 : 0) + (hideUp ? 1 : 0) +
+            (peaceUp ? 1 : 0) + (provoUp ? 1 : 0);
     const float sz = 42.0f, gap = 8.0f;
     Rectangle bar = { 166.0f, y - 6.0f, n * sz + (n - 1) * gap + 18.0f, sz + 12.0f };
     g_beltRect = bar; g_beltDrawnAt = GetTime();
@@ -10556,6 +10573,23 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
             PlaySfx(SfxId::Click);
             TryHide(s, false, g_foesNear);
         }
+    }
+    int bk = (ooc ? 2 : 1) + (int)potions.size() + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0) + (teleUp ? 1 : 0) + (hideUp ? 1 : 0);
+    auto note = [&](Rectangle r, Color c, const char* lbl) { // a music note
+        float cx = r.x + r.width / 2, cy = r.y + r.height / 2 - 3;
+        DrawCircleV({ cx, cy }, 15.0f, Fade(c, 0.22f));
+        DrawEllipse((int)cx - 4, (int)cy + 7, 6.0f, 4.5f, c);
+        DrawRectangleRec({ cx + 1, cy - 11, 2.5f, 18 }, c);
+        DrawTriangle({ cx + 3, cy - 11 }, { cx + 3, cy - 4 }, { cx + 10, cy - 6 }, c);
+        DrawUIText(lbl, (int)r.x + 3, (int)(r.y + r.height - 14), 11, Color{ 240, 236, 220, 255 });
+    };
+    if (peaceUp) {
+        if (slot(bk, s.bardCd <= 0.0f, 0, [&](Rectangle r) { note(r, Color{ 150, 200, 255, 255 }, "Peace"); })) { PlaySfx(SfxId::Click); BardPeace(s, bardZone); }
+        bk++;
+    }
+    if (provoUp) {
+        if (slot(bk, s.bardCd <= 0.0f, 0, [&](Rectangle r) { note(r, Color{ 255, 120, 90, 255 }, "Provoke"); })) { PlaySfx(SfxId::Click); BardProvoke(s); }
+        bk++;
     }
 }
 
@@ -26638,6 +26672,148 @@ static std::string FlagTargetName(const GameState& s) {
 }
 
 static void ClearFlagTarget(GameState& s) { s.flagTarget.reset(); }
+// ---- Bard skills (2026-09-28) ----------------------------------------------
+// Musicianship: every song needs it - play badly and nothing happens.
+// Peacemaking: calm every monster on you and end the fight; between fights, a
+//   song keeps them from coming for you for a while.
+// Provocation: turn the monster you're fighting on another enemy - they fight
+//   each other (not you) for a while, and may kill each other.
+static int g_provokeKill = -1; // a spot a provoked monster just finished off (resolved after the AI runs)
+static float BardAvg(const GameState& s, float GameState::* skill) {
+    return (EffectiveSkill(s, &GameState::musicianship) + EffectiveSkill(s, skill)) * 0.5f;
+}
+static bool BardPlay(GameState& s) { // the Musicianship roll that starts every song
+    float c = std::clamp(55.0f + EffectiveSkill(s, &GameState::musicianship) * 0.45f, 55.0f, 99.0f);
+    SkillUseGain(s.musicianship, c / 100.0f, 2.0f);
+    PlaySfx(SfxId::Quest);
+    if (RandUnit() * 100.0f < c) return true;
+    s.logLine = "You fumble the tune - nothing happens.";
+    return false;
+}
+static int BardFoeLevel(const GameState& s, int zone, bool* duel) {
+    int lvl = 0; *duel = false;
+    if (zone == 0) {
+        if (s.wildEngaged.has_value()) {
+            if (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0) *duel = true;
+            else lvl = kWildernessMonsterSpots[(size_t)s.wildEngaged->spotIdx].level;
+        }
+        for (const auto& ex : s.wildExtraAttackers) lvl = std::max(lvl, kWildernessMonsterSpots[(size_t)ex.spotIdx].level);
+    } else if (s.selectedDungeon.has_value()) {
+        const DungeonDef& d = kDungeons[*s.selectedDungeon];
+        if (s.dungeonEngaged.has_value()) {
+            if (s.dungeonEngaged->isBoss) *duel = true;
+            else lvl = DungeonSlotMonster(d, s.dungeonEngaged->monsterIdx).level;
+        }
+        for (const auto& ex : s.dungeonExtraAttackers) if (!ex.isBoss) lvl = std::max(lvl, DungeonSlotMonster(d, ex.monsterIdx).level);
+    }
+    return lvl;
+}
+static void BardPeace(GameState& s, int zone) {
+    if (s.bardCd > 0.0f || s.playerIsGhost) return;
+    RevealFromHiding(s, "");
+    s.bardCd = 5.0f;
+    bool duel = false;
+    int lvl = BardFoeLevel(s, zone, &duel);
+    bool fighting = zone == 0 ? (s.wildEngaged.has_value() || !s.wildExtraAttackers.empty())
+                              : (s.dungeonEngaged.has_value() || !s.dungeonExtraAttackers.empty());
+    if (duel) { s.logLine = "This foe won't be soothed by a song!"; return; }
+    if (!BardPlay(s)) return;
+    float c = std::clamp(45.0f + BardAvg(s, &GameState::peacemaking) * 0.6f - lvl * 0.8f, 5.0f, 97.0f);
+    float g = SkillUseGain(s.peacemaking, fighting ? c / 100.0f : 0.5f, fighting ? 2.5f : 0.8f);
+    std::string note = g > 0 ? " (Peacemaking +" + std::to_string(g).substr(0, 3) + ")" : "";
+    if (fighting && RandUnit() * 100.0f >= c) { s.logLine = "Your song doesn't reach them - they fight on." + note; return; }
+    float calm = 6.0f + EffectiveSkill(s, &GameState::peacemaking) * 0.14f; // 6 .. 20 s
+    if (zone == 0) { s.wildEngaged.reset(); s.wildExtraAttackers.clear(); }
+    else { s.dungeonEngaged.reset(); s.dungeonExtraAttackers.clear(); }
+    ClearFlagTarget(s);
+    s.disengageGraceT = std::max(s.disengageGraceT, calm);
+    s.logLine = (fighting ? "Your song calms them - the fight is over." : "You hum a calming air - nothing will come for you for a while.") +
+                std::string(TextFormat(" (%ds)", (int)calm)) + note;
+}
+static GameState::ActiveMonster* WildFoeBySpot(GameState& s, int spot, const GameState::ActiveMonster* notMe) {
+    if (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == spot && &*s.wildEngaged != notMe) return &*s.wildEngaged;
+    for (auto& ex : s.wildExtraAttackers) if (ex.spotIdx == spot && &ex != notMe) return &ex;
+    return nullptr;
+}
+static void BardProvoke(GameState& s) {
+    if (s.bardCd > 0.0f || s.playerIsGhost || !s.wildEngaged.has_value()) return;
+    GameState::ActiveMonster& a = *s.wildEngaged;
+    if (a.isRival || a.bladeIdx >= 0 || a.spotIdx == kWyrmSpot) { s.logLine = "This foe won't be goaded!"; return; }
+    s.bardCd = 5.0f;
+    RevealFromHiding(s, "");
+    // the other enemy: one already on you, else the nearest monster close by (it joins in)
+    int other = -1;
+    for (const auto& ex : s.wildExtraAttackers) if (ex.provokedT <= 0.0f) { other = ex.spotIdx; break; }
+    if (other < 0) {
+        float best = 480.0f;
+        for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
+            if ((int)i == a.spotIdx || (int)i == kWyrmSpot || s.wildSpotRespawn[i] > 0.0f || FindWildExtra(s, (int)i)) continue;
+            float d = Dist(WildernessMonsterLivePos((int)i, s.worldTime), a.pos);
+            if (d < best) { best = d; other = (int)i; }
+        }
+        if (other < 0) { s.logLine = "There's no other enemy near enough to turn it on."; return; }
+        GameState::ActiveMonster am;
+        am.spotIdx = other;
+        am.pos = WildernessMonsterLivePos(other, s.worldTime);
+        am.spawnPos = am.pos;
+        am.maxHp = WildSpotMaxHp(other); am.hp = am.maxHp;
+        s.wildExtraAttackers.push_back(am);
+    }
+    if (!BardPlay(s)) return;
+    int lvl = std::max(kWildernessMonsterSpots[(size_t)a.spotIdx].level, kWildernessMonsterSpots[(size_t)other].level);
+    float c = std::clamp(40.0f + BardAvg(s, &GameState::provocation) * 0.65f - lvl * 0.7f, 5.0f, 95.0f);
+    float g = SkillUseGain(s.provocation, c / 100.0f, 2.5f);
+    std::string note = g > 0 ? " (Provocation +" + std::to_string(g).substr(0, 3) + ")" : "";
+    if (RandUnit() * 100.0f >= c) { s.logLine = "The " + kWildernessMonsterSpots[(size_t)a.spotIdx].name + " ignores your taunts." + note; return; }
+    float t = 8.0f + EffectiveSkill(s, &GameState::provocation) * 0.1f; // 8 .. 18 s
+    GameState::ActiveMonster* b = WildFoeBySpot(s, other, &*s.wildEngaged);
+    if (!b) return;
+    GameState::ActiveMonster& a2 = *s.wildEngaged; // (the push_back above may have moved nothing here, but re-read anyway)
+    a2.provokedT = t; a2.provokeFoe = other;
+    b->provokedT = t; b->provokeFoe = a2.spotIdx;
+    s.logLine = "Your song drives the " + kWildernessMonsterSpots[(size_t)a2.spotIdx].name + " and the " +
+                kWildernessMonsterSpots[(size_t)other].name + " into a frenzy - they turn on each other!" + note;
+    Journal(s, s.logLine);
+}
+// One provoked monster's turn: go for its foe instead of you. Returns true while provoked.
+static bool BardProvokedStep(GameState& s, GameState::ActiveMonster& am, float dt) {
+    if ((am.provokedT -= dt) <= 0.0f) { am.provokedT = 0.0f; am.provokeFoe = -1; return false; }
+    GameState::ActiveMonster* foe = WildFoeBySpot(s, am.provokeFoe, &am);
+    if (!foe || foe->hp <= 0.0f) { am.provokedT = 0.0f; am.provokeFoe = -1; return false; }
+    float d = Dist(am.pos, foe->pos);
+    if (d > 55.0f) {
+        Vector2 dir = { (foe->pos.x - am.pos.x) / d, (foe->pos.y - am.pos.y) / d };
+        am.pos = { am.pos.x + dir.x * kWildMonsterChaseSpeed * dt, am.pos.y + dir.y * kWildMonsterChaseSpeed * dt };
+    } else if (am.monsterAttackCooldown <= 0.0f) {
+        am.monsterAttackCooldown = kWildMonsterAttackCooldown;
+        am.monsterAttackT = 0.0f;
+        int lvl = kWildernessMonsterSpots[(size_t)am.spotIdx].level;
+        int dmg = std::max(1, (int)std::round(lvl * (0.8f + RandUnit() * 0.6f) * 1.4f));
+        foe->hp -= (float)dmg;
+        foe->monsterHurtT = 0.0f;
+        SpawnFloatText(s, 0, foe->pos, std::to_string(dmg), Color{ 255, 150, 90, 255 });
+        if (foe->hp <= 0.0f) { foe->hp = 0.0f; g_provokeKill = foe->spotIdx; }
+    }
+    return true;
+}
+// After the AI: a provoked monster finished its foe - it dies like any other (you get the body).
+static void BardResolveProvokeKill(GameState& s) {
+    if (g_provokeKill < 0) return;
+    int k = g_provokeKill; g_provokeKill = -1;
+    if (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == k) {
+        EngagedMonsterStats st = EngagedWildMonsterStats(s, *s.wildEngaged);
+        s.logLine = "The " + st.name + " is torn down by its rival!";
+        BeginWildMonsterDeath(s, *s.wildEngaged, st.name, st.baseGold, st.baseLeather);
+        return;
+    }
+    for (size_t i = 0; i < s.wildExtraAttackers.size(); i++)
+        if (s.wildExtraAttackers[i].spotIdx == k) {
+            s.logLine = "The " + kWildernessMonsterSpots[(size_t)k].name + " is torn down by its rival!";
+            BeginWildExtraDeath(s, s.wildExtraAttackers[i]);
+            s.wildExtraAttackers.erase(s.wildExtraAttackers.begin() + i);
+            return;
+        }
+}
 
 static const float kDisengageGraceSeconds = 1.5f; // bump-engage suppression after a manual disengage
 
@@ -29218,7 +29394,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // outside the 47-unit floor, so the monster can actually reach and hold its
         // stopping distance instead of perpetually overshooting into collision.
         float distNow = Dist(am.pos, s.wildernessPlayerPos);
-        if (distNow > kWildMeleeRange) {
+        if (distNow > kWildMeleeRange && am.provokedT <= 0.0f) {
             Vector2 dir = { s.wildernessPlayerPos.x - am.pos.x, s.wildernessPlayerPos.y - am.pos.y };
             float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
             if (len > 0.0001f) {
@@ -29235,7 +29411,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             }
         }
 
-        if (Dist(am.pos, s.wildernessPlayerPos) > kWildDisengageRange) {
+        if (am.provokedT <= 0.0f && Dist(am.pos, s.wildernessPlayerPos) > kWildDisengageRange) {
             s.logLine = "The " + spot.name + " loses interest.";
             s.wildEngaged.reset();
             s.wildExtraAttackers.clear(); // the pack gives up too
@@ -29254,6 +29430,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (am.swingEffectTimer > 0) am.swingEffectTimer -= dtF;
         if (am.castEffectTimer > 0) am.castEffectTimer -= dtF;
 
+        if (am.provokedT > 0.0f && BardProvokedStep(s, am, dtF)) return; // Provocation (2026-09-28)
         bool inMelee = Dist(am.pos, s.wildernessPlayerPos) < kWildMeleeRange;
         if (inMelee && am.monsterAttackCooldown <= 0) {
             // Fumbling Curse: the monster attacks 50% slower (2026-09-24).
@@ -29527,7 +29704,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             GameState::ActiveMonster& ex = s.wildExtraAttackers[i];
             const WildernessMonsterSpot& spot = kWildernessMonsterSpots[ex.spotIdx];
             float distNow = Dist(ex.pos, s.wildernessPlayerPos);
-            if (distNow > kWildMeleeRange) {
+            if (distNow > kWildMeleeRange && ex.provokedT <= 0.0f) {
                 Vector2 dir = { s.wildernessPlayerPos.x - ex.pos.x, s.wildernessPlayerPos.y - ex.pos.y };
                 float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
                 if (len > 0.0001f) {
@@ -29543,7 +29720,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                     ex.pos = newPos;
                 }
             }
-            if (Dist(ex.pos, s.wildernessPlayerPos) > kWildDisengageRange) {
+            if (ex.provokedT <= 0.0f && Dist(ex.pos, s.wildernessPlayerPos) > kWildDisengageRange) {
                 s.wildExtraAttackers.erase(s.wildExtraAttackers.begin() + i);
                 continue; // loses interest, melts back to ambient
             }
@@ -29552,6 +29729,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 ex.monsterHurtT += dtF;
                 if (ex.monsterHurtT > 0.30f) ex.monsterHurtT = -1.0f;
             }
+            if (ex.provokedT > 0.0f && BardProvokedStep(s, ex, dtF)) { i++; continue; } // Provocation (2026-09-28)
             bool inMelee = Dist(ex.pos, s.wildernessPlayerPos) < kWildMeleeRange;
             if (inMelee && ex.monsterAttackCooldown <= 0) {
                 // Nearest-rank selection: the primary plus the closest extras fill
@@ -29958,6 +30136,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     else
         updateEngagedMonsterAI();
     updateWildExtraAttackers(); // pack members chase/crowd/attack alongside the primary
+    BardResolveProvokeKill(s);  // a provoked monster finished its rival (2026-09-28)
     if (s.wildEngaged.has_value() && !WildBlocked(engPrev)) WildTerrainResolve(s.wildEngaged->pos, engPrev);
     if (s.wildExtraAttackers.size() == extraPrev.size())
         for (size_t i = 0; i < extraPrev.size(); i++)
@@ -33685,7 +33864,7 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
 // want working. Equipped skills add up to at most 700 and stop improving once
 // the loadout is full; unequipped skills keep every point but do nothing until
 // you equip them again. Grouped, with a line on what each one does.
-static const char* kCappedSkillWhat[26] = {
+static const char* kCappedSkillWhat[29] = {
     "Hit harder and more often with swords and axes.",
     "Hit harder and more often with spears and daggers.",
     "Hit harder and more often with maces and hammers.",
@@ -33712,6 +33891,9 @@ static const char* kCappedSkillWhat[26] = {
     "Holy magic: heal, bless your blade, smite. Stronger with Karma.",
     "Decode treasure maps to find where the chest is buried.",
     "Pick the locks on treasure chests (forcing them spoils loot).",
+    "Play well: every bard song needs it.",
+    "Calm the monsters on you - or keep them off you for a while.",
+    "Turn the monster you're fighting on another enemy.",
 };
 struct SkillGroup { const char* name; std::vector<int> idx; };
 static float g_skillsScroll = 0.0f;
@@ -33722,6 +33904,7 @@ static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
         { "Animals", { 12, 13, 14 } },
         { "Scouting & thievery", { 19, 21, 22, 15, 16, 17 } },
         { "Treasure hunting", { 24, 25 } },
+        { "Bard", { 26, 27, 28 } },
     };
     const Color ink = kColorText, soft = Fade(kColorText, 0.72f), good = { 46, 120, 60, 255 }, warn = { 170, 90, 20, 255 };
     float total = ActiveSkillTotal(s);
@@ -34713,7 +34896,7 @@ static void UpdateDrawFrame() {
         DrawDirectionsHud(state, screenW); // compass + world-boss timer (2026-09-27)
         DrawWalkMarker(state);             // tap to walk + Teleport aim (2026-09-27)
         if (state.hidden && state.screen != Screen::Wilderness && state.screen != Screen::Hunt) state.hidden = false; // (2026-09-28)
-        if (state.hidden && !state.exploreMenuOpen) DrawHudLine(EffectiveSkill(state, &GameState::stealth) > 0.0f ? "HIDDEN - sneaking (Stealth)" : "HIDDEN - moving will reveal you", 20, 244, 13, Color{ 200, 190, 255, 255 });
+        if (state.hidden && !state.exploreMenuOpen && state.openCorpseId < 0) DrawHudLine(EffectiveSkill(state, &GameState::stealth) > 0.0f ? "HIDDEN - sneaking (Stealth)" : "HIDDEN - moving will reveal you", 20, 244, 13, Color{ 200, 190, 255, 255 });
         g_hudCamZone = -1;
         // UO-style travel (2026-09-25): arriving in a town marks it as a recall
         // destination. selectedTown only changes on real arrivals (gates, tabs,
