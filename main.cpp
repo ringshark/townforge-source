@@ -1817,6 +1817,17 @@ struct GameState {
     float necromancy = 0; // (2026-09-27) the dark school: bone, blood and the risen dead; capped at 100
     float hiding = 0, stealth = 0; // (2026-09-28) vanish, and move while unseen; capped at 100
     float chivalry = 0;            // (2026-09-28) holy magic, powered by Karma; capped at 100
+    float cartography = 0, lockpicking = 0; // (2026-09-28) treasure hunting; capped at 100
+    // Treasure hunting (2026-09-28) - maps PERSISTED; the dig and the chest are transient.
+    struct TreasureMap { int tier = 1; bool decoded = false; Vector2 spot{}; };
+    std::vector<TreasureMap> tmaps;
+    int tmapTrack = -1;          // the decoded map you're following (minimap arrow + HUD)
+    float digT = -1.0f;          // >=0: seconds into digging
+    bool tchestOn = false;       // a chest has been dug up and waits
+    Vector2 tchestPos{};
+    int tchestTier = 1, tchestMap = -1;
+    float pickT = -1.0f;         // >=0: seconds into picking the chest's lock
+    float tmapCd = 0.0f;         // a moment between decode attempts
     float consecrateT = 0.0f;      // (2026-09-28) Consecrate Weapon: +30% melee damage, seconds left
     // Hidden (2026-09-28) - transient: monsters, rivals and ambushes pass you by.
     bool hidden = false;
@@ -1832,9 +1843,9 @@ struct GameState {
     // --- The Echo system - mirrors state.skillActive. true = contributing to
     // gameplay right now; false = benched (still fully trained, just inactive).
     // Indexed by WeeklyGoalIdx... no - indexed by position in kCappedSkills below. ---
-    std::array<bool, 24> skillActive = { true, true, true, true, true, true, true, true,
+    std::array<bool, 26> skillActive = { true, true, true, true, true, true, true, true,
                                           true, true, true, true, true, true, true, true, true, true, true, true, true,
-                                          true, true, true };
+                                          true, true, true, true, true };
 
     // --- The Bloodstained Road - mirrors state.bloodstainedProgress/bloodstainedLoop/
     // bloodstainedBossDefeated/grayEncounter. Tier index 0-4 = current rung; reaching
@@ -4463,7 +4474,7 @@ static bool HasWeeklyBlessing(const GameState& s) {
 // ---------------------------------------------------------------------
 
 struct CappedSkillDef { const char* label; float GameState::* field; };
-static const std::array<CappedSkillDef, 24> kCappedSkills = {{
+static const std::array<CappedSkillDef, 26> kCappedSkills = {{
     {"Swordsmanship", &GameState::swordsmanship}, {"Fencing", &GameState::fencing},
     {"Macing", &GameState::macing}, {"Archery", &GameState::archery}, {"Wrestling", &GameState::wrestling},
     {"Tactics", &GameState::tactics}, {"Anatomy", &GameState::anatomy},
@@ -4477,6 +4488,7 @@ static const std::array<CappedSkillDef, 24> kCappedSkills = {{
     {"Necromancy", &GameState::necromancy}, // (2026-09-27)
     {"Hiding", &GameState::hiding}, {"Stealth", &GameState::stealth}, // (2026-09-28)
     {"Chivalry", &GameState::chivalry}, // (2026-09-28)
+    {"Cartography", &GameState::cartography}, {"Lockpicking", &GameState::lockpicking}, // (2026-09-28)
 }};
 static const float kTotalSkillCap = 700.0f;
 
@@ -7180,6 +7192,9 @@ static void SaveGame(const GameState& s) {
     out << "parrying=" << s.parrying << "\n";
     out << "tracking=" << s.tracking << "\nnecromancy=" << s.necromancy << "\n";
     out << "hiding=" << s.hiding << "\nstealth=" << s.stealth << "\nchivalry=" << s.chivalry << "\n";
+    out << "cartography=" << s.cartography << "\nlockpicking=" << s.lockpicking << "\ntmapTrack=" << s.tmapTrack << "\n";
+    for (size_t i = 0; i < s.tmaps.size(); i++)
+        out << "tmap." << i << "=" << s.tmaps[i].tier << "|" << (s.tmaps[i].decoded ? 1 : 0) << "|" << s.tmaps[i].spot.x << "|" << s.tmaps[i].spot.y << "\n";
     out << "tactics=" << s.tactics << "\nanatomy=" << s.anatomy << "\nmagicResist=" << s.magicResist <<
            "\nhealing=" << s.healing << "\n";
     out << "skillActive=";
@@ -7459,6 +7474,14 @@ static bool LoadGame(GameState& s) {
         else if (key == "hiding") s.hiding = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "stealth") s.stealth = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "chivalry") s.chivalry = std::min(100.0f, (float)std::atof(val.c_str()));
+        else if (key == "cartography") s.cartography = std::min(100.0f, (float)std::atof(val.c_str()));
+        else if (key == "lockpicking") s.lockpicking = std::min(100.0f, (float)std::atof(val.c_str()));
+        else if (key == "tmapTrack") s.tmapTrack = std::atoi(val.c_str());
+        else if (key.rfind("tmap.", 0) == 0) {
+            auto p = SplitStr(val, '|');
+            if (p.size() >= 4) { GameState::TreasureMap m; m.tier = std::clamp(std::atoi(p[0].c_str()), 1, 5); m.decoded = p[1] == "1";
+                                 m.spot = { (float)std::atof(p[2].c_str()), (float)std::atof(p[3].c_str()) }; s.tmaps.push_back(m); }
+        }
         else if (key == "necromancy") s.necromancy = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "magicResist") s.magicResist = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "healing") s.healing = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
@@ -15565,6 +15588,18 @@ static void DrawMinimap(GameState& s) {
             DrawDirArrow({ ctr.x + cosf(a) * r, ctr.y + sinf(a) * r }, a, 9.0f, Fade(Color{ 255, 120, 40, 255 }, pulse));
         }
     }
+    if (s.tmapTrack >= 0 && s.tmapTrack < (int)s.tmaps.size() && s.tmaps[(size_t)s.tmapTrack].decoded) { // treasure (2026-09-28)
+        Vector2 f = toMap(s.tmaps[(size_t)s.tmapTrack].spot);
+        Color gold = { 255, 214, 90, 255 };
+        if (inside(f, 4)) {
+            DrawLineEx({ f.x - 5, f.y - 5 }, { f.x + 5, f.y + 5 }, 3.0f, gold);
+            DrawLineEx({ f.x - 5, f.y + 5 }, { f.x + 5, f.y - 5 }, 3.0f, gold);
+        } else {
+            Vector2 ctr = { mm.x + mm.width / 2, mm.y + mm.height / 2 };
+            float a = atan2f(f.y - ctr.y, f.x - ctr.x), r = mm.width / 2 - 12;
+            DrawDirArrow({ ctr.x + cosf(a) * r, ctr.y + sinf(a) * r }, a, 9.0f, gold);
+        }
+    }
     EndScissorMode();
     MapCompassLetters(mm, 11);
     DrawRectangleLinesEx(mm, 1.5f, Fade(Color{ 250, 236, 170, 255 }, 0.85f));
@@ -15593,7 +15628,7 @@ static bool ExploreHeaderCollapsed(const GameState& s) {
 }
 static const Rectangle kCompactMenuBtn = { 20, 56, 104, 40 };
 static Rectangle CompactMenuPanelRect(bool inDungeon) {
-    return { 12, 104, 336, inDungeon ? 392.0f : 366.0f }; // (2026-09-27) + Cloud/Reset row
+    return { 12, 104, 336, inDungeon ? 440.0f : 414.0f }; // (2026-09-27) + Cloud/Reset row; (2026-09-28) + Treasure maps
 }
 static bool ExploreMenuPointInUI(Vector2 m, const GameState& s) {
     if (!ExploreHeaderCollapsed(s)) return false;
@@ -18589,6 +18624,10 @@ static void CorpseDrawGlint(const GameState::WorldCorpse& c) {
     DrawSphereEx({ c.pos.x, y, c.pos.y }, 3.2f, 6, 6, Fade(Color{ 255, 226, 120, 255 }, 0.8f + 0.2f * pulse));
 }
 static void Wild3DDrawCorpse(const GameState::WorldCorpse& c, bool shadowPass) {
+    if (c.name == "Treasure Chest") { // (2026-09-28) an opened treasure chest, looted like a body
+        Town3DDrawPiece(g_t3dModels.chest, { c.pos.x, 0.0f, c.pos.y }, 30.0f, 1.15f);
+        return;
+    }
     float sink = c.timer < 10.0f ? (1.0f - c.timer / 10.0f) * 26.0f : 0.0f;
     rlPushMatrix();
     rlTranslatef(0.0f, -sink, 0.0f);
@@ -19124,6 +19163,7 @@ static void WyrmHurtPlayer(GameState& s, int h, float raw) {
 }
 static void WyrmSlain(GameState& s) {
     s.wyrmKills++;
+    if (s.tmaps.size() < 10) { GameState::TreasureMap m; m.tier = 5; s.tmaps.push_back(m); Journal(s, "Among the wyrm's hoard: a Legendary treasure map!"); }
     WarAward(s, 5, 200); // War Week: The Wyrm
     s.wyrmHp = -1.0f;
     int gold = 1200 + GetRandomValue(0, 400);
@@ -19910,6 +19950,8 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         if (!vis(c.pos.x, c.pos.y, 70.0f)) continue;
         Wild3DDrawCorpse(c, shadowPass);
     }
+    if (s.tchestOn && vis(s.tchestPos.x, s.tchestPos.y, 70.0f)) // a dug-up treasure chest, still locked (2026-09-28)
+        Town3DDrawPiece(g_t3dModels.chest, { s.tchestPos.x, 0.0f, s.tchestPos.y }, 30.0f, 1.15f);
     // AI companion.
     if (Pet* ap = ActivePet(s)) {
         if (vis(s.companionPos.x, s.companionPos.y, 70.0f)) {
@@ -24514,6 +24556,8 @@ static float GuildRecruitsFight(GameState& s, const GameState::ActiveMonster& am
     return total;
 }
 // A kill while your guild is at war with the victim's side counts toward the war.
+static std::vector<int> g_tguards; // treasure guardians (2026-09-28) - see Treasure hunting
+static void TreasureMaybeDrop(GameState& s, int level, bool boss);
 static void GuildWarCredit(GameState& s, const GameState::ActiveMonster& am, const std::string& name) {
     if (!GuildFounded(s)) return;
     for (auto& r : s.guildRecruits) // everyone who was there learns something
@@ -25147,6 +25191,9 @@ static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& 
                                   const std::string& name, int baseGold, int baseLeather,
                                   bool clearEngagement) {
     GuildWarCredit(s, am, name); // (2026-09-27) before anything resets `am`
+    if (am.spotIdx >= 0 && am.spotIdx != kWyrmSpot && !am.isRival && am.bladeIdx < 0 && // treasure maps (2026-09-28)
+        std::find(g_tguards.begin(), g_tguards.end(), am.spotIdx) == g_tguards.end())
+        TreasureMaybeDrop(s, kWildernessMonsterSpots[(size_t)am.spotIdx].level, false);
     PlaySfx(SfxId::MonsterDie);
     // Capture identity BEFORE s.wildEngaged.reset() below - callers pass *s.wildEngaged
     // by reference, so `am` dangles the moment the optional resets (2026-09-25).
@@ -25195,6 +25242,7 @@ static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeo
     s.dungeonSpawnRespawn[dungeonIdx][dm.monsterIdx] = RollDungeonRespawn(wasBoss);
     s.dyingMonsters.push_back(dm);
     if (wasBoss) WarAward(s, 3, 50); // War Week: Hunt
+    TreasureMaybeDrop(s, level, wasBoss); // treasure maps (2026-09-28)
     if (clearEngagement) {
         s.dungeonEngaged.reset();
         PromoteDungeonExtraOrAutoFlag(s, dungeonIdx);
@@ -25861,11 +25909,160 @@ static GameState::WorldCorpse* NecroFindCorpse(GameState& s, int zone, Vector2 n
     GameState::WorldCorpse* best = nullptr;
     float bd = range;
     for (auto& c : s.worldCorpses) {
-        if (!CorpseHere(s, c, zone) || c.timer <= 0.5f) continue;
+        if (!CorpseHere(s, c, zone) || c.timer <= 0.5f || c.name == "Treasure Chest") continue;
         float d = Dist(c.pos, near);
         if (d < bd) { bd = d; best = &c; }
     }
     return best;
+}
+// ---- Treasure hunting (2026-09-28) -----------------------------------------
+// Tougher monsters sometimes carry a treasure map (5 tiers). Decode it with
+// Cartography and the dig site shows on your minimap; dig there, and guardians
+// rise to defend the chest. Once they fall, pick its lock (Lockpicking) - or
+// force it and ruin some of what's inside - then loot it like a body.
+static const char* kTmapTierName[6] = { "", "Tattered", "Worn", "Fine", "Rare", "Legendary" };
+static int TreasureTierForLevel(int level) { return std::clamp((level - 5) / 8 + 1, 1, 5); }
+static float TmapDecodeChance(const GameState& s, int tier) {
+    return std::clamp(35.0f + EffectiveSkill(s, &GameState::cartography) * 0.8f - (tier - 1) * 18.0f, 5.0f, 98.0f);
+}
+static float TchestPickChance(const GameState& s, int tier) {
+    return std::clamp(30.0f + EffectiveSkill(s, &GameState::lockpicking) * 0.8f - (tier - 1) * 15.0f, 5.0f, 99.0f);
+}
+// Somewhere open in the wilds, well away from towns.
+static Vector2 TreasureRollSpot(const GameState& s) {
+    const float W = kWildernessWorldSize;
+    for (int tries = 0; tries < 200; tries++) {
+        Vector2 p = { 250.0f + RandUnit() * (W - 500.0f), 250.0f + RandUnit() * (W - 500.0f) };
+        if (WildBlocked(p)) continue;
+        bool nearTown = false;
+        for (const auto& g : kTownGates) if (Dist(p, g.wildernessPos) < 700.0f) nearTown = true;
+        if (nearTown || Dist(p, kWyrmLair) < kWyrmLairR + 200.0f || Dist(p, s.wildernessPlayerPos) < 500.0f) continue;
+        return p;
+    }
+    return { W * 0.5f, W * 0.5f };
+}
+static void TreasureMaybeDrop(GameState& s, int level, bool boss) {
+    if (level < 5 || s.tmaps.size() >= 10) return;
+    float chance = boss ? 0.40f : 0.035f + level * 0.0008f;
+    if (RandUnit() >= chance) return;
+    GameState::TreasureMap m;
+    m.tier = boss ? std::min(5, TreasureTierForLevel(level) + 1) : TreasureTierForLevel(level);
+    s.tmaps.push_back(m);
+    std::string msg = std::string("You find a ") + kTmapTierName[m.tier] + " treasure map! Decode it from MENU - Treasure maps.";
+    Journal(s, msg);
+    s.rivalBanner = std::string(kTmapTierName[m.tier]) + " treasure map!";
+    s.rivalBannerTimer = kRivalBannerTime * 0.8f;
+}
+static void TreasureDecode(GameState& s, int i) {
+    if (i < 0 || i >= (int)s.tmaps.size() || s.tmaps[(size_t)i].decoded || s.tmapCd > 0.0f) return;
+    GameState::TreasureMap& m = s.tmaps[(size_t)i];
+    float c = TmapDecodeChance(s, m.tier);
+    s.tmapCd = 2.0f;
+    float g = SkillUseGain(s.cartography, c / 100.0f, 3.0f);
+    std::string note = g > 0 ? " (Cartography +" + std::to_string(g).substr(0, 3) + ")" : "";
+    if (RandUnit() * 100.0f < c) {
+        m.decoded = true;
+        m.spot = TreasureRollSpot(s);
+        s.tmapTrack = i;
+        s.logLine = "The markings make sense at last - the dig site is on your minimap (a gold X)." + note;
+        PlaySfx(SfxId::Quest);
+    } else s.logLine = "The map's markings still make no sense to you." + note;
+}
+static void TreasureRemoveMap(GameState& s, int i) {
+    if (i < 0 || i >= (int)s.tmaps.size()) return;
+    s.tmaps.erase(s.tmaps.begin() + i);
+    if (s.tmapTrack == i) s.tmapTrack = -1; else if (s.tmapTrack > i) s.tmapTrack--;
+    if (s.tchestMap == i) s.tchestMap = -1; else if (s.tchestMap > i) s.tchestMap--;
+}
+static bool TreasureGuardsUp(const GameState& s) {
+    for (int i : g_tguards) if (s.wildSpotRespawn[(size_t)i] <= 0.0f) return true;
+    return false;
+}
+// The dig finishes: the chest breaks the surface and its guardians rise around you.
+static void TreasureUnearth(GameState& s) {
+    const GameState::TreasureMap& m = s.tmaps[(size_t)s.tmapTrack];
+    s.tchestOn = true; s.tchestPos = m.spot; s.tchestTier = m.tier; s.tchestMap = s.tmapTrack;
+    s.pickT = -1.0f;
+    g_tguards.clear();
+    int want = m.tier >= 4 ? 3 : (m.tier >= 2 ? 2 : 1);
+    int target = 6 + m.tier * 7; // guardian strength by tier: ~13 .. ~41
+    std::vector<std::pair<int, int>> cand; // |level - target|, spot
+    for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
+        if ((int)i == kWyrmSpot || s.wildSpotRespawn[i] > 0.0f || FindWildExtra(s, (int)i) || SettleIsRaider((int)i)) continue;
+        if (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == (int)i) continue;
+        cand.push_back({ std::abs(kWildernessMonsterSpots[i].level - target), (int)i });
+    }
+    std::sort(cand.begin(), cand.end());
+    for (size_t k = 0; k < cand.size() && (int)g_tguards.size() < want; k++) g_tguards.push_back(cand[k].second);
+    for (size_t k = 0; k < g_tguards.size(); k++) {
+        GameState::ActiveMonster am;
+        am.spotIdx = g_tguards[k];
+        float a = (float)k * 2.1f + RandUnit();
+        am.pos = { m.spot.x + cosf(a) * 120.0f, m.spot.y + sinf(a) * 120.0f };
+        if (WildBlocked(am.pos)) am.pos = WildNearestFree(am.pos);
+        am.spawnPos = am.pos;
+        am.maxHp = WildSpotMaxHp(g_tguards[k]);
+        am.hp = am.maxHp;
+        if (!s.wildEngaged.has_value()) s.wildEngaged = am; else s.wildExtraAttackers.push_back(am);
+    }
+    s.rivalBanner = "The chest's guardians rise!";
+    s.rivalBannerTimer = kRivalBannerTime;
+    s.logLine = std::string("Your shovel strikes wood - a ") + kTmapTierName[m.tier] + " chest! Its guardians rise to defend it.";
+    Journal(s, s.logLine);
+    PlaySfx(SfxId::Hunt);
+}
+// Open it: the loot goes into a chest you loot like a body.
+static void TreasureOpen(GameState& s, bool forced) {
+    int t = s.tchestTier;
+    GameState::WorldCorpse c;
+    c.pos = s.tchestPos; c.zone = 0; c.name = "Treasure Chest";
+    c.timer = c.duration = 900.0f;
+    int gold = t * (150 + GetRandomValue(0, 150));
+    if (forced) gold /= 2;
+    c.loot.push_back({ GameState::kClGold, gold, std::nullopt });
+    c.loot.push_back({ GameState::kClReagents, 8 * t, std::nullopt });
+    c.loot.push_back({ GameState::kClBandages, 4 * t, std::nullopt });
+    int jewels = (t >= 3 ? 2 : 1) + (t == 5 ? 1 : 0);
+    if (forced) jewels = std::max(0, jewels - 1);
+    for (int j = 0; j < jewels; j++) c.loot.push_back({ GameState::kClItem, 1, MakeJewel(s, GetRandomValue(0, 2), t * 2 + GetRandomValue(0, 2)) });
+    if (t >= 4 && !forced) s.rareDyeCharges += t - 3;
+    AddWorldCorpse(s, c);
+    WarAward(s, 3, 30 * t); // War Week: Hunt
+    GainFame(s, (float)t);
+    TreasureRemoveMap(s, s.tchestMap);
+    s.tchestOn = false; s.tchestMap = -1; s.pickT = -1.0f;
+    g_tguards.clear();
+    s.logLine = forced ? "You smash the chest open - some of what was inside is ruined, but the rest is yours."
+                       : std::string("The lock clicks open - the ") + kTmapTierName[t] + " chest is yours!" + (t >= 4 ? " (and rare dyes)" : "");
+    Journal(s, s.logLine);
+    PlaySfx(SfxId::Coin);
+}
+// Per frame in the wilds: digging, lock picking, and giving up on a chest you walked away from.
+static void TreasureTick(GameState& s, float dt, bool moved) {
+    s.tmapCd = std::max(0.0f, s.tmapCd - dt);
+    if (s.digT >= 0.0f) {
+        if (moved || s.wildEngaged.has_value()) { s.digT = -1.0f; s.logLine = "You stop digging."; }
+        else if ((s.digT += dt) >= 4.0f) { s.digT = -1.0f; TreasureUnearth(s); }
+    }
+    if (s.pickT >= 0.0f) {
+        if (moved || s.wildEngaged.has_value()) { s.pickT = -1.0f; }
+        else if ((s.pickT += dt) >= 2.5f) {
+            s.pickT = -1.0f;
+            float c = TchestPickChance(s, s.tchestTier);
+            float g = SkillUseGain(s.lockpicking, c / 100.0f, 3.0f);
+            std::string note = g > 0 ? " (Lockpicking +" + std::to_string(g).substr(0, 3) + ")" : "";
+            if (RandUnit() * 100.0f < c) TreasureOpen(s, false);
+            else s.logLine = "The lock holds. Try again." + note;
+        }
+    }
+    if (s.tchestOn && Dist(s.wildernessPlayerPos, s.tchestPos) > 1500.0f) { // left it behind: it sinks back (the map keeps)
+        s.tchestOn = false; s.tchestMap = -1; g_tguards.clear();
+        s.logLine = "You left the treasure behind - the earth swallows it again. Dig again with the same map.";
+    }
+}
+static bool TreasureNearDig(const GameState& s) {
+    if (s.tchestOn || s.tmapTrack < 0 || s.tmapTrack >= (int)s.tmaps.size() || !s.tmaps[(size_t)s.tmapTrack].decoded) return false;
+    return Dist(s.wildernessPlayerPos, s.tmaps[(size_t)s.tmapTrack].spot) < 70.0f;
 }
 static void NecroConsumeCorpse(GameState& s, GameState::WorldCorpse& c) {
     LootAllCorpse(s, c); // whatever it carried drops into your pack as it's used up
@@ -29640,6 +29837,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     if (s.playerDeathAnimT <= 0.0f) {
         bool moved = UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GameDt() * SettleTravelMult(s), kWildernessWorldSize); // Stable (2026-09-27)
         StealthTick(s, GameDt(), moved); // Hiding & Stealth (2026-09-28)
+        TreasureTick(s, GameDt(), moved); // digging and lock picking (2026-09-28)
         // UO-style attack flagging (2026-09-24): when the player isn't driving,
         // steer toward the flagged target until contact auto-engages. Manual
         // input always wins - steering only fills the idle gap.
@@ -30198,7 +30396,27 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         DrawLiveCombatQuickItems(s, 0); // hurt and out of a fight: bandage / potion / heal spell
         if (IsKeyPressed(KEY_B)) UseBandageOutOfCombat(s);
         if (IsKeyPressed(KEY_H)) CastHealOutOfCombat(s, 0);
-        if (inRange && !prompt.empty() && DrawInteractButton(prompt)) tryInteract();
+        bool atChest = s.tchestOn && Dist(s.wildernessPlayerPos, s.tchestPos) < 80.0f && !s.playerIsGhost;
+        if (s.digT >= 0.0f || s.pickT >= 0.0f) { // treasure work in progress (2026-09-28)
+            float t = s.digT >= 0.0f ? s.digT / 4.0f : s.pickT / 2.5f;
+            Rectangle bar = { kViewport.x + kViewport.width - 150.0f, kViewport.y + kViewport.height - 90.0f, 130.0f, 60.0f };
+            DrawRectangleRounded(bar, 0.2f, 6, Fade(BLACK, 0.6f));
+            DrawUIText(s.digT >= 0.0f ? "Digging..." : "Picking the lock...", (int)bar.x + 10, (int)bar.y + 10, 13, Color{ 255, 236, 170, 255 });
+            DrawRectangleRec({ bar.x + 10, bar.y + 36, 110, 10 }, Fade(WHITE, 0.2f));
+            DrawRectangleRec({ bar.x + 10, bar.y + 36, 110 * std::clamp(t, 0.0f, 1.0f), 10 }, Color{ 255, 214, 90, 255 });
+        } else if (atChest && TreasureGuardsUp(s)) {
+            DrawPromptLabel("Defeat the chest's guardians first!", screenW, screenH);
+        } else if (atChest) {
+            if (DrawInteractButton("Pick the lock")) { s.pickT = 0.0f; RevealFromHiding(s, ""); s.logLine = "You set to work on the lock..."; }
+            if (Button({ kViewport.x + kViewport.width - 150.0f, kViewport.y + kViewport.height - 250.0f, 130.0f, 36.0f }, "Force it open", true)) {
+                int dmg = 4 * s.tchestTier; // the trap
+                s.hp = std::max(1, s.hp - dmg);
+                TreasureOpen(s, true);
+                s.logLine += " A trap bites you for " + std::to_string(dmg) + ".";
+            }
+        } else if (TreasureNearDig(s) && !s.playerIsGhost) {
+            if (DrawInteractButton("Dig for treasure")) { s.digT = 0.0f; RevealFromHiding(s, ""); s.logLine = "You start digging..."; }
+        } else if (inRange && !prompt.empty() && DrawInteractButton(prompt)) tryInteract();
     }
     DrawGhostStatus(s); // death animation / ghost walk banner
     DrawCorpseUI(s, 0); // UO corpse window / Loot button (2026-09-26)
@@ -30313,6 +30531,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 // a dungeon, the Magery escape); picking one navigates and closes it.
 static float g_resetArmedTimer = 0.0f; // >0 while the Reset button is armed, waiting for a confirm click
 static bool g_warOpen = false;         // the War Week screen (over the House screen)
+static bool g_tmapOpen = false;        // the Treasure maps screen (over the House screen, 2026-09-28)
 static void OpenWarWeek(GameState& s); // (2026-09-27) defined with the Guildstone
 // Tap to walk (2026-09-27): a pulsing gold ring on the ground where you're headed.
 static void DrawWalkMarker(const GameState& s) {
@@ -30334,6 +30553,22 @@ static void DrawWalkMarker(const GameState& s) {
                 prev = sp; havePrev = ok;
             }
             DrawHudLine("Teleport: tap the ground inside the blue ring", 20, 226, 13);
+        }
+    }
+    if (s.screen == Screen::Wilderness && !s.exploreMenuOpen && !s.worldMapOpen &&
+        s.tmapTrack >= 0 && s.tmapTrack < (int)s.tmaps.size() && s.tmaps[(size_t)s.tmapTrack].decoded && !s.tchestOn) {
+        Vector2 spot = s.tmaps[(size_t)s.tmapTrack].spot; // treasure (2026-09-28)
+        float d = Dist(s.wildernessPlayerPos, spot);
+        DrawHudLine(d < 70.0f ? "Treasure: dig here!" : TextFormat("Treasure: %d paces %s", (int)(d / 10.0f), CompassWord(s.wildernessPlayerPos, spot).c_str()),
+                    20, 262, 13, Color{ 255, 214, 90, 255 });
+        if (g_hudCamZone == 0 && d < 900.0f) { // a gold X on the ground
+            float gy = WildGroundY(spot.x, spot.y) + 3.0f;
+            Vector2 a, b, c2, d2;
+            if (Town3DProject(g_hudCam, { spot.x - 22, gy, spot.y - 22 }, &a) && Town3DProject(g_hudCam, { spot.x + 22, gy, spot.y + 22 }, &b) &&
+                Town3DProject(g_hudCam, { spot.x - 22, gy, spot.y + 22 }, &c2) && Town3DProject(g_hudCam, { spot.x + 22, gy, spot.y - 22 }, &d2)) {
+                DrawLineEx(a, b, 6.0f, Fade(BLACK, 0.35f)); DrawLineEx(c2, d2, 6.0f, Fade(BLACK, 0.35f));
+                DrawLineEx(a, b, 4.0f, Color{ 255, 214, 90, 255 }); DrawLineEx(c2, d2, 4.0f, Color{ 255, 214, 90, 255 });
+            }
         }
     }
     if (!g_walkOn || g_hudCamZone < 0) return;
@@ -30403,7 +30638,7 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         if (Button({ bx0, by, 152, 40 }, "Pets", tabsEnabled)) { s.screen = Screen::Pets; open = false; }
         if (Button({ bx1, by, 152, 40 }, "Bank", tabsEnabled)) { s.screen = Screen::Bank; open = false; }
         by += 48;
-        if (Button({ bx0, by, 152, 40 }, "House", tabsEnabled)) { s.screen = Screen::House; open = false; g_warOpen = false; }
+        if (Button({ bx0, by, 152, 40 }, "House", tabsEnabled)) { s.screen = Screen::House; open = false; g_warOpen = false; g_tmapOpen = false; }
         if (Button({ bx1, by, 152, 40 }, "Skills", tabsEnabled)) { s.screen = Screen::Skills; open = false; }
         by += 48;
         if (Button({ bx0, by, 152, 40 }, "Help", tabsEnabled)) { s.screen = Screen::Guide; s.guidePage = 0; open = false; }
@@ -30429,8 +30664,12 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
             }
 #endif
             if (Button({ bx1, ry, 152, 40 }, "War Week", tabsEnabled)) { s.screen = Screen::House; OpenWarWeek(s); open = false; }
+            if (Button({ bx0, ry + 48, 312, 40 }, s.tmaps.empty() ? "Treasure maps" : TextFormat("Treasure maps (%d)", (int)s.tmaps.size()), tabsEnabled)) {
+                s.screen = Screen::House; g_tmapOpen = true; g_warOpen = false; open = false; // (2026-09-28)
+            }
         }
         by += 48;
+        by += 48; // the Treasure maps row (2026-09-28)
         if (inDungeon) {
             // UO-style travel (2026-09-25): magery escape. Allowed mid-fight -
             // the 3s cast breaks on damage, so it can't blank a boss mid-swing.
@@ -33043,7 +33282,7 @@ static void WarNetTick(GameState& s, float dt) {
     }
 }
 static void OpenWarWeek(GameState& s) {
-    g_warOpen = true; g_warScroll = 0.0f; g_leaveArmT = 0.0f;
+    g_warOpen = true; g_tmapOpen = false; g_warScroll = 0.0f; g_leaveArmT = 0.0f;
     WarCheckWeek(s);
     JS_GuildNetRefresh(WarWeekKey(s).c_str());
 }
@@ -33297,7 +33536,56 @@ static void DrawGuildstone(GameState& s, int screenW, int screenH) {
     }
 }
 
+// Treasure maps (2026-09-28): your maps - decode them, and pick the one to follow.
+static void DrawTreasureMaps(GameState& s, int screenW, int screenH) {
+    Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
+    UODrawGump(G, kUoParchment);
+    UODrawTitle(G, "Treasure maps", 15);
+    const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 }, gold = { 150, 100, 20, 255 };
+    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_tmapOpen = false; return; }
+    float x = G.x + 22, y = G.y + 34, w = G.width - 44;
+    DrawUIText(TextFormat("Cartography %.1f    Lockpicking %.1f", s.cartography, s.lockpicking), (int)x, (int)y, 13, soft); y += 20;
+    if (s.tmaps.empty()) {
+        const char* lines[] = { "You have no treasure maps yet.", "", "Tougher monsters sometimes carry one; dungeon bosses",
+                                "often do, and the Tri-Wyrm always does.", "", "Decode a map here (Cartography), follow the gold X",
+                                "on your minimap, dig, defeat the chest's guardians,", "then pick its lock (Lockpicking) - or force it open", "and spoil some of the loot." };
+        for (const char* l : lines) { DrawUIText(l, (int)x, (int)y, 13, ink); y += 19; }
+        return;
+    }
+    y += 6;
+    int drop = -1;
+    for (size_t i = 0; i < s.tmaps.size(); i++) {
+        const GameState::TreasureMap& m = s.tmaps[i];
+        Rectangle row = { x - 6, y, w + 12, 58 };
+        bool tracked = s.tmapTrack == (int)i && m.decoded;
+        DrawRectangleRounded(row, 0.15f, 6, tracked ? Color{ 255, 214, 110, 90 } : Fade(BLACK, i % 2 ? 0.04f : 0.08f));
+        DrawUIText(TextFormat("%s treasure map", kTmapTierName[m.tier]), (int)x, (int)y + 6, 15, m.tier >= 4 ? gold : ink);
+        if (!m.decoded) {
+            DrawUIText(TextFormat("Not yet decoded - %d%% chance with your Cartography", (int)TmapDecodeChance(s, m.tier)), (int)x, (int)y + 30, 12, soft);
+            if (UOButton({ x + w - 186, y + 12, 96, 34 }, "Decode", s.tmapCd <= 0.0f)) TreasureDecode(s, (int)i);
+        } else {
+            float d = Dist(s.wildernessPlayerPos, m.spot);
+            DrawUIText(TextFormat("Dig site: %d paces %s of you", (int)(d / 10.0f), CompassWord(s.wildernessPlayerPos, m.spot).c_str()), (int)x, (int)y + 30, 12, soft);
+            if (UOButton({ x + w - 186, y + 12, 96, 34 }, tracked ? "Following" : "Follow", !tracked)) { s.tmapTrack = (int)i; PlaySfx(SfxId::Click); }
+        }
+        if (UOButton({ x + w - 84, y + 12, 84, 34 }, "Discard")) drop = (int)i;
+        y += 64;
+    }
+    if (drop >= 0) { TreasureRemoveMap(s, drop); s.logLine = "You throw the map away."; }
+    y += 6;
+    DrawUIText("Follow a decoded map: a gold X marks it on your minimap and on the ground.", (int)x, (int)y, 12, soft);
+    y += 26;
+    if (!s.logLine.empty()) { // the last decode result, right here (2026-09-28)
+        std::string cur, word; std::istringstream ws(s.logLine);
+        while (ws >> word) {
+            std::string t = cur.empty() ? word : cur + " " + word;
+            if (MeasureUIText(t.c_str(), 13) > w) { DrawUIText(cur.c_str(), (int)x, (int)y, 13, gold); y += 18; cur = word; } else cur = t;
+        }
+        if (!cur.empty()) DrawUIText(cur.c_str(), (int)x, (int)y, 13, gold);
+    }
+}
 static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
+    if (g_tmapOpen) { DrawTreasureMaps(s, screenW, screenH); return; }
     if (g_warOpen) { DrawWarWeek(s, screenW, screenH); return; }
     if (g_guildOpen) { DrawGuildstone(s, screenW, screenH); return; }
     if (g_settleOpen) { DrawSettlement(s, screenW, screenH); return; }
@@ -33397,7 +33685,7 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
 // want working. Equipped skills add up to at most 700 and stop improving once
 // the loadout is full; unequipped skills keep every point but do nothing until
 // you equip them again. Grouped, with a line on what each one does.
-static const char* kCappedSkillWhat[24] = {
+static const char* kCappedSkillWhat[26] = {
     "Hit harder and more often with swords and axes.",
     "Hit harder and more often with spears and daggers.",
     "Hit harder and more often with maces and hammers.",
@@ -33422,6 +33710,8 @@ static const char* kCappedSkillWhat[24] = {
     "Vanish from sight: monsters and ambushers pass you by.",
     "Move while hidden, and strike harder from the shadows.",
     "Holy magic: heal, bless your blade, smite. Stronger with Karma.",
+    "Decode treasure maps to find where the chest is buried.",
+    "Pick the locks on treasure chests (forcing them spoils loot).",
 };
 struct SkillGroup { const char* name; std::vector<int> idx; };
 static float g_skillsScroll = 0.0f;
@@ -33431,6 +33721,7 @@ static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
         { "Magic", { 9, 10, 11, 20, 23 } },
         { "Animals", { 12, 13, 14 } },
         { "Scouting & thievery", { 19, 21, 22, 15, 16, 17 } },
+        { "Treasure hunting", { 24, 25 } },
     };
     const Color ink = kColorText, soft = Fade(kColorText, 0.72f), good = { 46, 120, 60, 255 }, warn = { 170, 90, 20, 255 };
     float total = ActiveSkillTotal(s);
@@ -34422,7 +34713,7 @@ static void UpdateDrawFrame() {
         DrawDirectionsHud(state, screenW); // compass + world-boss timer (2026-09-27)
         DrawWalkMarker(state);             // tap to walk + Teleport aim (2026-09-27)
         if (state.hidden && state.screen != Screen::Wilderness && state.screen != Screen::Hunt) state.hidden = false; // (2026-09-28)
-        if (state.hidden) DrawHudLine(EffectiveSkill(state, &GameState::stealth) > 0.0f ? "HIDDEN - sneaking (Stealth)" : "HIDDEN - moving will reveal you", 20, 244, 13, Color{ 200, 190, 255, 255 });
+        if (state.hidden && !state.exploreMenuOpen) DrawHudLine(EffectiveSkill(state, &GameState::stealth) > 0.0f ? "HIDDEN - sneaking (Stealth)" : "HIDDEN - moving will reveal you", 20, 244, 13, Color{ 200, 190, 255, 255 });
         g_hudCamZone = -1;
         // UO-style travel (2026-09-25): arriving in a town marks it as a recall
         // destination. selectedTown only changes on real arrivals (gates, tabs,
