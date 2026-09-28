@@ -1082,17 +1082,18 @@ static const std::array<Spell, 31> kSpells = {{
     // special-cased wherever travel needs different handling (costs, picker).
     // Circle 4 conventions: minSkill 40, 12 mana, 2 reagents.
     {"Recall", 4, SpellType::Utility, 40, 80, 12, 2, 0},
-    // Necromancy (2026-09-27) - a Diablo-style dark school, trained by the
-    // Necromancy skill and paid for in mana alone: bone magic, curses, and the
-    // dead raised from the corpses you leave behind. Indices 17-24.
-    {"Teeth", 1, SpellType::Offensive, 0, 50, 4, 0, 5, true},
-    {"Raise Skeleton", 1, SpellType::Summon, 0, 60, 9, 0, 0, true},
-    {"Amplify Damage", 2, SpellType::Debuff, 15, 70, 7, 0, 0, true},
-    {"Bone Armor", 3, SpellType::Buff, 25, 75, 10, 0, 0, true},
-    {"Bone Spear", 4, SpellType::Offensive, 35, 85, 12, 0, 16, true},
-    {"Corpse Explosion", 5, SpellType::Offensive, 45, 95, 14, 0, 0, true},
-    {"Raise Skeletal Mage", 6, SpellType::Summon, 55, 100, 16, 0, 0, true},
-    {"Life Tap", 7, SpellType::Debuff, 65, 100, 16, 0, 0, true},
+    // Necromancy (2026-09-27; reworked 2026-09-28, #70) - the grave-lore of this
+    // land's own restless dead: the Whisper Crypt's walking bones, the Frostbound
+    // Tomb's grave-frost and the wailing Fields of Sorrow. Trained by Necromancy,
+    // paid for in mana alone. Indices 17-24 (the kSp* names below are historical).
+    {"Grave Chill", 1, SpellType::Offensive, 0, 50, 4, 0, 5, true},
+    {"Raise Bonewalker", 1, SpellType::Summon, 0, 60, 9, 0, 0, true},
+    {"Crypt Mark", 2, SpellType::Debuff, 15, 70, 7, 0, 0, true},
+    {"Rime Shroud", 3, SpellType::Buff, 25, 75, 10, 0, 0, true},
+    {"Sorrow's Lance", 4, SpellType::Offensive, 35, 85, 12, 0, 16, true},
+    {"Rot Bloom", 5, SpellType::Offensive, 45, 95, 14, 0, 0, true},
+    {"Raise Glacier Wight", 6, SpellType::Summon, 55, 100, 16, 0, 0, true},
+    {"Soul Siphon", 7, SpellType::Debuff, 65, 100, 16, 0, 0, true},
     // (2026-09-27) UO's Bless: + Str/Dex/Int past the trained cap for 3 minutes.
     {"Bless", 3, SpellType::Buff, 30, 70, 9, 2, 0},
     // (2026-09-27) UO's Teleport: cast, then tap the ground within reach to blink there.
@@ -10750,14 +10751,14 @@ static const char* kSpellDesc[31] = {
     "A column of fire on your foe.",                                             // Inferno Strike
     "A fiend fights at your side for 25 seconds.",                               // Summon Fiend
     "Carries you to any town you have visited (40 Magery).",                     // Recall
-    "A spray of bone teeth at your foe.",                                        // Teeth
-    "Raises a skeleton warrior from a nearby body.",                             // Raise Skeleton
-    "Your foe takes more damage for a while.",                                   // Amplify Damage
-    "Bone plates that absorb damage.",                                           // Bone Armor
-    "A spear of bone at your foe.",                                              // Bone Spear
-    "Blows up a body near your foe, hurting everything around it.",              // Corpse Explosion
-    "Raises a skeletal mage from a nearby body.",                                // Raise Skeletal Mage
-    "Your hits on the foe heal you for a while.",                                // Life Tap
+    "Tomb-frost bites your foe and weakens its blows for a moment.",             // Grave Chill
+    "A Whisper Crypt bonewalker claws up from a nearby body to fight for you.",  // Raise Bonewalker
+    "The crypt's mark: your foe takes half again as much damage for a while.",   // Crypt Mark
+    "A shroud of Frostbound grave-frost that soaks up blows.",                   // Rime Shroud
+    "A wailing lance from the Fields of Sorrow that drives through a pack.",     // Sorrow's Lance
+    "A body near your foe bursts in grave-rot, hurting everything around it.",   // Rot Bloom
+    "A Glacier Wight rises from a nearby body and hurls frost at your foes.",    // Raise Glacier Wight
+    "Siphon the foe's soul: your hits on it heal you for a while.",              // Soul Siphon
     "+5 to +15 Str, Dex and Int for 3 minutes (with Magery).",                   // Bless
     "Cast, then tap the ground in reach to blink there.",                        // Teleport
     "Heals you (stronger with Karma).",                                          // Close Wounds
@@ -25428,7 +25429,7 @@ static const float kSpellAoeDetonation = 220.0f;  // Detonation splash radius
 static float SpellAoeRadius(const Spell& spell) {
     if (spell.name == "Ember Burst") return kSpellAoeEmberBurst;
     if (spell.name == "Detonation") return kSpellAoeDetonation;
-    if (spell.name == "Bone Spear") return 75.0f; // (2026-09-27) the spear drives on through the pack
+    if (spell.name == "Sorrow's Lance") return 75.0f; // (2026-09-27) the spear drives on through the pack
     return 0.0f;
 }
 
@@ -26664,7 +26665,7 @@ static SpellFX SpellFXFor(int spellIdx) {
         case -12: return { Color{255,140,70,255},  0, 1200, Color{255,120,50,255},  80 }; // summoning burst
         case -4:  return { Color{255,255,255,255},  0,    0, Color{255,236,170,255},  40 }; // melee hit burst
         // Necromancy (2026-09-27)
-        case 17: return { Color{236,230,210,255},  7, 1500, Color{220,214,190,255},  36 }; // Teeth
+        case 17: return { Color{190,225,255,255},  7, 1500, Color{160,205,245,255},  36 }; // Grave Chill (#70: tomb-frost)
         case 18: return { Color{120,255,150,255},  0, 1000, Color{120,255,150,255},  64 }; // Raise (grave light)
         case 19: return { Color{220,60,60,255},    8,  700, Color{200,40,40,255},    46 }; // Amplify Damage wisp
         case 21: return { Color{242,238,218,255}, 12, 1900, Color{230,225,200,255},  72 }; // Bone Spear
@@ -27303,8 +27304,8 @@ static int NecroShield(GameState& s, int zone, int dmg) {
         float a = std::min(s.boneArmor, (float)dmg);
         s.boneArmor -= a;
         dmg -= (int)std::round(a);
-        SpawnFloatText(s, zone, me, "Bone Armor", Color{ 230, 226, 205, 255 });
-        if (s.boneArmor <= 0.0f) { s.boneArmor = 0.0f; Journal(s, "Your bone armor shatters."); }
+        SpawnFloatText(s, zone, me, "Rime Shroud", Color{ 190, 225, 255, 255 });
+        if (s.boneArmor <= 0.0f) { s.boneArmor = 0.0f; Journal(s, "Your rime shroud shatters."); }
     }
     return std::max(0, dmg);
 }
@@ -27330,7 +27331,7 @@ static void NecroRaise(GameState& s, int zone, int kind, const std::string& note
     SpawnSpellImpact(s, zone, c->pos, kSpRaiseSkeleton, 1.3f);
     NecroConsumeCorpse(s, *c);
     s.minions.push_back(m);
-    s.logLine = std::string(kind == 0 ? "A skeleton" : "A skeletal mage") + " claws its way out of the " + what + "!" + note;
+    s.logLine = std::string(kind == 0 ? "A bonewalker" : "A glacier wight") + " claws its way out of the " + what + "!" + note;
     Journal(s, s.logLine);
 }
 // Corpse Explosion: the body nearest your target bursts, hurting everything round it.
@@ -27392,7 +27393,7 @@ static void NecroUpdateMinions(GameState& s, float dt) {
         m.ttl -= dt;
         if (m.hp <= 0.0f || m.ttl <= 0.0f) {
             SpawnSpellImpact(s, zone, m.pos, -13, 0.9f);
-            Journal(s, std::string(m.kind == 0 ? "Your skeleton" : "Your skeletal mage") + " collapses into bones.");
+            Journal(s, std::string(m.kind == 0 ? "Your bonewalker collapses into bones." : "Your glacier wight crumbles into rime."));
             s.minions.erase(s.minions.begin() + (long)i);
             continue;
         }
@@ -27424,7 +27425,7 @@ static void NecroUpdateMinions(GameState& s, float dt) {
             float dist = Dist(m.pos, tp);
             if (m.kind == 0 && dist <= 36.0f) {
                 m.atkT = 1.4f;
-                SummonStrikeLive(s, zone, 3.0f + n * 0.12f, "skeleton hacks at");
+                SummonStrikeLive(s, zone, 3.0f + n * 0.12f, "bonewalker hacks at");
             } else if (m.kind == 1 && dist <= 260.0f) {
                 m.atkT = 2.4f;
                 SpawnSpellProjectile(s, zone, m.pos, tp, kSpTeeth, true, "");
@@ -27446,6 +27447,7 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
             if (s.vigorT > 0.0f) base *= 1.25f; // Blessing of Vigor
             int dmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
             dmg = NecroOnHit(s, am, dmg); // Amplify Damage / Life Tap
+            if (spellIdx == kSpTeeth && am.debuffKind == 0) { am.debuffKind = 1; am.debuffT = 4.0f; } // Grave Chill weakens its blows (#70)
             am.hp -= dmg;
             am.monsterHurtT = 0.0f;
             PlaySfx(SfxId::Hit);
@@ -27523,6 +27525,7 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
             if (s.vigorT > 0.0f) base *= 1.25f;
             int dmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
             dmg = NecroOnHit(s, am, dmg); // Amplify Damage / Life Tap
+            if (spellIdx == kSpTeeth && am.debuffKind == 0) { am.debuffKind = 1; am.debuffT = 4.0f; } // Grave Chill weakens its blows (#70)
             am.hp -= dmg;
             am.monsterHurtT = 0.0f;
             PlaySfx(SfxId::Hit);
@@ -28805,7 +28808,11 @@ static HumanOutfit HumanOutfitSkeleton(int kind) {
     o.region[kHrBelt] = Color{ 90, 70, 50, 255 }; // a rotted belt is all that's left
     o.skeleton = true; // bones, not a painted body (2026-09-27)
     if (kind == 0) { HumanGive(o, kHwSword, kHsOneHand); o.shield = true; }
-    else { HumanGive(o, kHwStaff, kHsMagic); o.cloak = true; o.cloakCol = Color{ 64, 34, 84, 255 }; }
+    else { // a Glacier Wight (#70): frost-rimed bones, an icy shroud
+        Color rime = { 200, 226, 246, 255 };
+        for (int r = 0; r < kHrCount; r++) o.region[r] = ColorLerp(o.region[r], rime, 0.55f);
+        HumanGive(o, kHwStaff, kHsMagic); o.cloak = true; o.cloakCol = Color{ 70, 110, 150, 255 };
+    }
     return o;
 }
 static void DrawNecro3D(GameState& s, int zone) {
@@ -28826,7 +28833,7 @@ static void DrawNecro3D(GameState& s, int zone) {
         DrawHuman(track, m.pos.x, m.pos.y, m.yaw, 0.95f, WHITE, HumanOutfitSkeleton(m.kind), hp, false);
         rlPopMatrix();
         // grave-light glow and a small health bar
-        DrawSphereEx({ m.pos.x, 52.0f, m.pos.y }, 5.0f, 6, 5, Fade(Color{ 120, 255, 150, 255 }, 0.25f + 0.15f * sinf(t * 3.0f + i))); // grave-light
+        DrawSphereEx({ m.pos.x, 52.0f, m.pos.y }, 5.0f, 6, 5, Fade(m.kind == 1 ? Color{ 150, 210, 255, 255 } : Color{ 120, 255, 150, 255 }, 0.25f + 0.15f * sinf(t * 3.0f + i))); // grave-light (a wight's is cold blue)
         if (m.riseT >= 1.0f && m.hp < m.maxHp) {
             float f = std::clamp(m.hp / m.maxHp, 0.0f, 1.0f);
             DrawCube({ m.pos.x, 74.0f, m.pos.y }, 24.0f, 2.2f, 1.0f, Color{ 30, 20, 20, 220 });
@@ -28840,7 +28847,7 @@ static void DrawNecro3D(GameState& s, int zone) {
             float a = t * 2.2f + k * 6.2832f / n, y = 30.0f + sinf(t * 3.0f + k) * 6.0f;
             Vector3 c = { me.x + cosf(a) * 24.0f, y, me.y + sinf(a) * 24.0f };
             Vector3 d = { -sinf(a) * 6.0f, 3.0f, cosf(a) * 6.0f };
-            DrawCylinderEx({ c.x - d.x, c.y - d.y, c.z - d.z }, { c.x + d.x, c.y + d.y, c.z + d.z }, 1.6f, 0.4f, 5, Color{ 236, 230, 208, 255 });
+            DrawCylinderEx({ c.x - d.x, c.y - d.y, c.z - d.z }, { c.x + d.x, c.y + d.y, c.z + d.z }, 1.6f, 0.4f, 5, Color{ 190, 225, 255, 230 }); // rime shards
         }
     }
 }
