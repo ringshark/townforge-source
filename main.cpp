@@ -4511,7 +4511,7 @@ static const char* kWarDayHow[7] = {
     "Slay monsters: 5 each. Tame: 10. Dungeon boss: 50.",
     "Win a settlement raid at the gate: 60 (30 if you were away). Finish a building upgrade: 20.",
     "Wound Vyrathax the Tri-Wyrm: 1 point per 10 damage. Slay it: 200.",
-    "Defeat rivals, Blades and bounty killers: 40 each.",
+    "Defeat Kael Vorn, his Blades and bounty killers: 40 each.",
 };
 static long long WarWeekNow() { return ((long long)std::time(nullptr) - 345600LL) / 604800LL; }
 static int WarDayNow() { return (int)((((long long)std::time(nullptr) - 345600LL) / 86400LL) % 7); }
@@ -5929,13 +5929,13 @@ static std::string InnocentRumor(const GameState& s, int id) {
         std::string doing = GuildTaskLabel(s.rivalMind);
         for (auto& ch : doing) ch = (char)std::tolower((unsigned char)ch);
         if (s.rivalActivity == GameState::RivalActivity::Patrol && s.rivalMind.task != kGtNone)
-            options.push_back("Passed the Rival " + region + " - " + doing + ", bold as you like. Carries a fat purse, that one.");
+            options.push_back("Passed Kael Vorn " + region + " - " + doing + ", bold as you like. Carries a fat purse, that one.");
     }
     if (s.rivalGrudge >= 1.0f)
-        options.push_back("The Rival's been asking after you by name. Whatever you did, it wasn't forgotten.");
+        options.push_back("Kael Vorn's been asking after you by name. Whatever you did, it wasn't forgotten.");
     if (s.rivalActivity == GameState::RivalActivity::Hunting ||
         s.rivalActivity == GameState::RivalActivity::Stalking)
-        options.push_back("Word is the Rival's hunting someone in the wilds right now. Could be you. Keep moving.");
+        options.push_back("Word is Kael Vorn's hunting someone in the wilds right now. Could be you. Keep moving.");
     for (int bi = 0; bi < kBladeCount; bi++) {
         if (s.blades[bi].activity == GameState::RivalActivity::Hunting ||
             s.blades[bi].activity == GameState::RivalActivity::Stalking) {
@@ -8829,11 +8829,12 @@ static_assert(kWildernessMonsterSpots.size() == kWildMonsterSpotCount,
 // --- UO player-killer Rival (2026-09-24): epithet ladder, tuning, and helpers ---
 // Display name escalates with rivalKillsOnPlayer - the red earns its reputation.
 static std::string RivalEpithetName(const GameState& s) {
-    if (s.rivalKillsOnPlayer >= 8) return "Rival Adventurer, Bane of the Wilderness";
-    if (s.rivalKillsOnPlayer >= 5) return "Rival Adventurer the Merciless";
-    if (s.rivalKillsOnPlayer >= 3) return "Rival Adventurer the Relentless";
-    if (s.rivalKillsOnPlayer >= 1) return "Rival Adventurer the Ruthless";
-    return "Rival Adventurer";
+    // (2026-09-28 cleanup) the Rival is Murder Inc.'s own master, Kael Vorn - one band of killers, not two
+    if (s.rivalKillsOnPlayer >= 8) return "Kael Vorn, Bane of the Wilderness";
+    if (s.rivalKillsOnPlayer >= 5) return "Kael Vorn the Merciless";
+    if (s.rivalKillsOnPlayer >= 3) return "Kael Vorn the Relentless";
+    if (s.rivalKillsOnPlayer >= 1) return "Kael Vorn the Ruthless";
+    return "Kael Vorn, Master of Murder Inc.";
 }
 // All rival-hunt tuning in one place.
 static const float kRivalSprintSpeed = 260.0f;   // faster than kPlayerSpeed (220): it CAN run you down in the open
@@ -8987,7 +8988,7 @@ static void RivalCorpseLoot(GameState& s) {
     s.gold = std::max(0, s.gold - loot);
     s.rivalMind.gold += loot; // your gold rides off in its purse - take it back
     s.rivalGrudge = std::max(0.0f, s.rivalGrudge - 1.0f); // score settled, for now
-    std::string msg = "The " + RivalEpithetName(s) + " loots your corpse (" +
+    std::string msg = RivalEpithetName(s) + " loots your corpse (" +
                       std::to_string(loot) + " gold)";
     if (!s.backpack.empty()) {
         int idx = std::rand() % (int)s.backpack.size();
@@ -9299,7 +9300,7 @@ static void WildTerrainResolve(Vector2& pos, Vector2 prev);
 static int GuildGatherKind(const std::string& r) { return r == "wood" ? 1 : (r == "fish" ? 3 : 2); }
 static GameState::GuildMind& GuildMindOf(GameState& s, int who) { return who < 0 ? s.rivalMind : s.blades[who].mind; }
 static Vector2& GuildPosOf(GameState& s, int who) { return who < 0 ? s.rivalPos : s.blades[who].pos; }
-static std::string GuildWho(int who) { return who < 0 ? std::string("Rival Adventurer") : BladeName(who); }
+static std::string GuildWho(int who) { return who < 0 ? std::string("Kael Vorn") : BladeName(who); }
 static const char* GuildTaskLabel(const GameState::GuildMind& m) {
     switch (m.task) {
         case kGtGather: {
@@ -21150,7 +21151,7 @@ static Wild3DNearest Wild3DNearestInfo(const GameState& s) {
                      : WildernessMonsterLivePos((int)i, s.worldTime);
         consider(mp, "Fight " + kWildernessMonsterSpots[i].name);
     }
-    consider((wasEngaged && s.wildEngaged->isRival) ? s.wildEngaged->pos : s.rivalPos, "Fight Rival Adventurer");
+    consider((wasEngaged && s.wildEngaged->isRival) ? s.wildEngaged->pos : s.rivalPos, "Fight Kael Vorn");
     for (int bi = 0; bi < kBladeCount; bi++) {
         Vector2 bp = (wasEngaged && s.wildEngaged->bladeIdx == bi) ? s.wildEngaged->pos : s.blades[bi].pos;
         consider(bp, "Fight " + BladeName(bi));
@@ -26797,7 +26798,7 @@ static bool FoeShieldBlock(GameState& s, const GameState::ActiveMonster& am) {
     if (!am.isRival || RandUnit() >= 0.15f) return false;
     SpawnFloatText(s, 0, am.pos, "Blocked", kFloatMissColor);
     PlaySfx(SfxId::Hit);
-    s.logLine = "The " + RivalEpithetName(s) + " blocks your blow with its shield!";
+    s.logLine = RivalEpithetName(s) + " blocks your blow with his shield!";
     return true;
 }
 
@@ -30504,7 +30505,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         am.hp = std::max(1.0f, am.maxHp * s.rivalMind.hpFrac); // wounds carry over
         s.wildEngaged = am;
         if (s.rivalMind.cornered) GuildSay(s, -1, 12, true);
-        s.logLine = "The " + RivalEpithetName(s) + " turns to face you!";
+        s.logLine = RivalEpithetName(s) + " turns to face you!";
     };
     auto tryEngageBlade = [&](int bi) {
         if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
@@ -30754,7 +30755,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 s.wildEngaged.reset();
                 if (s.rivalMind.hpFrac < 0.5f) {
                     ClearFlagTarget(s);
-                    s.logLine = "The " + RivalEpithetName(s) + " lets you go - for now.";
+                    s.logLine = RivalEpithetName(s) + " lets you go - for now.";
                     s.disengageGraceT = kDisengageGraceSeconds;
                     return;
                 }
@@ -30764,7 +30765,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 s.rivalSprintTimer = kRivalSprintDuration;
                 s.rivalSprintStartDist = Dist(s.rivalPos, s.wildernessPlayerPos);
                 s.rivalSprintStartVel = s.rivalPlayerVel;
-                s.logLine = "The " + RivalEpithetName(s) + " gives chase!";
+                s.logLine = RivalEpithetName(s) + " gives chase!";
                 return;
             }
             if (am.bladeIdx >= 0) {
@@ -31180,7 +31181,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         else if (nearestKind == WildNodeKind::Creature)
             prompt = "[E] Tame " + kWildCreatures[kWildernessCreatureSpots[nearestIdx].creatureIdx].name;
         else if (nearestKind == WildNodeKind::Monster) prompt = "[E] Fight " + kWildernessMonsterSpots[nearestIdx].name;
-        else if (nearestKind == WildNodeKind::Rival) prompt = "[E] Fight Rival Adventurer";
+        else if (nearestKind == WildNodeKind::Rival) prompt = "[E] Fight Kael Vorn";
         else if (nearestKind == WildNodeKind::Blade) prompt = "[E] Fight " + BladeName(nearestIdx);
         else if (nearestKind == WildNodeKind::Innocent) prompt = "[E] Approach " + InnocentName(s.innocentSpots[nearestIdx].identity);
         else if (nearestKind == WildNodeKind::DungeonEntrance)
@@ -31682,7 +31683,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     { // Murder Inc.'s camp: a red-marked tent, wherever it currently squats
         Vector2 campPos = kRivalCampSpots[s.rivalCampIdx];
         Vector2 screenPos = WorldToScreen(campPos, camera);
-        DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 180, 50, 40, 255 }, "Rival Camp", false, "Murder Inc. was seen here");
+        DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 180, 50, 40, 255 }, "Murder Inc. Camp", false, "Kael Vorn's crew was seen here");
     }
     if (s.notoriety > 1.0f || s.refugeKnown) { // the outlaw refuge: hidden from the upstanding
         bool near = nearestKind == WildNodeKind::Refuge && inRange;
