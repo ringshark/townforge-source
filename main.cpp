@@ -1050,6 +1050,7 @@ struct Spell {
     int manaCost, reagentCost;
     int baseDamage; // also doubles as heal amount for Utility (heal) spells
     bool necro = false; // (2026-09-27) Necromancy school: trained/cast off Necromancy, mana only
+    bool chiv = false;  // (2026-09-28) Chivalry: trained/cast off Chivalry, mana only, powered by Karma
 };
 
 // Copied verbatim from SPELLS in the JS (all 16, across 8 circles), plus Recall
@@ -1059,7 +1060,7 @@ struct Spell {
 // gate (added 2026-09-21, see its comment) doesn't lock a starting Magery-0
 // character out of practicing anything at all - a deliberate deviation from the
 // port, not a formula mismatch.
-static const std::array<Spell, 27> kSpells = {{
+static const std::array<Spell, 31> kSpells = {{
     {"Spark Dart", 1, SpellType::Offensive, 0, 50, 4, 1, 4},
     {"Mending Word", 1, SpellType::Utility, 0, 50, 4, 1, 4},
     {"Sap Strength", 1, SpellType::Debuff, 0, 50, 4, 1, 4},
@@ -1096,7 +1097,14 @@ static const std::array<Spell, 27> kSpells = {{
     {"Bless", 3, SpellType::Buff, 30, 70, 9, 2, 0},
     // (2026-09-27) UO's Teleport: cast, then tap the ground within reach to blink there.
     {"Teleport", 3, SpellType::Utility, 30, 70, 9, 2, 0},
+    // Chivalry (2026-09-28) - holy magic of the virtuous: cast off Chivalry, paid
+    // in mana alone, and stronger the higher your Karma. Indices 27-30.
+    {"Close Wounds", 1, SpellType::Utility, 0, 50, 8, 0, 14, false, true},
+    {"Consecrate Weapon", 2, SpellType::Buff, 15, 65, 10, 0, 0, false, true},
+    {"Holy Light", 3, SpellType::Offensive, 30, 80, 14, 0, 18, false, true},
+    {"Divine Shield", 4, SpellType::Buff, 45, 95, 16, 0, 0, false, true},
 }};
+static const int kSpCloseWounds = 27, kSpConsecrate = 28, kSpHolyLight = 29, kSpDivineShield = 30;
 static const int kSpBless = 25;
 static const int kSpTeleport = 26;
 static const float kTeleportRange = 380.0f; // world units (about 1.7 s of walking)
@@ -1808,6 +1816,8 @@ struct GameState {
     float tracking = 0;   // (2026-09-27) sensing who hunts you - Murder Inc. warnings need it; capped at 100
     float necromancy = 0; // (2026-09-27) the dark school: bone, blood and the risen dead; capped at 100
     float hiding = 0, stealth = 0; // (2026-09-28) vanish, and move while unseen; capped at 100
+    float chivalry = 0;            // (2026-09-28) holy magic, powered by Karma; capped at 100
+    float consecrateT = 0.0f;      // (2026-09-28) Consecrate Weapon: +30% melee damage, seconds left
     // Hidden (2026-09-28) - transient: monsters, rivals and ambushes pass you by.
     bool hidden = false;
     float hideCd = 0.0f;     // a moment between attempts
@@ -1822,9 +1832,9 @@ struct GameState {
     // --- The Echo system - mirrors state.skillActive. true = contributing to
     // gameplay right now; false = benched (still fully trained, just inactive).
     // Indexed by WeeklyGoalIdx... no - indexed by position in kCappedSkills below. ---
-    std::array<bool, 23> skillActive = { true, true, true, true, true, true, true, true,
+    std::array<bool, 24> skillActive = { true, true, true, true, true, true, true, true,
                                           true, true, true, true, true, true, true, true, true, true, true, true, true,
-                                          true, true };
+                                          true, true, true };
 
     // --- The Bloodstained Road - mirrors state.bloodstainedProgress/bloodstainedLoop/
     // bloodstainedBossDefeated/grayEncounter. Tier index 0-4 = current rung; reaching
@@ -3401,8 +3411,56 @@ static const Texture2D* NecroIcon(int spellIdx) {
     }
     return &g_necroIcons[k];
 }
+// Chivalry's icons (2026-09-28): gold emblems on a deep blue field.
+static Texture2D g_chivIcons[4];
+static bool g_chivIconsReady = false;
+static const Texture2D* ChivIcon(int spellIdx) {
+    int k = spellIdx - 27;
+    if (k < 0 || k >= 4) return nullptr;
+    if (!g_chivIconsReady) {
+        g_chivIconsReady = true;
+        const Color gold = { 255, 214, 110, 255 }, goldHi = { 255, 244, 200, 255 }, steel = { 220, 226, 236, 255 };
+        for (int i = 0; i < 4; i++) {
+            const int N = 64;
+            Image im = GenImageGradientRadial(N, N, 0.0f, Color{ 60, 96, 170, 255 }, Color{ 12, 22, 52, 255 });
+            switch (i) {
+                case 0: // Close Wounds: a gold cross
+                    ImageDrawRectangle(&im, 27, 10, 10, 44, gold);
+                    ImageDrawRectangle(&im, 12, 24, 40, 10, gold);
+                    ImageDrawRectangle(&im, 29, 12, 3, 40, goldHi);
+                    break;
+                case 1: // Consecrate Weapon: a glowing upright sword
+                    ImageDrawCircle(&im, 32, 30, 20, Color{ 255, 220, 120, 70 });
+                    ImageDrawRectangle(&im, 29, 8, 6, 36, steel);
+                    ImageDrawTriangle(&im, { 32, 3 }, { 28, 9 }, { 36, 9 }, steel);
+                    ImageDrawRectangle(&im, 20, 42, 24, 5, gold);
+                    ImageDrawRectangle(&im, 29, 47, 6, 10, Color{ 120, 80, 40, 255 });
+                    break;
+                case 2: // Holy Light: a sunburst
+                    for (int r = 0; r < 12; r++) {
+                        float a = r * 0.5236f;
+                        ImageDrawLineEx(&im, { 32 + cosf(a) * 10, 32 + sinf(a) * 10 }, { 32 + cosf(a) * 27, 32 + sinf(a) * 27 }, 3, gold);
+                    }
+                    ImageDrawCircle(&im, 32, 32, 11, goldHi);
+                    break;
+                default: // Divine Shield: a heater shield with a cross
+                    ImageDrawRectangle(&im, 16, 12, 32, 22, gold);
+                    ImageDrawTriangle(&im, { 16, 34 }, { 32, 56 }, { 48, 34 }, gold);
+                    ImageDrawRectangle(&im, 30, 16, 4, 30, Color{ 40, 70, 150, 255 });
+                    ImageDrawRectangle(&im, 21, 24, 22, 4, Color{ 40, 70, 150, 255 });
+                    break;
+            }
+            ImageDrawRectangleLines(&im, { 0, 0, (float)N, (float)N }, 2, Color{ 10, 16, 36, 255 });
+            g_chivIcons[i] = LoadTextureFromImage(im);
+            SetTextureFilter(g_chivIcons[i], TEXTURE_FILTER_BILINEAR);
+            UnloadImage(im);
+        }
+    }
+    return &g_chivIcons[k];
+}
 static const Texture2D* SpellIcon(int spellIdx) {
     if (const Texture2D* ni = NecroIcon(spellIdx)) return ni;
+    if (const Texture2D* ci = ChivIcon(spellIdx)) return ci;
     if (spellIdx >= 0 && spellIdx < (int)g_assets.spellIconPerSpell.size() && g_assets.spellIconPerSpellOk[spellIdx])
         return &g_assets.spellIconPerSpell[spellIdx];
     if (spellIdx >= 0 && spellIdx < (int)kSpells.size()) return SpellTypeIcon(kSpells[spellIdx].type);
@@ -4405,7 +4463,7 @@ static bool HasWeeklyBlessing(const GameState& s) {
 // ---------------------------------------------------------------------
 
 struct CappedSkillDef { const char* label; float GameState::* field; };
-static const std::array<CappedSkillDef, 23> kCappedSkills = {{
+static const std::array<CappedSkillDef, 24> kCappedSkills = {{
     {"Swordsmanship", &GameState::swordsmanship}, {"Fencing", &GameState::fencing},
     {"Macing", &GameState::macing}, {"Archery", &GameState::archery}, {"Wrestling", &GameState::wrestling},
     {"Tactics", &GameState::tactics}, {"Anatomy", &GameState::anatomy},
@@ -4418,6 +4476,7 @@ static const std::array<CappedSkillDef, 23> kCappedSkills = {{
     {"Tracking", &GameState::tracking},     // (2026-09-27) appended, same reason
     {"Necromancy", &GameState::necromancy}, // (2026-09-27)
     {"Hiding", &GameState::hiding}, {"Stealth", &GameState::stealth}, // (2026-09-28)
+    {"Chivalry", &GameState::chivalry}, // (2026-09-28)
 }};
 static const float kTotalSkillCap = 700.0f;
 
@@ -6356,21 +6415,27 @@ static void UseBandageInCombat(GameState& s) {
 // scaling reagent cost by spell circle the way the turn-based panel does.
 static const int kLiveCombatReagentCost = 1;
 // Live reagent cost for a spell - the dark school needs none (2026-09-27).
-static int LiveReagentCost(int spellIdx) { return (spellIdx >= 0 && spellIdx < (int)kSpells.size() && kSpells[spellIdx].necro) ? 0 : kLiveCombatReagentCost; }
+static int LiveReagentCost(int spellIdx) { return (spellIdx >= 0 && spellIdx < (int)kSpells.size() && (kSpells[spellIdx].necro || kSpells[spellIdx].chiv)) ? 0 : kLiveCombatReagentCost; }
 static float MaxMana(const GameState& s) { return (float)EffInt(s); } // JS currentMaxMana(); gear/Bless count (2026-09-27)
 static float EvalIntMultiplier(const GameState& s) { return (EffectiveSkill(s, &GameState::evalInt) * 3.0f / 100.0f) + 1.0f; }
 // The skill a spell is cast (and trained) with: Necromancy for the dark school.
 static float SpellSkill(const GameState& s, const Spell& spell) {
-    return EffectiveSkill(s, spell.necro ? &GameState::necromancy : &GameState::magery);
+    return EffectiveSkill(s, spell.necro ? &GameState::necromancy : spell.chiv ? &GameState::chivalry : &GameState::magery);
 }
+// Chivalry answers to your Karma (2026-09-28): Virtuous (+60) casts at x1.4, Kind
+// at x1.13, neutral x1; below -20 (Wicked) the virtues turn away entirely.
+static bool ChivKarmaOk(const GameState& s) { return s.karma > -20.0f; }
+static float ChivKarmaMul(const GameState& s) { return std::clamp(1.0f + s.karma / 150.0f, 0.85f, 1.5f); }
 static int SpellPowerFor(const GameState& s, const Spell& spell) {
     float mul = spell.necro ? 1.0f + SpellSkill(s, spell) * 3.0f / 100.0f : EvalIntMultiplier(s); // necromancers scale with their art
+    if (spell.chiv) mul = (1.0f + SpellSkill(s, spell) * 2.5f / 100.0f) * ChivKarmaMul(s); // paladins, with their virtue
     return (int)std::round(spell.baseDamage * mul);
 }
 // JS spellSuccessChance(): 1% below minSkill, then scales 2%-100% across [minSkill,maxSkill].
 static float SpellSuccessChance(const GameState& s, const Spell& spell) {
     float magery = SpellSkill(s, spell);
-    if (!spell.necro) {
+    if (spell.chiv && !ChivKarmaOk(s)) return 0.0f; // the Wicked can't call on the virtues
+    if (!spell.necro && !spell.chiv) {
         // (2026-09-27, "at 51 Magery a heal shouldn't fizzle") UO-style by circle, a
         // touch friendlier than UO: each circle's range starts 14.3 higher and is 40
         // wide - 4th circle (Greater Mending, Recall) is sure by ~53, 8th ~75% at GM.
@@ -6400,12 +6465,12 @@ static void RegenMana(GameState& s, float dt) {
 // JS applySpellTraining(): every cast (combat or practice) trains Magery (with the
 // same overshoot taper crafting uses), plus a small Eval Int and Meditation roll.
 static void ApplySpellTraining(GameState& s, const Spell& spell, std::string& logOut) {
-    if (spell.necro) { // Necromancy trains itself (and a little Meditation), never Magery
+    if (spell.necro || spell.chiv) { // Necromancy / Chivalry train themselves (and a little Meditation), never Magery
         float odds = SpellSuccessChance(s, spell) / 100.0f; // a spell at the edge of your ability teaches most
-        float g = SkillUseGain(s.necromancy, odds, 2.0f);
+        float g = SkillUseGain(spell.chiv ? s.chivalry : s.necromancy, odds, 2.0f);
         float med = SkillUseGain(s.meditation, 0.5f, 0.3f);
         std::vector<std::string> notes;
-        if (g > 0) notes.push_back("Necromancy +" + std::to_string(g).substr(0, 4));
+        if (g > 0) notes.push_back(std::string(spell.chiv ? "Chivalry +" : "Necromancy +") + std::to_string(g).substr(0, 4));
         if (med > 0) notes.push_back("Meditation +" + std::to_string(med).substr(0, 4));
         if (MaybeGainStat(s, &GameState::intStat, 0.05f)) notes.push_back("INT +1");
         for (size_t i = 0; i < notes.size(); i++) logOut += (i == 0 ? " (" : ", ") + notes[i] + (i + 1 == notes.size() ? ")" : "");
@@ -6526,7 +6591,7 @@ static bool CanPracticeSpell(const GameState& s, const Spell& spell) {
 static void TryPracticeSpell(GameState& s, int spellIdx) {
     const Spell& spell = kSpells[spellIdx];
     if (!CanPracticeSpell(s, spell)) {
-        s.logLine = std::string(spell.necro ? "Necromancy" : "Magery") + " too low to attempt " + spell.name + " (needs " + std::to_string(spell.minSkill) + ").";
+        s.logLine = std::string(spell.necro ? "Necromancy" : spell.chiv ? "Chivalry" : "Magery") + " too low to attempt " + spell.name + " (needs " + std::to_string(spell.minSkill) + ").";
         return;
     }
     if (s.mana < spell.manaCost) {
@@ -7114,7 +7179,7 @@ static void SaveGame(const GameState& s) {
            "\narchery=" << s.archery << "\nwrestling=" << s.wrestling << "\n";
     out << "parrying=" << s.parrying << "\n";
     out << "tracking=" << s.tracking << "\nnecromancy=" << s.necromancy << "\n";
-    out << "hiding=" << s.hiding << "\nstealth=" << s.stealth << "\n";
+    out << "hiding=" << s.hiding << "\nstealth=" << s.stealth << "\nchivalry=" << s.chivalry << "\n";
     out << "tactics=" << s.tactics << "\nanatomy=" << s.anatomy << "\nmagicResist=" << s.magicResist <<
            "\nhealing=" << s.healing << "\n";
     out << "skillActive=";
@@ -7393,6 +7458,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "tracking") s.tracking = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "hiding") s.hiding = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "stealth") s.stealth = std::min(100.0f, (float)std::atof(val.c_str()));
+        else if (key == "chivalry") s.chivalry = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "necromancy") s.necromancy = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "magicResist") s.magicResist = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "healing") s.healing = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
@@ -10145,6 +10211,7 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
             const Spell& sp = kSpells[spellIdx];
             const Texture2D* icon = nullptr;
             if (sp.necro) icon = NecroIcon(spellIdx);
+            else if (sp.chiv) icon = ChivIcon(spellIdx);
             else if (spellIdx < 16 && g_assets.spellIconPerSpellOk[spellIdx]) icon = &g_assets.spellIconPerSpell[spellIdx];
             else if (sp.type == SpellType::Utility && g_assets.spellIconUtilityOk) icon = &g_assets.spellIconUtility;
             else if (g_assets.spellIconOffensiveOk) icon = &g_assets.spellIconOffensive;
@@ -10202,7 +10269,7 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
     }
     { // reagent count over the bar's right end (2026-09-27) - red when you're about to run dry
         bool mage = false;
-        for (int sp : s.combatHotbar) if (sp >= 0 && sp < (int)kSpells.size() && !kSpells[sp].necro) mage = true;
+        for (int sp : s.combatHotbar) if (sp >= 0 && sp < (int)kSpells.size() && !kSpells[sp].necro && !kSpells[sp].chiv) mage = true;
         if (mage) {
             bool low = s.reagents < 5;
             std::string rt = s.reagents <= 0 ? "OUT of reagents" : TextFormat("Reagents %d", s.reagents);
@@ -10241,7 +10308,7 @@ static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppre
         for (size_t i = 0; i < kSpells.size(); i++) {
             const Spell& sp = kSpells[i];
             if (sp.necro != (pass == 0 ? necroFirst : !necroFirst)) continue;
-            if ((sp.necro || sp.type == SpellType::Offensive || sp.type == SpellType::Utility) && SpellSkill(s, sp) >= sp.minSkill)
+            if ((sp.necro || sp.chiv || sp.type == SpellType::Offensive || sp.type == SpellType::Utility) && SpellSkill(s, sp) >= sp.minSkill)
                 known.push_back((int)i);
         }
     float listBottom = overlay.y + overlay.height - 52;
@@ -10257,13 +10324,15 @@ static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppre
         DrawRectangleLinesEx(row, 1.0f, Fade(kUoBronze, 0.7f));
         Rectangle ir = { row.x + 4, row.y + 4, 34, 34 };
         if (const Texture2D* ni = NecroIcon(idx)) DrawTexturePro(*ni, { 0, 0, (float)ni->width, (float)ni->height }, ir, { 0, 0 }, 0.0f, WHITE);
+        else if (const Texture2D* ci = ChivIcon(idx)) DrawTexturePro(*ci, { 0, 0, (float)ci->width, (float)ci->height }, ir, { 0, 0 }, 0.0f, WHITE);
         else if (idx < 16 && g_assets.spellIconPerSpellOk[idx])
             DrawTexturePro(g_assets.spellIconPerSpell[idx], { 0, 0, (float)g_assets.spellIconPerSpell[idx].width, (float)g_assets.spellIconPerSpell[idx].height }, ir, { 0, 0 }, 0.0f, WHITE);
         else DrawRectangleRec(ir, Color{ 60, 44, 30, 255 });
         DrawRectangleLinesEx(ir, 1.5f, kUoBronze);
         const char* tag = sp.necro ? (sp.type == SpellType::Summon ? "Necromancy - Raise" : sp.type == SpellType::Debuff ? "Necromancy - Curse"
                                       : sp.type == SpellType::Buff ? "Necromancy - Ward" : "Necromancy - Attack")
-                        : sp.type == SpellType::Offensive ? "Attack" : (idx == kRecallSpellIdx ? "Travel" : "Heal / Aid");
+                        : sp.chiv ? (sp.type == SpellType::Offensive ? "Chivalry - Smite" : sp.type == SpellType::Buff ? "Chivalry - Blessing" : "Chivalry - Heal")
+                        : sp.type == SpellType::Offensive ? "Attack" : (idx == kRecallSpellIdx || idx == kSpTeleport ? "Travel" : "Heal / Aid");
         DrawUIText(sp.name.c_str(), (int)row.x + 48, (int)row.y + 5, 15, Color{ 70, 40, 20, 255 });
         DrawUIText(TextFormat("%s  -  Circle %d  -  %d mana", tag, sp.circle, sp.manaCost), (int)row.x + 48, (int)row.y + 24, 11, Color{ 110, 80, 50, 255 });
         if (!suppressPress && UOTapped(row)) {
@@ -10313,6 +10382,7 @@ static GameState::WorldCorpse* NecroFindCorpse(GameState& s, int zone, Vector2 n
 // Best self-heal spell you can cast right now (Greater Mending once Magery allows), or -1.
 static int BestHealSpell(const GameState& s) {
     float mag = EffectiveSkill(s, &GameState::magery);
+    if (EffectiveSkill(s, &GameState::chivalry) > mag && ChivKarmaOk(s)) return kSpCloseWounds; // a paladin's heal (2026-09-28)
     if (mag >= (float)kSpells[9].minSkill) return 9; // Greater Mending
     return 1;                                        // Mending Word (circle 1, anyone may try)
 }
@@ -10330,7 +10400,7 @@ static void CastHealOutOfCombat(GameState& s, int zone) {
     if (s.hp >= s.maxHp) { s.logLine = "You're already at full health."; return; }
     if (g_oocHealCd > 0.0f) return;
     if (s.mana < kSpells[sp].manaCost) { s.logLine = "Not enough mana for " + kSpells[sp].name + "."; return; }
-    if (s.reagents < kLiveCombatReagentCost) { s.logLine = "No reagents for " + kSpells[sp].name + "."; return; }
+    if (s.reagents < LiveReagentCost(sp)) { s.logLine = "No reagents for " + kSpells[sp].name + "."; return; }
     g_oocHealCd = 1.5f;
     CastLiveUtilitySpell(s, sp, zone);
 }
@@ -10396,7 +10466,7 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     }
     if (ooc) { // the heal spell, with its mana cost under the icon
         int sp = BestHealSpell(s);
-        bool can = s.mana >= kSpells[sp].manaCost && s.reagents >= kLiveCombatReagentCost && g_oocHealCd <= 0.0f;
+        bool can = s.mana >= kSpells[sp].manaCost && s.reagents >= LiveReagentCost(sp) && g_oocHealCd <= 0.0f;
         if (slot(1 + (int)potions.size(), can, 0, [&](Rectangle r) {
                 float cx = r.x + r.width / 2, cy = r.y + r.height / 2 - 3;
                 DrawCircleV({ cx, cy }, 14.0f, Fade(Color{ 120, 255, 150, 255 }, 0.25f));
@@ -25404,6 +25474,7 @@ static SpellFX SpellFXFor(int spellIdx) {
         case 18: return { Color{120,255,150,255},  0, 1000, Color{120,255,150,255},  64 }; // Raise (grave light)
         case 19: return { Color{220,60,60,255},    8,  700, Color{200,40,40,255},    46 }; // Amplify Damage wisp
         case 21: return { Color{242,238,218,255}, 12, 1900, Color{230,225,200,255},  72 }; // Bone Spear
+        case 29: return { Color{255,236,150,255}, 12, 1800, Color{255,246,200,255},  80 }; // Holy Light (2026-09-28)
         case 22: return { Color{210,70,50,255},    0, 1400, Color{200,60,40,255},    60 }; // Corpse Explosion
         case 23: return { Color{170,120,255,255},  0, 1000, Color{160,110,240,255},  64 }; // Raise mage
         case 24: return { Color{180,20,50,255},    8,  700, Color{160,10,40,255},    46 }; // Life Tap wisp
@@ -26230,6 +26301,7 @@ static void UpdateLiveSpellFX(GameState& s, float dt) {
     if (s.playerBlockT >= 0.0f) { s.playerBlockT += dt; if (s.playerBlockT > 0.3f) s.playerBlockT = -1.0f; }
     if (s.healGlowT >= 0.0f) { s.healGlowT += dt; if (s.healGlowT > 0.6f) s.healGlowT = -1.0f; }
     if (s.vigorT > 0.0f) s.vigorT -= dt;
+    if (s.consecrateT > 0.0f) s.consecrateT -= dt; // (2026-09-28)
 
     // If a fight starts with something other than the flagged target
     // (bump-engage while steering at something else), re-flag to the actual
@@ -27831,6 +27903,21 @@ static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
         else s.logLine = spell.name + " fizzles!" + note;
         return;
     }
+    if (spellIdx == kSpConsecrate || spellIdx == kSpDivineShield) { // Chivalry buffs (2026-09-28)
+        setCastPose();
+        if (success) {
+            Vector2 ppos = (zone == 0) ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+            SpawnSpellImpact(s, zone, ppos, -11, 1.0f);
+            if (spellIdx == kSpConsecrate) {
+                s.consecrateT = 30.0f;
+                s.logLine = "Your weapon glows with holy light (+30% melee damage for 30 seconds)" + note;
+            } else {
+                s.boneArmor = (18.0f + EffectiveSkill(s, &GameState::chivalry) * 0.5f) * ChivKarmaMul(s);
+                s.logLine = "A holy ward surrounds you (absorbs " + std::to_string((int)s.boneArmor) + ")" + note;
+            }
+        } else s.logLine = std::string(!ChivKarmaOk(s) ? "The virtues turn away from the Wicked - " + spell.name + " fails!" : spell.name + " fizzles!") + note;
+        return;
+    }
     if (spellIdx == kSpBless) {
         setCastPose();
         if (success) {
@@ -29328,6 +29415,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             int dmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
             if (s.vigorT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.25f)); // Blessing of Vigor
             dmg = SurpriseStrike(s, dmg); // from the shadows (2026-09-28)
+            if (s.consecrateT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.3f)); // Consecrate Weapon
             dmg = NecroOnHit(s, am, dmg); // Amplify Damage / Life Tap
             am.hp -= dmg;
             am.monsterHurtT = 0.0f; // hit-flash on the monster
@@ -30921,6 +31009,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             int dmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
             if (s.vigorT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.25f)); // Blessing of Vigor
             dmg = SurpriseStrike(s, dmg); // from the shadows (2026-09-28)
+            if (s.consecrateT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.3f)); // Consecrate Weapon
             dmg = NecroOnHit(s, am, dmg); // Amplify Damage / Life Tap
             am.hp -= dmg;
             am.monsterHurtT = 0.0f; // hit-flash on the monster
@@ -32167,23 +32256,24 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
 
     // --- which book ---
     std::vector<int> spells;
-    for (size_t i = 0; i < kSpells.size(); i++) if (kSpells[i].necro == (book == 1)) spells.push_back((int)i);
+    for (size_t i = 0; i < kSpells.size(); i++)
+        if ((kSpells[i].necro ? 1 : kSpells[i].chiv ? 2 : 0) == book) spells.push_back((int)i); // (2026-09-28) + Chivalry
     const int perPage = 4, pages = ((int)spells.size() + perPage - 1) / perPage, spreads = (pages + 1) / 2;
     spread = std::clamp(spread, 0, std::max(0, spreads - 1));
-    for (int b = 0; b < 2; b++) { // two tomes on the shelf
+    for (int b = 0; b < 3; b++) { // three tomes on the shelf (2026-09-28: + Chivalry)
         Rectangle r = { 22.0f + b * 150.0f, 290, 140, 34 };
         bool on = book == b;
-        Color cover = b == 0 ? Color{ 128, 30, 30, 255 } : Color{ 34, 28, 40, 255 };
+        Color cover = b == 0 ? Color{ 128, 30, 30, 255 } : b == 1 ? Color{ 34, 28, 40, 255 } : Color{ 40, 70, 130, 255 };
         DrawRectangleRounded({ r.x, r.y + (on ? 0 : 6), r.width, r.height }, 0.2f, 6, on ? cover : ColorBrightness(cover, -0.25f));
         DrawRectangleRoundedLines({ r.x, r.y + (on ? 0 : 6), r.width, r.height }, 0.2f, 6, on ? kUoBronzeHi : kUoBronze);
-        const char* nm = b == 0 ? "Magery" : "Necromancy";
+        const char* nm = b == 0 ? "Magery" : b == 1 ? "Necromancy" : "Chivalry";
         int w = MeasureUIText(nm, 15);
         DrawUIText(nm, (int)(r.x + (r.width - w) / 2), (int)r.y + (on ? 9 : 15), 15, on ? kUoGoldText : Color{ 236, 220, 190, 255 });
         if (!pickerOpen && !on && UOTapped(r)) { book = b; spread = 0; PlaySfx(SfxId::Click); }
     }
     // --- the open book ---
     Rectangle cover = { 10, 322, (float)screenW - 20, (float)screenH - 336 };
-    Color coverCol = book == 0 ? Color{ 110, 26, 26, 255 } : Color{ 30, 24, 36, 255 };
+    Color coverCol = book == 0 ? Color{ 110, 26, 26, 255 } : book == 1 ? Color{ 30, 24, 36, 255 } : Color{ 34, 60, 112, 255 };
     DrawRectangleRounded({ cover.x + 4, cover.y + 6, cover.width, cover.height }, 0.03f, 6, Fade(BLACK, 0.4f));
     DrawRectangleRounded(cover, 0.03f, 6, coverCol);
     DrawRectangleRoundedLines(cover, 0.03f, 6, kUoBronze);
@@ -32207,11 +32297,17 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
                                         "Recall carries you to any", "town you have visited", "(40 Magery)." };
                 for (int i = 0; i < 9; i++) DrawUIText(lines[i], (int)pr.x + 16, (int)pr.y + 46 + i * 20, 13, inkSoft);
             }
+            if (book == 2 && page == pages) { // Chivalry's note (2026-09-28)
+                DrawUIText("The Virtues", (int)pr.x + 16, (int)pr.y + 14, 16, ink);
+                const char* lines[] = { "Chivalry costs mana only.", "", "Its power follows your", "Karma: strongest when", "Virtuous, weaker when not.",
+                                        "", "The Wicked (Karma below", "-20) cannot call on it.", "", TextFormat("Your Karma: %d", (int)s.karma) };
+                for (int i = 0; i < 10; i++) DrawUIText(lines[i], (int)pr.x + 16, (int)pr.y + 46 + i * 20, 13, i == 9 ? ink : inkSoft);
+            }
             continue;
         }
         int first = page * perPage;
         const Spell& head = kSpells[spells[(size_t)first]];
-        std::string title = book == 1 ? "Necromantic Rites" : TextFormat("Circle %d%s", head.circle, "");
+        std::string title = book == 1 ? "Necromantic Rites" : book == 2 ? "Rites of Virtue" : TextFormat("Circle %d%s", head.circle, "");
         if (book == 0) {
             int lastC = kSpells[spells[(size_t)std::min((int)spells.size() - 1, first + perPage - 1)]].circle;
             if (lastC != head.circle) title = TextFormat("Circles %d - %d", head.circle, lastC);
@@ -32238,7 +32334,7 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
             std::string info = TextFormat("%d mana%s", sp.manaCost, SpellNeedsCorpse(idx) ? " - corpse" : "");
             DrawUIText(info.c_str(), (int)tx, (int)y + 24, 11, inkSoft);
             if (!known) {
-                DrawUIText(TextFormat("Needs %d %s", sp.minSkill, sp.necro ? "Necromancy" : "Magery"), (int)tx, (int)y + 40, 11, Color{ 150, 60, 40, 255 });
+                DrawUIText(TextFormat("Needs %d %s", sp.minSkill, sp.necro ? "Necromancy" : sp.chiv ? "Chivalry" : "Magery"), (int)tx, (int)y + 40, 11, Color{ 150, 60, 40, 255 });
                 continue;
             }
             Rectangle btn = { tx, y + 42, std::min(96.0f, pr.width - (tx - pr.x) - 10), 24 };
@@ -33301,7 +33397,7 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
 // want working. Equipped skills add up to at most 700 and stop improving once
 // the loadout is full; unequipped skills keep every point but do nothing until
 // you equip them again. Grouped, with a line on what each one does.
-static const char* kCappedSkillWhat[23] = {
+static const char* kCappedSkillWhat[24] = {
     "Hit harder and more often with swords and axes.",
     "Hit harder and more often with spears and daggers.",
     "Hit harder and more often with maces and hammers.",
@@ -33325,13 +33421,14 @@ static const char* kCappedSkillWhat[23] = {
     "Dark magic: bone spells, curses, raise the dead.",
     "Vanish from sight: monsters and ambushers pass you by.",
     "Move while hidden, and strike harder from the shadows.",
+    "Holy magic: heal, bless your blade, smite. Stronger with Karma.",
 };
 struct SkillGroup { const char* name; std::vector<int> idx; };
 static float g_skillsScroll = 0.0f;
 static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
     static const SkillGroup kGroups[] = {
         { "Combat", { 0, 1, 2, 3, 4, 5, 6, 18, 8, 7 } },
-        { "Magic", { 9, 10, 11, 20 } },
+        { "Magic", { 9, 10, 11, 20, 23 } },
         { "Animals", { 12, 13, 14 } },
         { "Scouting & thievery", { 19, 21, 22, 15, 16, 17 } },
     };
