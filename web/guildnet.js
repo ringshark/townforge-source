@@ -37,7 +37,8 @@
         c.from('guilds').select('motd').eq('id', gid).maybeSingle(),
         c.from('guild_wars').select('guild_id, target_id').or('guild_id.eq.' + gid + ',target_id.eq.' + gid),
       ]).then(function (q) {
-        if (q[0].error) throw q[0].error;
+        // A failed wars/score query must not look like peace or zero progress.
+        q.forEach(function (result) { if (result.error) throw result.error; });
         var pts = {};
         (q[1].data || []).forEach(function (w) { pts[w.user_id] = (pts[w.user_id] || 0) + w.points; });
         var now = Date.now();
