@@ -13694,6 +13694,7 @@ static SkinChar* SkinCharGet(int id) {
 }
 struct SkinPose {
     float move = 0.0f;     // 0 idle .. 1 full run
+    float speed = -1.0f;   // ground speed, world units/s (<0: taken from move)
     float attackT = -1.0f; // a swing's phase (edge-triggered: a new swing starts on the rising edge)
     float castT = -1.0f;
     float hurtT = -1.0f;
@@ -13710,8 +13711,13 @@ struct SkinAnimState {
     int atkVariant = 0, castVariant = 0;
     float cycle = 0.0f, idleCycle = 0.0f;
     bool moving = false;
+    float vSm = 0.0f; // smoothed ground speed
 };
 static std::map<int, SkinAnimState> g_skinAnim;
+// Meshy's walk and run clips, measured (tools: foot travel over a cycle): the
+// walk covers 1.36 m/s, the run 3.8 m/s, and both plant the left foot forward
+// at a quarter cycle, so they blend stride-for-stride.
+static const float kSkWalkMps = 1.36f, kSkRunMps = 3.8f;
 // Pose and draw one rigged character. heightW: standing height in world units.
 // gear (optional): weapon/shield/tool from a body-kit outfit, drawn in hand.
 // Armor on the sculpted body: the body kit's pieces, per piece a scale and an
@@ -13785,8 +13791,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     else if (hurting && has(kSkHit)) { k = kSkHit; ph = hurtT; a1 = 0.55f; }
     else if (st.moving) {
         if (p.sneaking && has(kSkSneak)) { k = kSkSneak; speed = 0.8f + 0.5f * p.move; }
-        else if (p.move > 0.62f && has(kSkRun)) { k = kSkRun; speed = 0.85f + 0.3f * p.move; }
-        else { k = kSkWalk; speed = 0.75f + 0.6f * p.move; }
+        else k = kSkWalk; // walk and run blend by speed below
     } else if (gathering) {
         if (p.gather == 1 && has(kSkAxe)) k = kSkAxe;
         else if (p.gather == 2 && has(kSkHammer)) k = kSkHammer;
@@ -13799,6 +13804,23 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     float dt = st.lastT < 0.0 ? 0.0f : std::clamp((float)(now - st.lastT), 0.0f, 0.1f);
     st.lastT = now;
     float clipLen = n / 60.0f;
+    // Locomotion (2026-09-28): walk blends into run with ground speed (no hard
+    // switch to flicker between), and the stride rate follows that speed so the
+    // feet keep pace with the ground.
+    float v = p.speed >= 0.0f ? p.speed : p.move * 140.0f;
+    st.vSm += (v - st.vSm) * std::min(1.0f, dt * 6.0f);
+    float runW = 0.0f;
+    if (k == kSkWalk && has(kSkRun)) {
+        float upm = heightW / 1.8f; // world units per metre
+        runW = std::clamp((st.vSm - 2.2f * upm) / (1.4f * upm), 0.0f, 1.0f); // walking pace up to ~2.2 m/s, full run by ~3.6
+        runW = runW * runW * (3.0f - 2.0f * runW);
+        float walkRate = std::clamp(st.vSm / (kSkWalkMps * upm), 0.55f, 1.7f);
+        float runRate = std::clamp(st.vSm / (kSkRunMps * upm), 0.75f, 1.45f);
+        float lenW = std::max(2, C.anims[C.clip[kSkWalk]].keyframeCount) / 60.0f;
+        float lenR = std::max(2, C.anims[C.clip[kSkRun]].keyframeCount) / 60.0f;
+        float cyclesPerSec = (walkRate / lenW) * (1.0f - runW) + (runRate / lenR) * runW;
+        speed = cyclesPerSec * clipLen; // in units of this (walk) clip, for the shared stride clock below
+    }
     float frame;
     if (ph >= 0.0f) frame = (a0 + (a1 - a0) * std::clamp(ph, 0.0f, 0.999f)) * (float)(n - 1);
     else {
@@ -13811,7 +13833,12 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     if (st.clip != clip) { st.prevClip = st.clip; st.prevFrame = st.frame; st.switchT = now; st.clip = clip; }
     st.frame = frame;
     float fade = (float)((now - st.switchT) / 0.16);
-    if (st.prevClip >= 0 && fade < 1.0f && k != kSkDeath)
+    if (runW > 0.02f) { // walk <-> run blend on the shared stride phase
+        const ModelAnimation& ra = C.anims[C.clip[kSkRun]];
+        float rf = st.cycle * (float)(std::max(2, ra.keyframeCount) - 1);
+        if (runW > 0.98f) UpdateModelAnimation(C.model, ra, rf);
+        else UpdateModelAnimationEx(C.model, an, frame, ra, rf, runW);
+    } else if (st.prevClip >= 0 && fade < 1.0f && k != kSkDeath)
         UpdateModelAnimationEx(C.model, C.anims[st.prevClip], st.prevFrame, an, frame, std::clamp(fade, 0.0f, 1.0f));
     else
         UpdateModelAnimation(C.model, an, frame);
@@ -13946,7 +13973,7 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
     if (!s.optClassicBody) { // the sculpted hero (2026-09-28); Options can switch back to the dressable body
         HumanEnsure(); // the weapon models live with the body kit
         SkinPose sp;
-        sp.move = hp.move; sp.attackT = hp.attackT; sp.castT = hp.castT; sp.hurtT = hp.hurtT; sp.deathT = hp.deathT;
+        sp.move = hp.move; sp.speed = move > 0.001f ? T3CSpeedTrack(trackId, x, z, false) : 0.0f; sp.attackT = hp.attackT; sp.castT = hp.castT; sp.hurtT = hp.hurtT; sp.deathT = hp.deathT;
         sp.engaged = hp.engaged; sp.gather = hp.gather; sp.style = outfit.style;
         sp.blocking = s.playerBlockT >= 0.0f && s.playerBlockT < 0.35f && s.playerDeathAnimT <= 0.0f;
         sp.sneaking = s.hidden;
