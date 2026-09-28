@@ -1585,6 +1585,7 @@ struct GameState {
     std::string taskWhat;      // monster name, or wood/ore/leather/fish
     int taskNeed = 0, taskHave = 0, taskReward = 0;
     int taskSeed = 1;          // rolls the board's three offers
+    bool thievesGuild = false; // PERSISTED (2026-09-28, #69): a member of the Thieves' Guild
     bool autoReagents = false; // PERSISTED (2026-09-27): top reagents up to 30 whenever you walk into a town
     // Options (2026-09-28) - PERSISTED.
     bool optHideWyrm = false;      // no world-boss banners or wake-up countdown
@@ -7584,7 +7585,7 @@ static void SaveGame(const GameState& s) {
         << "\nbladeBounty=" << s.bladeBounty[0] << "," << s.bladeBounty[1] << "," << s.bladeBounty[2]
         << "\nbladeNextName=" << s.bladeNextName << "\nbountyTarget=" << s.bountyTarget << "\nbountyDone=" << (s.bountyDone ? 1 : 0) << "\nbountyPay=" << s.bountyPay
         << "\ntaskKind=" << s.taskKind << "\ntaskWhat=" << s.taskWhat << "\ntaskNeed=" << s.taskNeed << "\ntaskHave=" << s.taskHave
-        << "\ntaskReward=" << s.taskReward << "\ntaskSeed=" << s.taskSeed << "\n";
+        << "\ntaskReward=" << s.taskReward << "\ntaskSeed=" << s.taskSeed << "\nthievesGuild=" << (s.thievesGuild ? 1 : 0) << "\n";
     out << "optHideWyrm=" << (s.optHideWyrm ? 1 : 0) << "\noptHideDungeonBoss=" << (s.optHideDungeonBoss ? 1 : 0)
         << "\noptClassic2D=" << (s.optClassic2D ? 1 : 0) << "\noptTapWalk=" << (s.optTapWalk ? 1 : 0) << "\noptAlwaysDay=" << (s.optAlwaysDay ? 1 : 0)
         << "\noptSfx=" << (s.optSfx ? 1 : 0) << "\noptMusic=" << (s.optMusic ? 1 : 0) << "\n";
@@ -7896,6 +7897,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "taskHave") s.taskHave = std::max(0, std::atoi(val.c_str()));
         else if (key == "taskReward") s.taskReward = std::max(0, std::atoi(val.c_str()));
         else if (key == "taskSeed") s.taskSeed = std::atoi(val.c_str());
+        else if (key == "thievesGuild") s.thievesGuild = std::atoi(val.c_str()) != 0;
         else if (key == "stableBought") s.stableBought = std::clamp(std::atoi(val.c_str()), 0, 15);
         else if (key == "optHideWyrm") s.optHideWyrm = std::atoi(val.c_str()) != 0;
         else if (key == "optHideDungeonBoss") s.optHideDungeonBoss = std::atoi(val.c_str()) != 0;
@@ -33656,6 +33658,75 @@ static void TryBuyHealPotion(GameState& s) {
     s.logLine = "Bought a Heal Potion for " + std::to_string(kProvisionerHealPotionCost) + " gold.";
 }
 
+// ---- The Thieves' Guild (2026-09-28, #69) --------------------------------------
+// A back room behind every Provisioner. Members practise on the guild's lockboxes,
+// its pouch-dummy and with its hedge-wizard - up to 70; past that, the skill is
+// learned on real locks, real pockets and real spells.
+static const float kThiefPracticeCap = 70.0f;
+static float g_thiefCd = 0.0f;
+static void DrawThievesGuild(GameState& s, int screenW, int y) {
+    g_thiefCd = std::max(0.0f, g_thiefCd - GetFrameTime());
+    DrawInfoLine("The back room - the Thieves' Guild. Mind the loose board.", 20, y, 13, kColorAccent);
+    y += 28;
+    if (!s.thievesGuild) {
+        DrawInfoLine("\"Join us and our locks, pouches and our old hedge-wizard are yours to practise on.\"", 20, y, 12, kColorText);
+        y += 30;
+        if (Button({ 20, (float)y, 220, 34 }, "Join the Guild (250g)", CanAfford(s, 250))) {
+            PayGold(s, 250); s.thievesGuild = true;
+            s.logLine = "The guildmaster nods. \"Welcome, friend. Touch nothing that isn't practice.\"";
+            PlaySfx(SfxId::Coin);
+        }
+        return;
+    }
+    auto skillRow = [&](const char* label, float v) {
+        DrawInfoLine(TextFormat("%s: %.1f%s", label, v, v >= kThiefPracticeCap ? "  (practice can't teach you more)" : ""), 20, y, 13, kColorText);
+        y += 24;
+    };
+    // Lockpicking: three practice boxes, from easy to masterwork
+    skillRow("Lockpicking", s.lockpicking);
+    static const char* boxN[3] = { "Simple box", "Sturdy box", "Masterwork" };
+    const float boxD[3] = { 0.0f, 30.0f, 60.0f };
+    for (int k = 0; k < 3; k++) {
+        float chance = std::clamp(55.0f + (EffectiveSkill(s, &GameState::lockpicking) - boxD[k]) * 1.2f, 5.0f, 97.0f);
+        Rectangle b = { 20.0f + k * ((screenW - 40) / 3.0f), (float)y, (screenW - 52) / 3.0f, 32 };
+        if (Button(b, TextFormat("%s %d%%", boxN[k], (int)chance), g_thiefCd <= 0.0f && s.lockpicking < kThiefPracticeCap)) {
+            g_thiefCd = 1.2f;
+            float g = SkillUseGain(s.lockpicking, chance / 100.0f, 0.6f, kThiefPracticeCap);
+            bool ok = RandUnit() * 100.0f < chance;
+            PlaySfx(SfxId::Lock);
+            s.logLine = std::string(ok ? "Click - the " : "The pick slips - the ") + boxN[k] + (ok ? " opens." : " stays shut.") +
+                        (g > 0 ? TextFormat(" (Lockpicking +%.1f)", g) : "");
+        }
+    }
+    y += 44;
+    // Snooping: the pouch-dummy with a bell on it
+    skillRow("Snooping", s.snooping);
+    {
+        float chance = std::clamp(45.0f + EffectiveSkill(s, &GameState::snooping) * 0.6f, 5.0f, 97.0f);
+        if (Button({ 20, (float)y, (float)screenW - 40, 32 }, TextFormat("Lift the dummy's pouch without ringing its bell (%d%%)", (int)chance),
+                   g_thiefCd <= 0.0f && s.snooping < kThiefPracticeCap)) {
+            g_thiefCd = 1.2f;
+            float g = SkillUseGain(s.snooping, chance / 100.0f, 0.6f, kThiefPracticeCap);
+            bool ok = RandUnit() * 100.0f < chance;
+            PlaySfx(ok ? SfxId::Click : SfxId::Door);
+            s.logLine = std::string(ok ? "Your fingers find the pouch - not a jingle." : "Ding! The bell gives you away. The guild laughs.") +
+                        (g > 0 ? TextFormat(" (Snooping +%.1f)", g) : "");
+        }
+    }
+    y += 44;
+    // Magery: lessons from the hedge-wizard in the corner
+    skillRow("Magery", s.magery);
+    if (Button({ 20, (float)y, (float)screenW - 40, 32 }, "A lesson from the hedge-wizard (40g)",
+               g_thiefCd <= 0.0f && s.magery < kThiefPracticeCap && CanAfford(s, 40))) {
+        g_thiefCd = 1.0f;
+        PayGold(s, 40);
+        float g = SkillUseGain(s.magery, 0.5f, 4.0f, kThiefPracticeCap);
+        PlaySfx(SfxId::Cast);
+        s.logLine = std::string("\"No, no - wrist first, then the words.\"") + (g > 0 ? TextFormat(" (Magery +%.1f)", g) : " You learn nothing new today.");
+    }
+    y += 44;
+    DrawInfoLine("Practice teaches up to 70. Past that, only real locks, pockets and spells will do.", 20, y, 12, Fade(kColorText, 0.8f));
+}
 static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
     DrawInteriorBackdrop(g_assets.provisionerWallOk ? &g_assets.provisionerWall : nullptr,
                            g_assets.provisionerFloorOk ? &g_assets.provisionerFloor : nullptr,
@@ -33667,10 +33738,11 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
 
     {
         int mode = s.provisionerTab;
-        DrawPillTabs({ "Buy", "Sell" }, &mode, 20, (float)y, 26);
+        DrawPillTabs({ "Buy", "Sell", "Back room" }, &mode, 20, (float)y, 26);
         s.provisionerTab = mode;
     }
     y += 34;
+    if (s.provisionerTab == 2) { DrawThievesGuild(s, screenW, y); return; } // (2026-09-28, #69)
 
     if (s.provisionerTab == 0) {
         DrawInfoLine(s.bankGold > 0 ? TextFormat("Gold: %d   Bank: %d (short? the rest comes from your bank, +2%% fee)", s.gold, s.bankGold) : TextFormat("Gold: %d", s.gold), 20, y, 13, kColorAccent);
