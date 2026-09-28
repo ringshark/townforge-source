@@ -7806,7 +7806,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "merchantStock") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 5; i++) s.merchantStock[i] = std::max(0, std::atoi(p[i].c_str())); }
         else if (key == "merchantRestockT") s.merchantRestockT = (float)std::max(0, std::atoi(val.c_str()));
         else if (key == "innocentReqState") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 4; i++) s.innocentReqState[i] = std::clamp(std::atoi(p[i].c_str()), 0, 2); }
-        else if (key == "innocentReqKind") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 4; i++) s.innocentReqKind[i] = std::clamp(std::atoi(p[i].c_str()), 0, 3); }
+        else if (key == "innocentReqKind") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 4; i++) s.innocentReqKind[i] = std::clamp(std::atoi(p[i].c_str()), 0, 4); } // (#73) 4 = fish - was clamped into an escort
         else if (key == "innocentReqCooldown") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 4; i++) s.innocentReqCooldown[i] = (float)std::max(0, std::atoi(p[i].c_str())); }
     }
 
@@ -31585,6 +31585,26 @@ static void DrawWalkMarker(const GameState& s) {
             }
         }
     }
+    if (s.screen == Screen::Wilderness && !s.exploreMenuOpen && !s.worldMapOpen && !s.innocentEncounter.has_value()) {
+        // Travellers' errands (2026-09-28, #73): what they asked for, and where to find them.
+        int line = 0;
+        for (int id = 0; id < 4; id++) {
+            int kind = s.innocentReqKind[(size_t)id];
+            if (s.innocentReqState[(size_t)id] != 2 || kind == 3) continue;
+            int have = kind == 0 ? s.wood : kind == 1 ? s.ore : kind == 2 ? s.leather : s.fish;
+            int need = kind == 0 ? 5 : 4;
+            const char* what = kind == 0 ? "wood" : kind == 1 ? "ore" : kind == 2 ? "leather" : "fish";
+            std::string t = InnocentName(id) + TextFormat(" wants %d %s (you have %d)", need, what, have);
+            if (have >= need) {
+                if (s.innocentSpots[(size_t)id].present) {
+                    Vector2 at = WildernessInnocentLivePos(id, s.worldTime);
+                    t += TextFormat(" - bring it: %d paces %s", (int)(Dist(s.wildernessPlayerPos, at) / 10.0f), CompassWord(s.wildernessPlayerPos, at).c_str());
+                } else t += " - they'll be back on the road soon";
+            } else if (kind == 4) t += " - fish at any shore";
+            DrawHudLine(t.c_str(), 20, 280 + line * 18, 13, Color{ 190, 230, 170, 255 });
+            line++;
+        }
+    }
     if (!g_walkOn || g_hudCamZone < 0) return;
     float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 6.0f);
     float r = 16.0f + 5.0f * pulse;
@@ -33927,8 +33947,8 @@ static void DrawInnocentPanel(GameState& s, int screenW) {
                 StartEscort(s, id, from);
             } else {
                 s.innocentReqState[id] = 2; // active fetch
-                s.logLine = "You agree to bring " + InnocentName(id) + " " +
-                            InnocentRequestNeed(kind) + ".";
+                s.logLine = "You agree to bring " + InnocentName(id) + " " + InnocentRequestNeed(kind) +
+                            ". Come back and tap them to hand it over - the top-left of your screen shows the way.";
                 PlaySfx(SfxId::Quest);
             }
         }
@@ -33967,7 +33987,7 @@ static void DrawInnocentPanel(GameState& s, int screenW) {
     if (s.innocentReqState[id] == 1) {
         if (Button({ (float)bx, (float)y, 100, 36 }, "Listen", true)) enc.reqView = true;
         bx += 110;
-    } else if (s.innocentReqState[id] == 2 && s.innocentReqKind[id] < 3) {
+    } else if (s.innocentReqState[id] == 2 && s.innocentReqKind[id] != 3) { // (#73) fish (kind 4) was left out - no Hand over button
         DrawUIText(("They asked for " + InnocentRequestNeed(s.innocentReqKind[id]) + ".").c_str(),
                    bx, y + 8, 13, kColorAccent);
         if (InnocentRequestFulfilled(s, id) &&
