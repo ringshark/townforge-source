@@ -9,38 +9,40 @@ The models are static: no rig or animations.
 Scale is normalized to roughly 2 units on the longest axis, centered on the origin,
 so scale and position each model in-engine.
 
-Filenames follow the in-game monster names (`kDungeons` in `main.cpp`) where one exists.
-The spider line is not in the game yet and uses the names from its concept art.
+Filenames follow the monster names in Town Forge 3D (the build in
+`ringshark/townforge-3d-preview`), not the 2D `main.cpp`, whose rosters differ. The
+fish-folk line has no 3D counterpart yet; the Sunken Vault's Scalekin Raiders are
+the closest fit if it's meant for there.
 
-| File | In game | Source art |
-|---|---|---|
-| `web_spinner.glb` | new: spider line, Lvl 1 | Spider line, Lvl 1 |
-| `silk_stalker.glb` | new: spider line, Lvl 2 | Spider line, Lvl 2 |
-| `venom_weaver.glb` | new: spider line, Lvl 3 | Spider line, Lvl 3 |
-| `brood_hunter.glb` | new: spider line, Lvl 4 | Spider line, Lvl 4 |
-| `nest_guardian.glb` | new: spider line, Lvl 5 | Spider line, Lvl 5 |
-| `spider_broodmother.glb` | new: spider line boss | Red/black spider with green egg sac |
-| `orc_warbringer.glb` | Orc Warbringer (Bloodtusk Hold) | Leather-and-iron orc |
-| `orc_overlord.glb` | Orc Overlord (Bloodtusk Hold boss) | Horned, black-armored orc |
-| `stoneborn.glb` | Stoneborn (Emberveil Hollow) | Mossy stone golem with amber crystals |
-| `bonewalker.glb` | Bonewalker (Sunken Crypt) | Crypt lineup 1 |
-| `rotbound_corpse.glb` | Rotbound Corpse (Sunken Crypt) | Crypt lineup 2 |
-| `gravewretch.glb` | Gravewretch (Sunken Crypt) | Crypt lineup 3 |
-| `grave_warden.glb` | Grave Warden (Sunken Crypt) | Crypt lineup 4 |
-| `crypt_sovereign.glb` | Crypt Sovereign (Sunken Crypt) | Crypt lineup 5 |
-| `glacier_wight.glb` | new: ice undead line, Lvl 1 | Ice lineup, Lvl 1* |
-| `rimebound_horror.glb` | new: ice undead line, Lvl 2 | Ice lineup, Lvl 2* |
-| `hoarfrost_revenant.glb` | new: ice undead line, Lvl 3 | Ice lineup, Lvl 3* |
-| `winters_maw.glb` | new: ice undead line, Lvl 4 | Ice lineup, Lvl 4* |
-| `ice_undead_lvl5.glb` | new: ice undead line, Lvl 5 (placeholder name) | Ice lineup, Lvl 5* |
-| `fishfolk_scout.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 1 |
-| `fishfolk_archer.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 2 |
-| `fishfolk_warlord.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 3 |
-| `fishfolk_shaman.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 4 |
-| `fishfolk_huntress.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 5 |
-| `world_boss_dragon.glb` | new: world boss (placeholder name) | Three-headed dragon from the battle scene\*\* |
-| `hero.glb` | main hero (static, full PBR) | Hero turnaround: front/side/back views |
-| `hero_animated.glb` | main hero (rigged + animated) | Same model, auto-rigged by Meshy |
+| File | In Town Forge 3D |
+|---|---|
+| `web_spinner.glb` | Web Spinner (Weavers' Nest) |
+| `silk_stalker.glb` | Silk Stalker (Weavers' Nest) |
+| `venom_weaver.glb` | Venom Weaver (Weavers' Nest) |
+| `brood_hunter.glb` | Brood Hunter (Weavers' Nest) |
+| `nest_guardian.glb` | Nest Guardian (Weavers' Nest) |
+| `broodmother.glb` | The Broodmother (Weavers' Nest boss) |
+| `orc_grunt.glb` | Orc Grunt, also used for Orc Archer, Shaman and Brute (Grimtusk Hold) |
+| `orc_warlord.glb` | Orc Warlord (Grimtusk Hold) |
+| `rock_golem.glb` | Rock Golem (Stonepeaks) |
+| `bonewalker.glb` | Bonewalker (Whisper Crypt) |
+| `rotbound_corpse.glb` | Rotbound Corpse (Whisper Crypt) |
+| `gravewretch.glb` | Gravewretch (Whisper Crypt) |
+| `grave_warden.glb` | Grave Warden (Whisper Crypt) |
+| `crypt_sovereign.glb` | Crypt Sovereign (Whisper Crypt) |
+| `glacier_wight.glb` | Glacier Wight (Frostbound Tomb) \* |
+| `rimebound_horror.glb` | Rimebound Horror (Frostbound Tomb) \* |
+| `hoarfrost_revenant.glb` | Hoarfrost Revenant (Frostbound Tomb) \* |
+| `winters_maw.glb` | Winter's Maw (Frostbound Tomb) \* |
+| `frostbound_king.glb` | The Frostbound King (Frostbound Tomb boss) \* |
+| `fishfolk_scout.glb` | none yet: fish-folk line, placeholder name |
+| `fishfolk_archer.glb` | none yet: fish-folk line, placeholder name |
+| `fishfolk_warlord.glb` | none yet: fish-folk line, placeholder name |
+| `fishfolk_shaman.glb` | none yet: fish-folk line, placeholder name |
+| `fishfolk_huntress.glb` | none yet: fish-folk line, placeholder name |
+| `vyrathax.glb` | Vyrathax the Tri-Wyrm (world boss) \*\* |
+| `hero.glb` | Main hero (static, full PBR) |
+| `hero_animated.glb` | Main hero (rigged, Walk and Run clips) |
 
 \* The ice lineup's figures overlap too much to crop apart, so each was redrawn in
 isolation from the lineup with Meshy image-to-image (`nano-banana-pro`) before 3D
