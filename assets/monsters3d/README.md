@@ -42,7 +42,7 @@ Raider monster.
 | `scalekin_raider_huntress.glb` | Scalekin Raider, huntress variant (Sunken Vault) |
 | `vyrathax.glb` | Vyrathax the Tri-Wyrm (world boss) \*\* |
 | `hero.glb` | Main hero (static, full PBR) |
-| `hero_animated.glb` | Main hero (rigged, Walk and Run clips) |
+| `hero_animated.glb` | Main hero (rigged, 19 animation clips) |
 
 \* The ice lineup's figures overlap too much to crop apart, so each was redrawn in
 isolation from the lineup with Meshy image-to-image (`nano-banana-pro`) before 3D
@@ -64,7 +64,33 @@ triangle target instead of 30k.
 - `hero.glb` was built with Meshy multi-image-to-3D from all three turnaround views
   (`source/hero_front|side|back.jpg`), so the backpack and cape match the art.
 - `hero_animated.glb` is the same character run through Meshy auto-rigging: a
-  24-bone humanoid skeleton (`Armature`) with two clips, `Walk` and `Run`, merged into
-  one file. Load it with raylib's `LoadModel` + `LoadModelAnimations`. Meshy's rigging
-  output keeps only the base color texture (no normal/metallic-roughness maps), so it
-  looks slightly flatter than `hero.glb`.
+  24-bone humanoid skeleton (`Armature`) with 19 clips from Meshy's animation library,
+  merged into one file. Load it with raylib's `LoadModel` + `LoadModelAnimations`.
+  Meshy's rigging output keeps only the base color texture (no normal/metallic-roughness
+  maps), so it looks slightly flatter than `hero.glb`.
+
+| Clip | Length | Use for | Meshy action |
+|---|---|---|---|
+| `Idle` | 4.0s | standing around | 0 Idle |
+| `CombatIdle` | 1.7s | in a fight, between swings | 89 Combat Idle |
+| `Walk` | 1.1s | walking | rig default |
+| `Run` | 0.7s | running | rig default |
+| `SwordSlash` | 1.5s | one-handed melee swing | 219 Right-hand Sword Slash |
+| `ComboAttack` | 4.4s | special or crit melee | 105 Triple Combo Attack |
+| `AxeChop` | 7.7s | axe swing, Lumberjacking | 237 Charged Axe Chop |
+| `HammerSwing` | 1.9s | mace or hammer, Mining | 128 Heavy Hammer Swing |
+| `BowShot` | 7.9s | Archery | 222 Draw and Shoot from Back |
+| `Cast` | 2.3s | spellcasting | 129 Mage Spell Cast |
+| `CastCharged` | 2.7s | big spells | 125 Charged Spell Cast |
+| `Parry` | 1.9s | parry or block | 147 Sword Parry |
+| `HitReact` | 1.7s | taking a hit | 178 Hit Reaction |
+| `Death` | 2.3s | dying | 189 Dying Backwards |
+| `PickUp` | 7.2s | looting | 276 Male Bend Over Pick Up |
+| `Gather` | 6.0s | gathering, harvesting | 284 Collect Object |
+| `Drink` | 8.9s | potions, bandaging | 342 Stand and Drink |
+| `Sneak` | 2.9s | Hiding and Stealth | 559 Sneaky Walk |
+| `Kneel` | 2.6s | Meditation, praying at shrines | 365 Kneel on One Knee and Stand |
+
+Some library clips are long (`AxeChop`, `BowShot`, `PickUp`, `Drink`), so play part of
+the clip or speed it up to fit the game's action timing. Fishing, playing instruments and
+riding have no library clip and need code-driven motion.
