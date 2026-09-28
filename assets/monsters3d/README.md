@@ -24,6 +24,8 @@ Raider monster.
 | `broodmother.glb` | The Broodmother (Weavers' Nest boss) |
 | `orc_grunt.glb` | Orc Grunt, also used for Orc Archer, Shaman and Brute (Grimtusk Hold) |
 | `orc_warlord.glb` | Orc Warlord (Grimtusk Hold) |
+| `orc_grunt_animated.glb` | Orc Grunt, rigged, 6 clips (`Idle`, `Walk`, `Run`, `Attack`, `HitReact`, `Death`) |
+| `orc_warlord_animated.glb` | Orc Warlord, rigged, same 6 clips |
 | `rock_golem.glb` | Rock Golem (Stonepeaks) |
 | `bonewalker.glb` | Bonewalker (Whisper Crypt) |
 | `rotbound_corpse.glb` | Rotbound Corpse (Whisper Crypt) |
@@ -94,3 +96,12 @@ triangle target instead of 30k.
 Some library clips are long (`AxeChop`, `BowShot`, `PickUp`, `Drink`), so play part of
 the clip or speed it up to fit the game's action timing. Fishing, playing instruments and
 riding have no library clip and need code-driven motion.
+
+## Orcs
+
+`orc_grunt_animated.glb` and `orc_warlord_animated.glb` are the same models as the static
+files, run through Meshy auto-rigging (2.0 m tall) and given six clips each: `Idle` (4.0s),
+`Walk` (1.1s) and `Run` (0.7s) from the rig, plus `Attack` (1.5s, Meshy 219 Right-hand
+Sword Slash), `HitReact` (1.7s, 178) and `Death` (2.3s, 189 Dying Backwards). As with the
+hero, the rig keeps only the base color texture. The static files remain for anything
+that doesn't need animation. The Archer, Shaman and Brute can share the Grunt's file.
