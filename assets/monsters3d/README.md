@@ -10,9 +10,9 @@ Scale is normalized to roughly 2 units on the longest axis, centered on the orig
 so scale and position each model in-engine.
 
 Filenames follow the monster names in Town Forge 3D (the build in
-`ringshark/townforge-3d-preview`), not the 2D `main.cpp`, whose rosters differ. The
-fish-folk line has no 3D counterpart yet; the Sunken Vault's Scalekin Raiders are
-the closest fit if it's meant for there.
+`ringshark/townforge-3d-preview`), not the 2D `main.cpp`, whose rosters differ. The five
+`scalekin_raider_*` files are role variants of the Sunken Vault's single Scalekin
+Raider monster.
 
 | File | In Town Forge 3D |
 |---|---|
@@ -35,11 +35,11 @@ the closest fit if it's meant for there.
 | `hoarfrost_revenant.glb` | Hoarfrost Revenant (Frostbound Tomb) \* |
 | `winters_maw.glb` | Winter's Maw (Frostbound Tomb) \* |
 | `frostbound_king.glb` | The Frostbound King (Frostbound Tomb boss) \* |
-| `fishfolk_scout.glb` | none yet: fish-folk line, placeholder name |
-| `fishfolk_archer.glb` | none yet: fish-folk line, placeholder name |
-| `fishfolk_warlord.glb` | none yet: fish-folk line, placeholder name |
-| `fishfolk_shaman.glb` | none yet: fish-folk line, placeholder name |
-| `fishfolk_huntress.glb` | none yet: fish-folk line, placeholder name |
+| `scalekin_raider_scout.glb` | Scalekin Raider, scout variant (Sunken Vault) |
+| `scalekin_raider_archer.glb` | Scalekin Raider, archer variant (Sunken Vault) |
+| `scalekin_raider_warlord.glb` | Scalekin Raider, warlord variant (Sunken Vault) |
+| `scalekin_raider_shaman.glb` | Scalekin Raider, shaman variant (Sunken Vault) |
+| `scalekin_raider_huntress.glb` | Scalekin Raider, huntress variant (Sunken Vault) |
 | `vyrathax.glb` | Vyrathax the Tri-Wyrm (world boss) \*\* |
 | `hero.glb` | Main hero (static, full PBR) |
 | `hero_animated.glb` | Main hero (rigged, Walk and Run clips) |
