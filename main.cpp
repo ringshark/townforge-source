@@ -12522,6 +12522,10 @@ struct HumanOutfit {
     bool skeleton = false;              // drawn as bones on the rig instead of the body (necro minions, 2026-09-27)
     Color robeCol = { 112, 96, 80, 255 };
     Color hatCol = { 90, 70, 120, 255 };
+    // Armor you can see (2026-09-28, #64): 0 none, 1 light (leather, studded, fur),
+    // 2 heavy (ring, chain, plate) - shaped pieces on the bones, not just paint.
+    int armChest = 0, armArms = 0, armLegs = 0, armGorget = 0;
+    Color armChestCol = WHITE, armArmsCol = WHITE, armLegsCol = WHITE, armGorgetCol = WHITE;
 };
 
 struct HumanPose {
@@ -12561,6 +12565,8 @@ struct HumanRig {
     Model cloak{};     // procedural, chest-bone space
     Model hat[6]{};    // clothing hats, head-bone space (index = kClWizardHat..kClFeatherHat)
     Model robeSkirt{}; // chest-bone space, waist to ankles
+    Model armor[12]{}; // (2026-09-28, #64) shaped armor pieces - see HumanBuildArmor
+    int boneThighR = -1, boneThighL = -1, boneShinR = -1, boneShinL = -1;
     Model outfit[kOpCount]{};                      // (2026-09-27) clothing meshes, loaded lazily
     std::vector<int> outfitMap[kOpCount];          // outfit bone index -> our bone index
     bool outfitOk[kOpCount]{}, outfitTried = false;
@@ -12774,6 +12780,36 @@ static Model HumanBuildRobeSkirt() {
     return T3CFinish(b);
 }
 
+// Armor pieces (2026-09-28, #64), in their bone's space (metres, +Y along the bone):
+// 0/1 chest light/heavy, 2/3 pauldron, 4/5 bracer, 6/7 greave, 8 heavy cuisse, 9 gorget.
+enum { kArChestL, kArChestH, kArPauldronL, kArPauldronH, kArBracerL, kArBracerH, kArGreaveL, kArGreaveH, kArCuisse, kArGorget };
+static Model HumanBuildArmor(int k) {
+    T3CMeshBuilder b;
+    Color w = WHITE, rim = { 214, 214, 214, 255 }; // tinted per draw; rims a shade darker
+    switch (k) {
+        case kArChestL: T3CSphere(b, 0.0f, 0.0f, 0.012f, 0.166f, 0.205f, 0.13f, 6, 12, w); break;
+        case kArChestH:
+            T3CSphere(b, 0.0f, 0.01f, 0.016f, 0.178f, 0.215f, 0.14f, 6, 12, w);
+            T3CCylinder(b, 0.0f, -0.31f, 0.0f, -0.13f, 0.168f, 0.16f, 12, rim, false, false); // faulds
+            T3CBox(b, 0.0f, 0.04f, 0.15f, 0.03f, 0.26f, 0.02f, rim);                        // the ridge down the front
+            break;
+        case kArPauldronL: T3CSphere(b, 0.0f, 0.035f, 0.0f, 0.07f, 0.068f, 0.07f, 5, 10, w); break;
+        case kArPauldronH:
+            T3CSphere(b, 0.0f, 0.025f, 0.0f, 0.088f, 0.078f, 0.088f, 5, 10, w);
+            T3CSphere(b, 0.0f, 0.095f, 0.0f, 0.078f, 0.05f, 0.078f, 4, 10, rim);
+            break;
+        case kArBracerL: T3CCylinder(b, 0.0f, 0.07f, 0.0f, 0.22f, 0.043f, 0.049f, 10, w); break;
+        case kArBracerH: T3CCylinder(b, 0.0f, 0.04f, 0.0f, 0.23f, 0.05f, 0.057f, 10, w); break;
+        case kArGreaveL: T3CCylinder(b, 0.0f, 0.08f, 0.0f, 0.34f, 0.056f, 0.048f, 10, w); break;
+        case kArGreaveH:
+            T3CCylinder(b, 0.0f, 0.06f, 0.0f, 0.36f, 0.062f, 0.052f, 10, w);
+            T3CSphere(b, 0.0f, 0.0f, 0.03f, 0.062f, 0.058f, 0.058f, 5, 10, rim); // knee cop
+            break;
+        case kArCuisse: T3CCylinder(b, 0.0f, 0.06f, 0.0f, 0.34f, 0.09f, 0.072f, 10, w); break;
+        case kArGorget: T3CCylinder(b, 0.0f, 0.15f, 0.0f, 0.25f, 0.118f, 0.086f, 12, w); break;
+    }
+    return T3CFinish(b);
+}
 static Model HumanBuildCloak() {
     // Chest-bone (spine.003) space in metres: hangs from the shoulders down the
     // back to mid-calf, flaring out. Two-sided so the lining shows when it swings.
@@ -12843,6 +12879,8 @@ static void HumanEnsure() {
     H.boneUpperR = HumanFindBone(H.model, "DEF-upper_arm.R");
     H.boneUpperL = HumanFindBone(H.model, "DEF-upper_arm.L");
     H.boneForearmR = HumanFindBone(H.model, "DEF-forearm.R");
+    H.boneThighR = HumanFindBone(H.model, "DEF-thigh.R"); H.boneThighL = HumanFindBone(H.model, "DEF-thigh.L");
+    H.boneShinR = HumanFindBone(H.model, "DEF-shin.R"); H.boneShinL = HumanFindBone(H.model, "DEF-shin.L");
     {
         int nb = H.model.skeleton.boneCount;
         H.invBind.resize((size_t)nb);
@@ -12903,6 +12941,7 @@ static void HumanEnsure() {
     for (int g = kHwBow; g < kHwGearCount; g++) { H.gear[g] = HumanBuildWeapon(g); H.gearOk[g] = true; }
     for (int k = kHhLeather; k <= kHhPlate; k++) H.helm[k] = HumanBuildHelm(k);
     H.cloak = HumanBuildCloak();
+    for (int k = kArChestL; k <= kArGorget; k++) H.armor[k] = HumanBuildArmor(k);
     H.robeSkirt = HumanBuildRobeSkirt();
     for (int k = kClWizardHat; k <= kClFeatherHat; k++) H.hat[k] = HumanBuildHat(k);
     H.face = HumanBuildFace();
@@ -13114,6 +13153,16 @@ static HumanOutfit HumanOutfitFor(const Equipment& e) {
                : kHhLeather;
         HumanArmorColor(e.helmet, &o.helmCol);
         if (o.helm == kHhPlate) o.helmCol = Color{ 190, 194, 202, 255 };
+    }
+    { // shaped armor pieces (2026-09-28, #64)
+        auto tier = [](const std::optional<Item>& it) {
+            if (!it.has_value()) return 0;
+            const std::string& n = it->name;
+            return (n.find("Plate") != std::string::npos || n.find("Chain") != std::string::npos || n.find("Ring") != std::string::npos) ? 2 : 1;
+        };
+        o.armChest = tier(e.chest); o.armArms = tier(e.arms); o.armLegs = tier(e.legs); o.armGorget = tier(e.gorget);
+        HumanArmorColor(e.chest, &o.armChestCol); HumanArmorColor(e.arms, &o.armArmsCol);
+        HumanArmorColor(e.legs, &o.armLegsCol); HumanArmorColor(e.gorget, &o.armGorgetCol);
     }
     if (e.robe) { // a robe goes over the armor, UO style (gloves, boots and helm still show)
         Color rc = ClothColor(*e.robe);
@@ -13740,6 +13789,21 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
         HumanDrawAttached(H.helm[o.helm], &flat, metres, HumanBoneMatrix(H, H.boneHead), world, HumanMul(o.helmCol, tint));
     else if (o.hat >= kClWizardHat && o.hat <= kClFeatherHat && H.boneHead >= 0) // clothing hat (2026-09-27)
         HumanDrawAttached(H.hat[o.hat], &flat, metres, HumanBoneMatrix(H, H.boneHead), world, HumanMul(o.hatCol, tint));
+    if (!o.skeleton) { // shaped armor (2026-09-28, #64); a robe goes over the body pieces
+        auto piece = [&](int k, int bone, Color c) { if (bone >= 0) HumanDrawAttached(H.armor[k], &flat, metres, HumanBoneMatrix(H, bone), world, HumanMul(c, tint)); };
+        if (o.armChest && !o.robe) piece(o.armChest == 2 ? kArChestH : kArChestL, H.boneChest, o.armChestCol);
+        if (o.armArms && !o.robe) {
+            int pk = o.armArms == 2 ? kArPauldronH : kArPauldronL, bk = o.armArms == 2 ? kArBracerH : kArBracerL;
+            piece(pk, H.boneUpperR, o.armArmsCol); piece(pk, H.boneUpperL, o.armArmsCol);
+            piece(bk, H.boneForearmR, o.armArmsCol); piece(bk, H.boneForearmL, o.armArmsCol);
+        }
+        if (o.armLegs && !o.robe) {
+            int gk = o.armLegs == 2 ? kArGreaveH : kArGreaveL;
+            piece(gk, H.boneShinR, o.armLegsCol); piece(gk, H.boneShinL, o.armLegsCol);
+            if (o.armLegs == 2) { piece(kArCuisse, H.boneThighR, o.armLegsCol); piece(kArCuisse, H.boneThighL, o.armLegsCol); }
+        }
+        if (o.armGorget) piece(kArGorget, H.boneChest, o.armGorgetCol);
+    }
     if (o.robe && H.boneChest >= 0)
         HumanDrawAttached(H.robeSkirt, &flat, metres, HumanBoneMatrix(H, H.boneChest), world, HumanMul(o.robeCol, tint));
     if (o.cloak && H.boneChest >= 0) {
