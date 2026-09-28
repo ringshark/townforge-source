@@ -27096,7 +27096,7 @@ static void TreasureMaybeDrop(GameState& s, int level, bool boss) {
     GameState::TreasureMap m;
     m.tier = boss ? std::min(5, TreasureTierForLevel(level) + 1) : TreasureTierForLevel(level);
     s.tmaps.push_back(m);
-    std::string msg = std::string("You find a ") + kTmapTierName[m.tier] + " treasure map! Decode it from MENU - Treasure maps.";
+    std::string msg = std::string("You find a ") + kTmapTierName[m.tier] + " treasure map! Decode it from MENU - Quests - Treasure maps.";
     Journal(s, msg);
     s.rivalBanner = std::string(kTmapTierName[m.tier]) + " treasure map!";
     s.rivalBannerTimer = kRivalBannerTime * 0.8f;
@@ -32125,8 +32125,8 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         if (Button({ bx1, by, 152, 40 }, "Bank & House", tabsEnabled)) { MenuGoScreen(s, g_menuGroupLast[2]); open = false; }
         by += 48;
         if (Button({ bx0, by, 152, 40 }, "Guild", tabsEnabled)) { s.screen = Screen::House; OpenWarWeek(s); g_guildTab = 0; open = false; }
-        if (Button({ bx1, by, 152, 40 }, s.tmaps.empty() ? "Treasure maps" : TextFormat("Maps (%d)", (int)s.tmaps.size()), tabsEnabled)) {
-            s.screen = Screen::House; g_tmapOpen = true; g_warOpen = false; g_optOpen = false; open = false; // (2026-09-28)
+        if (Button({ bx1, by, 152, 40 }, "Quests", tabsEnabled)) { // (2026-09-28 cleanup) the one Quest Board: town, weekly goals, maps
+            s.screen = Screen::House; g_questOpen = true; g_tmapOpen = false; g_warOpen = false; g_optOpen = false; open = false;
         }
         by += 48;
         if (Button({ bx0, by, 152, 40 }, "Help & Save", tabsEnabled)) { MenuGoScreen(s, Screen::Guide); s.guidePage = 0; open = false; }
@@ -34546,26 +34546,7 @@ static void DrawBankScreen(GameState& s, int screenW, int screenH) {
     EndScissorMode();
     y = vaultTop + vaultHeight + 12;
 
-    // --- The Hearthmoot's weekly goals ---
-    CheckWeeklyReset(s);
-    long long secondsLeft = std::max(0LL, (s.weekStartEpoch + kWeekSeconds) - (long long)std::time(nullptr));
-    long long daysLeft = secondsLeft / 86400;
-    DrawUIText(TextFormat("The Hearthmoot - resets in ~%lld day%s", daysLeft, daysLeft == 1 ? "" : "s"),
-               20, y, 13, kColorAccent);
-    y += 20;
-    if (HasWeeklyBlessing(s))
-        DrawUIText("Weekly Blessing active: +10% combat power!", 20, y, 12, kColorSlate), y += 18;
-
-    for (int i = 0; i < kWeeklyGoalCount; i++) {
-        const WeeklyGoalDef& goal = kWeeklyGoals[i];
-        int progress = std::min(goal.target, s.weeklyProgress[i]);
-        std::string line = std::string(goal.label) + ": " + std::to_string(progress) + "/" + std::to_string(goal.target);
-        DrawUIText(line.c_str(), 20, y + 4, 12, kColorText);
-        bool ready = s.weeklyProgress[i] >= goal.target && !s.weeklyClaimed[i];
-        std::string label = s.weeklyClaimed[i] ? "Claimed" : "Claim";
-        if (Button({ (float)(screenW - 90), (float)y, 70, 22 }, label, ready)) ClaimWeeklyGoal(s, i);
-        y += 26;
-    }
+    DrawUIText("Weekly goals have moved to MENU > Quests.", 20, y, 12, Fade(kColorText, 0.7f));
 }
 
 // ---------------------------------------------------------------------
@@ -35307,8 +35288,8 @@ static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int sec
 }
 
 // Treasure maps (2026-09-28): your maps - decode them, and pick the one to follow.
-static void DrawTreasureMaps(GameState& s, int screenW, int screenH) {
-    Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
+static void DrawTreasureMaps(GameState& s, int screenW, int screenH, float top = 112.0f) {
+    Rectangle G = { 10, top, (float)screenW - 20, (float)screenH - top - 12 };
     UODrawGump(G, kUoParchment);
     UODrawTitle(G, "Treasure maps", 15);
     const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 }, gold = { 150, 100, 20, 255 };
@@ -35391,13 +35372,58 @@ static std::string BladeLastSeen(const GameState& s, int bi) {
     Vector2 from = s.screen == Screen::Wilderness || g_playScreen == Screen::Wilderness ? s.wildernessPlayerPos : kTownGates[std::clamp(s.selectedTown, 0, (int)kTownGates.size() - 1)].wildernessPos;
     return std::string("last seen in the ") + RegionName(RegionAt(b.pos)) + TextFormat(", %d paces ", (int)(Dist(from, b.pos) / 10.0f)) + CompassWord(from, b.pos);
 }
+// The one Quest Board (2026-09-28 cleanup): Town (wanted + tasks), the Hearthmoot's
+// weekly goals (moved off the Bank screen) and your treasure maps - one place for
+// "what can I do", reachable from MENU > Quests anywhere, and at every Town Hall.
+static int g_questTab = 0;
+static void DrawWeeklyGoalsBody(GameState& s, float x, float y, float w) {
+    const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 }, good = { 40, 110, 50, 255 };
+    CheckWeeklyReset(s);
+    long long secondsLeft = std::max(0LL, (s.weekStartEpoch + kWeekSeconds) - (long long)std::time(nullptr));
+    long long daysLeft = secondsLeft / 86400;
+    DrawUIText("The Hearthmoot's weekly goals", (int)x, (int)y, 16, ink); y += 22;
+    DrawUIText(TextFormat("New goals in ~%lld day%s. Finish all five for the Weekly Blessing (+10%% combat power).", daysLeft, daysLeft == 1 ? "" : "s"),
+               (int)x, (int)y, 11, soft);
+    y += 20;
+    if (HasWeeklyBlessing(s)) { DrawUIText("Weekly Blessing active: +10% combat power!", (int)x, (int)y, 13, good); y += 20; }
+    for (int i = 0; i < kCoreWeeklyGoalCount; i++) { // the Bloodstained Road's three are hidden with the Road
+        const WeeklyGoalDef& goal = kWeeklyGoals[i];
+        int progress = std::min(goal.target, s.weeklyProgress[i]);
+        Rectangle row = { x, y, w, 46 };
+        DrawRectangleRounded(row, 0.1f, 4, Fade(BLACK, 0.07f));
+        DrawUIText(goal.label, (int)x + 10, (int)y + 6, 14, ink);
+        DrawUIText(TextFormat("%d / %d   -   %d gold", progress, goal.target, goal.reward), (int)x + 10, (int)y + 25, 12, progress >= goal.target ? good : soft);
+        bool ready = s.weeklyProgress[i] >= goal.target && !s.weeklyClaimed[i];
+        if (UOButton({ x + w - 104, y + 7, 96, 32 }, s.weeklyClaimed[i] ? "Claimed" : "Claim", ready)) ClaimWeeklyGoal(s, i);
+        y += 52;
+    }
+    y += 8;
+    DrawUIText("Crafting commissions are taken at each workshop's Commissions tab.", (int)x, (int)y, 11, soft);
+}
 static void DrawQuestBoard(GameState& s, int screenW, int screenH) {
-    Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
+    { // tabs
+        static const char* kTabs[3] = { "Town", "Weekly", "Treasure maps" };
+        float tw = ((float)screenW - 20 - 8) / 3.0f;
+        for (int k = 0; k < 3; k++) {
+            Rectangle r = { 10 + k * (tw + 4), 112, tw, 32 };
+            const char* lbl = k == 2 && !s.tmaps.empty() ? TextFormat("Maps (%d)", (int)s.tmaps.size()) : kTabs[k];
+            if (MenuGroupTab(r, lbl, g_questTab == k, true)) { g_questTab = k; PlaySfx(SfxId::Click); }
+        }
+    }
+    if (g_questTab == 2) { // the treasure-map list, under the tabs
+        g_tmapOpen = true;
+        DrawTreasureMaps(s, screenW, screenH, 150.0f);
+        if (!g_tmapOpen) g_questOpen = false; // its X closes the board
+        g_tmapOpen = false;
+        return;
+    }
+    Rectangle G = { 10, 150, (float)screenW - 20, (float)screenH - 162 };
     UODrawGump(G, kUoParchment);
-    UODrawTitle(G, "Town Hall - Quest Board", 15);
+    UODrawTitle(G, "Quest Board", 15);
     const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 }, red = { 150, 30, 24, 255 }, good = { 40, 110, 50, 255 };
     if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_questOpen = false; return; }
     float x = G.x + 18, y = G.y + 36, w = G.width - 36;
+    if (g_questTab == 1) { DrawWeeklyGoalsBody(s, x, y, w); return; }
     DrawUIText("WANTED - by order of the Town Hall", (int)x, (int)y, 16, red); y += 22;
     for (int bi = 0; bi < 3; bi++) {
         Rectangle row = { x, y, w, 64 };
