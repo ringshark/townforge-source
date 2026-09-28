@@ -42,6 +42,10 @@ Raider monster.
 | `scalekin_raider_warlord.glb` | Scalekin Raider, warlord variant (Sunken Vault) |
 | `scalekin_raider_shaman.glb` | Scalekin Raider, shaman variant (Sunken Vault) |
 | `scalekin_raider_huntress.glb` | Scalekin Raider, huntress variant (Sunken Vault) |
+| `forest_dragon_mossback.glb` | Forest Dragon variant, mossy, antlered (tameable apex creature) |
+| `forest_dragon_thornwing.glb` | Forest Dragon variant, sleek, thorned (tameable apex creature) |
+| `forest_dragon_briarlord.glb` | Forest Dragon variant, bark-armored, vine-wrapped (tameable apex creature) |
+| `forest_dragon_wyldheart.glb` | Forest Dragon variant, iridescent, runed (tameable apex creature) |
 | `vyrathax.glb` | Vyrathax the Tri-Wyrm (world boss) \*\* |
 | `hero.glb` | Main hero (static, full PBR) |
 | `hero_animated.glb` | Main hero (rigged, 19 animation clips) |
@@ -119,3 +123,11 @@ Meshy's animation library (3 credits each). The Orcs and the hero have fuller se
 described above. Like the other rigged files, the rig keeps only the base color texture.
 Rigging worked on every monster here, including the robed Hoarfrost Revenant and the
 blocky Rock Golem and Winter's Maw, but check the deformation in-game.
+
+## Forest Dragons
+
+Four original dragon designs for the game's Forest Dragon (the apex tameable creature).
+The concept art in `source/forest_dragon_*.jpg` was generated with Meshy text-to-image
+(`nano-banana-pro`), then each was built with image-to-3D at a 50k triangle target, PBR
+textures shrunk to 1024px. Like Vyrathax they have wings, so they aren't auto-riggable and
+would use code-driven motion. Use them as variants or as tamed-dragon looks.
