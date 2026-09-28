@@ -1205,11 +1205,13 @@ static void MusicTick(int want, float dt) { // want: 0 town, 1 wilds, 2 dungeon,
     }
 }
 // Footsteps (2026-09-28): a step every ~36 units walked, on whatever is underfoot.
+static double g_lastMoveTime = -100.0; // when the player last moved (meditation breaks on it)
 static void FootstepTick(Vector2 pos, SfxId surface) {
     static Vector2 last{ -1e9f, -1e9f };
     static float walked = 0.0f;
     float d = hypotf(pos.x - last.x, pos.y - last.y);
     last = pos;
+    if (d > 0.5f && d <= 40.0f) g_lastMoveTime = GetTime();
     if (d > 40.0f) { walked = 0.0f; return; } // a teleport or a zone change, not a step
     walked += d;
     if (walked >= 36.0f) { walked = 0.0f; PlaySfx(surface); }
@@ -1934,7 +1936,7 @@ struct GameState {
     // Configurable live-combat spell hotbar (2026-09-22) - indices into kSpells, -1 =
     // empty slot. Real player configuration (unlike the transient UI-tab fields below),
     // so it's saved/loaded like any other persistent field.
-    std::array<int, 5> combatHotbar = {-1, -1, -1, -1, -1};
+    std::array<int, 8> combatHotbar = {-1, -1, -1, -1, -1, -1, -1, -1}; // (2026-09-28) 8 slots, keys 1-8
     // Deny-flash timers per hotbar slot (2026-09-25, combat feel): when a tap/key
     // on a slot can't fire (cooldown, no mana/reagents), the slot flashes red and
     // a floater explains why - a swallowed tap must never feel like "one cast".
@@ -6275,10 +6277,12 @@ static bool RollSpellDisrupted(const GameState& s) {
 // three times as fast and Meditation trains. A fight or a spell breaks it.
 static bool g_meditating = false;
 static float g_medTrainT = 0.0f;
-static float g_medCdT = 0.0f;     // (2026-09-28) 2.5s after a meditation ends before you can start another
+static float g_medCdT = 0.0f;     // (2026-09-28) seconds before you can meditate again (UO's skill delay)
+static const float kMedDelay = 10.0f;
 static void RegenMana(GameState& s, float dt) {
     static bool wasMed = false;
-    if (wasMed && !g_meditating) g_medCdT = 2.5f; // ended any way: stopped, a cast, a fight, full mana
+    if (!wasMed && g_meditating) g_medCdT = kMedDelay; // the delay starts when you begin, as in UO
+    if (g_meditating && GetTime() - g_lastMoveTime < 0.1) { g_meditating = false; s.logLine = "You move and lose your concentration."; }
     wasMed = g_meditating;
     if (g_medCdT > 0.0f) g_medCdT -= GetFrameTime();
     float regenPerSec = 0.15f + EffectiveSkill(s, &GameState::meditation) * 0.004f;
@@ -10046,7 +10050,7 @@ static float ScrollDelta(Rectangle area) {
 // Empty slots stay silent: "+" already says there's nothing there.
 static const float kHotbarDenyTime = 0.45f;
 static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* spellCds, float castLockT,
-                               float x = 175.0f, float y = kViewport.y + kViewport.height - 90.0f) {
+                               float x = 170.0f, float y = kViewport.y + kViewport.height - 90.0f) {
     // Spell bar look (2026-09-26): a bronze-framed dark-wood bar of recessed
     // slots showing each spell's icon, its key number and mana cost, a radial
     // cooldown sweep with the seconds left, a gold rim when it's ready to fire,
@@ -10055,7 +10059,7 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
     Vector2 mouse = GetMousePosition();
     bool pressEdge = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     const int n = (int)s.combatHotbar.size();
-    const float slotW = 60.0f, gap = 8.0f;
+    const float slotW = n > 5 ? 41.0f : 60.0f, gap = n > 5 ? 4.0f : 8.0f; // (2026-09-28) eight slots fit one row
     Rectangle bar = { x - 9.0f, y - 8.0f, n * slotW + (n - 1) * gap + 18.0f, slotW + 30.0f };
     UODrawGump(bar, kUoDarkWood);
     float t = (float)GetTime();
@@ -10123,7 +10127,8 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
             DrawRectangleRounded(pill, 0.5f, 4, affordable ? Color{ 34, 60, 120, 230 } : Color{ 120, 30, 30, 230 });
             DrawUIText(mc.c_str(), (int)pill.x + 4, (int)pill.y + 1, 10, Color{ 200, 220, 255, 255 });
             // name under the slot
-            std::string nm = sp.name.size() > 10 ? sp.name.substr(0, 9) + "." : sp.name;
+            size_t maxNm = slotW > 50.0f ? 10 : 7;
+            std::string nm = sp.name.size() > maxNm ? sp.name.substr(0, maxNm - 1) + "." : sp.name;
             int nw = MeasureUIText(nm.c_str(), 10);
             DrawUIText(nm.c_str(), (int)(r.x + r.width / 2 - nw / 2), (int)(r.y + r.height + 5), 10, Color{ 220, 205, 170, 255 });
         } else {
@@ -10526,12 +10531,12 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
                 DrawRectangleRec({ cx - 10, cy + 8, 20, 3 }, Color{ 120, 150, 220, 255 });
                 DrawUIText(g_meditating ? "Stop" : "Meditate", (int)r.x + 2, (int)(r.y + r.height - 14), 10, Color{ 220, 230, 255, 255 });
                 if (!medReady) { // the cooldown sweeps down the slot
-                    DrawRectangleRec({ r.x, r.y, r.width, r.height * std::clamp(g_medCdT / 2.5f, 0.0f, 1.0f) }, Fade(BLACK, 0.4f));
+                    DrawRectangleRec({ r.x, r.y, r.width, r.height * std::clamp(g_medCdT / kMedDelay, 0.0f, 1.0f) }, Fade(BLACK, 0.4f));
                     DrawUIText(TextFormat("%.1f", g_medCdT), (int)r.x + 4, (int)r.y + 3, 12, WHITE);
                 } })) {
             PlaySfx(SfxId::Click);
             g_meditating = !g_meditating; g_medTrainT = 0.0f;
-            s.logLine = g_meditating ? "You clear your mind and meditate - mana returns much faster." : "You stop meditating.";
+            s.logLine = g_meditating ? "You clear your mind and meditate - stand still and your mana returns much faster." : "You stop meditating.";
         }
         bk++;
     }
