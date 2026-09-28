@@ -9783,19 +9783,19 @@ static void UOFill(Rectangle r, int surface, Color tint = WHITE) {
 }
 static const Color kUoBronze = { 150, 112, 58, 255 }, kUoBronzeHi = { 222, 184, 110, 255 }, kUoBronzeLo = { 70, 48, 24, 255 };
 static const Color kUoGoldText = { 236, 208, 140, 255 };
-// A bronze-framed panel: drop shadow, surface fill, bevelled frame, corner studs.
+// Restrained bronze frame: preserve parchment contrast and existing hit areas.
 static void UODrawGump(Rectangle r, int surface, Color tint = WHITE) {
-    DrawRectangleRec({ r.x + 4, r.y + 5, r.width, r.height }, Fade(BLACK, 0.35f));
+    DrawRectangleRec({ r.x + 3, r.y + 6, r.width, r.height }, Fade(BLACK, 0.28f));
     UOFill(r, surface, tint);
-    DrawRectangleLinesEx(r, 2.0f, Color{ 24, 16, 10, 255 });
-    DrawRectangleLinesEx({ r.x + 2, r.y + 2, r.width - 4, r.height - 4 }, 3.0f, kUoBronze);
-    DrawRectangleLinesEx({ r.x + 2, r.y + 2, r.width - 4, r.height - 4 }, 1.0f, kUoBronzeHi);
-    DrawRectangleLinesEx({ r.x + 5, r.y + 5, r.width - 10, r.height - 10 }, 1.0f, kUoBronzeLo);
-    for (Vector2 c : { Vector2{ r.x + 5, r.y + 5 }, Vector2{ r.x + r.width - 5, r.y + 5 },
-                       Vector2{ r.x + 5, r.y + r.height - 5 }, Vector2{ r.x + r.width - 5, r.y + r.height - 5 } }) {
-        DrawRectanglePro({ c.x, c.y, 11, 11 }, { 5.5f, 5.5f }, 45.0f, kUoBronzeLo);
-        DrawRectanglePro({ c.x, c.y, 8, 8 }, { 4, 4 }, 45.0f, kUoBronze);
-        DrawCircleV({ c.x - 0.8f, c.y - 0.8f }, 1.6f, kUoBronzeHi);
+    DrawRectangleLinesEx(r, 1.0f, Color{ 24, 20, 18, 255 });
+    DrawRectangleLinesEx({ r.x + 1, r.y + 1, r.width - 2, r.height - 2 }, 1.0f, kUoBronze);
+    DrawLineEx({ r.x + 2, r.y + 2 }, { r.x + r.width - 2, r.y + 2 }, 1.0f, Fade(kUoBronzeHi, 0.7f));
+    DrawLineEx({ r.x + 2, r.y + r.height - 2 }, { r.x + r.width - 2, r.y + r.height - 2 }, 1.0f, kUoBronzeLo);
+    // Small corner accents replace the oversized decorative studs.
+    for (float cx : { r.x + 4, r.x + r.width - 4 }) {
+        float dir = cx < r.x + r.width * 0.5f ? 1.0f : -1.0f;
+        DrawLineEx({ cx, r.y + 4 }, { cx + dir * 10, r.y + 4 }, 1.0f, kUoBronzeHi);
+        DrawLineEx({ cx, r.y + 4 }, { cx, r.y + 12 }, 1.0f, kUoBronzeHi);
     }
 }
 // Engraved title plate centered on a gump's top edge.
