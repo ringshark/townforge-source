@@ -4434,9 +4434,9 @@ static bool SetSkillActive(GameState& s, int idx, bool active) {
     if (idx < 0 || idx >= (int)kCappedSkills.size()) return false;
     if (active) {
         float val = s.*(kCappedSkills[idx].field);
-        if (ActiveSkillTotal(s) + val > kTotalSkillCap) {
-            s.logLine = "No room in your active build for that (" + std::to_string((int)ActiveSkillTotal(s)) +
-                         "/" + std::to_string((int)kTotalSkillCap) + " active) - bench something else first.";
+        if (val > 0.0f && ActiveSkillTotal(s) + val > kTotalSkillCap) { // a 0-point skill costs nothing
+            s.logLine = std::string("No room to equip ") + kCappedSkills[idx].label + " (" + std::to_string((int)ActiveSkillTotal(s)) +
+                         "/" + std::to_string((int)kTotalSkillCap) + " equipped) - unequip another skill first.";
             return false;
         }
         s.skillActive[idx] = true;
@@ -4557,9 +4557,32 @@ static float RandUnit() { return (float)std::rand() / (float)RAND_MAX; } // [0,1
 
 // JS gainSkill(): clamps the raw gain so the skill never exceeds `cap`, returns the
 // actual amount applied (0 if already at cap).
+// The skill loadout (2026-09-27): equipped skills add up to at most 700, so an
+// equipped skill stops improving once the loadout is full. Unequipped ones still
+// learn (they keep every point for when you equip them again).
+static GameState* g_skillOwner = nullptr; // the player's state (set in main)
+static bool g_loadoutFullNoted = false;
 static float GainSkillCapped(float& skill, float amount, float cap = 100.0f) {
     if (amount <= 0.0f) return 0.0f;
     float actual = std::min(amount, std::max(0.0f, cap - skill));
+    if (g_skillOwner && actual > 0.0f) {
+        GameState& o = *g_skillOwner;
+        for (size_t i = 0; i < kCappedSkills.size(); i++) {
+            if (&(o.*(kCappedSkills[i].field)) != &skill) continue;
+            if (!o.skillActive[i]) break;
+            float room = kTotalSkillCap - ActiveSkillTotal(o);
+            if (room >= actual) g_loadoutFullNoted = false;
+            else {
+                actual = std::max(0.0f, std::floor(room * 10.0f + 0.001f) / 10.0f);
+                if (actual <= 0.0f && !g_loadoutFullNoted) {
+                    g_loadoutFullNoted = true;
+                    o.logLine = std::string("Your skill loadout is full (700) - ") + kCappedSkills[i].label +
+                                " can't improve. Unequip a skill on the Skills page to keep learning.";
+                }
+            }
+            break;
+        }
+    }
     skill += actual;
     return actual;
 }
@@ -6295,7 +6318,7 @@ static bool RollSpellDisrupted(const GameState& s) {
 }
 // JS regenMana(): passive regen scaled by Meditation, called every frame like gathering.
 static void RegenMana(GameState& s, float dt) {
-    float regenPerSec = 0.15f + s.meditation * 0.004f;
+    float regenPerSec = 0.15f + EffectiveSkill(s, &GameState::meditation) * 0.004f;
     if (IsShaken(s)) regenPerSec *= 0.5f;
     if (HasWeeklyBlessing(s)) regenPerSec *= 1.25f;
     regenPerSec *= 1.0f + 0.08f * SettleEff(s, kSbLibrary); // Library (2026-09-27)
@@ -6500,7 +6523,7 @@ static void Meditate(GameState& s) {
         return;
     }
     float gain = SkillUseGain(s.meditation, 0.5f, 3.0f); // a full meditation
-    float restoreAmt = std::round(8.0f + s.meditation * 0.3f);
+    float restoreAmt = std::round(8.0f + EffectiveSkill(s, &GameState::meditation) * 0.3f);
     s.mana = std::min(MaxMana(s), s.mana + restoreAmt);
     std::string msg = "You meditate, restoring " + std::to_string((int)restoreAmt) + " mana";
     if (gain > 0.0f) msg += " (Meditation +" + std::to_string(gain).substr(0, 4) + ")";
@@ -6639,7 +6662,7 @@ static void SellPet(GameState& s, int petId) {
 static void HealPet(GameState& s, int petId) {
     auto it = std::find_if(s.pets.begin(), s.pets.end(), [&](Pet& p) { return p.id == petId; });
     if (it == s.pets.end() || it->hp >= it->maxHp) return;
-    float successChance = std::clamp(20.0f + s.veterinary * 0.8f, 10.0f, 99.0f);
+    float successChance = std::clamp(20.0f + EffectiveSkill(s, &GameState::veterinary) * 0.8f, 10.0f, 99.0f);
     bool succeeded = RandUnit() * 100.0f < successChance;
     float gain = SkillUseGain(s.veterinary, successChance / 100.0f, 3.0f);
     float loreGain = SkillUseGain(s.animalLore, 0.5f, 1.5f);
@@ -6647,7 +6670,7 @@ static void HealPet(GameState& s, int petId) {
     if (gain > 0) note += " (Vet +" + std::to_string(gain).substr(0, 4) + ")";
     if (loreGain > 0) note += " (Lore +" + std::to_string(loreGain).substr(0, 4) + ")";
     if (succeeded) {
-        int healAmt = (int)std::round(8.0f + s.veterinary * 0.2f);
+        int healAmt = (int)std::round(8.0f + EffectiveSkill(s, &GameState::veterinary) * 0.2f);
         it->hp = std::min(it->maxHp, it->hp + healAmt);
         s.logLine = "Treated " + it->name + " for " + std::to_string(healAmt) + " HP." + note;
     } else {
@@ -7709,11 +7732,12 @@ static void PoisonWeapon(GameState& s, int potionIdx) {
     if (potionIdx < 0 || potionIdx >= (int)s.potions.size()) return;
     PotionStack& p = s.potions[potionIdx];
     if (p.effect != "poison") return;
-    s.weaponPoisonCharges = p.potency;
+    // (2026-09-27) Poisoning skill: up to 4 more poisoned hits per coating.
+    s.weaponPoisonCharges = p.potency + (int)(EffectiveSkill(s, &GameState::poisoning) / 25.0f);
     s.weaponPoisonPotency = p.potency;
     float gain = SkillUseGain(s.poisoning, 0.5f, 5.0f);
     std::string gainNote = gain > 0 ? " (Poisoning +" + std::to_string(gain).substr(0, 4) + ")" : "";
-    s.logLine = "You coat your weapon in poison - " + std::to_string(p.potency) + " charges." + gainNote;
+    s.logLine = "You coat your weapon in poison - " + std::to_string(s.weaponPoisonCharges) + " charges." + gainNote;
     p.count -= 1;
     if (p.count <= 0) s.potions.erase(s.potions.begin() + potionIdx);
 }
@@ -18924,7 +18948,7 @@ static float WyrmHpFrac(const GameState& s) {
     return s.wyrmHp > 0.0f ? s.wyrmHp / kWyrmMaxHp : 1.0f;
 }
 static void WyrmHurtPlayer(GameState& s, int h, float raw) {
-    float resist = std::min(0.5f, s.magicResist * 0.004f); // Magic Resistance blunts the breath
+    float resist = std::min(0.5f, EffectiveSkill(s, &GameState::magicResist) * 0.004f); // Magic Resistance blunts the breath
     int dmg = std::max(1, (int)std::round(raw * (1.0f - resist)));
     s.hp -= dmg;
     s.playerHurtT = 0.0f;
@@ -26097,7 +26121,7 @@ static void SummonStrikeLive(GameState& s, int zone, float base, const std::stri
         }
     }
 }
-static void FiendStrikeLive(GameState& s, int zone) { SummonStrikeLive(s, zone, 4.0f + s.magery * 0.1f, "fiend lashes"); }
+static void FiendStrikeLive(GameState& s, int zone) { SummonStrikeLive(s, zone, 4.0f + EffectiveSkill(s, &GameState::magery) * 0.1f, "fiend lashes"); }
 
 // Ticks every frame from both wilderness and dungeon updates: combat anim
 // timers, debuff expiry, spell projectiles/impacts, vigor, and the fiend.
@@ -33164,43 +33188,124 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
 // mirrors setSkillActive()'s all-or-nothing per-skill toggle.
 // ---------------------------------------------------------------------
 
+// Skills page as a loadout (2026-09-27): like gear, you equip the skills you
+// want working. Equipped skills add up to at most 700 and stop improving once
+// the loadout is full; unequipped skills keep every point but do nothing until
+// you equip them again. Grouped, with a line on what each one does.
+static const char* kCappedSkillWhat[21] = {
+    "Hit harder and more often with swords and axes.",
+    "Hit harder and more often with spears and daggers.",
+    "Hit harder and more often with maces and hammers.",
+    "Hit harder and more often with bows.",
+    "Fighting bare-handed.",
+    "More damage with every weapon.",
+    "More damage, and better bandage healing.",
+    "Take less damage from enemy spells.",
+    "Bandages heal more, and more often succeed.",
+    "Cast spells: success, and unlocks higher circles.",
+    "Your spells hit harder.",
+    "Mana comes back faster.",
+    "Tame wild creatures to fight at your side.",
+    "Know a creature's strength; pets fight better.",
+    "Heal your pets.",
+    "Lift gold and items from others.",
+    "Peek into others' packs before you steal.",
+    "Poison coatings on your weapon last more hits.",
+    "Block blows with a shield.",
+    "Sense Murder Inc. killers before they reach you.",
+    "Dark magic: bone spells, curses, raise the dead.",
+};
+struct SkillGroup { const char* name; std::vector<int> idx; };
+static float g_skillsScroll = 0.0f;
 static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
-    int y = 116;
-    float activeTotal = ActiveSkillTotal(s);
-    DrawUIText(TextFormat("Active build: %.1f / %.0f", activeTotal, kTotalSkillCap), 20, y, 15,
-               kColorText);
-    y += 20;
-    Rectangle budgetBar = { 20, (float)y, (float)(screenW - 40), 12 };
-    DrawRectangleRec(budgetBar, Fade(BLACK, 0.25f));
-    float pct = std::clamp(activeTotal / kTotalSkillCap, 0.0f, 1.0f);
-    DrawRectangleRec({ budgetBar.x, budgetBar.y, budgetBar.width * pct, budgetBar.height },
-                       activeTotal >= kTotalSkillCap ? kColorSlate : Color{ 63, 94, 63, 255 });
+    static const SkillGroup kGroups[] = {
+        { "Combat", { 0, 1, 2, 3, 4, 5, 6, 18, 8, 7 } },
+        { "Magic", { 9, 10, 11, 20 } },
+        { "Animals", { 12, 13, 14 } },
+        { "Scouting & thievery", { 19, 15, 16, 17 } },
+    };
+    const Color ink = kColorText, soft = Fade(kColorText, 0.72f), good = { 46, 120, 60, 255 }, warn = { 170, 90, 20, 255 };
+    float total = ActiveSkillTotal(s);
+    bool full = total >= kTotalSkillCap - 0.05f;
+    int y = 114;
+    // --- the loadout header ---
+    DrawUIText("Skill loadout", 20, y, 18, kColorHeading);
+    const char* tot = TextFormat("%.1f / %.0f equipped", total, kTotalSkillCap);
+    DrawUIText(tot, screenW - 20 - MeasureUIText(tot, 15), y + 2, 15, full ? warn : ink);
     y += 24;
-    DrawUIText("Every skill trains freely to its own cap regardless of Active/Benched -", 20, y, 13, Fade(DARKGRAY, 0.8f));
-    y += 14;
-    DrawUIText("benching just frees budget for something else without losing progress.", 20, y, 13, Fade(DARKGRAY, 0.8f));
-    y += 20;
-
-    int listTop = y;
-    int listHeight = screenH - listTop - 40;
-    Rectangle listArea = { 0, (float)listTop, (float)screenW, (float)listHeight };
-    s.craftScroll -= ScrollDelta(listArea);
-    float maxScroll = std::max(0.0f, (float)kCappedSkills.size() * 30.0f - listHeight);
-    s.craftScroll = std::clamp(s.craftScroll, 0.0f, maxScroll);
-
-    BeginScissorMode(0, listTop, screenW, listHeight);
-    for (size_t i = 0; i < kCappedSkills.size(); i++) {
-        float rowY = listTop + (float)i * 30 - s.craftScroll;
-        if (rowY < listTop - 30 || rowY > listTop + listHeight) continue;
-        float val = s.*(kCappedSkills[i].field);
-        std::string line = TextFormat("%s: %.1f", kCappedSkills[i].label, val);
-        DrawUIText(line.c_str(), 20, (int)rowY + 6, 13, kColorText);
-        bool active = s.skillActive[i];
-        std::string label = active ? "Active" : "Benched";
-        if (Button({ (float)(screenW - 100), rowY, 80, 24 }, label, true))
-            SetSkillActive(s, (int)i, !active);
+    Rectangle bar = { 20, (float)y, (float)(screenW - 40), 12 };
+    DrawRectangleRounded(bar, 0.5f, 6, Fade(BLACK, 0.18f));
+    float pct = std::clamp(total / kTotalSkillCap, 0.0f, 1.0f);
+    if (pct > 0.0f) DrawRectangleRounded({ bar.x, bar.y, bar.width * pct, bar.height }, 0.5f, 6, full ? Color{ 214, 140, 40, 255 } : good);
+    y += 18;
+    if (full) {
+        DrawUIText("Your loadout is full: equipped skills stop improving.", 20, y, 13, warn); y += 16;
+        DrawUIText("Unequip one you're not using to make room.", 20, y, 13, warn); y += 18;
+    } else {
+        DrawUIText("Equipped skills work (up to 700 points in total).", 20, y, 13, soft); y += 16;
+        DrawUIText("Unequipped skills keep every point, but do nothing until you equip them.", 20, y, 13, soft); y += 18;
     }
+    y += 4;
+    // --- the list ---
+    int listTop = y, listH = screenH - listTop - 10;
+    Rectangle listArea = { 0, (float)listTop, (float)screenW, (float)listH };
+    g_skillsScroll -= ScrollDelta(listArea);
+    BeginScissorMode(0, listTop, screenW, listH);
+    float yy = listTop - g_skillsScroll;
+    auto visible = [&](Rectangle r) { return r.y >= listTop && r.y + r.height <= listTop + listH; };
+    for (const auto& g : kGroups) {
+        DrawUIText(g.name, 20, (int)yy + 6, 15, kColorHeading);
+        yy += 28;
+        for (int i : g.idx) {
+            float val = s.*(kCappedSkills[(size_t)i].field);
+            bool on = s.skillActive[(size_t)i];
+            bool canOn = on || val <= 0.0f || total + val <= kTotalSkillCap + 0.05f;
+            Rectangle row = { 14, yy, (float)screenW - 28, 50 };
+            DrawRectangleRounded(row, 0.15f, 6, on ? Fade(Color{ 255, 250, 235, 255 }, 0.55f) : Fade(BLACK, 0.06f));
+            if (on) DrawRectangleRec({ row.x, row.y + 6, 4, row.height - 12 }, good);
+            Color nameCol = on ? ink : Fade(ink, 0.55f);
+            DrawUIText(kCappedSkills[(size_t)i].label, (int)row.x + 12, (int)yy + 6, 15, nameCol);
+            const char* vs = TextFormat("%.1f", val);
+            // value bar to 100
+            float bx = row.x + 12 + 150, bw = row.width - 150 - 12 - 160;
+            DrawRectangleRounded({ bx, yy + 11, bw, 8 }, 0.5f, 4, Fade(BLACK, 0.15f));
+            if (val > 0.0f) DrawRectangleRounded({ bx, yy + 11, bw * std::clamp(val / 100.0f, 0.0f, 1.0f), 8 }, 0.5f, 4, on ? Color{ 196, 150, 60, 255 } : Fade(Color{ 196, 150, 60, 255 }, 0.4f));
+            DrawUIText(vs, (int)(bx + bw + 6), (int)yy + 7, 13, nameCol);
+            DrawUIText(kCappedSkillWhat[i], (int)row.x + 12, (int)yy + 29, 11, on ? soft : Fade(soft, 0.6f));
+            Rectangle b = { row.x + row.width - 104, yy + 9, 96, 30 };
+            const char* lbl = on ? "Equipped" : (canOn ? "Equip" : "No room");
+            if (Button(b, lbl, canOn) && visible(b)) {
+                if (SetSkillActive(s, i, !on)) {
+                    PlaySfx(SfxId::Click);
+                    s.logLine = std::string(kCappedSkills[(size_t)i].label) + (on ? " unequipped - its points are kept." : " equipped.");
+                }
+            }
+            if (on) { // a check mark
+                DrawLineEx({ b.x + 8, b.y + 15 }, { b.x + 12, b.y + 20 }, 2.5f, Color{ 150, 230, 150, 255 });
+                DrawLineEx({ b.x + 12, b.y + 20 }, { b.x + 19, b.y + 9 }, 2.5f, Color{ 150, 230, 150, 255 });
+            }
+            yy += 56;
+        }
+        yy += 6;
+    }
+    // trade skills: always on, outside the loadout
+    DrawUIText("Trade skills", 20, (int)yy + 6, 15, kColorHeading);
+    yy += 24;
+    DrawUIText("Always on, and they don't count toward the 700.", 20, (int)yy, 12, soft);
+    yy += 20;
+    struct TradeRow { const char* name; float v; };
+    const TradeRow trades[] = { { "Lumberjacking", s.lumberjacking }, { "Mining", s.mining }, { "Fishing", s.fishing }, { "Skinning", s.skinning } };
+    for (const auto& t : trades) {
+        DrawUIText(t.name, 32, (int)yy, 14, ink);
+        float bx = 180, bw = (float)screenW - 180 - 90;
+        DrawRectangleRounded({ bx, yy + 4, bw, 8 }, 0.5f, 4, Fade(BLACK, 0.15f));
+        if (t.v > 0.0f) DrawRectangleRounded({ bx, yy + 4, bw * std::clamp(t.v / 100.0f, 0.0f, 1.0f), 8 }, 0.5f, 4, Color{ 120, 150, 90, 255 });
+        DrawUIText(TextFormat("%.1f", t.v), (int)(bx + bw + 8), (int)yy, 13, ink);
+        yy += 24;
+    }
+    float contentH = yy + g_skillsScroll - listTop + 20;
     EndScissorMode();
+    g_skillsScroll = std::clamp(g_skillsScroll, 0.0f, std::max(0.0f, contentH - listH));
 }
 
 // ---------------------------------------------------------------------
@@ -34216,6 +34321,7 @@ static void CleanupAndClose() {
 }
 
 int main() {
+    g_skillOwner = &g_state; // the skill loadout cap (2026-09-27)
     std::srand((unsigned)std::time(nullptr));
 #ifndef __EMSCRIPTEN__
     InitWindow((int)(kScreenW * kZoom), (int)(kScreenH * kZoom), "Town Forge");
