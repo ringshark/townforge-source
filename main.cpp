@@ -35564,7 +35564,11 @@ static void DrawDirectionsHud(GameState& s, int screenW) {
     // the world boss: a countdown while it stirs, a pointer while it's awake
     bool stirring = s.wyrmRespawnT > 0.0f && s.wyrmRespawnT <= 180.0f;
     bool awake = s.wyrmRespawnT <= 0.0f;
-    if (!(stirring || awake) || s.playerIsGhost || s.worldMapOpen || s.optHideWyrm) return;
+    // (2026-09-28) the X hides this stage's alert only: it comes back when the wyrm wakes (or next time it stirs)
+    static int dismissedStage = 0; // 1 = the stirring countdown, 2 = the awake pointer
+    int stage = awake ? 2 : stirring ? 1 : 0;
+    if (dismissedStage != 0 && dismissedStage != stage) dismissedStage = 0;
+    if (!(stirring || awake) || s.playerIsGhost || s.worldMapOpen || s.optHideWyrm || dismissedStage == stage) return;
     if (!IsPlayScreen(s.screen) && !IsMenuScreen(s.screen)) return;
     Vector2 d = { kWyrmLair.x - s.wildernessPlayerPos.x, kWyrmLair.y - s.wildernessPlayerPos.y };
     float dist = hypotf(d.x, d.y);
@@ -35582,6 +35586,13 @@ static void DrawDirectionsHud(GameState& s, int screenW) {
     DrawUIText(line.c_str(), (int)r.x + 10, (int)r.y + 5, 15, Color{ 255, 190, 120, 255 });
     DrawUIText(sub.c_str(), (int)r.x + 10, (int)r.y + 25, 12, Color{ 230, 210, 180, 255 });
     if (wild) DrawDirArrow({ r.x + r.width - 22, r.y + r.height / 2 }, ScreenAngleOf(d), 12.0f, Fade(Color{ 255, 140, 50, 255 }, 0.7f + 0.3f * pulse));
+    Rectangle xb = { r.x - 30, r.y + 8, 26, 26 }; // dismiss
+    UIRegister(xb);
+    DrawRectangleRounded(xb, 0.4f, 6, Fade(Color{ 30, 14, 8, 255 }, 0.88f));
+    DrawRectangleRoundedLinesEx(xb, 0.4f, 6, 1.5f, Fade(Color{ 255, 120, 40, 255 }, 0.6f));
+    DrawLineEx({ xb.x + 8, xb.y + 8 }, { xb.x + 18, xb.y + 18 }, 2.0f, Color{ 255, 190, 120, 255 });
+    DrawLineEx({ xb.x + 18, xb.y + 8 }, { xb.x + 8, xb.y + 18 }, 2.0f, Color{ 255, 190, 120, 255 });
+    if (UOTapped(xb)) { dismissedStage = stage; PlaySfx(SfxId::Click); }
 }
 
 // ---- Toasts (2026-09-27) ----
