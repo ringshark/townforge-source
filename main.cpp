@@ -33609,10 +33609,13 @@ static float g_trainTick = 0.0f, g_trainTapCd = 0.0f, g_trainScroll = 0.0f;
 static bool TrainGroundsHere(const GameState& s) {
     return (g_playScreen == Screen::Town || g_playScreen == Screen::Interior) && !s.combat.has_value() && !s.playerIsGhost;
 }
-static void TrainGroundsDrill(GameState& s, float weight) {
+// Every drill lands (2026-09-28): 0.6 a go while the skill is raw, easing to 0.2 as it
+// nears 50 - ~175 drills from 0 to 50 (a minute or two of tapping, ~6 min on AUTO).
+static void TrainGroundsDrill(GameState& s) {
     float& sk = s.*(kCappedSkills[(size_t)g_trainSkill].field);
     if (sk >= kTrainGroundsCap) { g_trainAuto = false; return; }
-    float g = SkillUseGain(sk, 0.5f, weight, kTrainGroundsCap);
+    float want = std::clamp((kTrainGroundsCap - sk) * 0.012f, 0.2f, 0.6f);
+    float g = GainSkillCapped(sk, std::round(want * 10.0f) / 10.0f, kTrainGroundsCap); // the 700 loadout cap still applies
     if (g > 0.0f) s.logLine = TextFormat("%s %.1f (+%.1f)", kCappedSkills[(size_t)g_trainSkill].label, sk, g);
     if (sk >= kTrainGroundsCap) {
         g_trainAuto = false;
@@ -33624,7 +33627,7 @@ static void TrainGroundsTick(GameState& s, float dt) {
     g_trainTapCd = std::max(0.0f, g_trainTapCd - dt);
     if (!g_trainAuto) return;
     if (!g_trainOpen || s.screen != Screen::Skills || !TrainGroundsHere(s)) { g_trainAuto = false; return; }
-    if ((g_trainTick += dt) >= 1.5f) { g_trainTick = 0.0f; TrainGroundsDrill(s, 0.4f); }
+    if ((g_trainTick += dt) >= 2.0f) { g_trainTick = 0.0f; TrainGroundsDrill(s); }
 }
 static void DrawTrainingGrounds(GameState& s, int screenW, int screenH) {
     Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
@@ -33647,7 +33650,7 @@ static void DrawTrainingGrounds(GameState& s, int screenW, int screenH) {
     y += 22;
     bool can = here && cur < kTrainGroundsCap;
     if (UOButton({ x, y, w * 0.55f, 44 }, cur >= kTrainGroundsCap ? "Mastered here (50)" : "Train", can && g_trainTapCd <= 0.0f)) {
-        g_trainTapCd = 0.35f; TrainGroundsDrill(s, 0.25f); PlaySfx(SfxId::Swing);
+        g_trainTapCd = 0.35f; TrainGroundsDrill(s); PlaySfx(SfxId::Swing);
     }
     if (UOButton({ x + w * 0.58f, y, w * 0.42f, 44 }, g_trainAuto ? "AUTO: on" : "AUTO: off", can)) { g_trainAuto = !g_trainAuto; g_trainTick = 0.0f; PlaySfx(SfxId::Click); }
     if (g_trainAuto) DrawCircleV({ x + w * 0.58f + 16, y + 22 }, 5.0f + sinf((float)GetTime() * 5.0f), Color{ 120, 220, 120, 255 });
