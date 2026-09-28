@@ -2899,47 +2899,6 @@ static void LoadGameAssets() {
 
     g_assets.player = TryLoadTexture("assets/player.png", g_assets.playerOk);
 
-    static const char* kBuildingKeys[10] = {
-        "smith", "carpenter", "tailor", "alchemy", "provisioner", "stable", "healer", "bank", "townhall", "house"
-    };
-    for (int i = 0; i < 10; i++) {
-        bool ok = false;
-        Texture2D t = TryLoadTexture(std::string("assets/buildings/") + kBuildingKeys[i] + ".png", ok);
-        g_assets.building[i] = { kBuildingKeys[i], t };
-        g_assets.buildingOk[i] = ok;
-    }
-    for (int i = 0; i < 10; i++) {
-        bool ok = false;
-        Texture2D t = TryLoadTexture(std::string("assets/town_buildings/") + kBuildingKeys[i] + ".png", ok);
-        g_assets.townBuilding[i] = { kBuildingKeys[i], t };
-        g_assets.townBuildingOk[i] = ok;
-    }
-    for (int i = 0; i < 10; i++) {
-        bool ok = false;
-        Texture2D t = TryLoadTexture(std::string("assets/saltmere_buildings/") + kBuildingKeys[i] + ".png", ok);
-        g_assets.saltmereBuilding[i] = { kBuildingKeys[i], t };
-        g_assets.saltmereBuildingOk[i] = ok;
-    }
-    // Phase 3 - Frostmere's building art (5 keys matching kTown3NodePositions).
-    static const char* kFrostmereBuildingKeys[5] = {
-        "bank", "healer", "provisioner", "furtrader", "smith"
-    };
-    for (int i = 0; i < 5; i++) {
-        bool ok = false;
-        Texture2D t = TryLoadTexture(std::string("assets/frostmere_buildings/") + kFrostmereBuildingKeys[i] + ".png", ok);
-        g_assets.frostmereBuilding[i] = { kFrostmereBuildingKeys[i], t };
-        g_assets.frostmereBuildingOk[i] = ok;
-    }
-    // Phase 4 - Cragmoor's building art (5 keys matching kTown4NodePositions).
-    static const char* kCragmoorBuildingKeys[5] = {
-        "bank", "healer", "provisioner", "smith", "minersguild"
-    };
-    for (int i = 0; i < 5; i++) {
-        bool ok = false;
-        Texture2D t = TryLoadTexture(std::string("assets/cragmoor_buildings/") + kCragmoorBuildingKeys[i] + ".png", ok);
-        g_assets.cragmoorBuilding[i] = { kCragmoorBuildingKeys[i], t };
-        g_assets.cragmoorBuildingOk[i] = ok;
-    }
 
     // File names match dungeon theme (emberveil/bloodtusk/sunkencrypt/wyrmscar/
     // hollowwarrens), in the same 0-4 order as kDungeons, for both the regular-monster
@@ -2971,12 +2930,9 @@ static void LoadGameAssets() {
         g_assets.bossFamily[i] = TryLoadTexture(kBossFiles[i], g_assets.bossFamilyOk[i]);
     }
 
-    g_assets.groundGrass = TryLoadTexture("assets/ground/grass.png", g_assets.groundGrassOk);
     g_assets.groundDirt = TryLoadTexture("assets/ground/dirt.png", g_assets.groundDirtOk);
     g_assets.dungeonWall = TryLoadTexture("assets/dungeon/wall.png", g_assets.dungeonWallOk);
     g_assets.dungeonFloor = TryLoadTexture("assets/dungeon/floor.png", g_assets.dungeonFloorOk);
-    g_assets.buildingDoor = TryLoadTexture("assets/buildings/door.png", g_assets.buildingDoorOk);
-    g_assets.foliage = TryLoadTexture("assets/ground/foliage.png", g_assets.foliageOk);
 
     // Per-dungeon theming - same 0-4 order as kDungeons/kMonsterFiles above.
     static const char* kThemedFloorFiles[6] = {
@@ -2996,7 +2952,6 @@ static void LoadGameAssets() {
         g_assets.dungeonWallThemed[i] = TryLoadTexture(kThemedWallFiles[i], g_assets.dungeonWallThemedOk[i]);
     }
     g_assets.hollowWarrensRug = TryLoadTexture("assets/dungeon_themed/hollowwarrens_rug.png", g_assets.hollowWarrensRugOk);
-    g_assets.hollowWarrensTorch = TryLoadTexture("assets/dungeon_themed/hollowwarrens_torch.png", g_assets.hollowWarrensTorchOk);
 
     // Per-building interior backdrop - same 0-3 order as kCraftBuildings.
     static const char* kCraftFloorFiles[4] = {
@@ -3101,31 +3056,6 @@ static void LoadGameAssets() {
         g_assets.heroSheet.castStart[3] = 0; g_assets.heroSheet.castCount[3] = 1;
     }
 
-    g_assets.doorSmith = LoadSpriteSheet("assets/village/door_smith.png", 64);
-    g_assets.doorCarpenter = LoadSpriteSheet("assets/village/door_carpenter.png", 64);
-    g_assets.doorTailor = LoadSpriteSheet("assets/village/door_tailor.png", 64);
-    g_assets.doorAlchemy = LoadSpriteSheet("assets/village/door_alchemy.png", 64);
-    g_assets.fencePost = TryLoadTexture("assets/village/fencepost.png", g_assets.fencePostOk);
-    g_assets.farmland = TryLoadTexture("assets/village/farmland.png", g_assets.farmlandOk);
-    g_assets.townFountain = TryLoadTexture("assets/village/fountain.png", g_assets.townFountainOk);
-    g_assets.townLamp = TryLoadTexture("assets/village/streetlamp.png", g_assets.townLampOk);
-    g_assets.townSignSmith = TryLoadTexture("assets/village/sign_smith.png", g_assets.townSignSmithOk);
-    g_assets.townStall1 = TryLoadTexture("assets/village/stall1.png", g_assets.townStall1Ok);
-    g_assets.townStall2 = TryLoadTexture("assets/village/stall2.png", g_assets.townStall2Ok);
-    g_assets.townStall3 = TryLoadTexture("assets/village/stall3.png", g_assets.townStall3Ok);
-    g_assets.townLumberpile = TryLoadTexture("assets/village/lumberpile.png", g_assets.townLumberpileOk);
-    g_assets.townBarrel = TryLoadTexture("assets/village/barrel.png", g_assets.townBarrelOk);
-    g_assets.townCrate = TryLoadTexture("assets/village/crate.png", g_assets.townCrateOk);
-    g_assets.townAnvil = TryLoadTexture("assets/village/anvil.png", g_assets.townAnvilOk);
-    g_assets.townStatue = TryLoadTexture("assets/village/statue.png", g_assets.townStatueOk);
-    g_assets.townAutumnBush = TryLoadTexture("assets/village/autumnbush.png", g_assets.townAutumnBushOk);
-    g_assets.townSheep = TryLoadTexture("assets/village/sheep.png", g_assets.townSheepOk);
-    g_assets.townCow = TryLoadTexture("assets/village/cow.png", g_assets.townCowOk);
-    g_assets.townChicken = TryLoadTexture("assets/village/chicken.png", g_assets.townChickenOk);
-    g_assets.townPotionPurple = TryLoadTexture("assets/village/potion_purple.png", g_assets.townPotionPurpleOk);
-    g_assets.townPotionRed = TryLoadTexture("assets/village/potion_red.png", g_assets.townPotionRedOk);
-    g_assets.townChest = TryLoadTexture("assets/village/chest.png", g_assets.townChestOk);
-    g_assets.townBookshelf = TryLoadTexture("assets/village/bookshelf.png", g_assets.townBookshelfOk);
     g_assets.spellIconOffensive = TryLoadTexture("assets/spellbook_icons/spell_offensive.png", g_assets.spellIconOffensiveOk);
     g_assets.spellIconDebuff = TryLoadTexture("assets/spellbook_icons/spell_debuff.png", g_assets.spellIconDebuffOk);
     g_assets.spellIconBuff = TryLoadTexture("assets/spellbook_icons/spell_buff.png", g_assets.spellIconBuffOk);
@@ -3153,94 +3083,7 @@ static void LoadGameAssets() {
     g_assets.gearIconGauntlet = TryLoadTexture("assets/gear_icons/gauntlet.png", g_assets.gearIconGauntletOk);
     g_assets.gearIconAmulet = TryLoadTexture("assets/gear_icons/amulet.png", g_assets.gearIconAmuletOk);
     g_assets.sunkenCryptWater = TryLoadTexture("assets/dungeon_themed/sunkencrypt_water.png", g_assets.sunkenCryptWaterOk);
-    g_assets.emberveilBrazier = TryLoadTexture("assets/dungeon_themed/emberveil_brazier.png", g_assets.emberveilBrazierOk);
 
-    g_assets.wildTree = TryLoadTexture("assets/wilderness/tree.png", g_assets.wildTreeOk);
-    g_assets.wildRock = TryLoadTexture("assets/wilderness/rock.png", g_assets.wildRockOk);
-    // Replaced 2026-09-23 with real directional sheets (Mark's "Carl" art drop,
-    // assets/wilderness_v2/creatures/) - also what the AI companion now renders as.
-    // Column counts and the two walkColsOverride cases (Panther, Wyvern - side-view
-    // rows only have 5 real frames trailed by blank padding) came from viewing each
-    // sheet directly, same as the dungeon monsters above.
-    static const char* kWildCreatureFiles[11] = {
-        "assets/wilderness_v2/creatures/dog.png", "assets/wilderness_v2/creatures/wolf.png", "assets/wilderness_v2/creatures/bear.png",
-        "assets/wilderness_v2/creatures/panther.png", "assets/wilderness_v2/creatures/bison.png", "assets/wilderness_v2/creatures/horse.png",
-        "assets/wilderness_v2/creatures/sabertooth.png", "assets/wilderness_v2/creatures/griffin.png", "assets/wilderness_v2/creatures/drake.png",
-        "assets/wilderness_v2/creatures/wyvern.png", "assets/wilderness_v2/creatures/dragon.png"
-    };
-    static const int kWildCreatureCols[11] = { 6, 8, 8, 8, 5, 8, 8, 5, 8, 6, 5 };
-    static const int kWildCreatureWalkOverride[11] = { 0, 0, 0, 5, 0, 0, 0, 0, 0, 5, 0 };
-    for (int i = 0; i < (int)kWildCreatures.size(); i++) {
-        g_assets.wildCreatureTex[i] = LoadCarlActorSheet(kWildCreatureFiles[i], kWildCreatureCols[i], 4, kWildCreatureWalkOverride[i]);
-    }
-    static const char* kWildPropFiles[10] = {
-        "assets/wilderness_props/water.png", "assets/wilderness_props/deerskull.png",
-        "assets/wilderness_props/chest.png", "assets/wilderness_props/bush.png",
-        "assets/wilderness_props/rocks.png", "assets/wilderness_props/cactus.png",
-        "assets/wilderness_props/fence.png", "assets/wilderness_props/grass.png",
-        "assets/wilderness_props/haybale.png", "assets/wilderness_props/plant.png"
-    };
-    for (int i = 0; i < 10; i++) {
-        bool ok = false;
-        g_assets.wildPropTex[i] = TryLoadTexture(kWildPropFiles[i], ok);
-        g_assets.wildPropTexOk[i] = ok;
-    }
-    static const char* kWildOreFiles[3] = {
-        "assets/wilderness/ore1.png", "assets/wilderness/ore2.png", "assets/wilderness/ore3.png"
-    };
-    for (int i = 0; i < 3; i++) {
-        bool ok = false;
-        g_assets.wildOreTex[i] = TryLoadTexture(kWildOreFiles[i], ok);
-        g_assets.wildOreTexOk[i] = ok;
-    }
-    g_assets.wildBush1 = TryLoadTexture("assets/wilderness/bush1.png", g_assets.wildBush1Ok);
-    g_assets.wildBush2 = TryLoadTexture("assets/wilderness/bush2.png", g_assets.wildBush2Ok);
-    g_assets.wildFern1 = TryLoadTexture("assets/wilderness/fern1.png", g_assets.wildFern1Ok);
-    // Replaced 2026-09-23 with real directional sheets, same drop as above - these
-    // chase the player, so DrawWildernessScreen derives real facing from movement now.
-    static const char* kWildMonsterFiles[5] = {
-        "assets/wilderness_v2/monsters/bat.png", "assets/wilderness_v2/monsters/goblin.png", "assets/wilderness_v2/monsters/wolf.png",
-        "assets/wilderness_v2/monsters/imp.png", "assets/wilderness_v2/monsters/bandit.png"
-    };
-    static const int kWildMonsterCols[5] = { 8, 5, 8, 8, 5 };
-    for (int i = 0; i < 5; i++) {
-        g_assets.wildMonsterTex[i] = LoadCarlActorSheet(kWildMonsterFiles[i], kWildMonsterCols[i]);
-    }
-    g_assets.rivalAdventurerSheet = LoadCarlActorSheet("assets/wilderness_v2/rival_adventurer.png", 8);
-
-    // Town NPCs - order matches kTownNPCs/kTown2NPCs exactly (see those arrays' own
-    // declaration for the name list). walkColsOverride covers two sheets whose Left row
-    // has fewer real frames than their nominal column count, found by viewing them
-    // directly, same as the monster/creature sheets above: Cobb (8 nominal, 6 real) and
-    // Young Petra (8 nominal, 7 real) both need their Left row's walkCount narrowed
-    // after loading since LoadCarlActorSheet only takes one uniform override.
-    static const char* kTownNPCFiles[6] = {
-        "assets/npcs_v2/old_miran.png", "assets/npcs_v2/young_petra.png", "assets/npcs_v2/wystan_baker.png",
-        "assets/npcs_v2/widow_aelith.png", "assets/npcs_v2/cobb_stableboy.png", "assets/npcs_v2/sister_meraude.png"
-    };
-    static const int kTownNPCCols[6] = { 8, 8, 5, 7, 8, 8 };
-    for (int i = 0; i < 6; i++) g_assets.townNPCSheets[i] = LoadCarlActorSheet(kTownNPCFiles[i], kTownNPCCols[i]);
-    g_assets.townNPCSheets[1].walkCount[1] = 7; // Young Petra's Left row: 7 real frames, not 8
-    g_assets.townNPCSheets[4].walkCount[1] = 6; // Cobb's Left row: 6 real frames, not 8
-    g_assets.townNPCSheets[4].walkCount[3] = 6; // Cobb's Up row: 6 real frames, not 8
-
-    static const char* kSaltmereNPCFiles[6] = {
-        "assets/npcs_v2/harbormaster_thane.png", "assets/npcs_v2/salty_bjorn.png", "assets/npcs_v2/nessa_netmender.png",
-        "assets/npcs_v2/old_corwin.png", "assets/npcs_v2/dockhand_fenn.png", "assets/npcs_v2/captain_ysolde.png"
-    };
-    static const int kSaltmereNPCCols[6] = { 8, 8, 8, 8, 8, 5 };
-    for (int i = 0; i < 6; i++) g_assets.saltmereNPCSheets[i] = LoadCarlActorSheet(kSaltmereNPCFiles[i], kSaltmereNPCCols[i]);
-    static const char* kWildEntranceFiles[6] = {
-        "assets/wilderness_entrances/sunkencrypt.png", "assets/wilderness_entrances/weaversnest.png", // [1] Phase 5
-        "assets/wilderness_entrances/wyrmscar.png", "assets/wilderness_entrances/emberveil.png", // [3] Ember Depths uses the emberveil entrance
-        "assets/wilderness_entrances/sunkencrypt.png", // [4] Frostbound Tomb aliases the crypt entrance
-        "assets/wilderness_entrances/hollowwarrens.png"
-    };
-    for (int i = 0; i < 6; i++) {
-        bool ok = false;
-        g_assets.wildEntranceTex[i] = TryLoadTexture(kWildEntranceFiles[i], ok);
-        g_assets.wildEntranceTexOk[i] = ok;
-    }
     static const char* kInnocentFiles[4] = {
         "assets/innocents/traveler.png", "assets/innocents/pilgrim.png",
         "assets/innocents/merchant.png", "assets/innocents/farmer.png"
