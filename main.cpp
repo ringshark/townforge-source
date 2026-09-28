@@ -16194,7 +16194,9 @@ static void T3DDrawNightGlows(const Town3DCam& c, int town);
 // Soft vignette over the 3D viewport (2026-09-26): darkens the edges a touch so
 // the eye settles on the middle of the scene; drawn right after EndMode3D, under the HUD.
 static void T3DDrawVignette() {
-    const Rectangle v = kViewport;
+    // (2026-09-28) from the very top of the screen: the 3D world shows behind the
+    // collapsed header too, and starting at the viewport left a lighter band up there.
+    const Rectangle v = { kViewport.x, 0.0f, kViewport.width, kViewport.y + kViewport.height };
     const Color edge = { 10, 12, 30, (unsigned char)(70 + 70 * g_t3dNight) }, clear = { 10, 12, 30, 0 };
     DrawRectangleGradientV((int)v.x, (int)v.y, (int)v.width, 110, edge, clear);
     DrawRectangleGradientV((int)v.x, (int)(v.y + v.height - 150), (int)v.width, 150, clear, edge);
@@ -18410,6 +18412,51 @@ static void Wild3DDrawGate(float x, float z, Color post, Color beam, Vector2 fac
     DrawCube({ 38, 58, 8 }, 10, 22, 1, Color{ 160, 40, 36, 255 });
     rlPopMatrix();
 }
+#ifdef TF_TOWNSCAN
+static Vector2 GateLocal(Vector2 p, Vector2 gate, Vector2 f);
+static void TownCompoundScan() {
+    WildTerrainEnsure();
+    for (int ti = 0; ti < 4; ti++) {
+        Vector2 g = kTownGates[(size_t)ti].wildernessPos, f = TownGateFacing(ti);
+        auto in = [&](Vector2 p) { Vector2 l = GateLocal(p, g, f); return fabsf(l.x) < 300.0f && l.y < 0.0f && l.y > -600.0f; };
+        int blocked = 0, water = 0, total = 0, outside = 0;
+        for (float lx = -290; lx <= 290; lx += 20) for (float lz = -590; lz <= -10; lz += 20) {
+            Vector2 w = { g.x + lx * f.y + lz * f.x, g.y - lx * f.x + lz * f.y };
+            total++;
+            if (w.x < 0 || w.y < 0 || w.x > kWildernessWorldSize || w.y > kWildernessWorldSize) { outside++; continue; }
+            unsigned char t = WildTerrainAt(w.x, w.y);
+            if (t & kWTWater) water++; if (t & kWTRidge) blocked++;
+        }
+        printf("TOWNSCAN %d %s gate=(%.0f,%.0f) facing=(%.2f,%.2f) samples=%d water=%d ridge=%d offmap=%d\n", ti, kTownGates[(size_t)ti].townName, g.x, g.y, f.x, f.y, total, water, blocked, outside);
+        for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) if (in(kWildernessMonsterSpots[i].pos)) printf("TOWNSCAN   monster %s\n", kWildernessMonsterSpots[i].name.c_str());
+        for (const auto& n : kWildernessGatherNodes) if (in(n.pos)) printf("TOWNSCAN   node %s\n", n.resource.c_str());
+        auto L = [&](Vector2 p) { Vector2 l = GateLocal(p, g, f); printf(" local=(%.0f,%.0f)\n", l.x, l.y); };
+        for (const auto& c : kWildernessCreatureSpots) if (in(c.pos)) { printf("TOWNSCAN   creature"); L(c.pos); }
+        for (const auto& e : kWildernessDungeonEntrances) if (in(e.pos)) { printf("TOWNSCAN   entrance"); L(e.pos); }
+        for (const auto& h : kHousePlots) if (in(h.pos)) { printf("TOWNSCAN   houseplot %s r=%.0f", h.name, SettleWallR(h.cells)); L(h.pos); }
+        // how deep can the town go at each half-width before hitting water or the map edge?
+        for (float hw : { 300.0f, 250.0f, 200.0f }) {
+            float depth = 0;
+            for (float lz = -10; lz >= -700; lz -= 10) {
+                bool bad = false;
+                for (float lx = -hw; lx <= hw; lx += 10) {
+                    Vector2 w = { g.x + lx * f.y + lz * f.x, g.y - lx * f.x + lz * f.y };
+                    if (w.x < 30 || w.y < 30 || w.x > kWildernessWorldSize - 30 || w.y > kWildernessWorldSize - 30 || (WildTerrainAt(w.x, w.y) & (kWTWater | kWTRidge))) { bad = true; break; }
+                }
+                if (bad) break; depth = -lz;
+            }
+            printf("TOWNSCAN   halfwidth %.0f -> clear depth %.0f\n", hw, depth);
+        }
+        for (const auto& sh : kShrines) if (in(sh.pos)) printf("TOWNSCAN   shrine\n");
+        for (const auto& ip : kWildernessInnocentSpots) if (in(ip.pos)) printf("TOWNSCAN   innocent\n");
+        for (const auto& cp : kRivalCampSpots) if (in(cp)) printf("TOWNSCAN   rivalcamp\n");
+        if (in(kOrcFortPos)) printf("TOWNSCAN   orcfort\n");
+        for (const auto& d : kSaltDocks) if (in(d.pos)) printf("TOWNSCAN   dock\n");
+        for (int t2 = 0; t2 < 4; t2++) if (t2 != ti && in(kTownGates[(size_t)t2].wildernessPos)) printf("TOWNSCAN   othergate\n");
+        if (in(kOutlawRefuge)) printf("TOWNSCAN   refuge\n");
+    }
+}
+#endif
 // Gatehouse collision: the walls and towers are solid; only the archway is open.
 // Local gate frame: +z = facing (out to the wilds), +x = facing rotated to the right.
 static Vector2 GateLocal(Vector2 p, Vector2 gate, Vector2 f) {
@@ -35144,6 +35191,9 @@ static void CleanupAndClose() {
 }
 
 int main() {
+#ifdef TF_TOWNSCAN
+    TownCompoundScan();
+#endif
     g_skillOwner = &g_state; // the skill loadout cap (2026-09-27)
     std::srand((unsigned)std::time(nullptr));
 #ifndef __EMSCRIPTEN__
