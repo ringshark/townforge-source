@@ -1581,6 +1581,7 @@ struct GameState {
     bool optHideDungeonBoss = false; // no "the boss is now available" notices
     bool optTapWalk = true;        // tap the ground to walk there
     bool optAlwaysDay = false;
+    bool optClassicBody = false; // (2026-09-28) the dressable body kit instead of the sculpted hero
     bool optSfx = true, optMusic = true; // (2026-09-28) the audio pass     // (2026-09-28) keep the world in daylight - no real-clock night
     // Stat buffs (2026-09-27) - transient: Bless, Strength and Agility potions.
     float blessT = 0.0f, strPotT = 0.0f, agiPotT = 0.0f;
@@ -7109,7 +7110,7 @@ static void SaveGame(const GameState& s) {
         << "\ntaskKind=" << s.taskKind << "\ntaskWhat=" << s.taskWhat << "\ntaskNeed=" << s.taskNeed << "\ntaskHave=" << s.taskHave
         << "\ntaskReward=" << s.taskReward << "\ntaskSeed=" << s.taskSeed << "\nthievesGuild=" << (s.thievesGuild ? 1 : 0) << "\n";
     out << "optHideWyrm=" << (s.optHideWyrm ? 1 : 0) << "\noptHideDungeonBoss=" << (s.optHideDungeonBoss ? 1 : 0)
-        << "\noptTapWalk=" << (s.optTapWalk ? 1 : 0) << "\noptAlwaysDay=" << (s.optAlwaysDay ? 1 : 0)
+        << "\noptTapWalk=" << (s.optTapWalk ? 1 : 0) << "\noptAlwaysDay=" << (s.optAlwaysDay ? 1 : 0) << "\noptClassicBody=" << (s.optClassicBody ? 1 : 0)
         << "\noptSfx=" << (s.optSfx ? 1 : 0) << "\noptMusic=" << (s.optMusic ? 1 : 0) << "\n";
     out << "wyrmRespawnT=" << s.wyrmRespawnT << "\nwyrmHp=" << s.wyrmHp << "\nwyrmKills=" << s.wyrmKills << "\n"; // world boss
     out << "warWeek=" << s.warWeek << "\nwarPlayMin=" << s.warPlayMin << "\nwarPts=";
@@ -7425,6 +7426,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "optHideDungeonBoss") s.optHideDungeonBoss = std::atoi(val.c_str()) != 0;
         else if (key == "optTapWalk") s.optTapWalk = std::atoi(val.c_str()) != 0;
         else if (key == "optAlwaysDay") s.optAlwaysDay = std::atoi(val.c_str()) != 0;
+        else if (key == "optClassicBody") s.optClassicBody = std::atoi(val.c_str()) != 0;
         else if (key == "optSfx") s.optSfx = std::atoi(val.c_str()) != 0;
         else if (key == "optMusic") s.optMusic = std::atoi(val.c_str()) != 0;
         else if (key == "wyrmHp") s.wyrmHp = (float)std::atof(val.c_str());
@@ -12795,6 +12797,13 @@ static Matrix HumanBoneMatrix(const HumanRig& H, int bone) {
 static Vector3 g_humanGripRot = { 90.0f, 0.0f, 0.0f }, g_humanGripOff = { -0.02f, 0.085f, 0.0f };
 static Vector3 g_humanShieldRot = { 0.0f, -90.0f, 0.0f }, g_humanShieldOff = { -0.09f, 0.14f, 0.0f };
 static const Vector3 kHumanBladeAxis = { 0.0f, 0.0f, 1.0f }; // where the grip points a weapon's +Y, in hand space
+// The same grips on the sculpted characters' (Meshy) hand bones - see DrawSkinChar.
+#ifdef TF_GRIP
+static Vector3 g_skinGripRot = TF_GRIP, g_skinGripOff = { -0.02f, 0.085f, 0.0f };
+#else
+static Vector3 g_skinGripRot = { -90.0f, 0.0f, 0.0f }, g_skinGripOff = { -0.02f, 0.085f, 0.0f };
+#endif
+static Vector3 g_skinShieldRot = { 0.0f, -90.0f, 0.0f }, g_skinShieldOff = { -0.09f, 0.14f, 0.0f };
 
 static void HumanDrawAttached(const Model& gear, const Material* matOverride, const Matrix& local,
                               const Matrix& bone, const Matrix& world, Color tint) {
@@ -13599,6 +13608,227 @@ static HumanPose HumanPlayerPose(const GameState& s, float move, float atk, floa
 }
 
 
+// ---- Sculpted, rigged characters (2026-09-28, assets/characters3d/) ---------
+// Meshy characters rigged on a 24-bone humanoid skeleton, each merged with its
+// animation clips into one file (tools/characters3d/merge_anims.mjs): the hero, now the
+// player's body, with 19 clips (idle, combat stance, walk, run, sneak, sword
+// slash, triple combo, hammer swing, axe chop, bow shot, two spell casts,
+// parry, hit, death, kneel, drink, pick-up...), and the orc Warbringer and
+// Overlord (idle, walk, run, slash, hit, death). raylib skins them on the CPU;
+// clip changes cross-fade. The hero carries your weapon (or gathering tool)
+// in his right hand and your shield on his left arm, reusing the body kit's
+// gear models.
+enum SkinCharId { kScHero, kScOrcWarbringer, kScOrcOverlord, kScCount };
+enum SkinClip { kSkIdle, kSkStance, kSkWalk, kSkRun, kSkSneak, kSkSlash, kSkCombo, kSkHammer, kSkAxe, kSkBow,
+                kSkCast, kSkCastCharged, kSkParry, kSkHit, kSkDeath, kSkKneel, kSkDrink, kSkPickup, kSkCollect, kSkClipCount };
+static const char* const kSkClipNames[kSkClipCount] = {
+    "Idle", "Combat_Stance", "walking_man", "running", "Sneaky_Walk", "Right_Hand_Sword_Slash", "Triple_Combo_Attack",
+    "Heavy_Hammer_Swing", "Charged_Axe_Chop", "Draw_and_Shoot_from_Back", "mage_soell_cast", "Charged_Spell_Cast",
+    "Sword_Parry", "Hit_Reaction", "dying_backwards", "Kneel_on_One_Knee_and_Stand", "Stand_and_Drink",
+    "Male_Bend_Over_Pick_Up", "Collect_Object" };
+struct SkinChar {
+    bool tried = false, ok = false;
+    Model model{};
+    ModelAnimation* anims = nullptr;
+    int animCount = 0;
+    int clip[kSkClipCount];
+    float baseScale = 1.0f, unit = 1.0f, minY = 0.0f;
+    int handR = -1, handL = -1, foreArmL = -1;
+};
+static SkinChar g_skinChars[kScCount];
+static SkinChar* SkinCharGet(int id) {
+    SkinChar& C = g_skinChars[id];
+    if (C.tried) return C.ok ? &C : nullptr;
+    C.tried = true;
+    static const char* const files[kScCount] = { "assets/characters3d/hero.glb", "assets/characters3d/orc_warbringer.glb",
+                                                 "assets/characters3d/orc_overlord.glb" };
+    if (!FileExists(files[id])) return nullptr;
+    C.model = LoadModel(files[id]);
+    if (C.model.meshCount <= 0 || C.model.skeleton.boneCount <= 0) return nullptr;
+    C.anims = LoadModelAnimations(files[id], &C.animCount);
+    for (int k = 0; k < kSkClipCount; k++) {
+        C.clip[k] = -1;
+        for (int a = 0; a < C.animCount; a++) if (strcmp(C.anims[a].name, kSkClipNames[k]) == 0) C.clip[k] = a;
+    }
+    if (C.clip[kSkIdle] < 0 || C.clip[kSkWalk] < 0) return nullptr;
+    for (int b = 0; b < C.model.skeleton.boneCount; b++) {
+        const char* n = C.model.skeleton.bones[b].name;
+        if (!strcmp(n, "RightHand")) C.handR = b;
+        else if (!strcmp(n, "LeftHand")) C.handL = b;
+        else if (!strcmp(n, "LeftForeArm")) C.foreArmL = b;
+    }
+    UpdateModelAnimation(C.model, C.anims[C.clip[kSkIdle]], 0.0f);
+    BoundingBox bb = GetModelBoundingBox(C.model);
+    float h = std::max(0.001f, bb.max.y - bb.min.y);
+    C.baseScale = 1.0f / h; // x the wanted height in world units
+    C.unit = h / 1.8f;      // model units per metre
+    C.minY = bb.min.y;
+    Town3DApplyLitShader(C.model);
+    C.ok = true;
+    return &C;
+}
+struct SkinPose {
+    float move = 0.0f;     // 0 idle .. 1 full run
+    float attackT = -1.0f; // a swing's phase (edge-triggered: a new swing starts on the rising edge)
+    float castT = -1.0f;
+    float hurtT = -1.0f;
+    float deathT = -1.0f;  // 0..1 through dying
+    bool engaged = false, blocking = false, sneaking = false, kneeling = false;
+    int gather = 0;        // 1 chopping, 2 mining, 3 fishing
+    int style = kHsOneHand;
+};
+struct SkinAnimState {
+    int clip = -1, prevClip = -1;
+    float frame = 0.0f, prevFrame = 0.0f;
+    double switchT = -9.0, lastT = -1.0, atkStart = -99.0, castStart = -99.0, hurtStart = -99.0;
+    float lastAtk = -1.0f, lastCast = -1.0f, lastHurt = -1.0f;
+    int atkVariant = 0, castVariant = 0;
+    float cycle = 0.0f, idleCycle = 0.0f;
+    bool moving = false;
+};
+static std::map<int, SkinAnimState> g_skinAnim;
+// Pose and draw one rigged character. heightW: standing height in world units.
+// gear (optional): weapon/shield/tool from a body-kit outfit, drawn in hand.
+static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, float heightW, Color tint,
+                         const SkinPose& p, bool shadowPass, const HumanOutfit* gear = nullptr, float maxDepth = 0.0f) {
+    SkinChar* Cp = SkinCharGet(id);
+    if (!Cp) return false;
+    SkinChar& C = *Cp;
+    T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
+    if (shadowPass) return true; // skinned meshes skip the shadow map; blob shadow below
+    { // off-screen: skip the skinning (the expensive part)
+        Matrix vp = MatrixMultiply(rlGetMatrixModelview(), rlGetMatrixProjection());
+        float y = heightW * 0.5f;
+        float cx = vp.m0 * x + vp.m4 * y + vp.m8 * z + vp.m12;
+        float cy = vp.m1 * x + vp.m5 * y + vp.m9 * z + vp.m13;
+        float cw = vp.m3 * x + vp.m7 * y + vp.m11 * z + vp.m15;
+        if (cw > 1.0f && (fabsf(cx) > cw * 1.25f || fabsf(cy) > cw * 1.4f)) return true;
+        // maxDepth: far off (or over this frame's budget), let the caller draw its light stand-in
+        if (maxDepth > 0.0f) {
+            static double budgetT = -1.0; static int used = 0;
+            if (budgetT != g_gameClock) { budgetT = g_gameClock; used = 0; }
+            if (cw > maxDepth || used >= 6) return false;
+            used++;
+        }
+    }
+    const double now = g_gameClock;
+    SkinAnimState& st = g_skinAnim[track * 4 + id];
+    auto edge = [](float cur, float& last) {
+        bool e = cur >= 0.0f && (last < 0.0f || cur < last - 0.3f);
+        last = cur;
+        return e;
+    };
+    if (edge(p.attackT, st.lastAtk)) { st.atkStart = now; st.atkVariant++; }
+    if (edge(p.castT, st.lastCast)) { st.castStart = now; st.castVariant++; }
+    if (edge(p.hurtT, st.lastHurt)) st.hurtStart = now;
+    static const float kAtkDur[7] = { 0.55f, 0.62f, 0.85f, 0.75f, 0.50f, 0.95f, 0.80f };
+    float atkT = (float)((now - st.atkStart) / kAtkDur[std::clamp(p.style, 0, 6)]);
+    float castT = (float)((now - st.castStart) / 0.85);
+    float hurtT = (float)((now - st.hurtStart) / 0.45);
+    bool attacking = atkT >= 0.0f && atkT < 1.0f, casting = castT >= 0.0f && castT < 1.0f, hurting = hurtT >= 0.0f && hurtT < 1.0f;
+    if (st.moving && p.move < 0.10f) st.moving = false;
+    else if (!st.moving && p.move > 0.16f) st.moving = true;
+    auto has = [&](int k) { return C.clip[k] >= 0; };
+    // ---- which clip, and where in it ----
+    int k = kSkIdle;
+    float a0 = 0.0f, a1 = 1.0f, ph = -1.0f; // one-shot: play [a0,a1] of the clip at phase ph; ph<0 loops
+    float speed = 1.0f;
+    bool gathering = p.gather > 0 && !attacking && !casting && !hurting && !st.moving && p.deathT < 0.0f;
+    if (p.deathT >= 0.0f && has(kSkDeath)) { k = kSkDeath; ph = std::min(p.deathT, 1.0f); }
+    else if (attacking) {
+        ph = atkT;
+        if (p.style == kHsBow && has(kSkBow)) { k = kSkBow; a0 = 0.50f; a1 = 0.80f; }            // the draw and loose
+        else if ((p.style == kHsTwoHand || p.style == kHsPolearm) && has(kSkHammer)) { k = kSkHammer; a0 = 0.08f; a1 = 0.80f; }
+        else if (p.style == kHsMagic && has(kSkCast)) { k = kSkCast; }
+        else if ((p.style == kHsUnarmed || p.style == kHsDagger || st.atkVariant % 2) && has(kSkCombo)) {
+            k = kSkCombo; int part = st.atkVariant % 3; a0 = part / 3.0f; a1 = (part + 1) / 3.0f; // one blow of the three
+        } else if (has(kSkSlash)) { k = kSkSlash; a0 = 0.10f; a1 = 0.85f; }
+        else ph = -1.0f;
+    } else if (casting && has(kSkCast)) {
+        ph = castT;
+        k = (st.castVariant % 2 && has(kSkCastCharged)) ? kSkCastCharged : kSkCast;
+        if (k == kSkCastCharged) { a0 = 0.15f; a1 = 0.85f; }
+    } else if (p.blocking && has(kSkParry)) { k = kSkParry; ph = 0.35f; a0 = 0.0f; a1 = 1.0f; }
+    else if (hurting && has(kSkHit)) { k = kSkHit; ph = hurtT; a1 = 0.55f; }
+    else if (st.moving) {
+        if (p.sneaking && has(kSkSneak)) { k = kSkSneak; speed = 0.8f + 0.5f * p.move; }
+        else if (p.move > 0.62f && has(kSkRun)) { k = kSkRun; speed = 0.85f + 0.3f * p.move; }
+        else { k = kSkWalk; speed = 0.75f + 0.6f * p.move; }
+    } else if (gathering) {
+        if (p.gather == 1 && has(kSkAxe)) k = kSkAxe;
+        else if (p.gather == 2 && has(kSkHammer)) k = kSkHammer;
+        else k = kSkIdle;
+    } else if (p.kneeling && has(kSkKneel)) { k = kSkKneel; ph = 0.42f; }               // down on one knee
+    else if (p.engaged && has(kSkStance)) k = kSkStance;
+    int clip = C.clip[k];
+    const ModelAnimation& an = C.anims[clip];
+    int n = std::max(2, an.keyframeCount);
+    float dt = st.lastT < 0.0 ? 0.0f : std::clamp((float)(now - st.lastT), 0.0f, 0.1f);
+    st.lastT = now;
+    float clipLen = n / 60.0f;
+    float frame;
+    if (ph >= 0.0f) frame = (a0 + (a1 - a0) * std::clamp(ph, 0.0f, 0.999f)) * (float)(n - 1);
+    else {
+        bool loco = k == kSkWalk || k == kSkRun || k == kSkSneak;
+        float& cyc = loco ? st.cycle : st.idleCycle;
+        if (st.clip != clip && !loco) cyc = 0.0f;
+        cyc = fmodf(cyc + dt * speed / clipLen, 1.0f);
+        frame = cyc * (float)(n - 1);
+    }
+    if (st.clip != clip) { st.prevClip = st.clip; st.prevFrame = st.frame; st.switchT = now; st.clip = clip; }
+    st.frame = frame;
+    float fade = (float)((now - st.switchT) / 0.16);
+    if (st.prevClip >= 0 && fade < 1.0f && k != kSkDeath)
+        UpdateModelAnimationEx(C.model, C.anims[st.prevClip], st.prevFrame, an, frame, std::clamp(fade, 0.0f, 1.0f));
+    else
+        UpdateModelAnimation(C.model, an, frame);
+    float sc = C.baseScale * heightW;
+    T3CDrawBlobShadow(g_t3cHumans[2].parts.merged, x, z, yawRad, heightW / 64.0f);
+    float rotDeg = 90.0f - yawRad * RAD2DEG; // model faces +Z
+    DrawModelEx(C.model, { x, -C.minY * sc, z }, { 0.0f, 1.0f, 0.0f }, rotDeg, { sc, sc, sc }, tint);
+    // ---- in hand: the weapon (or the gathering tool) and the shield ----
+    if (gear && g_human.ok && p.deathT < 0.0f) {
+        HumanRig& H = g_human;
+        Matrix world = MatrixMultiply(MatrixMultiply(MatrixScale(sc, sc, sc), MatrixRotateY(rotDeg * DEG2RAD)),
+                                      MatrixTranslate(x, -C.minY * sc, z));
+        auto boneM = [&](int b) {
+            const Transform& t = C.model.currentPose[b];
+            return MatrixMultiply(QuaternionToMatrix(t.rotation), MatrixTranslate(t.translation.x, t.translation.y, t.translation.z));
+        };
+        Shader sh = C.model.materials[0].shader;
+        float u = C.unit;
+        int wpn = gathering ? (p.gather == 1 ? kHwAxe : p.gather == 2 ? kHwPickaxe : kHwRod) : gear->weapon;
+        float wScale = gathering ? (p.gather == 1 ? 1.15f : 1.0f) : gear->weaponScale;
+        if (wpn >= 0 && wpn < kHwGearCount && H.gearOk[wpn]) {
+            static const float gearScale[kHwGearCount] = { 0.56f, 0.56f, 0.42f, 0.80f, 0.50f, 0.56f,
+                                                           1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+            bool left = wpn == kHwBow;
+            int hb = left ? C.handL : C.handR;
+            if (hb >= 0) {
+                float gs = gearScale[wpn] * wScale * u;
+                Vector3 off = g_skinGripOff;
+                if (left) off.x = -off.x;
+                Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(gs, gs, gs), MatrixRotateXYZ(Vector3Scale(g_skinGripRot, DEG2RAD))),
+                                              MatrixTranslate(off.x * u, off.y * u, off.z * u));
+                bool procedural = wpn >= kHwBow;
+                Material flat = H.model.materials[0];
+                flat.shader = sh;
+                flat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+                if (!procedural) for (int i = 0; i < H.gear[wpn].materialCount; i++) H.gear[wpn].materials[i].shader = sh;
+                HumanDrawAttached(H.gear[wpn], procedural ? &flat : nullptr, local, boneM(hb), world, tint);
+            }
+        }
+        if (gear->shield && H.gearOk[kHwShield] && C.foreArmL >= 0 && !gathering) {
+            float gs = 0.56f * u;
+            Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(gs, gs, gs), MatrixRotateXYZ(Vector3Scale(g_skinShieldRot, DEG2RAD))),
+                                          MatrixTranslate(g_skinShieldOff.x * u, g_skinShieldOff.y * u, g_skinShieldOff.z * u));
+            for (int i = 0; i < H.gear[kHwShield].materialCount; i++) H.gear[kHwShield].materials[i].shader = sh;
+            HumanDrawAttached(H.gear[kHwShield], nullptr, local, boneM(C.foreArmL), world, tint);
+        }
+    }
+    return true;
+}
+
 static void PlayerCombatPhases3D(const GameState& s, float* atk, float* cast);
 // The player on the animated body: swing/cast/hit/death clips ride the same
 // timers the kit poses did; red flash + knockback on a hit, translucent blue
@@ -13644,7 +13874,18 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
         }
     }
     if (s.hidden) tint = Color{ (unsigned char)(tint.r * 0.35f), (unsigned char)(tint.g * 0.35f), (unsigned char)(tint.b * 0.45f), tint.a }; // in the shadows (2026-09-28)
-    return DrawHuman(trackId, x, z, yawRad, 1.0f, tint, HumanOutfitFor(s.equipped), hp, shadowPass);
+    HumanOutfit outfit = HumanOutfitFor(s.equipped);
+    if (!s.optClassicBody) { // the sculpted hero (2026-09-28); Options can switch back to the dressable body
+        HumanEnsure(); // the weapon models live with the body kit
+        SkinPose sp;
+        sp.move = hp.move; sp.attackT = hp.attackT; sp.castT = hp.castT; sp.hurtT = hp.hurtT; sp.deathT = hp.deathT;
+        sp.engaged = hp.engaged; sp.gather = hp.gather; sp.style = outfit.style;
+        sp.blocking = s.playerBlockT >= 0.0f && s.playerBlockT < 0.35f && s.playerDeathAnimT <= 0.0f;
+        sp.sneaking = s.hidden;
+        sp.kneeling = g_meditating;
+        if (DrawSkinChar(kScHero, trackId, x, z, yawRad, 66.0f, tint, sp, shadowPass, &outfit)) return true;
+    }
+    return DrawHuman(trackId, x, z, yawRad, 1.0f, tint, outfit, hp, shadowPass);
 }
 
 // Orbit-camera state for the 3D town view. File-statics (like g_scrollDragging),
@@ -19355,6 +19596,18 @@ static bool MeshMonDraw(const std::string& name, float x, float z, float yawRad,
                         const T3CAnim& a, float attackT, float deathT, bool shadowPass) {
     int i = MeshMonIndex(name);
     if (i < 0) return false;
+    { // (2026-09-28) the orcs are rigged now: real walk/run/slash/hit/death clips
+        int sc = (name == "Orc Warlord") ? kScOrcOverlord
+               : (name == "Orc Grunt" || name == "Orc Archer" || name == "Orc Shaman" || name == "Orc Brute") ? kScOrcWarbringer : -1;
+        if (sc >= 0) {
+            SkinPose sp;
+            sp.move = std::clamp(a.move, 0.0f, 1.0f);
+            sp.attackT = attackT >= 0.0f ? 1.0f - attackT : -1.0f; // the lunge runs 1 -> 0
+            sp.deathT = deathT;
+            sp.engaged = attackT >= 0.0f;
+            if (DrawSkinChar(sc, (int)a.seed, x, z, yawRad, kMeshMons[i].height * sizeMul * 1.05f, tint, sp, shadowPass, nullptr, 1100.0f)) return true;
+        }
+    }
     if (name == "Scalekin Raider") { // five raider looks, fixed per monster
         int v = ((int)a.seed / 13) % 5;
         if (v > 0) i = MeshMonIndex("Scalekin Raider~" + std::to_string(v));
@@ -33903,6 +34156,7 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     toggle("Music", "A tune for the towns, the wilds and the dungeons.", s.optMusic);
     toggle("Sound effects", "Footsteps, swords, spells, coins and the rest.", s.optSfx);
     toggle("Always daytime", "Keep the world in daylight instead of following your real clock.", s.optAlwaysDay);
+    toggle("Classic body", "Play as the dressable body that shows your armor, clothing and dyes, instead of the sculpted hero.", s.optClassicBody);
     toggle("Auto-restock reagents", "Top up to 30 reagents whenever you enter a town (1 gold each).", s.autoReagents);
     y += 6;
     DrawUIText("Alerts you turn off still go in your journal (LOG).", (int)x, (int)y, 12, soft);
