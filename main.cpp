@@ -2155,6 +2155,8 @@ struct GameState {
 // ---------------------------------------------------------------------
 
 static const float kPlayerSpeed = 220.0f;   // world units/sec
+static float g_moveSpeedMul = 1.0f;         // (2026-09-28, #74) riding a mount
+static int g_mountPetId = -1;               // the pet you're riding (-1 on foot) - transient
 static const float kPlayerRadius = 17.0f;     // bumped from 14 for a less cramped, more legible view
 static const float kInteractRange = 54.0f;   // distance at which "[E] interact" becomes available
 static const float kNodeRadius = 50.0f;       // world/building/monster node radius - bumped from 40;
@@ -2325,7 +2327,7 @@ static bool UpdatePlayerMovement(Vector2& pos, Vector2& facing, float dt, float 
     if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) dir.x -= 1;
     if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) dir.x += 1;
     float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-    float step = kPlayerSpeed * dt;
+    float step = kPlayerSpeed * g_moveSpeedMul * dt;
     if (g_walkOn && g_walkFor != &pos) WalkTargetClear(); // left that place
     if (len <= 0.0001f) {
         dir = VirtualJoystickDir();
@@ -5144,8 +5146,45 @@ static int FollowersUsed(const GameState& s) {
 }
 static std::vector<Pet*> ActivePets(GameState& s) {
     std::vector<Pet*> v;
-    for (auto& p : s.pets) if (p.active && p.hp > 0) v.push_back(&p);
+    for (auto& p : s.pets) if (p.active && p.hp > 0 && p.id != g_mountPetId) v.push_back(&p); // the one you ride doesn't fight
     return v;
+}
+// Mounts (2026-09-28, #74): ride a horse, bison, big cat or griffin that's
+// following you. 0 = can't be ridden.
+static float MountSpeedFor(const std::string& species) {
+    if (species == "War Horse") return 1.85f;
+    if (species == "Storm Griffin") return 2.0f;
+    if (species == "Dire Panther" || species == "Sabertooth Cat") return 1.7f;
+    if (species == "Plains Bison") return 1.45f;
+    return 0.0f;
+}
+static Pet* RideablePet(GameState& s) { // the fastest mountable pet at your side (or the one you're on)
+    Pet* best = nullptr;
+    for (auto& p : s.pets) {
+        if (!p.active || p.hp <= 0 || MountSpeedFor(p.name) <= 0.0f) continue;
+        if (p.id == g_mountPetId) return &p;
+        if (!best || MountSpeedFor(p.name) > MountSpeedFor(best->name)) best = &p;
+    }
+    return best;
+}
+static Pet* MountedPet(GameState& s) {
+    if (g_mountPetId < 0) return nullptr;
+    for (auto& p : s.pets) if (p.id == g_mountPetId) return &p;
+    return nullptr;
+}
+static void Dismount(GameState& s, const char* why) {
+    if (g_mountPetId < 0) return;
+    g_mountPetId = -1; g_moveSpeedMul = 1.0f;
+    if (why && *why) s.logLine = why;
+}
+static void MountTick(GameState& s) { // keeps the saddle honest: no riding into fights, towns or dungeons
+    if (g_mountPetId < 0) { g_moveSpeedMul = 1.0f; return; }
+    Pet* m = MountedPet(s);
+    if (!m || !m->active || m->hp <= 0) { Dismount(s, "Your mount can't carry you any more."); return; }
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { Dismount(s, ""); return; }
+    if (s.screen != Screen::Wilderness && IsPlayScreen(s.screen)) { Dismount(s, "You leave your mount at the hitching post."); return; }
+    if (s.wildEngaged.has_value() || !s.wildExtraAttackers.empty()) { Dismount(s, "You leap from the saddle to fight!"); return; }
+    g_moveSpeedMul = MountSpeedFor(m->name);
 }
 // ---- Pet levels, bonding and death (2026-09-28) ------------------------------
 // Pets take hits, level up from kills (max 30) and bond after kBondKills fights
@@ -10887,9 +10926,11 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     bool medUp = ooc && !s.playerIsGhost && (s.mana < MaxMana(s) - 0.5f || g_meditating); // (2026-09-28, #63) Meditate
     int fishWater = (ooc && oocZone == 0 && !s.playerIsGhost && !s.gatheringResource.has_value()) ? WildWaterNear(s.wildernessPlayerPos) : 0;
     bool fishUp = fishWater > 0; // (2026-09-28, #66) cast a line at any shore
-    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp && !hideUp && !peaceUp && !medUp && !fishUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
+    Pet* rideable = (ooc && oocZone == 0 && !s.playerIsGhost) ? RideablePet(s) : nullptr;
+    bool rideUp = rideable != nullptr; // (2026-09-28, #74) Ride / Dismount
+    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp && !hideUp && !peaceUp && !medUp && !fishUp && !rideUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
     int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0) + (teleUp ? 1 : 0) + (hideUp ? 1 : 0) +
-            (peaceUp ? 1 : 0) + (provoUp ? 1 : 0) + (medUp ? 1 : 0) + (fishUp ? 1 : 0);
+            (peaceUp ? 1 : 0) + (provoUp ? 1 : 0) + (medUp ? 1 : 0) + (fishUp ? 1 : 0) + (rideUp ? 1 : 0);
     const float sz = 42.0f, gap = 8.0f;
     Rectangle bar = { 166.0f, y - 6.0f, n * sz + (n - 1) * gap + 18.0f, sz + 12.0f };
     g_beltRect = bar; g_beltDrawnAt = GetTime(); UIRegister(bar);
@@ -11007,6 +11048,21 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     }
     if (provoUp) {
         if (slot(bk, s.bardCd <= 0.0f, 0, [&](Rectangle r) { note(r, Color{ 255, 120, 90, 255 }, "Provoke"); })) { PlaySfx(SfxId::Click); BardProvoke(s); }
+        bk++;
+    }
+    if (rideUp) { // a horseshoe: mount up / get down
+        bool on = g_mountPetId >= 0;
+        if (slot(bk, true, 0, [&](Rectangle r) {
+                float cx = r.x + r.width / 2, cy = r.y + r.height / 2 - 4;
+                DrawRing({ cx, cy }, 7.0f, 11.0f, 200.0f, 520.0f, 16, on ? Color{ 255, 214, 110, 255 } : Color{ 190, 194, 202, 255 });
+                DrawUIText(on ? "Dismount" : "Ride", (int)r.x + 3, (int)(r.y + r.height - 14), 10, Color{ 240, 236, 220, 255 }); })) {
+            PlaySfx(SfxId::Click);
+            if (on) Dismount(s, "You swing down from the saddle.");
+            else {
+                g_mountPetId = rideable->id; g_moveSpeedMul = MountSpeedFor(rideable->name);
+                s.logLine = "You mount your " + rideable->name + ".";
+            }
+        }
         bk++;
     }
     if (fishUp) { // a rod and line: fish the water beside you
@@ -20938,8 +20994,20 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         float pyaw = atan2f(s.playerFacing.y, s.playerFacing.x);
         T3CAnim pa3 = T3CMakeAnim(kT3CTrackPlayerWild, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y, !shadowPass);
         Vector2 foe = s.wildEngaged.has_value() ? s.wildEngaged->pos : Vector2{ 0, 0 };
-        if (DrawPlayerHuman(s, kT3CTrackPlayerWild, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y, pyaw, pa3.move,
-                            s.wildEngaged.has_value() ? &foe : nullptr, shadowPass)) {
+        float seat = 0.0f, pmove = pa3.move;
+        if (Pet* mnt = MountedPet(const_cast<GameState&>(s))) { // riding (#74): the mount under you, you in the saddle
+            T3CAnim ma = pa3; ma.seed = 7.0f;
+            Vector2 under = { s.wildernessPlayerPos.x - cosf(pyaw) * 14.0f, s.wildernessPlayerPos.y - sinf(pyaw) * 14.0f }; // the saddle under you
+            DrawCompanionPet(*mnt, s, ma, pyaw, kitDist(under.x, under.y), shadowPass, under, kT3CTrackFollowerBase);
+            seat = mnt->name == "War Horse" ? 26.0f : mnt->name == "Plains Bison" ? 30.0f : mnt->name == "Storm Griffin" ? 28.0f : 20.0f;
+            pmove = 0.0f;
+        }
+        rlPushMatrix();
+        rlTranslatef(0.0f, seat, 0.0f);
+        bool drewBody = DrawPlayerHuman(s, kT3CTrackPlayerWild, s.wildernessPlayerPos.x, s.wildernessPlayerPos.y, pyaw, pmove,
+                            s.wildEngaged.has_value() ? &foe : nullptr, shadowPass);
+        rlPopMatrix();
+        if (drewBody) {
             // animated body drawn
         } else if (s.playerDeathAnimT > 0.0f) {
             float pshrink = std::max(0.05f, s.playerDeathAnimT / kPlayerDeathAnimTime);
@@ -34048,6 +34116,20 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
     int y = 116;
     DrawUIText(TextFormat("Taming: %.1f   Lore: %.1f   Veterinary: %.1f", s.animalTaming, s.animalLore, s.veterinary),
                20, y, 13, kColorText);
+    { // (2026-09-28, #74) not a tamer? the stable sells a riding horse
+        const int price = 400;
+        bool room = (int)s.pets.size() < PetSlotCapacity(s);
+        if (Button({ (float)screenW - 190, (float)y - 3, 170, 22 }, TextFormat("Riding horse (%dg)", price), room && CanAfford(s, price))) {
+            PayGold(s, price);
+            Pet pt; pt.id = s.nextPetId++; pt.name = "War Horse"; pt.role = PetRole::Tank;
+            pt.str = 40; pt.dex = 24; pt.intStat = 6; pt.maxHp = 90; pt.hp = 90; pt.maxMana = 6; pt.mana = 6;
+            pt.active = FollowersUsed(s) + PetFollowerCost(pt) <= kFollowerSlots;
+            s.pets.push_back(pt);
+            s.logLine = pt.active ? "The stable master saddles a horse for you. Tap Ride on your belt in the wilds."
+                                  : "The stable master saddles a horse for you - set it to Follow to ride it.";
+            PlaySfx(SfxId::Buy);
+        }
+    }
     y += 18;
     if (s.stableBought < kStableMaxBought) {
         int price = StableSlotPrice(s);
@@ -36245,6 +36327,7 @@ static void UpdateDrawFrame() {
         UpdateUpgrade(state, dt);
         RegenMana(state, dt);
         TrainGroundsTick(state, GetFrameTime()); // (2026-09-28, #71)
+        MountTick(state); // (2026-09-28, #74)
         { // the audio pass (2026-09-28): music for where you are, footsteps underfoot
             Screen sc = state.screen, where = IsPlayScreen(sc) ? sc : g_playScreen;
             int want = (where == Screen::Town || where == Screen::Interior) ? 0 : where == Screen::Wilderness ? 1
