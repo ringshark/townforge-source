@@ -6482,7 +6482,12 @@ static bool RollSpellDisrupted(const GameState& s) {
 // three times as fast and Meditation trains. A fight or a spell breaks it.
 static bool g_meditating = false;
 static float g_medTrainT = 0.0f;
+static float g_medCdT = 0.0f;     // (2026-09-28) 2.5s after a meditation ends before you can start another
 static void RegenMana(GameState& s, float dt) {
+    static bool wasMed = false;
+    if (wasMed && !g_meditating) g_medCdT = 2.5f; // ended any way: stopped, a cast, a fight, full mana
+    wasMed = g_meditating;
+    if (g_medCdT > 0.0f) g_medCdT -= GetFrameTime();
     float regenPerSec = 0.15f + EffectiveSkill(s, &GameState::meditation) * 0.004f;
     if (IsShaken(s)) regenPerSec *= 0.5f;
     if (HasWeeklyBlessing(s)) regenPerSec *= 1.25f;
@@ -10679,13 +10684,18 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
         bk++;
     }
     if (medUp) { // a calm blue lotus: Meditate
-        if (slot(bk, true, 0, [&](Rectangle r) {
+        bool medReady = g_meditating || g_medCdT <= 0.0f;
+        if (slot(bk, medReady, 0, [&](Rectangle r) {
                 float cx = r.x + r.width / 2, cy = r.y + r.height / 2 - 3;
                 float glow = g_meditating ? 0.45f + 0.2f * sinf((float)GetTime() * 3.0f) : 0.2f;
                 DrawCircleV({ cx, cy }, 16.0f, Fade(Color{ 120, 160, 255, 255 }, glow));
                 for (int i = -1; i <= 1; i++) DrawEllipse((int)(cx + i * 7), (int)cy + (i ? 2 : -2), 4.5f, 9.0f, Color{ 170, 200, 255, 255 });
                 DrawRectangleRec({ cx - 10, cy + 8, 20, 3 }, Color{ 120, 150, 220, 255 });
-                DrawUIText(g_meditating ? "Stop" : "Meditate", (int)r.x + 2, (int)(r.y + r.height - 14), 10, Color{ 220, 230, 255, 255 }); })) {
+                DrawUIText(g_meditating ? "Stop" : "Meditate", (int)r.x + 2, (int)(r.y + r.height - 14), 10, Color{ 220, 230, 255, 255 });
+                if (!medReady) { // the cooldown sweeps down the slot
+                    DrawRectangleRec({ r.x, r.y, r.width, r.height * std::clamp(g_medCdT / 2.5f, 0.0f, 1.0f) }, Fade(BLACK, 0.4f));
+                    DrawUIText(TextFormat("%.1f", g_medCdT), (int)r.x + 4, (int)r.y + 3, 12, WHITE);
+                } })) {
             PlaySfx(SfxId::Click);
             g_meditating = !g_meditating; g_medTrainT = 0.0f;
             s.logLine = g_meditating ? "You clear your mind and meditate - mana returns much faster." : "You stop meditating.";
