@@ -7730,7 +7730,7 @@ static bool LoadGame(GameState& s) {
             }
         }
         else if (key == "houseChest.count") { s.houseChest.clear(); s.houseChest.reserve(std::atoi(val.c_str())); }
-        else if (key.rfind("houseChest.", 0) == 0) { if (auto it = ItemFromLine(val)) s.houseChest.push_back(*it); }
+        else if (key.rfind("houseChest.", 0) == 0) { if (auto it = ItemFromLine(val)) s.bankItems.push_back(*it); } // (2026-09-28) the old house chest now lives in the bank
         else if (key.rfind("rivalStash.", 0) == 0) { if (auto it = ItemFromLine(val)) s.rivalStash.push_back(*it); }
         else if (key == "gold") s.gold = std::atoi(val.c_str());
         else if (key == "wood") s.wood = std::atoi(val.c_str());
@@ -24048,50 +24048,46 @@ static bool InteriorDoInteract(GameState& s, const InteriorPropDef* nearest, boo
 // Storage chest panel - opens from the Chest prop inside the wilderness homestead.
 // Two columns: backpack items with Store buttons, chest items with Take buttons.
 static int HouseStorageCap(const GameState& s); // Housing 2.0: base + every chest/trunk/cabinet placed
+// House storage = your bank box (2026-09-28 cleanup): a chest at home opens the
+// same vault as the Vaultkeep, so there's one place your things are, not two.
 static void DrawHouseChestPanel(GameState& s, int screenW, int screenH) {
     DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, 0.5f));
     float w = 500, h = 480;
     float x = (screenW - w) / 2, y = (screenH - h) / 2;
     Rectangle bg = { x, y, w, h };
     UODrawGump(bg, kUoLeather);
-    UODrawTitle(bg, "House Storage", 14);
-    const int kHouseChestCap = HouseStorageCap(s);
-    std::string counts = "Stored " + std::to_string(s.houseChest.size()) + "/" + std::to_string(kHouseChestCap) +
+    UODrawTitle(bg, "Your bank box (at home)", 14);
+    std::string counts = "In your bank " + std::to_string(s.bankItems.size()) +
                          "   Backpack " + std::to_string(s.backpack.size()) + "/" + std::to_string(BackpackCap(s));
     DrawUIText(counts.c_str(), (int)x + 16, (int)y + 30, 13, kUoGoldText);
     if (UOCloseButton(bg)) { s.houseChestOpen = false; return; }
     if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_X)) { s.houseChestOpen = false; return; }
-
-    const int rows = 11;
-    float listY = y + 62, rowH = 34;
-    // Backpack column (store into chest)
-    DrawUIText("Backpack", (int)x + 16, (int)listY - 18, 14, kColorHeading);
-    for (int i = 0; i < rows && i < (int)s.backpack.size(); i++) {
-        float ry = listY + i * rowH;
-        DrawUIText(s.backpack[i].name.c_str(), (int)x + 16, (int)ry + 8, 13, kColorText);
-        if (Button({ x + 176, ry + 2, 60, 26 }, "Store", (int)s.houseChest.size() < kHouseChestCap)) {
-            s.houseChest.push_back(s.backpack[i]);
-            s.backpack.erase(s.backpack.begin() + i);
-            PlaySfx(SfxId::Click);
-            break;
-        }
+    static float scrollL = 0.0f, scrollR = 0.0f;
+    const float rowH = 34, listY = y + 62, listH = h - 80;
+    // Backpack column (store in the bank)
+    DrawUIText("Backpack", (int)x + 16, (int)listY - 18, 14, kUoGoldText);
+    scrollL -= ScrollDelta({ x, listY, w / 2, listH });
+    scrollL = std::clamp(scrollL, 0.0f, std::max(0.0f, s.backpack.size() * rowH - listH));
+    BeginScissorMode((int)x, (int)listY, (int)(w / 2), (int)listH);
+    for (int i = 0; i < (int)s.backpack.size(); i++) {
+        float ry = listY + i * rowH - scrollL;
+        if (ry < listY - rowH || ry > listY + listH) continue;
+        DrawUIText(s.backpack[i].name.c_str(), (int)x + 16, (int)ry + 8, 13, Color{ 236, 222, 196, 255 });
+        if (Button({ x + 176, ry + 2, 60, 26 }, "Store", true)) { DepositItem(s, i); PlaySfx(SfxId::Click); break; }
     }
-    if ((int)s.backpack.size() > rows)
-        DrawUIText(("+" + std::to_string(s.backpack.size() - rows) + " more").c_str(), (int)x + 16, (int)(listY + rows * rowH), 12, kColorText);
-    // Chest column (take back)
-    DrawUIText("Chest", (int)x + 262, (int)listY - 18, 14, kColorHeading);
-    for (int i = 0; i < rows && i < (int)s.houseChest.size(); i++) {
-        float ry = listY + i * rowH;
-        DrawUIText(s.houseChest[i].name.c_str(), (int)x + 262, (int)ry + 8, 13, kColorText);
-        if (Button({ x + 422, ry + 2, 60, 26 }, "Take", (int)s.backpack.size() < BackpackCap(s))) {
-            s.backpack.push_back(s.houseChest[i]);
-            s.houseChest.erase(s.houseChest.begin() + i);
-            PlaySfx(SfxId::Click);
-            break;
-        }
+    EndScissorMode();
+    // Bank column (take back)
+    DrawUIText("Bank box", (int)x + 262, (int)listY - 18, 14, kUoGoldText);
+    scrollR -= ScrollDelta({ x + w / 2, listY, w / 2, listH });
+    scrollR = std::clamp(scrollR, 0.0f, std::max(0.0f, s.bankItems.size() * rowH - listH));
+    BeginScissorMode((int)(x + w / 2), (int)listY, (int)(w / 2), (int)listH);
+    for (int i = 0; i < (int)s.bankItems.size(); i++) {
+        float ry = listY + i * rowH - scrollR;
+        if (ry < listY - rowH || ry > listY + listH) continue;
+        DrawUIText(s.bankItems[i].name.c_str(), (int)x + 262, (int)ry + 8, 13, Color{ 236, 222, 196, 255 });
+        if (Button({ x + 422, ry + 2, 60, 26 }, "Take", (int)s.backpack.size() < BackpackCap(s))) { WithdrawItem(s, i); PlaySfx(SfxId::Click); break; }
     }
-    if ((int)s.houseChest.size() > rows)
-        DrawUIText(("+" + std::to_string(s.houseChest.size() - rows) + " more").c_str(), (int)x + 262, (int)(listY + rows * rowH), 12, kColorText);
+    EndScissorMode();
 }
 
 // ---- The homestead inside (Housing 2.0, 2026-09-26) -------------------------------
@@ -24551,7 +24547,7 @@ static void DrawHouseDecorateUI(GameState& s, int screenW, int screenH) {
         auto& d = s.houseDecor[(size_t)g_hdSel];
         const HouseDecorDef& k = kHouseDecorDefs[d.kind];
         DrawUIText(k.name, (int)G.x + 18, (int)G.y + 20, 14, kUoGoldText);
-        std::string info = k.storage > 0 ? "+" + std::to_string(k.storage) + " storage" : k.place == kHdpWall ? "Wall piece" : "";
+        std::string info = k.storage > 0 ? "Opens your bank box" : k.place == kHdpWall ? "Wall piece" : "";
         if (!info.empty()) DrawUIText(info.c_str(), (int)G.x + 200, (int)G.y + 22, 12, Color{ 210, 200, 180, 255 });
         msgLine(G.y + 42);
         float by = G.y + 66;
@@ -24564,22 +24560,18 @@ static void DrawHouseDecorateUI(GameState& s, int screenW, int screenH) {
         }
         int refund = k.gold / 2;
         if (UOButton({ G.x + 252, by, 150, 38 }, "Pick Up +" + std::to_string(refund) + "g")) {
-            int capAfter = HouseStorageCap(s) - k.storage;
-            if (k.storage > 0 && (int)s.houseChest.size() > capAfter) g_hdMsg = "Empty some storage first (" + std::to_string(s.houseChest.size()) + " items stored).";
-            else {
-                s.gold += refund;
-                s.logLine = "Picked up the " + std::string(k.name) + " (+" + std::to_string(refund) + "g).";
-                s.houseDecor.erase(s.houseDecor.begin() + g_hdSel);
-                g_hdSel = -1; g_hdMsg.clear();
-                PlaySfx(SfxId::Coin);
-            }
+            s.gold += refund; // storage furniture holds nothing itself now - it opens the bank box
+            s.logLine = "Picked up the " + std::string(k.name) + " (+" + std::to_string(refund) + "g).";
+            s.houseDecor.erase(s.houseDecor.begin() + g_hdSel);
+            g_hdSel = -1; g_hdMsg.clear();
+            PlaySfx(SfxId::Coin);
         }
         if (UOButton({ G.x + 410, by, 102, 38 }, "Done")) { g_hdSel = -1; g_hdMsg.clear(); }
         return;
     }
     // --- the catalog ---
     char gw[64];
-    snprintf(gw, sizeof(gw), "%d gold   %d wood   storage %d", s.gold, s.wood, HouseStorageCap(s));
+    snprintf(gw, sizeof(gw), "%d gold   %d wood", s.gold, s.wood);
     DrawUIText(gw, (int)G.x + 18, (int)G.y + 18, 12, Color{ 210, 200, 180, 255 });
     float tabW = (G.width - 32) / kHdcCount;
     for (int c = 0; c < kHdcCount; c++) {
@@ -24613,7 +24605,7 @@ static void DrawHouseDecorateUI(GameState& s, int screenW, int screenH) {
         DrawRectangleLinesEx({ r.x + 6, r.y + 8, 22, 22 }, 1.0f, Fade(BLACK, 0.5f));
         DrawUIText(k.name, (int)r.x + 34, (int)r.y + 5, 12, ok ? Color{ 250, 240, 220, 255 } : Color{ 160, 150, 140, 255 });
         std::string price = std::to_string(k.gold) + "g" + (k.wood > 0 ? " " + std::to_string(k.wood) + "w" : "");
-        if (k.storage > 0) price += "  +" + std::to_string(k.storage) + " slots";
+        if (k.storage > 0) price += "  (opens your bank)";
         if (k.module >= 0 && HomeWingLevel(s, k.module) <= 0) price = std::string("needs ") + kSettleDefs[kWingSettleKind[k.module]].name;
         DrawUIText(price.c_str(), (int)r.x + 34, (int)r.y + 22, 11, ok ? kUoGoldText : Color{ 200, 120, 100, 255 });
         if (tap && CheckCollisionPointRec(m, r)) {
