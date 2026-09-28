@@ -13713,6 +13713,7 @@ static void Town3DPinchZoom(float distMin, float distMax) {
         g_t3dPinchDist = 0.0f;
     }
 }
+static float WildGroundY(float x, float z);
 static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, int screenId,
                                  float distMin, float distMax, float followPitch) {
     float dt = GameDt();
@@ -13776,6 +13777,15 @@ static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, in
     c.pos = { c.target.x + cp * sinf(g_t3dYawSm) * g_t3dDistSm,
               c.target.y + sp * g_t3dDistSm,
               c.target.z + cp * cosf(g_t3dYawSm) * g_t3dDistSm };
+    if (screenId == 1) { // wilds: never inside a hill or the mountains beyond the map (2026-09-28)
+        float need = 0.0f;
+        for (float t = 0.35f; t <= 1.0f; t += 0.13f) { // along the sight line, camera end
+            float x = c.target.x + (c.pos.x - c.target.x) * t, z = c.target.z + (c.pos.z - c.target.z) * t;
+            float lineY = c.target.y + (c.pos.y - c.target.y) * t;
+            need = std::max(need, (WildGroundY(x, z) + 45.0f - lineY) / t);
+        }
+        if (need > 0.0f) c.pos.y += need;
+    }
     c.fwd = T3VNorm(T3VSub(c.target, c.pos));
     c.right = T3VNorm(T3VCross(c.fwd, { 0, 1, 0 }));
     c.up = T3VCross(c.right, c.fwd);
@@ -16608,8 +16618,10 @@ static void WildHeightEnsure() {
     }
     for (int i = 0; i < N * N; i++) if (g_wt[i] & (kWTWater | kWTSea)) g_wildH[(size_t)i] = 0.0f; // flat water
 }
+static float WildOuterY(float x, float z);
 static float WildGroundY(float x, float z) {
     if (!g_wildHBuilt) WildHeightEnsure();
+    if (x < 0.0f || z < 0.0f || x > kWildernessWorldSize || z > kWildernessWorldSize) return WildOuterY(x, z);
     float fx = x / kWTCell - 0.5f, fz = z / kWTCell - 0.5f;
     int x0 = (int)floorf(fx), z0 = (int)floorf(fz);
     float tx = fx - x0, tz = fz - z0;
@@ -16619,6 +16631,164 @@ static float WildGroundY(float x, float z) {
     };
     float a = at(x0, z0), b = at(x0 + 1, z0), c = at(x0, z0 + 1), d = at(x0 + 1, z0 + 1);
     return (a + (b - a) * tx) + ((c + (d - c) * tx) - (a + (b - a) * tx)) * tz;
+}
+// ---- The lands beyond the map (2026-09-28) -----------------------------------
+// The map used to stop at a hard edge: a flat green plane a step below the land,
+// a flat blue sea, and hill models floating over them. Now the ground runs on
+// past the border - you can't walk there, but you can see it: the Stonepeaks
+// climb into grey mountains to the west, the Frostwastes into snowy peaks to the
+// north, wooded hills roll away to the south, and the sea opens to the east.
+// Heights continue from the map's own edge, so there is no seam, and the
+// distance fog carries it all into the horizon.
+static float WildValueNoise(float x, float z) {
+    float fx = floorf(x), fz = floorf(z), tx = x - fx, tz = z - fz;
+    tx = tx * tx * (3.0f - 2.0f * tx); tz = tz * tz * (3.0f - 2.0f * tz);
+    auto h = [](float a, float b) { float v = sinf(a * 127.1f + b * 311.7f) * 43758.5453f; return v - floorf(v); };
+    float a = h(fx, fz), b = h(fx + 1, fz), c = h(fx, fz + 1), d = h(fx + 1, fz + 1);
+    return (a + (b - a) * tx) + ((c + (d - c) * tx) - (a + (b - a) * tx)) * tz;
+}
+static float WildCoastX(float z);
+// How far outside the map a point is, and how much of each side it belongs to.
+struct WildOuterW { float d, west, north, south, sea; };
+static WildOuterW WildOuterWeights(float x, float z) {
+    const float WS = kWildernessWorldSize;
+    float dw = std::max(0.0f, -x), de = std::max(0.0f, x - WS), dn = std::max(0.0f, -z), ds = std::max(0.0f, z - WS);
+    WildOuterW w{ sqrtf((dw + de) * (dw + de) + (dn + ds) * (dn + ds)), dw, dn, ds, de };
+    // south of the coast line is sea too
+    float cx = WildCoastX(std::clamp(z, 0.0f, WS));
+    if (ds > 0.0f && x > cx - 120.0f) { w.sea += ds * std::clamp((x - cx + 120.0f) / 240.0f, 0.0f, 1.0f); w.south *= std::clamp((cx + 120.0f - x) / 240.0f, 0.0f, 1.0f); }
+    if (dn > 0.0f && x > cx - 120.0f) { w.sea += dn * std::clamp((x - cx + 120.0f) / 240.0f, 0.0f, 1.0f); w.north *= std::clamp((cx + 120.0f - x) / 240.0f, 0.0f, 1.0f); }
+    float sum = w.west + w.north + w.south + w.sea;
+    if (sum <= 0.0f) { // inside the map (the tuck under its edge): by the nearest edge
+        const float R = 400.0f;
+        w.west = std::max(0.0f, R - x); w.north = std::max(0.0f, R - z); w.south = std::max(0.0f, R - (WS - z));
+        w.sea = std::max(0.0f, R - (WS - x));
+        sum = w.west + w.north + w.south + w.sea;
+        if (sum <= 0.0f) { w.south = 1.0f; sum = 1.0f; }
+    }
+    w.west /= sum; w.north /= sum; w.south /= sum; w.sea /= sum;
+    return w;
+}
+static float WildOuterY(float x, float z) {
+    const float WS = kWildernessWorldSize;
+    float edge = WildGroundY(std::clamp(x, 0.0f, WS), std::clamp(z, 0.0f, WS));
+    WildOuterW w = WildOuterWeights(x, z);
+    if (w.d <= 0.0f) return edge;
+    float n = WildValueNoise(x / 520.0f, z / 520.0f) * 0.6f + WildValueNoise(x / 170.0f + 9.0f, z / 170.0f) * 0.3f +
+              WildValueNoise(x / 60.0f, z / 60.0f + 3.0f) * 0.1f;
+    float ridge = 1.0f - fabsf(WildValueNoise(x / 330.0f + 4.0f, z / 330.0f + 7.0f) * 2.0f - 1.0f); // sharp crests
+    // low foothills near the border (the camera looks out over them), the
+    // high peaks well out, where they make the skyline
+    float nearR = Wild3DSmooth(0.0f, 700.0f, w.d), farR = Wild3DSmooth(500.0f, 2000.0f, w.d);
+    float mtn = nearR * (40.0f + 90.0f * n) + farR * (260.0f + 560.0f * (0.55f * n + 0.45f * ridge * ridge));
+    float hills = nearR * (30.0f + 70.0f * n) + farR * (60.0f + 160.0f * n);
+    float sea = -70.0f * Wild3DSmooth(0.0f, 260.0f, w.d);
+    return edge + mtn * (w.west + w.north * 1.15f) + hills * w.south + (sea - edge) * w.sea;
+}
+static const int kWildEdgeColN = 256;
+static std::vector<Color> g_wildEdgeCols; // the ground map's colours, downsampled (Wild3DEnsureGround)
+static Color WildOuterColor(float x, float z, float y) {
+    WildOuterW w = WildOuterWeights(x, z);
+    auto mix = [](Color a, Color b, float t) {
+        t = std::clamp(t, 0.0f, 1.0f);
+        return Color{ (unsigned char)(a.r + (b.r - a.r) * t), (unsigned char)(a.g + (b.g - a.g) * t), (unsigned char)(a.b + (b.b - a.b) * t), 255 };
+    };
+    float n = WildValueNoise(x / 90.0f, z / 90.0f);
+    Color grass = mix(Color{ 104, 150, 80, 255 }, Color{ 138, 180, 100, 255 }, n); // the map's own meadow palette
+    Color forest = mix(Color{ 70, 112, 62, 255 }, Color{ 88, 128, 70, 255 }, n);
+    Color rock = mix(Color{ 118, 112, 104, 255 }, Color{ 146, 140, 130, 255 }, n);
+    Color snow = mix(Color{ 226, 234, 244, 255 }, Color{ 246, 250, 255, 255 }, n);
+    Color sand = { 196, 184, 146, 255 };
+    Color west = mix(mix(grass, rock, (y - 40.0f) / 120.0f), snow, (y - 520.0f) / 90.0f);
+    Color north = mix(mix(snow, rock, (y - 160.0f) / 140.0f * (n > 0.55f ? 1.0f : 0.0f)), snow, (y - 380.0f) / 60.0f);
+    Color south = mix(grass, forest, Wild3DSmooth(0.0f, 500.0f, w.d) * (0.6f + 0.4f * n));
+    Color seaC = sand;
+    float r = west.r * w.west + north.r * w.north + south.r * w.south + seaC.r * w.sea;
+    float g = west.g * w.west + north.g * w.north + south.g * w.south + seaC.g * w.sea;
+    float b = west.b * w.west + north.b * w.north + south.b * w.south + seaC.b * w.sea;
+    if (!g_wildEdgeCols.empty() && w.sea < 0.5f) { // carry on from the map's own edge colour, fading out
+        const float WS = kWildernessWorldSize;
+        int px = std::clamp((int)(std::clamp(x, 0.0f, WS) / WS * kWildEdgeColN), 2, kWildEdgeColN - 3);
+        int pz = std::clamp((int)(std::clamp(z, 0.0f, WS) / WS * kWildEdgeColN), 2, kWildEdgeColN - 3);
+        float er = 0, eg = 0, eb = 0;
+        for (int dz = -2; dz <= 2; dz++)
+            for (int dx = -2; dx <= 2; dx++) {
+                const Color& e = g_wildEdgeCols[(size_t)(pz + dz) * kWildEdgeColN + px + dx];
+                er += e.r; eg += e.g; eb += e.b;
+            }
+        float k = 1.0f - Wild3DSmooth(0.0f, 700.0f, w.d);
+        r += (er / 25.0f - r) * k; g += (eg / 25.0f - g) * k; b += (eb / 25.0f - b) * k;
+    }
+    return { (unsigned char)r, (unsigned char)g, (unsigned char)b, 255 };
+}
+// One mesh around the map: a coarse grid out to 3000 units past each edge,
+// skipping the map itself (its first ring of cells tucks just under the map's
+// own ground so the border never shows a crack).
+static Model g_wildOuterModel{};
+static bool g_wildOuterBuilt = false;
+static void Town3DApplyLitShader(Model& m);
+static void T3DApplyGroundShader(Model& m);
+static void WildOuterEnsure() {
+    if (g_wildOuterBuilt) return;
+    g_wildOuterBuilt = true;
+    const float WS = kWildernessWorldSize, EXT = 3000.0f, C = 120.0f;
+    const int N = (int)((WS + 2.0f * EXT) / C) + 1;
+    auto P = [&](int i) { return -EXT + i * C; };
+    auto inner = [&](float x, float z) { return x > C * 0.5f && z > C * 0.5f && x < WS - C * 0.5f && z < WS - C * 0.5f; };
+    std::vector<float> vtx, nrm, uv; std::vector<unsigned char> col; std::vector<unsigned short> idx;
+    std::vector<int> map((size_t)N * N, -1);
+    auto vert = [&](int i, int j) {
+        int& m = map[(size_t)j * N + i];
+        if (m >= 0) return m;
+        float x = P(i), z = P(j);
+        bool in = x >= 0.0f && z >= 0.0f && x <= WS && z <= WS;
+        bool onEdge = in && (x == 0.0f || z == 0.0f || x == WS || z == WS);
+        float y = !in ? WildOuterY(x, z) : onEdge ? WildGroundY(x, z) - 2.0f : WildGroundY(x, z) - 45.0f; // tucked under the map
+        float e = 6.0f; // normal from the height field
+        float hx = WildOuterY(x + e, z) - WildOuterY(x - e, z), hz = WildOuterY(x, z + e) - WildOuterY(x, z - e);
+        Vector3 nn = Vector3Normalize({ -hx, 2.0f * e, -hz });
+        float rel = in ? 0.0f : y - WildGroundY(std::clamp(x, 0.0f, WS), std::clamp(z, 0.0f, WS));
+        Color c = WildOuterColor(x, z, rel);
+        // ground shader surface: grass detail on the green, soil grain on rock and snow
+        float grassy = (c.g > c.r + 18 && c.g > c.b + 18) ? 1.0f : 0.0f;
+        m = (int)(vtx.size() / 3);
+        vtx.insert(vtx.end(), { x, y, z }); nrm.insert(nrm.end(), { nn.x, nn.y, nn.z });
+        col.insert(col.end(), { c.r, c.g, c.b, 255 });
+        uv.insert(uv.end(), { grassy > 0.5f ? 0.25f : 0.75f, 0.5f });
+        return m;
+    };
+    for (int j = 0; j + 1 < N; j++)
+        for (int i = 0; i + 1 < N; i++) {
+            float cx = P(i) + C * 0.5f, cz = P(j) + C * 0.5f;
+            if (inner(cx, cz) && inner(cx - C, cz - C) && inner(cx + C, cz + C)) continue; // well inside the map
+            int a = vert(i, j), b = vert(i + 1, j), c = vert(i, j + 1), d = vert(i + 1, j + 1);
+            idx.insert(idx.end(), { (unsigned short)a, (unsigned short)c, (unsigned short)b, (unsigned short)b, (unsigned short)c, (unsigned short)d });
+        }
+    Mesh mesh{};
+    mesh.vertexCount = (int)(vtx.size() / 3);
+    mesh.triangleCount = (int)(idx.size() / 3);
+    mesh.vertices = (float*)MemAlloc((unsigned int)(vtx.size() * sizeof(float)));
+    mesh.normals = (float*)MemAlloc((unsigned int)(nrm.size() * sizeof(float)));
+    mesh.colors = (unsigned char*)MemAlloc((unsigned int)col.size());
+    mesh.texcoords = (float*)MemAlloc((unsigned int)(mesh.vertexCount * 2 * sizeof(float)));
+    mesh.indices = (unsigned short*)MemAlloc((unsigned int)(idx.size() * sizeof(unsigned short)));
+    memcpy(mesh.vertices, vtx.data(), vtx.size() * sizeof(float));
+    memcpy(mesh.normals, nrm.data(), nrm.size() * sizeof(float));
+    memcpy(mesh.colors, col.data(), col.size());
+    memcpy(mesh.texcoords, uv.data(), uv.size() * sizeof(float));
+    memcpy(mesh.indices, idx.data(), idx.size() * sizeof(unsigned short));
+    UploadMesh(&mesh, false);
+    g_wildOuterModel = LoadModelFromMesh(mesh);
+    // Drawn with the map's ground shader so the detail grain and cloud shadows
+    // carry on past the edge. Its "ground map" is two texels: white grass (alpha
+    // 1) and white soil (alpha 0.5); the colour itself rides on the vertices.
+    Image im = GenImageColor(2, 1, WHITE);
+    ((Color*)im.data)[1].a = 128;
+    Texture2D t = LoadTextureFromImage(im);
+    UnloadImage(im);
+    SetTextureFilter(t, TEXTURE_FILTER_BILINEAR);
+    g_wildOuterModel.materials[0].maps[MATERIAL_MAP_ALBEDO].texture = t;
+    T3DApplyGroundShader(g_wildOuterModel);
 }
 // The wilderness drawn around a town: same heights, shifted by the town's offset.
 static Vector2 g_groundOffset = { 0.0f, 0.0f };
@@ -16764,6 +16934,14 @@ static void Wild3DEnsureGround() {
     UnloadImage(blotchN);
     UnloadImage(dirtN);
     G.tex = LoadTextureFromImage(ground);
+    { // a small copy of the colours, so the lands beyond the map can carry on from its edge
+        Image small = ImageCopy(ground);
+        ImageResize(&small, kWildEdgeColN, kWildEdgeColN);
+        Color* c = LoadImageColors(small);
+        g_wildEdgeCols.assign(c, c + kWildEdgeColN * kWildEdgeColN);
+        UnloadImageColors(c);
+        UnloadImage(small);
+    }
     UnloadImage(ground);
     GenTextureMipmaps(&G.tex);
     SetTextureFilter(G.tex, TEXTURE_FILTER_TRILINEAR);
@@ -16821,6 +16999,9 @@ static bool Wild3DInView(const Town3DCam& c, float x, float z, float radius) {
     float rx = x - c.pos.x, ry = 0.0f - c.pos.y, rz = z - c.pos.z;
     float zc = rx * c.fwd.x + ry * c.fwd.y + rz * c.fwd.z;
     if (zc < 10.0f || zc > 4200.0f) return false;
+    // past full fog: lit things have faded into the sky anyway, and the unlit
+    // bits (signposts, docks...) would float over the fogged-out ground
+    if (rx * rx + rz * rz > (g_t3dFogRange[1] + radius) * (g_t3dFogRange[1] + radius)) return false;
     float tanF = tanf(c.fovY * 0.5f * DEG2RAD);
     float xc = rx * c.right.x + ry * c.right.y + rz * c.right.z;
     float yc = rx * c.up.x + ry * c.up.y + rz * c.up.z;
@@ -17545,17 +17726,34 @@ static void Wild3DBuildDressing() {
         float sc = kWPScaleRing * (0.85f + 0.5f * Town3DHash01(z * 0.3f, x * 0.2f));
         if (side == 0) id = kWPMountainA + (int)(h * 6.0f) % 6;                    // west
         else if (side == 1) { id = kWPMountainA + (int)(h * 3.0f) % 3; tint = Color{ 225, 235, 248, 255 }; } // north
-        else id = (i % 3 == 0) ? kWPTreesALarge + (int)(h * 2.0f) % 2 * 3 : kWPHillsATrees + (int)(h * 4.0f) % 4;
+        else { id = (h < 0.5f ? kWPTreesALarge : kWPTreesBLarge); sc = kWPScaleTrees * (1.1f + 0.6f * Town3DHash01(z, x)); } // woods (the bare hill models floated over the outer land)
         add(id, x, z, rot, sc, tint, 420.0f);
     };
     int i = 0;
     for (float t = -300.0f; t <= WS + 300.0f; t += 330.0f, i++) {
-        float o1 = 260.0f + 160.0f * Town3DHash01(t, 1.0f), o2 = 260.0f + 160.0f * Town3DHash01(t, 2.0f);
+        float o1 = 1100.0f + 400.0f * Town3DHash01(t, 1.0f), o2 = 1100.0f + 400.0f * Town3DHash01(t, 2.0f); // out on the far slopes
         float o3 = 260.0f + 160.0f * Town3DHash01(t, 3.0f), o4 = 260.0f + 160.0f * Town3DHash01(t, 4.0f);
         ring(-o1, t, 0, i);                 // west edge
         ring(t, -o2, 1, i);                 // north edge
-        ring(t, WS + o3, 2, i);             // south edge
+        if (t < WildCoastX(WS) - 200.0f) { // south edge: two bands of woods on the hills (not out at sea)
+            ring(t, WS + o3 * 0.6f, 2, i);
+            ring(t + 165.0f, WS + o3 * 1.3f, 2, i);
+        }
         (void)o4;                           // east edge: open sea since the coast (2026-09-26)
+    }
+    // 4) A ragged fringe of lone trees and small clumps just past the border
+    //    (2026-09-28), so the map's edge (where the grass tufts stop) never
+    //    reads as a line. Land sides only - the east is sea.
+    for (float t = 0.0f; t <= WS; t += 95.0f) {
+        for (int side = 0; side < 3; side++) {
+            float h = Town3DHash01(t * 0.37f + side * 11.0f, 5.0f + side);
+            float out = 25.0f + 150.0f * Town3DHash01(t, 9.0f + side);
+            float x = side == 0 ? -out : t + (h - 0.5f) * 60.0f, z = side == 0 ? t + (h - 0.5f) * 60.0f : side == 1 ? -out : WS + out;
+            if (x > WildCoastX(std::clamp(z, 0.0f, WS)) - 150.0f) continue; // not on the beach or in the sea
+            int id = h < 0.35f ? kWPTreeA : h < 0.7f ? kWPTreeB : (h < 0.85f ? kWPTreesASmall : kWPTreesBSmall);
+            Color tint = side == 1 ? Color{ 225, 235, 248, 255 } : WHITE; // frosted in the north
+            add(id, x, z, h * 360.0f, kWPScaleTrees * (0.8f + 0.5f * Town3DHash01(z, x)), tint, 160.0f);
+        }
     }
 }
 
@@ -20271,8 +20469,9 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     // Ground: procedural meadow with baked paths, plus a large flat outer field
     // so the horizon never shows a hard edge.
     DrawModel(g_wild3dGround.model, { 0, 0, 0 }, 1.0f, WHITE); // hilly mesh is in world coordinates
-    DrawPlane({ 1600 * kWS, -15.0f, 1600 * kWS }, { 8000 * kWS, 8000 * kWS }, Color{ 92, 132, 70, 255 });
-    DrawPlane({ 4200 * kWS, -2.0f, 1600 * kWS }, { 4800, 8000 * kWS }, Color{ 44, 96, 122, 255 }); // open sea past the coast (2026-09-26)
+    WildOuterEnsure();
+    DrawModel(g_wildOuterModel, { 0, 0, 0 }, 1.0f, WHITE); // the lands beyond the map (2026-09-28)
+    DrawPlane({ 8000.0f, -2.0f, 2400.0f }, { 8400.0f, 14000.0f }, Color{ 44, 96, 122, 255 }); // open sea past the coast (2026-09-26)
 
     // Region dressing: tree clusters, rocks, camps, horizon ring (main pass only).
     if (!shadowPass) Wild3DDrawDressing(cull);
