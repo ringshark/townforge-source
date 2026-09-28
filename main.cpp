@@ -18657,6 +18657,90 @@ static void CorpseDrawGlint(const GameState::WorldCorpse& c) {
     float y = 30.0f + 3.0f * sinf(t * 2.2f + c.id);
     DrawSphereEx({ c.pos.x, y, c.pos.y }, 3.2f, 6, 6, Fade(Color{ 255, 226, 120, 255 }, 0.8f + 0.2f * pulse));
 }
+// ---- Sculpted monsters (2026-09-28, assets/monsters3d/) ---------------------
+// Textured, unrigged models (Meshy image-to-3D, shrunk for the web). They move
+// in code: a walking bob and lean (a skittering jitter for spiders), a lunge on
+// the attack, the usual hit flash, and a topple-and-sink when they die.
+struct MeshMonDef { const char* name; const char* file; float height; bool spider; };
+static const MeshMonDef kMeshMons[] = {
+    { "Web Spinner", "web_spinner", 38.0f, true },   { "Silk Stalker", "silk_stalker", 44.0f, true },
+    { "Venom Weaver", "venom_weaver", 50.0f, true }, { "Brood Hunter", "brood_hunter", 56.0f, true },
+    { "Nest Guardian", "nest_guardian", 64.0f, true }, { "The Broodmother", "spider_broodmother", 100.0f, true },
+    { "Orc Grunt", "orc_warbringer", 70.0f, false }, { "Orc Archer", "orc_warbringer", 68.0f, false },
+    { "Orc Shaman", "orc_warbringer", 68.0f, false }, { "Orc Brute", "orc_warbringer", 78.0f, false },
+    { "Orc Warlord", "orc_overlord", 88.0f, false }, { "Rock Golem", "stoneborn", 88.0f, false },
+};
+struct MeshMonModel { bool tried = false, ok = false; Model model{}; float baseH = 1.0f; float halfW = 1.0f; };
+static MeshMonModel g_meshMon[sizeof(kMeshMons) / sizeof(kMeshMons[0])];
+static int MeshMonIndex(const std::string& name) {
+    for (int i = 0; i < (int)(sizeof(kMeshMons) / sizeof(kMeshMons[0])); i++) if (name == kMeshMons[i].name) return i;
+    return -1;
+}
+static MeshMonModel* MeshMonGet(int i) {
+    MeshMonModel& M = g_meshMon[i];
+    if (!M.tried) {
+        M.tried = true;
+        for (int j = 0; j < i; j++) // several monsters share one file: reuse it
+            if (g_meshMon[j].ok && std::string(kMeshMons[j].file) == kMeshMons[i].file) { M = g_meshMon[j]; return &M; }
+        std::string f = std::string("assets/monsters3d/") + kMeshMons[i].file + ".glb";
+        if (!FileExists(f.c_str())) return &M;
+        M.model = LoadModel(f.c_str());
+        if (M.model.meshCount <= 0) return &M;
+        BoundingBox bb = GetModelBoundingBox(M.model);
+        M.baseH = std::max(0.01f, bb.max.y - bb.min.y);
+        M.halfW = std::max(bb.max.x - bb.min.x, bb.max.z - bb.min.z) * 0.5f;
+        // stand it on the ground, centred
+        M.model.transform = MatrixTranslate(-(bb.min.x + bb.max.x) * 0.5f, -bb.min.y, -(bb.min.z + bb.max.z) * 0.5f);
+        Town3DApplyLitShader(M.model);
+        M.ok = true;
+    }
+    return &M;
+}
+// attackT: the lunge phase (1 -> 0) or -1; deathT: 0..1 or -1; sizeMul scales the table height.
+static bool MeshMonDraw(const std::string& name, float x, float z, float yawRad, float sizeMul, Color tint,
+                        const T3CAnim& a, float attackT, float deathT, bool shadowPass) {
+    int i = MeshMonIndex(name);
+    if (i < 0) return false;
+    MeshMonModel* M = MeshMonGet(i);
+    if (!M->ok) return false;
+    const MeshMonDef& d = kMeshMons[i];
+    float s = d.height * sizeMul / M->baseH;
+    float rotDeg = -90.0f - yawRad * RAD2DEG; // Meshy's models face -Z
+    float t = a.t + a.seed * 0.37f, mv = std::clamp(a.move, 0.0f, 1.0f);
+    float bob = 0.0f, pitch = 0.0f, roll = 0.0f, fwd = 0.0f, sink = 0.0f;
+    if (deathT >= 0.0f) { // topple onto its side (spiders flip over) and settle
+        float k = std::clamp(deathT * 1.6f, 0.0f, 1.0f);
+        k = 1.0f - (1.0f - k) * (1.0f - k);
+        if (d.spider) roll = 180.0f * k; else roll = 88.0f * k;
+        sink = d.spider ? -d.height * 0.55f * k : 0.0f; // flipped: lift by its own height so it lies on its back
+    } else {
+        if (d.spider) { // skitter: fast shallow bounce, a little wobble
+            bob = fabsf(sinf(t * 16.0f)) * 1.6f * mv + sinf(t * 2.1f) * 0.6f;
+            roll = sinf(t * 16.0f) * 3.0f * mv;
+        } else {        // heavy stride: rise and fall, sway, lean into the walk
+            bob = fabsf(sinf(t * 5.5f)) * 3.0f * mv + sinf(t * 1.7f) * 0.5f;
+            roll = sinf(t * 5.5f) * 4.0f * mv;
+            pitch = 7.0f * mv;
+        }
+        if (attackT >= 0.0f) { // the lunge
+            float k = sinf((1.0f - attackT) * PI);
+            fwd = k * (d.spider ? 16.0f : 12.0f);
+            pitch += k * (d.spider ? -18.0f : 16.0f); // spiders rear up, brutes lean into the blow
+            bob += k * (d.spider ? 4.0f : 0.0f);
+        }
+        if (!shadowPass) T3CDrawBlobShadow(g_t3cHumans[2].parts.merged, x, z, yawRad, std::max(0.8f, M->halfW * s / 16.0f));
+    }
+    T3DLiftScope lift_(x, z); // onto the wilderness hills
+    rlPushMatrix();
+    rlTranslatef(x + cosf(yawRad) * fwd, bob - sink, z + sinf(yawRad) * fwd);
+    rlRotatef(rotDeg, 0, 1, 0);
+    rlRotatef(pitch, 1, 0, 0);
+    rlRotatef(roll, 0, 0, 1);
+    if (deathT >= 0.0f && d.spider && roll > 90.0f) rlTranslatef(0.0f, -d.height * sizeMul * (roll / 180.0f), 0.0f);
+    DrawModelEx(M->model, { 0, 0, 0 }, { 0, 1, 0 }, 0.0f, { s, s, s }, tint);
+    rlPopMatrix();
+    return true;
+}
 static void Wild3DDrawCorpse(const GameState::WorldCorpse& c, bool shadowPass) {
     if (c.name == "Treasure Chest") { // (2026-09-28) an opened treasure chest, looted like a body
         Town3DDrawPiece(g_t3dModels.chest, { c.pos.x, 0.0f, c.pos.y }, 30.0f, 1.15f);
@@ -18675,8 +18759,12 @@ static void Wild3DDrawCorpse(const GameState::WorldCorpse& c, bool shadowPass) {
         const WildernessMonsterSpot& sp = kWildernessMonsterSpots[c.spotIdx];
         T3CMonLook ml = T3CMonsterLook(sp.iconIdx);
         Color rc = { 0, 0, 0, 0 }; float sc = 1.0f;
-        int an = ml.humanoid ? -1 : AnimalForMonster(sp.iconIdx, &rc, &sc);
-        if (an >= 0) {
+        T3CAnim still{ 0.0f, 0.0f, 0.0f };
+        bool sculpted = MeshMonDraw(sp.name, c.pos.x, c.pos.y, c.yaw, 1.0f, dim, still, -1.0f, 1.0f, shadowPass);
+        if (sculpted) drawn = true;
+        int an = (ml.humanoid || sculpted) ? -1 : AnimalForMonster(sp.iconIdx, &rc, &sc);
+        if (sculpted) {
+        } else if (an >= 0) {
             AnimalPose ap; ap.recolor = rc; ap.deathT = 1.0f; // lying where it fell
             Color named = AnimalRecolorForMonsterName(sp.name);
             if (named.a > 0) ap.recolor = named;
@@ -19850,6 +19938,9 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             DrawTriWyrm(mp, face, mHurtT, mAtk, frac, ma.move, shrink, shadowPass);
             continue;
         }
+        if (MeshMonDraw(kWildernessMonsterSpots[i].name, mp.x, mp.y, face, 1.0f, CombatHitTint(mHurtT, WHITE, Color{ 220, 90, 90, 255 }), ma, mAtk,
+                        isDying ? 1.0f - dying->timer / std::max(0.01f, dying->duration) : -1.0f, shadowPass))
+            continue; // a sculpted model (2026-09-28)
         Color anRecolor = { 0, 0, 0, 0 }; float anScale = 1.0f;
         int anId = mlook.humanoid ? -1 : AnimalForMonster(kWildernessMonsterSpots[i].iconIdx, &anRecolor, &anScale);
         if (anId >= 0) { // animated model (2026-09-26): its own attack/hit/death clips
@@ -20939,11 +21030,18 @@ static Color Dungeon3DMonsterColor(int dungeonIdx, bool boss) {
 // kit (humanoid for orcs/goblins/wraiths/skeletons, quadruped for beasts),
 // with diagonal-pair trot, idle bob and head turns. `tint` is the per-dungeon
 // palette color (boss brightened by the caller).
+static const DungeonMonster& DungeonSlotMonster(const DungeonDef& dungeon, int slotIdx);
 static void Dungeon3DDrawMonster(int dungeonIdx, int monsterIdx, int trackId, float x, float z,
                                  float yawRad, Color tint, float sizeMul,
                                  float attackT = -1.0f, float hurtT = -1.0f, float deathT = -1.0f) {
     T3CDunLook look = T3CDungeonMonsterLook(dungeonIdx, monsterIdx);
     T3CAnim a = T3CMakeAnim(trackId, x, z);
+    { // a sculpted model (2026-09-28)
+        const DungeonDef& dd = kDungeons[(size_t)dungeonIdx];
+        const std::string& nm = monsterIdx == kDungeonBossSlot ? dd.boss.name : DungeonSlotMonster(dd, monsterIdx).name;
+        if (MeshMonDraw(nm, x, z, yawRad, sizeMul / (monsterIdx == kDungeonBossSlot ? 1.3f : 1.0f),
+                        CombatHitTint(hurtT, WHITE, Color{ 220, 90, 90, 255 }), a, attackT, deathT, false)) return;
+    }
     float sm = sizeMul * look.scale;
     // Combat read (2026-09-24): lunge pose on attackT, white-hot then red flash
     // while hurtT is live (2026-09-25).
@@ -21165,6 +21263,10 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         rlTranslatef(0.0f, -sink, 0.0f);
         int track = kT3CTrackCorpse + c.id % 64;
         bool human = c.dungeonIdx >= 0 && c.monsterIdx >= 0 && T3CDungeonMonsterLook(c.dungeonIdx, c.monsterIdx).humanoid;
+        if (c.dungeonIdx >= 0 && c.monsterIdx >= 0) { // sculpted models lie where they fell too (2026-09-28)
+            const DungeonDef& dd = kDungeons[(size_t)c.dungeonIdx];
+            if (MeshMonIndex(c.monsterIdx == kDungeonBossSlot ? dd.boss.name : DungeonSlotMonster(dd, c.monsterIdx).name) >= 0) human = true;
+        }
         if (human)
             Dungeon3DDrawMonster(c.dungeonIdx, c.monsterIdx, track, c.pos.x, c.pos.y, c.yaw,
                                  ColorBrightness(Dungeon3DMonsterColor(c.dungeonIdx, c.isBoss), -0.2f), c.isBoss ? 1.3f : 1.0f,
