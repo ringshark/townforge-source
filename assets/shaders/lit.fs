@@ -64,11 +64,16 @@ void main()
     // Gamma encode (linear -> display)
     col = pow(max(col, vec3(0.0)), vec3(1.0/2.2));
 
+    // Window glass (material alpha 254, 2026-09-28): drawn unshaded, so panes
+    // glow with lamplight after dark instead of going black with the walls.
+    float alpha = texelColor.a;
+    if (colDiffuse.a > 0.99 && colDiffuse.a < 0.999) { col = texelColor.rgb; alpha = 1.0; }
+
     // Distance fog toward the horizon color (applied in display space so the
     // far ground melts into the sky gradient)
     float fogDist = length(viewPos - fragPosition);
     float fogF = smoothstep(fogRange.x, fogRange.y, fogDist);
     col = mix(col, fogColor, clamp(fogF, 0.0, 1.0));
 
-    gl_FragColor = vec4(col, texelColor.a);
+    gl_FragColor = vec4(col, alpha);
 }

@@ -10574,6 +10574,7 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
 //    with raylib's headers on every platform, including the emscripten build).
 // ---------------------------------------------------------------------
 #include "rlgl.h"
+#include "external/cgltf.h" // (in libraylib) kit material names, for texture sharing
 
 // ---- Terrain height hook (2026-09-26 rolling hills) ----
 // The wilderness has hills; the town, dungeons and interiors stay flat. While
@@ -13755,6 +13756,12 @@ static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, in
         g_t3dYaw = kT3DFollowYaw;
         g_t3dPitch = followPitch;
     }
+#ifdef TF_CAMYAW // debug builds: a fixed camera angle for screenshots
+    g_t3dYaw = TF_CAMYAW; g_t3dPitch = TF_CAMPITCH; g_t3dDist = TF_CAMDIST;
+#ifdef TF_CAMSPIN // step round the target every 2.5s
+    g_t3dYaw += floorf((float)GetTime() / 2.5f) * TF_CAMSPIN; g_t3dYawSm = g_t3dYaw;
+#endif
+#endif
     float ty = 1.0f - expf(-dt * kT3DCamDamp);
     float tz = 1.0f - expf(-dt * kT3DZoomDamp);
     float tt = 1.0f - expf(-dt * kT3DTargetDamp);
@@ -14170,6 +14177,7 @@ static float T3DLocalTimeOfDay() {
     return (lt->tm_hour + lt->tm_min / 60.0f + lt->tm_sec / 3600.0f) / 24.0f;
 #endif
 }
+static void Town3DGlassTick();
 static bool g_t3dLightDirty = false; // an interior pushed its own lamplight: re-push next update
 static void T3DUpdateDayNight(float worldTime, bool indoors) {
     (void)worldTime;
@@ -14178,6 +14186,7 @@ static void T3DUpdateDayNight(float worldTime, bool indoors) {
     g_t3dSkyHorizon = g_t3dLightNow.horizon;
     g_t3dSkyZenith = g_t3dLightNow.zenith;
     g_t3dNight = std::clamp((0.62f - g_t3dLightNow.sunI) / 0.34f, 0.0f, 1.0f);
+    Town3DGlassTick(); // window glass: dark by day, lamplit after dusk
     static float lastPushed = -1.0f;
     if (g_t3dLightDirty) { lastPushed = -1.0f; g_t3dLightDirty = false; }
     float sig = g_t3dLightNow.sun.x + g_t3dLightNow.amb[0] * 3.0f + g_t3dLightNow.horizon.r / 255.0f * 7.0f;
@@ -14606,26 +14615,74 @@ struct Town3DModels {
     Model treeOak{}, treePine{}, treeDetailed{}, treeDefault{}, treeFat{}, bush{};
     Model barrel{}, chest{};
     Model fenceSingle{}, fenceExt{};
+    // Art pass (2026-09-28): more of the same MegaKit - glazed windows, doors,
+    // shutters, timber corner posts, floor beams, stone footings, balconies.
+    Model wallPlasterBase{}, window{}, shutters{}, door{}, doorStud{}, cornerWood{}, cornerBrick{};
+    Model beam{}, footing{}, chimney2{}, balcony{}, support{}, towerRoof{}, vine2{}, vine4{}, steps{};
 };
 static Town3DModels g_t3dModels;
+
+// Kit models share their textures (2026-09-28): raylib loads a private copy of
+// every image per model, and the kit pieces all paint from the same handful of
+// sheets. Each texture is loaded once and handed to every model that uses it.
+// Window glass is collected so it can be lit from within after dark.
+static std::map<std::string, Texture2D> g_t3dKitTex;
+static std::vector<Material*> g_t3dGlass;
+static void Town3DApplyLitShader(Model& m);
+static Model T3DLoadKit(const char* path) {
+    Model m = LoadModel(path);
+    if (m.meshCount <= 0) return m;
+    cgltf_options opt{};
+    cgltf_data* data = nullptr;
+    if (cgltf_parse_file(&opt, path, &data) == cgltf_result_success) {
+        for (cgltf_size i = 0; i < data->materials_count && (int)i + 1 < m.materialCount; i++) {
+            const cgltf_material& gm = data->materials[i];
+            Material& mat = m.materials[i + 1]; // raylib: slot 0 is its default material
+            if (gm.name && strcmp(gm.name, "MI_WindowGlass") == 0) {
+                mat.maps[MATERIAL_MAP_ALBEDO].color = { 62, 72, 86, 254 }; // see Town3DGlassTick
+                g_t3dGlass.push_back(&mat);
+                continue;
+            }
+            const cgltf_texture* t = gm.has_pbr_metallic_roughness ? gm.pbr_metallic_roughness.base_color_texture.texture : nullptr;
+            if (!t || !t->image || !t->image->uri) continue;
+            Texture2D& tex = mat.maps[MATERIAL_MAP_ALBEDO].texture;
+            if (tex.id == 0 || tex.id == rlGetTextureIdDefault()) continue;
+            auto it = g_t3dKitTex.find(t->image->uri);
+            if (it == g_t3dKitTex.end()) g_t3dKitTex[t->image->uri] = tex;
+            else { UnloadTexture(tex); tex = it->second; }
+        }
+        cgltf_free(data);
+    }
+    Town3DApplyLitShader(m);
+    return m;
+}
+// Glass reads as dark panes by day and warm lamplight after dusk. lit.fs draws
+// any material whose alpha is 254 unshaded, so the glow isn't dimmed by night.
+static void Town3DGlassTick() {
+    float n = std::clamp((g_t3dNight - 0.15f) / 0.5f, 0.0f, 1.0f);
+    Color day = { 62, 72, 86, 254 }, night = { 255, 196, 112, 254 };
+    Color c = { (unsigned char)(day.r + (night.r - day.r) * n), (unsigned char)(day.g + (night.g - day.g) * n),
+                (unsigned char)(day.b + (night.b - day.b) * n), 254 };
+    for (Material* m : g_t3dGlass) m->maps[MATERIAL_MAP_ALBEDO].color = c;
+}
 
 static void Town3DLoadModels() {
     Town3DModels& M = g_t3dModels;
     if (M.loaded) return;
     M.loaded = true;
     Town3DEnsureShadow(); // models want the sun shader when shadows are available
-    M.wallPlaster     = LoadModel("assets/models/Wall_Plaster_Straight.gltf");
-    M.wallPlasterDoor = LoadModel("assets/models/Wall_Plaster_Door_Flat.gltf");
-    M.wallPlasterWin  = LoadModel("assets/models/Wall_Plaster_Window_Wide_Flat.gltf");
-    M.wallBrick       = LoadModel("assets/models/Wall_UnevenBrick_Straight.gltf");
-    M.wallBrickDoor   = LoadModel("assets/models/Wall_UnevenBrick_Door_Flat.gltf");
-    M.wallBrickWin    = LoadModel("assets/models/Wall_UnevenBrick_Window_Wide_Flat.gltf");
-    M.roof44          = LoadModel("assets/models/Roof_RoundTiles_4x4.gltf");
-    M.roof46          = LoadModel("assets/models/Roof_RoundTiles_4x6.gltf");
-    M.chimney         = LoadModel("assets/models/Prop_Chimney.gltf");
-    M.crate           = LoadModel("assets/models/Prop_Crate.gltf");
-    M.wagon           = LoadModel("assets/models/Prop_Wagon.gltf");
-    M.vine            = LoadModel("assets/models/Prop_Vine1.gltf");
+    M.wallPlaster     = T3DLoadKit("assets/models/Wall_Plaster_Straight.gltf");
+    M.wallPlasterDoor = T3DLoadKit("assets/models/Wall_Plaster_Door_Flat.gltf");
+    M.wallPlasterWin  = T3DLoadKit("assets/models/Wall_Plaster_Window_Wide_Flat.gltf");
+    M.wallBrick       = T3DLoadKit("assets/models/Wall_UnevenBrick_Straight.gltf");
+    M.wallBrickDoor   = T3DLoadKit("assets/models/Wall_UnevenBrick_Door_Flat.gltf");
+    M.wallBrickWin    = T3DLoadKit("assets/models/Wall_UnevenBrick_Window_Wide_Flat.gltf");
+    M.roof44          = T3DLoadKit("assets/models/Roof_RoundTiles_4x4.gltf");
+    M.roof46          = T3DLoadKit("assets/models/Roof_RoundTiles_4x6.gltf");
+    M.chimney         = T3DLoadKit("assets/models/Prop_Chimney.gltf");
+    M.crate           = T3DLoadKit("assets/models/Prop_Crate.gltf");
+    M.wagon           = T3DLoadKit("assets/models/Prop_Wagon.gltf");
+    M.vine            = T3DLoadKit("assets/models/Prop_Vine1.gltf");
     // Props pass: Kenney Nature Kit trees/bush (CC0), KayKit Dungeon barrel/chest
     // (CC0), Quaternius wooden fences (CC0, same kit as the buildings).
     M.treeOak         = LoadModel("assets/models/tree_oak.glb");
@@ -14636,20 +14693,8 @@ static void Town3DLoadModels() {
     M.bush            = LoadModel("assets/models/plant_bush.glb");
     M.barrel          = LoadModel("assets/models/barrel_small.glb");
     M.chest           = LoadModel("assets/models/chest.glb");
-    M.fenceSingle     = LoadModel("assets/models/Prop_WoodenFence_Single.gltf");
-    M.fenceExt        = LoadModel("assets/models/Prop_WoodenFence_Extension1.gltf");
-    Town3DApplyLitShader(M.wallPlaster);
-    Town3DApplyLitShader(M.wallPlasterDoor);
-    Town3DApplyLitShader(M.wallPlasterWin);
-    Town3DApplyLitShader(M.wallBrick);
-    Town3DApplyLitShader(M.wallBrickDoor);
-    Town3DApplyLitShader(M.wallBrickWin);
-    Town3DApplyLitShader(M.roof44);
-    Town3DApplyLitShader(M.roof46);
-    Town3DApplyLitShader(M.chimney);
-    Town3DApplyLitShader(M.crate);
-    Town3DApplyLitShader(M.wagon);
-    Town3DApplyLitShader(M.vine);
+    M.fenceSingle     = T3DLoadKit("assets/models/Prop_WoodenFence_Single.gltf");
+    M.fenceExt        = T3DLoadKit("assets/models/Prop_WoodenFence_Extension1.gltf");
     T3DApplyFoliageShader(M.treeOak); // trees and bushes sway in the wind (2026-09-26)
     T3DApplyFoliageShader(M.treePine);
     T3DApplyFoliageShader(M.treeDetailed);
@@ -14658,8 +14703,22 @@ static void Town3DLoadModels() {
     T3DApplyFoliageShader(M.bush);
     Town3DApplyLitShader(M.barrel);
     Town3DApplyLitShader(M.chest);
-    Town3DApplyLitShader(M.fenceSingle);
-    Town3DApplyLitShader(M.fenceExt);
+    M.wallPlasterBase = T3DLoadKit("assets/models/Wall_Plaster_Straight_Base.gltf");
+    M.window      = T3DLoadKit("assets/models/Window_Wide_Flat1.gltf");
+    M.shutters    = T3DLoadKit("assets/models/WindowShutters_Wide_Flat_Open.gltf");
+    M.door        = T3DLoadKit("assets/models/Door_1_Flat.gltf");
+    M.doorStud    = T3DLoadKit("assets/models/Door_2_Flat.gltf");
+    M.cornerWood  = T3DLoadKit("assets/models/Corner_Exterior_Wood.gltf");
+    M.cornerBrick = T3DLoadKit("assets/models/Corner_Exterior_Brick.gltf");
+    M.beam        = T3DLoadKit("assets/models/Wall_BottomCover.gltf");
+    M.footing     = T3DLoadKit("assets/models/Prop_ExteriorBorder_Straight1.gltf");
+    M.chimney2    = T3DLoadKit("assets/models/Prop_Chimney2.gltf");
+    M.balcony     = T3DLoadKit("assets/models/Balcony_Cross_Straight.gltf");
+    M.support     = T3DLoadKit("assets/models/Prop_Support.gltf");
+    M.towerRoof   = T3DLoadKit("assets/models/Roof_Tower_RoundTiles.gltf");
+    M.vine2       = T3DLoadKit("assets/models/Prop_Vine2.gltf");
+    M.vine4       = T3DLoadKit("assets/models/Prop_Vine4.gltf");
+    M.steps       = T3DLoadKit("assets/models/Stairs_Exterior_Straight.gltf");
 }
 
 // DrawModelEx guarded against a failed/missing asset, so a partially-filled
@@ -14704,37 +14763,97 @@ static Color Town3DTintFor(const std::string& key, bool roof) {
 
 // One modular house centered at (cx, cz): wMod x dMod footprint in 2m modules,
 // `stories` wall stories high, door on the ground-floor front (+z) face.
-// Wall pieces are modeled with their exterior toward local -z, so the back row
-// needs no rotation and the front row is turned 180 degrees.
+// The kit's wall pieces face their exterior toward local +z (brick skirt, glass,
+// shutters all sit on that side), with the wall's thickness running back to -z.
+// (Until the 2026-09-28 art pass they were set 180 degrees round - inside out.)
+// Art pass: every window is glazed (and lit after dark), ground-floor windows
+// get open shutters on some houses, doors are hung, timber posts dress the
+// corners, beams mark each floor and a stone footing runs round the base.
+static bool g_t3dHouseLite = false; // far away (the walled towns from the wilds): skip the small trim
 static void Town3DDrawHouse(float cx, float cz, const Model& wall, const Model& wallDoor,
                             const Model& wallWin, const Model& roof, float roofRotY,
                             int wMod, int dMod, int stories, bool chimney,
                             Color wallTint, Color roofTint) {
+    Town3DModels& M = g_t3dModels;
     const float S = kT3DModScale;
     const float mod = 2.0f;      // kit grid module, meters
     const float wallH = 3.125f;  // one wall story, meters
     const float baseY = 2.0f;    // sits on the foundation slab
+    const bool plaster = &wall == &M.wallPlaster;
     float hw = wMod * mod * 0.5f, hd = dMod * mod * 0.5f; // half extents, meters
+    unsigned hs = (unsigned)(wallTint.g * 7 + wallTint.b * 13 + roofTint.g * 31 + wMod * 3 + dMod * 5 + stories);
+    const bool shutters = (hs % 3) != 0;
+    // one wall slot: its piece, plus the window glazing / door leaf it frames
+    auto slot = [&](float x, float y, float z, float rot, int kind, int st) { // kind 0 plain, 1 window, 2 door
+        const Model& m = kind == 2 ? wallDoor : kind == 1 ? wallWin : (plaster && st == 0 ? M.wallPlasterBase : wall);
+        Town3DDrawPiece(m, { x, y, z }, rot, 1.0f, wallTint);
+        float rr = rot * DEG2RAD, fx = sinf(rr), fz = cosf(rr), rx = cosf(rr), rz = -sinf(rr); // out, right
+        if (kind == 1) {
+            Town3DDrawPiece(M.window, { x, y, z }, rot);
+            if (st == 0 && shutters && !g_t3dHouseLite) Town3DDrawPiece(M.shutters, { x, y, z }, rot);
+        } else if (kind == 2 && !g_t3dHouseLite) {
+            const float hx = -0.56f * S, in = -0.08f * S; // hinge side, set back in the frame
+            Town3DDrawPiece(((hs / 3) % 2) ? M.doorStud : M.door, { x + rx * hx + fx * in, y, z + rz * hx + fz * in }, rot);
+        }
+    };
     for (int st = 0; st < stories; st++) {
         float yb = baseY + st * wallH * S;
         for (int i = 0; i < wMod; i++) { // front (+z, door) and back (-z) rows
             float x = cx + (-hw + mod * (i + 0.5f)) * S;
-            const Model& m = (st == 0 && i == wMod / 2) ? wallDoor : ((i % 2) ? wallWin : wall);
-            Town3DDrawPiece(m, { x, yb, cz + hd * S }, 180.0f, 1.0f, wallTint);
-            Town3DDrawPiece(m, { x, yb, cz - hd * S }, 0.0f, 1.0f, wallTint);
+            bool door = st == 0 && i == wMod / 2;
+            slot(x, yb, cz + hd * S, 0.0f, door ? 2 : ((i + st) % 2 == 0 ? 1 : 0), st);
+            slot(x, yb, cz - hd * S, 180.0f, (i + st) % 2 == 1 ? 1 : 0, st);
         }
         for (int i = 0; i < dMod; i++) { // left (-x) and right (+x) rows
             float z = cz + (-hd + mod * (i + 0.5f)) * S;
-            const Model& m = (i % 2) ? wallWin : wall;
-            Town3DDrawPiece(m, { cx - hw * S, yb, z }, 90.0f, 1.0f, wallTint);
-            Town3DDrawPiece(m, { cx + hw * S, yb, z }, -90.0f, 1.0f, wallTint);
+            slot(cx - hw * S, yb, z, -90.0f, (i + st) % 2 == 0 ? 1 : 0, st);
+            slot(cx + hw * S, yb, z, 90.0f, (i + st) % 2 == 1 ? 1 : 0, st);
         }
+        if (g_t3dHouseLite) continue;
+        // corner posts (timber on plaster, dressed stone quoins on brick)
+        for (int c = 0; c < 4; c++) {
+            float sx = (c & 1) ? 1.0f : -1.0f, sz = (c & 2) ? 1.0f : -1.0f;
+            float rot = sx > 0 ? (sz > 0 ? 90.0f : 180.0f) : (sz > 0 ? 0.0f : -90.0f);
+            Town3DDrawPiece(plaster ? M.cornerWood : M.cornerBrick, { cx + sx * hw * S, yb, cz + sz * hd * S }, rot, 1.0f,
+                            plaster ? WHITE : wallTint);
+        }
+        // a beam along each face where one floor meets the next
+        if (st > 0)
+            for (int i = 0; i < wMod; i++) {
+                float x = cx + (-hw + mod * (i + 0.5f)) * S;
+                Town3DDrawPiece(M.beam, { x, yb, cz + hd * S }, 0.0f);
+                Town3DDrawPiece(M.beam, { x, yb, cz - hd * S }, 180.0f);
+            }
+        if (st > 0)
+            for (int i = 0; i < dMod; i++) {
+                float z = cz + (-hd + mod * (i + 0.5f)) * S;
+                Town3DDrawPiece(M.beam, { cx - hw * S, yb, z }, -90.0f);
+                Town3DDrawPiece(M.beam, { cx + hw * S, yb, z }, 90.0f);
+            }
+    }
+    // stone footing round the base (a step under the door)
+    for (int i = 0; i < wMod && !g_t3dHouseLite; i++) {
+        float x = cx + (-hw + mod * (i + 0.5f)) * S;
+        Town3DDrawPiece(M.footing, { x, 0.1f, cz + hd * S }, 0.0f);
+        Town3DDrawPiece(M.footing, { x, 0.1f, cz - hd * S }, 180.0f);
+    }
+    for (int i = 0; i < dMod && !g_t3dHouseLite; i++) {
+        float z = cz + (-hd + mod * (i + 0.5f)) * S;
+        Town3DDrawPiece(M.footing, { cx - hw * S, 0.1f, z }, -90.0f);
+        Town3DDrawPiece(M.footing, { cx + hw * S, 0.1f, z }, 90.0f);
     }
     float topY = baseY + stories * wallH * S;
     // Roof origin sits 0.5m up into the eaves (measured from the glTF bounds).
     Town3DDrawPiece(roof, { cx, topY + 0.5f * S, cz }, roofRotY, 1.0f, roofTint);
     if (chimney)
-        Town3DDrawPiece(g_t3dModels.chimney, { cx + 1.3f * S, topY + 1.2f * S, cz }, 0.0f);
+        Town3DDrawPiece((hs % 2) ? M.chimney2 : M.chimney, { cx + 1.3f * S, topY + 1.2f * S, cz }, 0.0f);
+    // a balcony over the door on the taller houses
+    if (stories >= 2 && wMod >= 3 && !g_t3dHouseLite) {
+        float yb = baseY + wallH * S;
+        Town3DDrawPiece(M.balcony, { cx, yb, cz + hd * S }, 0.0f);
+        Town3DDrawPiece(M.support, { cx - 0.9f * S, baseY, cz + hd * S }, 0.0f);
+        Town3DDrawPiece(M.support, { cx + 0.9f * S, baseY, cz + hd * S }, 0.0f);
+    }
 }
 
 // One town building -> its MegaKit assembly. Footprints match the old box layout
@@ -14945,7 +15064,7 @@ static void Town3DDrawBuilding(const std::string& key, float cx, float cz) {
             Town3DDrawPiece(M.crate, { cx + 3.4f * S, 0.0f + 1.06f * S, cz + 1.8f * S }, 40.0f);
         }
         if (key == "tailor" || key == "healer" || key == "house") { // vines on the front wall
-            Town3DDrawPiece(M.vine, { cx - 1.0f * S, 2.0f + 2.6f * S, cz + 2.35f * S }, 0.0f);
+            Town3DDrawPiece(M.vine, { cx - 1.0f * S, 2.0f + 2.6f * S, cz + 2.1f * S }, 0.0f);
         }
         if (key == "minersguild") { // Phase 4: ore wagon + crate stack by the guild hall door
             Town3DDrawPiece(M.wagon, { cx - 4.6f * S, 0.0f, cz + 3.2f * S }, 115.0f);
@@ -18368,31 +18487,132 @@ static void Wild3DDrawEntrance(const WildernessDungeonEntrance& e, int idx, floa
     }
     rlPopMatrix();
 }
+// ---- Dressed stone for the town walls (2026-09-28 art pass) -------------------
+// The walls, towers and gatehouses seen from the wilds were flat-colored boxes.
+// They now use a lit, textured cube/cylinder with a painted ashlar texture
+// (coursed blocks, mortar joints, weathering), tinted per town, and the towers
+// wear the MegaKit's tiled tower roof with a pennant on top.
+struct T3DStone { bool tried = false, ready = false; Model cube{}, cyl{}; };
+static T3DStone g_t3dStone;
+static void T3DStoneEnsure() {
+    T3DStone& T = g_t3dStone;
+    if (T.tried) return;
+    T.tried = true;
+    const int W = 128, H = 256, rows = 8; // 8 courses of blocks per texture
+    Image im = GenImageColor(W, H, WHITE);
+    Color* px = (Color*)im.data;
+    const int ch = H / rows;
+    for (int y = 0; y < H; y++) {
+        int row = y / ch, ry = y % ch;
+        int off = (row % 2) ? 21 : 0;
+        for (int x = 0; x < W; x++) {
+            int bx = (x + off) % W, blk = (x + off) / 43 + row * 7;
+            int rx = bx % 43;
+            float tone = 0.80f + SurfRand(blk, row, 91) * 0.16f;                 // each block its own shade
+            float grain = SurfRand(x, y, 17) * 0.10f + SurfRand(x / 3, y / 3, 23) * 0.08f;
+            float v = tone + grain - 0.09f;
+            if (ry < 2 || rx < 2) v = 0.52f + SurfRand(x, y, 5) * 0.06f;           // mortar joints
+            else if (ry < 4 || rx < 4) v *= 0.9f;                                  // soft shadowed arris
+            else if (ry > ch - 3) v *= 1.06f;                                      // lit top edge of the next course
+            float moss = std::max(0.0f, SurfRand(x / 6, y / 6, 44) - 0.82f) * 2.0f; // a little weathering
+            px[y * W + x] = { (unsigned char)std::clamp(255 * v * (1.0f - moss * 0.3f), 0.0f, 255.0f),
+                              (unsigned char)std::clamp(255 * v * (1.0f - moss * 0.1f), 0.0f, 255.0f),
+                              (unsigned char)std::clamp(255 * v * (1.0f - moss * 0.35f), 0.0f, 255.0f), 255 };
+        }
+    }
+    Texture2D tex = LoadTextureFromImage(im);
+    UnloadImage(im);
+    GenTextureMipmaps(&tex);
+    SetTextureFilter(tex, TEXTURE_FILTER_TRILINEAR);
+    SetTextureWrap(tex, TEXTURE_WRAP_REPEAT);
+    T.cube = LoadModelFromMesh(GenMeshCube(1.0f, 1.0f, 1.0f));
+    T.cyl = LoadModelFromMesh(GenMeshCylinder(1.0f, 1.0f, 14));
+    T.cube.materials[0].maps[MATERIAL_MAP_ALBEDO].texture = tex;
+    T.cyl.materials[0].maps[MATERIAL_MAP_ALBEDO].texture = tex;
+    Town3DApplyLitShader(T.cube);
+    Town3DApplyLitShader(T.cyl);
+    T.ready = true;
+}
+// A block of dressed stone centred at c (falls back to a plain cube).
+static void StoneBox(Vector3 c, Vector3 size, Color tint) {
+    T3DStoneEnsure();
+    if (!g_t3dStone.ready) { DrawCube(c, size.x, size.y, size.z, tint); return; }
+    DrawModelEx(g_t3dStone.cube, c, { 0, 1, 0 }, 0.0f, size, tint);
+}
+// A round stone tower from y0 up h, radius r.
+static void StoneTower(float x, float y0, float z, float r, float h, Color tint) {
+    T3DStoneEnsure();
+    if (!g_t3dStone.ready) { DrawCylinder({ x, y0, z }, r, r, h, 14, tint); return; }
+    DrawModelEx(g_t3dStone.cyl, { x, y0, z }, { 0, 1, 0 }, 0.0f, { r, h, r }, tint);
+}
+// The crown of a tower: a corbelled parapet with merlons, the kit's tiled
+// conical roof, and a pennant in the town's colour snapping in the wind.
+static void StoneTowerCrown(float x, float top, float z, float r, Color tint, Color roofTint, Color flag) {
+    Town3DModels& M = g_t3dModels;
+    StoneTower(x, top - 3.0f, z, r + 3.0f, 7.0f, ColorBrightness(tint, -0.12f)); // corbel ring
+    for (int k = 0; k < 8; k++) {
+        float a = k * PI / 4.0f;
+        StoneBox({ x + cosf(a) * (r + 1.5f), top + 7.0f, z + sinf(a) * (r + 1.5f) }, { 7.0f, 8.0f, 7.0f }, tint);
+    }
+    float sc = (r + 4.0f) / (2.83f * kT3DModScale);
+    Town3DDrawPiece(M.towerRoof, { x, top + 6.0f + 0.57f * kT3DModScale * sc, z }, 0.0f, sc, roofTint);
+    float poleB = top + 6.0f + 7.3f * kT3DModScale * sc, poleT = poleB + 22.0f;
+    DrawCylinderEx({ x, poleB, z }, { x, poleT, z }, 0.7f, 0.5f, 5, Color{ 60, 56, 52, 255 });
+    float t = (float)GetTime() * 3.0f + x * 0.05f;
+    Vector3 p0 = { x, poleT - 1.0f, z }, p1 = { x, poleT - 10.0f, z };
+    Vector3 tip = { x + 16.0f, poleT - 5.5f + sinf(t) * 1.8f, z + sinf(t * 1.3f) * 3.5f };
+    DrawTriangle3D(p0, p1, tip, flag);
+    DrawTriangle3D(p0, tip, p1, flag);
+}
+static Color TownBannerColor(int ti) {
+    static const Color c[4] = { { 168, 36, 36, 255 }, { 36, 92, 160, 255 }, { 210, 230, 250, 255 }, { 70, 110, 60, 255 } };
+    return c[std::clamp(ti, 0, 3)];
+}
+static Color TownTowerRoofTint(int ti) {
+    static const Color c[4] = { { 255, 255, 255, 255 }, { 200, 214, 236, 255 }, { 170, 196, 236, 255 }, { 176, 160, 150, 255 } };
+    return c[std::clamp(ti, 0, 3)];
+}
 // Town gatehouse (2026-09-27): towers, an open archway and wall running off to
 // both sides - the town reads as a place you walk into, not a frame to tap.
 // wildSide: +1 when the wilderness is on the gate's +z side, -1 when -z.
-static void Wild3DDrawGate(float x, float z, Color post, Color beam, Vector2 facing) {
+static void Wild3DDrawGate(float x, float z, Color post, Color beam, Vector2 facing, int town = 0) {
+    Town3DLoadModels();
     T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
     rlPushMatrix();
     rlTranslatef(x, 0, z);
     rlRotatef(atan2f(facing.x, facing.y) * RAD2DEG, 0, 1, 0); // local +z = out toward the wilds
-    Color wall = post, dark = beam, roof = { 120, 60, 44, 255 };
+    Color wall = ColorBrightness(post, 0.22f), dark = ColorBrightness(beam, 0.15f);
+    Color roofT = TownTowerRoofTint(town), flag = TownBannerColor(town);
     for (int sx = -1; sx <= 1; sx += 2) {
-        DrawCube({ sx * 170.0f, 30, -6 }, 230, 60, 18, wall);                            // curtain wall
-        for (int k = 0; k < 9; k++) DrawCube({ sx * (66.0f + k * 25.0f), 64, -6 }, 12, 10, 20, dark); // crenels
-        DrawCylinder({ sx * 50.0f, 0, -4 }, 24, 22, 88, 14, wall);                       // gate towers
-        DrawCylinder({ sx * 50.0f, 88, -4 }, 27, 27, 6, 14, dark);
-        DrawCylinderEx({ sx * 50.0f, 94, -4 }, { sx * 50.0f, 132, -4 }, 26, 0, 14, roof); // conical roofs
-        DrawCylinder({ sx * 286.0f, 0, -6 }, 16, 15, 70, 10, wall);                      // end towers
-        DrawCylinderEx({ sx * 286.0f, 70, -6 }, { sx * 286.0f, 96, -6 }, 18, 0, 10, roof);
-        DrawCube({ sx * 30.0f, 3, 22 }, 8, 6, 8, dark);                                  // bollards
+        StoneBox({ sx * 170.0f, 26, -6 }, { 230, 68, 18 }, wall);                  // curtain wall (sunk into the ground a little)
+        StoneBox({ sx * 170.0f, 61, -6 }, { 232, 4, 21 }, dark);                   // string course under the parapet
+        for (int k = 0; k < 9; k++) StoneBox({ sx * (66.0f + k * 25.0f), 68, -6 }, { 12, 12, 20 }, wall); // merlons
+        StoneTower(sx * 50.0f, -12.0f, -4, 24, 100, wall);                         // gate towers
+        StoneTowerCrown(sx * 50.0f, 88.0f, -4, 24, wall, roofT, flag);
+        StoneTower(sx * 286.0f, -12.0f, -6, 16, 82, wall);                         // end towers
+        StoneTowerCrown(sx * 286.0f, 70.0f, -6, 16, wall, roofT, flag);
+        StoneBox({ sx * 30.0f, 3, 22 }, { 8, 6, 8 }, dark);                         // bollards
+        // torches either side of the arch, lit after dusk
+        DrawCylinderEx({ sx * 34.0f, 38, 10 }, { sx * 34.0f, 46, 12 }, 1.2f, 1.6f, 5, Color{ 70, 50, 34, 255 });
+        if (g_t3dNight > 0.25f) {
+            float fl = 0.8f + 0.2f * sinf((float)GetTime() * 9.0f + sx);
+            DrawSphere({ sx * 34.0f, 48, 12 }, 3.2f * fl, Color{ 255, 190, 90, 255 });
+            DrawSphere({ sx * 34.0f, 49.5f, 12 }, 1.8f * fl, Color{ 255, 240, 190, 255 });
+        }
     }
-    DrawCube({ 0, 70, -4 }, 60, 26, 26, wall);        // over the arch
-    DrawCube({ 0, 84, -4 }, 64, 6, 30, dark);
+    StoneBox({ 0, 70, -4 }, { 60, 26, 26 }, wall);        // over the arch
+    StoneBox({ 0, 84, -4 }, { 64, 4, 30 }, dark);
+    for (int k = -1; k <= 1; k++) StoneBox({ k * 22.0f, 91, -4 }, { 11, 11, 26 }, wall);
+    StoneBox({ 0, 58, 8 }, { 50, 3, 3 }, dark);            // the arch's keystone lintel
+    // the portcullis, raised into the arch
+    for (int k = -3; k <= 3; k++) DrawCube({ k * 6.0f, 64, 2 }, 1.2f, 20, 1.2f, Color{ 48, 46, 50, 255 });
+    DrawCube({ 0, 55, 2 }, 40, 1.4f, 1.4f, Color{ 48, 46, 50, 255 });
     DrawCube({ -24, 30, 8 }, 6, 60, 3, Color{ 92, 64, 40, 255 }); // gate leaves, swung open
     DrawCube({ 24, 30, 8 }, 6, 60, 3, Color{ 92, 64, 40, 255 });
-    DrawCube({ -38, 58, 8 }, 10, 22, 1, Color{ 160, 40, 36, 255 }); // banners
-    DrawCube({ 38, 58, 8 }, 10, 22, 1, Color{ 160, 40, 36, 255 });
+    for (int sx = -1; sx <= 1; sx += 2) { // long banners in the town's colour
+        DrawCube({ sx * 50.0f, 58, 21 }, 14, 30, 1, flag);
+        DrawCube({ sx * 50.0f, 44, 21 }, 14, 2, 1.2f, Color{ 222, 180, 70, 255 });
+    }
     rlPopMatrix();
 }
 #ifdef TF_TOWNSCAN
@@ -18579,7 +18799,6 @@ static void Wild3DDrawTownCompound(const GameState& s, int ti, Color wall, Color
     float gy = WildGroundY(g.x, g.y);
     auto groundAt = [&](float lx, float lz) { Vector2 w = GateWorld({ lx, lz }, g, f); return WildGroundY(w.x, w.y) - gy; };
     const bool harbor = ti == 1; // Saltmere stands on a plank deck over the water
-    const Color roof = { 120, 60, 44, 255 };
     const Color pave = harbor ? Color{ 128, 98, 68, 255 } : ti == 2 ? Color{ 214, 222, 232, 255 } : Color{ 142, 134, 122, 255 };
     const Color yard = harbor ? Color{ 110, 84, 58, 255 } : ti == 2 ? Color{ 232, 238, 246, 255 } : ti == 3 ? Color{ 118, 112, 100, 255 } : Color{ 104, 132, 80, 255 };
     T3DLiftScope lift_(g.x, g.y);
@@ -18592,17 +18811,23 @@ static void Wild3DDrawTownCompound(const GameState& s, int ti, Color wall, Color
         for (float lz = -20.0f; lz > -D; lz -= 40.0f) {
             at(lx, lz);
             DrawCube({ lx, -4.0f, lz }, 41.0f, 12.0f, 41.0f, yard);
-            if (fabsf(lx) < 60.0f) DrawCube({ lx, 2.4f, lz }, 41.0f, 1.0f, 41.0f, pave);
+            if (fabsf(lx) < 60.0f) StoneBox({ lx, 2.4f, lz }, { 41.0f, 1.0f, 41.0f }, ColorBrightness(pave, 0.3f)); // flagstones
             rlPopMatrix();
         }
     if (harbor) // pilings under the deck
         for (float lx = -kCompoundHalfW + 30.0f; lx < kCompoundHalfW; lx += 80.0f)
             for (float lz = -40.0f; lz > -D; lz -= 80.0f) { at(lx, lz); DrawCylinder({ lx, -30.0f, lz }, 5, 5, 30, 6, Color{ 80, 60, 40, 255 }); rlPopMatrix(); }
-    // walls: 40-unit segments, each set on its own ground, with crenels
+    // walls: 40-unit segments of dressed stone, each set on its own ground,
+    // a string course under a crenellated parapet
+    const Color stone = ColorBrightness(wall, 0.22f), course = ColorBrightness(dark, 0.15f);
+    const Color roofT = TownTowerRoofTint(ti), flag = TownBannerColor(ti);
     auto wallSeg = [&](float lx, float lz, bool alongZ) {
         at(lx, lz);
-        DrawCube({ lx, 15.0f, lz }, alongZ ? 18.0f : 41.0f, 90.0f, alongZ ? 41.0f : 18.0f, wall);
-        DrawCube({ lx, 64.0f, lz }, alongZ ? 20.0f : 12.0f, 10.0f, alongZ ? 12.0f : 20.0f, dark);
+        StoneBox({ lx, 15.0f, lz }, { alongZ ? 18.0f : 41.0f, 90.0f, alongZ ? 41.0f : 18.0f }, stone);
+        StoneBox({ lx, 58.0f, lz }, { alongZ ? 21.0f : 41.0f, 4.0f, alongZ ? 41.0f : 21.0f }, course);
+        for (int m = -1; m <= 1; m += 2)
+            StoneBox({ lx + (alongZ ? 0.0f : m * 10.0f), 65.0f, lz + (alongZ ? m * 10.0f : 0.0f) },
+                     { alongZ ? 20.0f : 11.0f, 10.0f, alongZ ? 11.0f : 20.0f }, stone);
         rlPopMatrix();
     };
     for (int sx = -1; sx <= 1; sx += 2)
@@ -18610,9 +18835,8 @@ static void Wild3DDrawTownCompound(const GameState& s, int ti, Color wall, Color
     for (float lx = -kCompoundHalfW; lx <= kCompoundHalfW; lx += 40.0f) wallSeg(lx, -D, false);
     auto tower = [&](float lx, float lz, float r, float h) {
         at(lx, lz);
-        DrawCylinder({ lx, -20.0f, lz }, r, r - 2.0f, h + 20.0f, 12, wall);
-        DrawCylinder({ lx, h, lz }, r + 3.0f, r + 3.0f, 6.0f, 12, dark);
-        DrawCylinderEx({ lx, h + 6.0f, lz }, { lx, h + 42.0f, lz }, r + 2.0f, 0.0f, 12, roof);
+        StoneTower(lx, -20.0f, lz, r, h + 20.0f, stone);
+        StoneTowerCrown(lx, h, lz, r, stone, roofT, flag);
         rlPopMatrix();
     };
     for (int sx = -1; sx <= 1; sx += 2) { tower(sx * kCompoundHalfW, -D, 20.0f, 84.0f); tower(sx * kCompoundHalfW, -D * 0.5f, 16.0f, 74.0f); }
@@ -18632,6 +18856,7 @@ static void Wild3DDrawTownCompound(const GameState& s, int ti, Color wall, Color
         rlPopMatrix();
         rlPopMatrix();
     };
+    g_t3dHouseLite = Dist(s.wildernessPlayerPos, g) > 650.0f;
     float hallZ = -D + 62.0f;
     for (float lz = -104.0f; lz > -D + 90.0f && k < keys.size(); lz -= 136.0f)
         for (int sx = -1; sx <= 1 && k < keys.size(); sx += 2) {
@@ -18639,6 +18864,7 @@ static void Wild3DDrawTownCompound(const GameState& s, int ti, Color wall, Color
             building(keys[k++], sx * (wide ? 186.0f : 176.0f), lz, sx < 0 ? 90.0f : -90.0f);
         }
     if (hall && D >= 200.0f) building("townhall", 0.0f, hallZ, 0.0f);
+    g_t3dHouseLite = false;
     // lamps along the street, lit after dusk
     for (float lz = -60.0f; lz > -D + 40.0f; lz -= 110.0f)
         for (int sx = -1; sx <= 1; sx += 2) {
@@ -20114,18 +20340,18 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     // Travel gates.
     if (vis(kWildernessReturnGatePos.x, kWildernessReturnGatePos.y, 320.0f))
         Wild3DDrawGate(kWildernessReturnGatePos.x, kWildernessReturnGatePos.y,
-                       Color{ 168, 150, 124, 255 }, Color{ 128, 110, 88, 255 }, TownGateFacing(0));
+                       Color{ 168, 150, 124, 255 }, Color{ 128, 110, 88, 255 }, TownGateFacing(0), 0);
     if (vis(kWildernessTown2GatePos.x, kWildernessTown2GatePos.y, 320.0f))
         Wild3DDrawGate(kWildernessTown2GatePos.x, kWildernessTown2GatePos.y,
-                       Color{ 184, 176, 160, 255 }, Color{ 140, 134, 122, 255 }, TownGateFacing(1));
+                       Color{ 184, 176, 160, 255 }, Color{ 140, 134, 122, 255 }, TownGateFacing(1), 1);
     // Phase 3 - Frostmere gate: icy pale-blue stone.
     if (vis(kWildernessTown3GatePos.x, kWildernessTown3GatePos.y, 320.0f))
         Wild3DDrawGate(kWildernessTown3GatePos.x, kWildernessTown3GatePos.y,
-                       Color{ 196, 212, 228, 255 }, Color{ 150, 175, 200, 255 }, TownGateFacing(2));
+                       Color{ 196, 212, 228, 255 }, Color{ 150, 175, 200, 255 }, TownGateFacing(2), 2);
     // Phase 4 - Cragmoor gate: granite.
     if (vis(kWildernessTown4GatePos.x, kWildernessTown4GatePos.y, 320.0f))
         Wild3DDrawGate(kWildernessTown4GatePos.x, kWildernessTown4GatePos.y,
-                       Color{ 150, 142, 128, 255 }, Color{ 115, 108, 96, 255 }, TownGateFacing(3));
+                       Color{ 150, 142, 128, 255 }, Color{ 115, 108, 96, 255 }, TownGateFacing(3), 3);
     { // the walled towns behind the gates (2026-09-28)
         static const Color walls[4][2] = { { { 168, 150, 124, 255 }, { 128, 110, 88, 255 } }, { { 184, 176, 160, 255 }, { 140, 134, 122, 255 } },
                                            { { 196, 212, 228, 255 }, { 150, 175, 200, 255 } }, { { 150, 142, 128, 255 }, { 115, 108, 96, 255 } } };
