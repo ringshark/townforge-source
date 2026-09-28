@@ -4917,6 +4917,17 @@ static void ToggleAutoGather(GameState& s) {
     if (!s.gatheringResource.has_value()) TryStartGather(s, next);
 }
 
+// Fishing the open water (2026-09-28, #66): 0 a tidal pool, 1 the sea, 2 a lake, 3 a river.
+static int g_fishWater = 0;
+static const char* FishCatchName(int water, bool big) {
+    static const char* sea[4] = { "mackerel", "sea bass", "cod", "herring" };
+    static const char* lake[3] = { "carp", "perch", "pike" };
+    static const char* river[3] = { "trout", "salmon", "grayling" };
+    if (water == 1) return big ? "a great tuna" : sea[std::rand() % 4];
+    if (water == 2) return big ? "a golden carp" : lake[std::rand() % 3];
+    if (water == 3) return big ? "a huge salmon" : river[std::rand() % 3];
+    return big ? "a fat rock crab" : "fish";
+}
 static void UpdateGathering(GameState& s, float dt) {
     if (!s.gatheringResource.has_value()) return;
     s.gatherSecondsRemaining -= dt;
@@ -4934,11 +4945,17 @@ static void UpdateGathering(GameState& s, float dt) {
             s.wood += gained;
             gainNote = gain > 0 ? " (Lumberjacking +" + std::to_string(gain).substr(0, 4) + ")" : "";
             s.logLine = "Gathered " + std::to_string(gained) + " wood." + gainNote;
-        } else if (type == "fish") { // Phase 2: Salt Coast fishery - tidal pools
+        } else if (type == "fish") { // Phase 2: Salt Coast fishery - tidal pools; (#66) the sea, lakes and rivers too
             float gain = SkillUseGain(s.fishing, 0.6f, gatherW);
+            bool big = RandUnit() < 0.04f + EffectiveSkill(s, &GameState::fishing) * 0.0008f; // up to ~12% at GM
+            if (g_fishWater == 2 || g_fishWater == 3) gained = std::max(2, gained - 1); // fresh water: a little leaner
+            if (big) gained += g_fishWater == 1 ? 5 : 3;
             s.fish += gained;
             gainNote = gain > 0 ? " (Fishing +" + std::to_string(gain).substr(0, 4) + ")" : "";
-            s.logLine = "Caught " + std::to_string(gained) + " fish." + gainNote;
+            s.logLine = big ? std::string("You land ") + FishCatchName(g_fishWater, true) + "! (" + std::to_string(gained) + " fish)" + gainNote
+                            : g_fishWater > 0 ? "Caught " + std::to_string(gained) + " fish - " + FishCatchName(g_fishWater, false) + "." + gainNote
+                                              : "Caught " + std::to_string(gained) + " fish." + gainNote;
+            g_fishWater = 0;
         } else if (type == "ice") { // Phase 3: Frostwastes ice crystals - Mining skill
             float gain = SkillUseGain(s.mining, 0.6f, gatherW);
             s.ice += gained;
@@ -5869,7 +5886,7 @@ static std::string InnocentRequestOffer(int id, int kind) {
     if (kind == 4) { // Phase 2: fish request
         if (id == 0) return "Haven't eaten since yesterday's dawn. 4 fish from the tidal pools, and I'll pay.";
         if (id == 1) return "The shrine feeds whoever comes hungry - 4 fish would fill the pot. Will you help?";
-        if (id == 2) return "Saltmere pays good coin for fresh catch! Bring me 4 fish, straight from the pools.";
+        if (id == 2) return "Saltmere pays good coin for fresh catch! Bring me 4 fish - from the sea, a river or the pools.";
         return "My old bones can't work the nets anymore. 4 fish, friend, and there's coin in it.";
     }
     if (id == 0) return "These roads aren't safe for a lone walker. See me to the town gate and I'll pay.";
@@ -10685,6 +10702,7 @@ static void CastHealOutOfCombat(GameState& s, int zone) {
     CastLiveUtilitySpell(s, sp, zone);
 }
 static void BardPeace(GameState& s, int zone); // bard songs (2026-09-28), defined with the combat helpers
+static int WildWaterNear(Vector2 p); // (2026-09-28, #66) 0 none, 1 sea, 2 lake, 3 river - defined with the terrain grid
 static void BardProvoke(GameState& s);
 static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     // Belt pouch (2026-09-26): bandages and heal potions as framed slots in the
@@ -10718,9 +10736,11 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     bool provoUp = !ooc && bardZone == 0 && !s.playerIsGhost && s.instrument > 0 && s.skillActive[28] && (!PlayerYoung(s) || s.provocation > 0.0f) &&
                    s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0;
     bool medUp = ooc && !s.playerIsGhost && (s.mana < MaxMana(s) - 0.5f || g_meditating); // (2026-09-28, #63) Meditate
-    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp && !hideUp && !peaceUp && !medUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
+    int fishWater = (ooc && oocZone == 0 && !s.playerIsGhost && !s.gatheringResource.has_value()) ? WildWaterNear(s.wildernessPlayerPos) : 0;
+    bool fishUp = fishWater > 0; // (2026-09-28, #66) cast a line at any shore
+    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp && !hideUp && !peaceUp && !medUp && !fishUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
     int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0) + (teleUp ? 1 : 0) + (hideUp ? 1 : 0) +
-            (peaceUp ? 1 : 0) + (provoUp ? 1 : 0) + (medUp ? 1 : 0);
+            (peaceUp ? 1 : 0) + (provoUp ? 1 : 0) + (medUp ? 1 : 0) + (fishUp ? 1 : 0);
     const float sz = 42.0f, gap = 8.0f;
     Rectangle bar = { 166.0f, y - 6.0f, n * sz + (n - 1) * gap + 18.0f, sz + 12.0f };
     g_beltRect = bar; g_beltDrawnAt = GetTime(); UIRegister(bar);
@@ -10838,6 +10858,21 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     }
     if (provoUp) {
         if (slot(bk, s.bardCd <= 0.0f, 0, [&](Rectangle r) { note(r, Color{ 255, 120, 90, 255 }, "Provoke"); })) { PlaySfx(SfxId::Click); BardProvoke(s); }
+        bk++;
+    }
+    if (fishUp) { // a rod and line: fish the water beside you
+        if (slot(bk, true, 0, [&](Rectangle r) {
+                float cx = r.x + r.width / 2, cy = r.y + r.height / 2 - 4;
+                DrawLineEx({ cx - 12, cy + 12 }, { cx + 10, cy - 12 }, 3.0f, Color{ 150, 110, 60, 255 });
+                DrawLineEx({ cx + 10, cy - 12 }, { cx + 12, cy + 6 }, 1.0f, Color{ 230, 230, 230, 255 });
+                DrawCircleV({ cx + 12, cy + 7 }, 2.5f, Color{ 220, 60, 50, 255 });
+                DrawUIText(fishWater == 1 ? "Sea" : fishWater == 2 ? "Lake" : "River", (int)r.x + 3, (int)(r.y + r.height - 14), 11, Color{ 200, 230, 255, 255 }); })) {
+            PlaySfx(SfxId::Click);
+            g_fishWater = fishWater;
+            TryStartGather(s, "fish", 3.0f);
+            if (s.gatheringResource.has_value())
+                s.logLine = fishWater == 1 ? "You cast a line into the sea..." : fishWater == 2 ? "You cast a line into the lake..." : "You cast a line into the river...";
+        }
         bk++;
     }
     if (medUp) { // a calm blue lotus: Meditate
@@ -15495,6 +15530,23 @@ static void WildTerrainEnsure() {
             }
         }
     }
+}
+static int WildWaterNear(Vector2 p) { // the water within a short cast of the shore (2026-09-28, #66)
+    WildTerrainEnsure();
+    const float R = 44.0f;
+    int best = 0;
+    int gx0 = std::max(0, (int)((p.x - R) / kWTCell)), gx1 = std::min(kWTN - 1, (int)((p.x + R) / kWTCell));
+    int gz0 = std::max(0, (int)((p.y - R) / kWTCell)), gz1 = std::min(kWTN - 1, (int)((p.y + R) / kWTCell));
+    for (int gz = gz0; gz <= gz1; gz++)
+        for (int gx = gx0; gx <= gx1; gx++) {
+            unsigned char c = g_wt[WTIdx(gx, gz)];
+            float cx = (gx + 0.5f) * kWTCell - p.x, cz = (gz + 0.5f) * kWTCell - p.y;
+            if (cx * cx + cz * cz > R * R) continue;
+            if (c & kWTSea) return 1;
+            if ((c & kWTRiver) && !(c & (kWTBridge | kWTFord))) best = 3;
+            else if ((c & kWTWater) && best == 0) best = 2;
+        }
+    return best;
 }
 static unsigned char WildTerrainAt(float x, float z) {
     WildTerrainEnsure();
