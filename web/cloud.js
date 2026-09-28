@@ -20,6 +20,10 @@
   function hash(s) { var h = 5381; for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return String(h >>> 0) + ':' + s.length; }
   function getStamp() { try { return localStorage.getItem(LS_SYNC) || ''; } catch (e) { return ''; } }
   function setStamp(t) { try { localStorage.setItem(LS_SYNC, t || ''); } catch (e) {} }
+  // The same moment comes back from the database as "...Z" or "...+00:00" (and with
+  // extra digits) - compare the times, not the text, or every check looks like
+  // another device saved and the dialog pops up (2026-09-28).
+  function sameTime(a, b) { return !!a && !!b && Date.parse(a) === Date.parse(b); }
   // The save rewrites its timestamp every 2 s - ignore it when asking "did anything change?"
   function contentHash(t) { return hash((t || '').replace(/^lastActiveEpoch=.*$/m, '')); }
   function field(t, k) { var m = t && t.match(new RegExp('^' + k + '=(.*)$', 'm')); return m ? m[1] : ''; }
@@ -81,7 +85,7 @@
       fetchCloud().then(function () {
         if (!cloud) { upload(true); return; }
         var stamp = getStamp();
-        if (stamp && cloud.updated_at === stamp) { status = 'synced'; upload(false); return; }
+        if (stamp && sameTime(cloud.updated_at, stamp)) { status = 'synced'; upload(false); return; }
         paused = true;
         status = stamp ? 'newer' : 'conflict';
         msg = stamp ? 'Your character was played on another device since this one last synced.'
@@ -99,7 +103,7 @@
     busy = true; status = 'syncing'; render();
     var check = force ? Promise.resolve(cloud) : fetchCloud();
     return check.then(function (c) {
-      if (!force && c && c.updated_at !== getStamp()) { // someone else wrote in the meantime
+      if (!force && c && !sameTime(c.updated_at, getStamp())) { // someone else wrote in the meantime
         busy = false; paused = true; status = 'newer';
         msg = 'Your character was just saved from another device.'; open(); return;
       }
