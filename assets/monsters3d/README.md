@@ -57,6 +57,14 @@ Raider monster.
 | `cave_brute.glb` | Cave Brute (The Hollow) |
 | `deep_marauder.glb` | Deep Marauder (The Hollow) |
 | `hollow_king.glb` | The Hollow King (The Hollow boss) |
+| `fen_serpent.glb` | Fen Serpent (Sunken Vault), limbless, static only |
+| `brine_drake.glb` | Brine Drake (Sunken Vault), quadruped |
+| `sunken_king.glb` | The Sunken King (Sunken Vault boss), with trident, static |
+| `sunken_king_animated.glb` | The Sunken King, rigged (Walk, Run, Death), **no trident** |
+| `whisper_king.glb` | The Whisper King (Whisper Crypt boss), with scepter, static |
+| `whisper_king_animated.glb` | The Whisper King, rigged (Walk, Run, Death), **no scepter** |
+| `frostbite_husk.glb` | Frostbite Husk (Frostbound Tomb), with axe, static |
+| `frostbite_husk_animated.glb` | Frostbite Husk, rigged (Walk, Run, Death), with axe |
 | `vyrathax.glb` | Vyrathax the Tri-Wyrm (world boss) \*\* |
 | `hero.glb` | Main hero (static, full PBR) |
 | `hero_animated.glb` | Main hero (rigged, 19 animation clips) |
@@ -155,3 +163,13 @@ auto-rigged. The Emberlord failed Meshy's rigging pose check with its big diagon
 `emberlord_animated.glb` is a version redrawn without the sword (same armor, cape and
 flame crown, open hands). `emberlord.glb` keeps the sword; attach a sword mesh to the
 animated one's hand bone if you want it armed.
+
+## Sunken Vault, Whisper King, Frostbite Husk
+
+Built from Meshy concept art like the Ember Depths and Hollow monsters. Both kings
+failed Meshy's rigging pose check while holding a long weapon (the same thing that stopped
+the first Emberlord), so their `_animated` files are built from concepts redrawn with empty
+hands (`source/*_animated.jpg`); attach a trident or scepter mesh to the hand bone to
+arm them. The static kings keep their weapons. The Frostbite Husk rigged fine holding its
+axe. The Fen Serpent has no limbs and the Brine Drake is a quadruped, so neither can be
+auto-rigged. Bosses are 50k triangles, the rest 30k.
