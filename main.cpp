@@ -1807,6 +1807,12 @@ struct GameState {
     float parrying = 0; // (2026-09-26) blocking blows - best with a shield; capped at 100
     float tracking = 0;   // (2026-09-27) sensing who hunts you - Murder Inc. warnings need it; capped at 100
     float necromancy = 0; // (2026-09-27) the dark school: bone, blood and the risen dead; capped at 100
+    float hiding = 0, stealth = 0; // (2026-09-28) vanish, and move while unseen; capped at 100
+    // Hidden (2026-09-28) - transient: monsters, rivals and ambushes pass you by.
+    bool hidden = false;
+    float hideCd = 0.0f;     // a moment between attempts
+    float stealthMoveT = 0.0f; // seconds moved since the last Stealth check
+    float surpriseT = 0.0f;  // just sprang from hiding: the next landed swing hits hard
 
     // --- Bandages - mirrors state.bandages. A plain consumable count, not a backpack
     // item; crafted by the Tailor or bought from the Provisioner stand-in (see
@@ -1816,8 +1822,9 @@ struct GameState {
     // --- The Echo system - mirrors state.skillActive. true = contributing to
     // gameplay right now; false = benched (still fully trained, just inactive).
     // Indexed by WeeklyGoalIdx... no - indexed by position in kCappedSkills below. ---
-    std::array<bool, 21> skillActive = { true, true, true, true, true, true, true, true,
-                                          true, true, true, true, true, true, true, true, true, true, true, true, true };
+    std::array<bool, 23> skillActive = { true, true, true, true, true, true, true, true,
+                                          true, true, true, true, true, true, true, true, true, true, true, true, true,
+                                          true, true };
 
     // --- The Bloodstained Road - mirrors state.bloodstainedProgress/bloodstainedLoop/
     // bloodstainedBossDefeated/grayEncounter. Tier index 0-4 = current rung; reaching
@@ -4398,7 +4405,7 @@ static bool HasWeeklyBlessing(const GameState& s) {
 // ---------------------------------------------------------------------
 
 struct CappedSkillDef { const char* label; float GameState::* field; };
-static const std::array<CappedSkillDef, 21> kCappedSkills = {{
+static const std::array<CappedSkillDef, 23> kCappedSkills = {{
     {"Swordsmanship", &GameState::swordsmanship}, {"Fencing", &GameState::fencing},
     {"Macing", &GameState::macing}, {"Archery", &GameState::archery}, {"Wrestling", &GameState::wrestling},
     {"Tactics", &GameState::tactics}, {"Anatomy", &GameState::anatomy},
@@ -4410,6 +4417,7 @@ static const std::array<CappedSkillDef, 21> kCappedSkills = {{
     {"Parrying", &GameState::parrying}, // (2026-09-26) appended so saved indices 0-17 keep their meaning
     {"Tracking", &GameState::tracking},     // (2026-09-27) appended, same reason
     {"Necromancy", &GameState::necromancy}, // (2026-09-27)
+    {"Hiding", &GameState::hiding}, {"Stealth", &GameState::stealth}, // (2026-09-28)
 }};
 static const float kTotalSkillCap = 700.0f;
 
@@ -4618,6 +4626,68 @@ static float SkillUseGain(float& skill, float successChance, float weight, float
     return GainSkillCapped(skill, steps * 0.1f, cap);
 }
 
+// ---- Hiding & Stealth (2026-09-28) ----------------------------------------
+// Hide (belt button, out of a fight) and you vanish: monsters don't notice or
+// bump into you, rivals and Murder Inc. lose you, ambushes pass you by.
+// Moving without Stealth steps you out; with it, each second of movement is a
+// Stealth check. Attacking springs a surprise: the next landed swing hits hard.
+// Casting, gathering and fighting all reveal you.
+static float HideChance(const GameState& s, bool foesNear) {
+    float c = 25.0f + EffectiveSkill(s, &GameState::hiding) * 0.72f; // 25% untrained .. 97% at GM
+    if (foesNear) c -= 30.0f; // hard to vanish with eyes on you
+    return std::clamp(c, 5.0f, 97.0f);
+}
+static float StealthChance(const GameState& s) {
+    return std::clamp(40.0f + EffectiveSkill(s, &GameState::stealth) * 0.6f, 40.0f, 99.0f); // 94% a second at 90
+}
+static bool g_foesNear = false; // a hostile within a few paces (set by the wilds/dungeon loops)
+static void RevealFromHiding(GameState& s, const std::string& why) {
+    if (!s.hidden) return;
+    s.hidden = false; s.stealthMoveT = 0.0f;
+    if (!why.empty()) s.logLine = why;
+}
+static void TryHide(GameState& s, bool inFight, bool foesNear) {
+    if (s.hidden) { RevealFromHiding(s, "You step out of hiding."); return; }
+    if (inFight) { s.logLine = "You can't hide in the middle of a fight!"; return; }
+    if (s.hideCd > 0.0f) return;
+    s.hideCd = 2.0f;
+    float c = HideChance(s, foesNear);
+    bool ok = RandUnit() * 100.0f < c;
+    float gain = SkillUseGain(s.hiding, c / 100.0f, 3.0f);
+    std::string note = gain > 0 ? " (Hiding +" + std::to_string(gain).substr(0, 3) + ")" : "";
+    if (ok) {
+        s.hidden = true; s.stealthMoveT = 0.0f;
+        s.logLine = std::string("You blend into the shadows") +
+                    (EffectiveSkill(s, &GameState::stealth) > 0.0f ? " - move carefully to stay unseen." : ". Moving will give you away.") + note;
+    } else s.logLine = (foesNear ? "You can't hide with enemies watching you." : "You fail to hide.") + note;
+}
+// Each frame while hidden: moving needs Stealth. Returns false if you were revealed.
+static void StealthTick(GameState& s, float dt, bool moved) {
+    s.hideCd = std::max(0.0f, s.hideCd - dt);
+    s.surpriseT = std::max(0.0f, s.surpriseT - dt);
+    if (!s.hidden || !moved) return;
+    if (EffectiveSkill(s, &GameState::stealth) <= 0.0f && s.stealth <= 0.0f) { RevealFromHiding(s, "You step out of hiding."); return; }
+    if ((s.stealthMoveT += dt) < 1.0f) return;
+    s.stealthMoveT -= 1.0f;
+    float c = StealthChance(s);
+    bool ok = RandUnit() * 100.0f < c;
+    SkillUseGain(s.stealth, c / 100.0f, 1.2f);
+    if (!ok) RevealFromHiding(s, "A twig snaps underfoot - you've been seen!");
+}
+// Springing from hiding onto a foe: the next landed swing is a surprise strike.
+static void SpringFromHiding(GameState& s) {
+    if (!s.hidden) return;
+    RevealFromHiding(s, "You spring from the shadows!");
+    s.surpriseT = 4.0f;
+}
+static int SurpriseStrike(GameState& s, int dmg) {
+    if (s.surpriseT <= 0.0f) return dmg;
+    s.surpriseT = 0.0f;
+    float mul = 1.5f + EffectiveSkill(s, &GameState::stealth) / 200.0f; // x1.5 .. x2
+    s.logLine = "Surprise strike!";
+    return std::max(1, (int)std::round(dmg * mul));
+}
+
 // STR/DEX/INT growth (2026-09-20, Mark's own design - the JS prototype's live stat-gain
 // path, maybeGainStat(), has no combined cap at all, just 100 per stat; a second,
 // more UO-faithful 225-total/125-individual version exists in the JS but was dead code,
@@ -4728,6 +4798,7 @@ static const float kAutoGatherMinSkill = 30.0f; // JS AUTO_GATHER_MIN_SKILL
 // walk-up-to-a-node gather nodes pass 3s instead (2026-09-27, was 5s), rewarding active
 // play with a faster rate than Town's passive/idle HUD buttons - see DrawWildernessScreen.
 static void TryStartGather(GameState& s, const std::string& resourceKey, float seconds = 8.0f) {
+    RevealFromHiding(s, ""); // (2026-09-28) chopping and mining are anything but quiet
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
     if (s.gatheringResource.has_value()) { s.logLine = "Already gathering."; return; }
     if (s.ambush.has_value() || s.innocentEncounter.has_value()) { s.logLine = "Deal with what's in front of you first."; return; }
@@ -5160,6 +5231,7 @@ static bool TryTriggerAmbush(GameState& s, const std::string& /*source*/) {
     if (!kAmbushSystemEnabled) return false;
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) return false; // the dead can't be ambushed
     if (PlayerYoung(s)) return false; // (2026-09-27) nor the Young
+    if (s.hidden) return false;       // (2026-09-28) nor someone they can't see
     // Also guards against an active live fight (Wilderness/dungeon) - without this, a
     // live fight left running while the player tabbed to another screen (it pauses,
     // since updateEngaged*MonsterAI only runs inside its own Draw*Screen) could end up
@@ -7042,6 +7114,7 @@ static void SaveGame(const GameState& s) {
            "\narchery=" << s.archery << "\nwrestling=" << s.wrestling << "\n";
     out << "parrying=" << s.parrying << "\n";
     out << "tracking=" << s.tracking << "\nnecromancy=" << s.necromancy << "\n";
+    out << "hiding=" << s.hiding << "\nstealth=" << s.stealth << "\n";
     out << "tactics=" << s.tactics << "\nanatomy=" << s.anatomy << "\nmagicResist=" << s.magicResist <<
            "\nhealing=" << s.healing << "\n";
     out << "skillActive=";
@@ -7318,6 +7391,8 @@ static bool LoadGame(GameState& s) {
         else if (key == "anatomy") s.anatomy = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "parrying") s.parrying = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "tracking") s.tracking = std::min(100.0f, (float)std::atof(val.c_str()));
+        else if (key == "hiding") s.hiding = std::min(100.0f, (float)std::atof(val.c_str()));
+        else if (key == "stealth") s.stealth = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "necromancy") s.necromancy = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "magicResist") s.magicResist = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "healing") s.healing = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
@@ -10280,11 +10355,13 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     bool blessUp = false; // (2026-09-27) Bless on your bar: recast it between fights
     if (ooc && !s.playerIsGhost && s.blessT <= 0.0f)
         for (int sp : s.combatHotbar) if (sp == kSpBless && CanPracticeSpell(s, kSpells[kSpBless])) blessUp = true;
+    // (2026-09-28) Hide: with Hiding equipped (and past the Young days, or trained a little)
+    bool hideUp = ooc && !s.playerIsGhost && s.skillActive[21] && (!PlayerYoung(s) || s.hiding > 0.0f);
     bool teleUp = false; // (2026-09-27) Teleport on your bar: blink about between fights too
     if (ooc && !s.playerIsGhost)
         for (int sp : s.combatHotbar) if (sp == kSpTeleport && CanPracticeSpell(s, kSpells[kSpTeleport])) teleUp = true;
-    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
-    int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0) + (teleUp ? 1 : 0);
+    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp && !hideUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
+    int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0) + (teleUp ? 1 : 0) + (hideUp ? 1 : 0);
     const float sz = 42.0f, gap = 8.0f;
     Rectangle bar = { 166.0f, y - 6.0f, n * sz + (n - 1) * gap + 18.0f, sz + 12.0f };
     g_beltRect = bar; g_beltDrawnAt = GetTime();
@@ -10371,6 +10448,20 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
             PlaySfx(SfxId::Click);
             if (aiming) { g_teleAimZone = -1; s.logLine = "Teleport cancelled."; }
             else CastLiveUtilitySpell(s, kSpTeleport, oocZone);
+        }
+    }
+    if (hideUp) { // a hooded eye: Hide / step out
+        int k = 2 + (int)potions.size() + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0) + (teleUp ? 1 : 0);
+        if (slot(k, s.hidden || s.hideCd <= 0.0f, 0, [&](Rectangle r) {
+                float cx = r.x + r.width / 2, cy = r.y + r.height / 2 - 2;
+                if (s.hidden) DrawCircleV({ cx, cy }, 17.0f, Fade(Color{ 120, 110, 170, 255 }, 0.45f));
+                DrawCircleSector({ cx, cy + 2 }, 15.0f, 180.0f, 360.0f, 18, Color{ 60, 56, 70, 255 });   // the hood
+                DrawEllipse((int)cx, (int)cy + 3, 9.0f, 5.0f, Color{ 230, 224, 200, 255 });              // the eye
+                DrawCircleV({ cx, cy + 3 }, 3.2f, s.hidden ? Color{ 150, 140, 220, 255 } : Color{ 40, 30, 20, 255 });
+                if (s.hidden) DrawLineEx({ cx - 12, cy + 12 }, { cx + 12, cy - 6 }, 2.5f, Color{ 230, 224, 200, 255 }); // struck through: step out
+                DrawUIText(s.hidden ? "Out" : "Hide", (int)r.x + 3, (int)(r.y + r.height - 14), 11, Color{ 230, 220, 255, 255 }); })) {
+            PlaySfx(SfxId::Click);
+            TryHide(s, false, g_foesNear);
         }
     }
 }
@@ -13427,6 +13518,7 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
             if (hp.gatherAtValid && move < 0.1f) yawRad = atan2f(hp.gatherAt.y - z, hp.gatherAt.x - x);
         }
     }
+    if (s.hidden) tint = Color{ (unsigned char)(tint.r * 0.35f), (unsigned char)(tint.g * 0.35f), (unsigned char)(tint.b * 0.45f), tint.a }; // in the shadows (2026-09-28)
     return DrawHuman(trackId, x, z, yawRad, 1.0f, tint, HumanOutfitFor(s.equipped), hp, shadowPass);
 }
 
@@ -24006,6 +24098,7 @@ static void DrawWorldCorpses2D(const GameState& s, int zone, Vector2 camera) {
 }
 
 static void BeginPlayerDeath(GameState& s) {
+    s.hidden = false; s.surpriseT = 0.0f; // (2026-09-28)
     // Called at the END of every player-loss path, AFTER that path's gold/item/
     // Shaken/Rival-loot logic has resolved - this only handles the death itself:
     // HP to 0, everything hostile cleared, ghost placed. The loss functions no
@@ -26801,6 +26894,7 @@ static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
                 Wild3DConsiderFlag(s, c, m, 150.0f, &f) || // assist pass
                 Wild3DScreenAssist(s, c, m, assistPx, &f); // screen-space snap
     }
+    if (found) SpringFromHiding(s); // (2026-09-28) picking a target breaks cover
     if (found) {
         if ((fightingNormal && !f.isRival && f.bladeIdx < 0 && f.spotIdx != s.wildEngaged->spotIdx) ||
             (!s.wildEngaged.has_value() && !f.isRival && f.bladeIdx < 0 && FindWildExtra(s, f.spotIdx))) {
@@ -26908,6 +27002,7 @@ static void Dungeon3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m) {
     bool found = Dungeon3DConsiderFlag(s, c, m, 70.0f, di, &f) ||
                  Dungeon3DConsiderFlag(s, c, m, 150.0f, di, &f) ||
                  Dungeon3DScreenAssist(s, c, m, assistPx, di, &f);
+    if (found) SpringFromHiding(s); // (2026-09-28) picking a target breaks cover
     if (found) {
         if (s.dungeonEngaged.has_value() || FindDungeonExtra(s, f.monsterIdx, f.isBoss)) {
             TransferDungeonPrimary(s, di, f.monsterIdx, f.isBoss);
@@ -27678,6 +27773,7 @@ static void CastLiveDebuffSpell(GameState& s, int spellIdx, int zone) {
 //     the engaged enemy every 2s - see FiendStrikeLive.
 static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
     if (spellIdx < 0 || spellIdx >= (int)kSpells.size()) return;
+    RevealFromHiding(s, ""); // spellcasting gives you away (2026-09-28)
     const Spell& spell = kSpells[spellIdx];
     // UO-style travel: Recall never casts directly - the hotbar/Magic/R-key paths
     // open the town picker instead (costs are paid on destination select).
@@ -28735,6 +28831,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // (level*3) for starting HP.
     auto tryEngageWildMonster = [&](int idx) {
         if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
+        SpringFromHiding(s); // (2026-09-28) only you can start a fight while hidden
         if (s.wildSpotRespawn[idx] > 0.0f) return; // empty - waiting to respawn
         const WildernessMonsterSpot& spot = kWildernessMonsterSpots[idx];
         GameState::ActiveMonster am;
@@ -28799,7 +28896,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // mid-panel with an ambush or innocent encounter. (If the moment passes, it passes.)
     if (s.rivalAutoEngage) {
         s.rivalAutoEngage = false;
-        if (!PlayerYoung(s) && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && !s.wildEngaged.has_value() && !s.ambush.has_value() && !s.innocentEncounter.has_value() &&
+        if (!PlayerYoung(s) && !s.hidden && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && !s.wildEngaged.has_value() && !s.ambush.has_value() && !s.innocentEncounter.has_value() &&
             Dist(s.rivalPos, s.wildernessPlayerPos) < kRivalCatchRange * 1.5f)
             tryEngageRival();
     }
@@ -28808,7 +28905,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     for (int bi = 0; bi < kBladeCount; bi++) {
         if (!s.blades[bi].autoEngage) continue;
         s.blades[bi].autoEngage = false;
-        if (!s.playerIsGhost && s.playerDeathAnimT <= 0.0f && !s.wildEngaged.has_value() && !s.ambush.has_value() && !s.innocentEncounter.has_value() &&
+        if (!s.hidden && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && !s.wildEngaged.has_value() && !s.ambush.has_value() && !s.innocentEncounter.has_value() &&
             Dist(s.blades[bi].pos, s.wildernessPlayerPos) < kRivalCatchRange * 1.5f)
             tryEngageBlade(bi);
     }
@@ -29230,6 +29327,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (RandUnit() * 100.0f < hitChance && !(foeBlocked = FoeShieldBlock(s, am))) {
             int dmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
             if (s.vigorT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.25f)); // Blessing of Vigor
+            dmg = SurpriseStrike(s, dmg); // from the shadows (2026-09-28)
             dmg = NecroOnHit(s, am, dmg); // Amplify Damage / Life Tap
             am.hp -= dmg;
             am.monsterHurtT = 0.0f; // hit-flash on the monster
@@ -29453,6 +29551,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     const Vector2 wildPrevPos = s.wildernessPlayerPos; // for the terrain check below (2026-09-26)
     if (s.playerDeathAnimT <= 0.0f) {
         bool moved = UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GameDt() * SettleTravelMult(s), kWildernessWorldSize); // Stable (2026-09-27)
+        StealthTick(s, GameDt(), moved); // Hiding & Stealth (2026-09-28)
         // UO-style attack flagging (2026-09-24): when the player isn't driving,
         // steer toward the flagged target until contact auto-engages. Manual
         // input always wins - steering only fills the idle gap.
@@ -29466,6 +29565,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, node.pos, kNodeRadius * 0.7f);
     for (auto& spot : kWildernessCreatureSpots)
         ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, spot.pos, kNodeRadius * 0.8f);
+    g_foesNear = false;
     for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
         // The engaged one collides against its live position (below); the others
         // wander in a small loop (WildernessMonsterLivePos) and auto-engage the player
@@ -29477,13 +29577,15 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == (int)i) continue;
         if (FindWildExtra(s, (int)i)) continue; // pack member: it's already on you (tap it to fight it)
         Vector2 livePos = WildernessMonsterLivePos((int)i, s.worldTime);
-        if (!s.wildEngaged.has_value() && s.wildExtraAttackers.empty() && // with a pack on you, you choose (tap-to-target)
+        if (Dist(s.wildernessPlayerPos, livePos) < 220.0f && ThreatOf(s, kWildernessMonsterSpots[i].level) != kThreatTrivial) g_foesNear = true;
+        if (!s.hidden && // hidden (2026-09-28): it doesn't see you, even up close
+            !s.wildEngaged.has_value() && s.wildExtraAttackers.empty() && // with a pack on you, you choose (tap-to-target)
             !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
             s.disengageGraceT <= 0.0f && // manual-disengage grace (2026-09-25): don't instantly re-engage
             Dist(s.wildernessPlayerPos, livePos) < (kPlayerRadius + kNodeRadius * 0.7f) *
                 (PlayerRoadWarded(s.wildernessPlayerPos) ? 0.5f : 1.0f)) // Phase 6: road patrols halve the engage radius
             tryEngageWildMonster((int)i);
-        else if (!s.wildEngaged.has_value() && s.wildExtraAttackers.empty() && !s.playerIsGhost &&
+        else if (!s.hidden && !s.wildEngaged.has_value() && s.wildExtraAttackers.empty() && !s.playerIsGhost &&
                  s.playerDeathAnimT <= 0.0f && s.disengageGraceT <= 0.0f && !s.innocentEncounter.has_value() &&
                  Dist(s.wildernessPlayerPos, livePos) < WildNoticeRange(s, kWildernessMonsterSpots[i].level)) {
             // UO-style aggro (2026-09-27): it spots you and comes for you - the
@@ -30623,6 +30725,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // without needing real pathfinding.
     auto tryEngageDungeonMonster = [&](int monsterIdx, bool isBoss) {
         if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
+        SpringFromHiding(s); // (2026-09-28)
         int slot = isBoss ? kDungeonBossSlot : monsterIdx;
         if (s.dungeonSpawnRespawn[*s.selectedDungeon][slot] > 0.0f) return; // empty - waiting to respawn
         const DungeonMonster& m = isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, monsterIdx);
@@ -30817,6 +30920,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (RandUnit() * 100.0f < hitChance) {
             int dmg = std::max(1, (int)std::round(power * (0.85f + RandUnit() * 0.3f)));
             if (s.vigorT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.25f)); // Blessing of Vigor
+            dmg = SurpriseStrike(s, dmg); // from the shadows (2026-09-28)
             dmg = NecroOnHit(s, am, dmg); // Amplify Damage / Life Tap
             am.hp -= dmg;
             am.monsterHurtT = 0.0f; // hit-flash on the monster
@@ -30897,6 +31001,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // No movement during the death animation - the body isn't going anywhere.
     if (s.playerDeathAnimT <= 0.0f) {
         bool moved = UpdatePlayerMovement(s.dungeonPlayerPos, s.playerFacing, GameDt(), kDungeonWorldSize);
+        StealthTick(s, GameDt(), moved); // Hiding & Stealth (2026-09-28)
         // Flag steering, same as Wilderness - the wall-slide below still applies.
         if (!moved) SteerTowardFlag(s, s.dungeonPlayerPos, s.playerFacing, GameDt(), kDungeonWorldSize, 1);
         if (ActivePet(s)) UpdateCompanionFollow(s, s.dungeonPlayerPos, s.playerFacing, GameDt(),
@@ -30915,6 +31020,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             return;
         }
     }
+    g_foesNear = false;
     for (int i = 0; i < kDungeonRegularSlots; i++) {
         // The engaged one collides against its live position (below); the rest
         // wander (DungeonMonsterLivePos) and auto-engage the player on contact - same
@@ -30926,7 +31032,9 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (s.dungeonEngaged.has_value() && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
         if (FindDungeonExtra(s, i, false)) continue; // pack member: already on you (tap it to fight it)
         Vector2 livePos = DungeonMonsterLivePos(*s.selectedDungeon, i, s.worldTime);
-        if (!s.dungeonEngaged.has_value() && s.dungeonExtraAttackers.empty() && // pack on you: you choose
+        if (Dist(s.dungeonPlayerPos, livePos) < 220.0f) g_foesNear = true;
+        if (!s.hidden && // hidden (2026-09-28)
+            !s.dungeonEngaged.has_value() && s.dungeonExtraAttackers.empty() && // pack on you: you choose
             !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
             s.disengageGraceT <= 0.0f && // manual-disengage grace (2026-09-25)
             Dist(s.dungeonPlayerPos, livePos) < kPlayerRadius + kNodeRadius * 0.8f)
@@ -30936,7 +31044,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     if (!(s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss) &&
         s.dungeonSpawnRespawn[*s.selectedDungeon][kDungeonBossSlot] <= 0.0f) {
         Vector2 bossLivePos = DungeonMonsterLivePos(*s.selectedDungeon, kDungeonBossSlot, s.worldTime);
-        if (bossUnlocked && !s.dungeonEngaged.has_value() && s.dungeonExtraAttackers.empty() &&
+        if (Dist(s.dungeonPlayerPos, bossLivePos) < 220.0f) g_foesNear = true;
+        if (bossUnlocked && !s.hidden && !s.dungeonEngaged.has_value() && s.dungeonExtraAttackers.empty() &&
             !FindDungeonExtra(s, kDungeonBossSlot, true) && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f &&
             s.disengageGraceT <= 0.0f && // manual-disengage grace (2026-09-25)
             Dist(s.dungeonPlayerPos, bossLivePos) < kPlayerRadius + kNodeRadius)
@@ -33192,7 +33301,7 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
 // want working. Equipped skills add up to at most 700 and stop improving once
 // the loadout is full; unequipped skills keep every point but do nothing until
 // you equip them again. Grouped, with a line on what each one does.
-static const char* kCappedSkillWhat[21] = {
+static const char* kCappedSkillWhat[23] = {
     "Hit harder and more often with swords and axes.",
     "Hit harder and more often with spears and daggers.",
     "Hit harder and more often with maces and hammers.",
@@ -33214,6 +33323,8 @@ static const char* kCappedSkillWhat[21] = {
     "Block blows with a shield.",
     "Sense Murder Inc. killers before they reach you.",
     "Dark magic: bone spells, curses, raise the dead.",
+    "Vanish from sight: monsters and ambushers pass you by.",
+    "Move while hidden, and strike harder from the shadows.",
 };
 struct SkillGroup { const char* name; std::vector<int> idx; };
 static float g_skillsScroll = 0.0f;
@@ -33222,7 +33333,7 @@ static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
         { "Combat", { 0, 1, 2, 3, 4, 5, 6, 18, 8, 7 } },
         { "Magic", { 9, 10, 11, 20 } },
         { "Animals", { 12, 13, 14 } },
-        { "Scouting & thievery", { 19, 15, 16, 17 } },
+        { "Scouting & thievery", { 19, 21, 22, 15, 16, 17 } },
     };
     const Color ink = kColorText, soft = Fade(kColorText, 0.72f), good = { 46, 120, 60, 255 }, warn = { 170, 90, 20, 255 };
     float total = ActiveSkillTotal(s);
@@ -34213,6 +34324,8 @@ static void UpdateDrawFrame() {
         if (!guideBlocked || state.starterStep == kStFight || state.starterStep == kStLoot) UpdateDrawStarter(state, screenW, screenH);
         DrawDirectionsHud(state, screenW); // compass + world-boss timer (2026-09-27)
         DrawWalkMarker(state);             // tap to walk + Teleport aim (2026-09-27)
+        if (state.hidden && state.screen != Screen::Wilderness && state.screen != Screen::Hunt) state.hidden = false; // (2026-09-28)
+        if (state.hidden) DrawHudLine(EffectiveSkill(state, &GameState::stealth) > 0.0f ? "HIDDEN - sneaking (Stealth)" : "HIDDEN - moving will reveal you", 20, 244, 13, Color{ 200, 190, 255, 255 });
         g_hudCamZone = -1;
         // UO-style travel (2026-09-25): arriving in a town marks it as a recall
         // destination. selectedTown only changes on real arrivals (gates, tabs,
