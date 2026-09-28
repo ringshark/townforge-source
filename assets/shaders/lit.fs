@@ -1,6 +1,11 @@
 #version 100
 
+// Keep world-space lighting stable on mobile; retain an ES2 fallback.
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
 
 // Town Forge 3D "lit" shader (fragment stage) — 2026-09-24.
 // This is assets/shaders/shadowmap.fs with the shadow-map sampling section
@@ -45,7 +50,8 @@ void main()
     // pale and washed out.
     vec4 texelColor = texture2D(texture0, fragTexCoord)*fragColor*colDiffuse;
     vec3 albedo = pow(texelColor.rgb, vec3(2.2));
-    vec3 normal = normalize(fragNormal);
+    float normalLength = length(fragNormal);
+    vec3 normal = normalLength > 0.0001 ? fragNormal / normalLength : vec3(0.0, 1.0, 0.0);
     vec3 viewD = normalize(viewPos - fragPosition);
     vec3 l = -lightDir;
     float NdotL = max(dot(normal, l), 0.0);
@@ -53,13 +59,20 @@ void main()
     // Hemisphere ambient: cool sky fill from above, darker warm ground bounce
     // from below, so faces turned away from the sun still show their form.
     float up = normal.y*0.5 + 0.5;
+    // Lift side-facing detail gently: leather folds and sculpted faces should
+    // remain readable in moonlight without flattening the sunlit surfaces.
     vec3 amb = ambient.rgb*0.75*mix(vec3(0.55, 0.50, 0.45), vec3(1.05, 1.08, 1.18), up);
+    amb *= 1.0 + 0.20 * (1.0 - NdotL) * (1.0 - up);
     vec3 light = lightColor.rgb*0.80*NdotL + amb;
 
     float spec = 0.0;
-    if (NdotL > 0.0) spec = pow(max(0.0, dot(viewD, reflect(-l, normal))), 24.0)*0.10;
+    if (NdotL > 0.0) spec = pow(max(0.0, dot(viewD, reflect(-l, normal))), 20.0)*0.045*NdotL;
 
     vec3 col = albedo*light + lightColor.rgb*spec;
+    // A restrained sky reflection outlines grazing surfaces. Tied to the
+    // existing sky fill, so it follows night/day instead of glowing in darkness.
+    float edge = pow(1.0 - max(dot(normal, viewD), 0.0), 3.0);
+    col += ambient.rgb * vec3(0.82, 0.94, 1.12) * edge * 0.025;
 
     // Gamma encode (linear -> display)
     col = pow(max(col, vec3(0.0)), vec3(1.0/2.2));
