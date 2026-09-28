@@ -17259,6 +17259,8 @@ static float Wild3DRoadDist(Vector2 p) {
     return d;
 }
 
+static float TownCompoundBaseDepth(int ti);           // walled towns (2026-09-28)
+static bool TownCompoundContains(Vector2 p, int ti, float D, float pad);
 static void Wild3DBuildDressing() {
     Wild3DDressing& D = g_wild3dDress;
     if (D.built) return;
@@ -17292,6 +17294,7 @@ static void Wild3DBuildDressing() {
     };
     auto add = [&](int id, float x, float z, float rot, float sc, Color tint, float cullR) {
         if (id < 0 || id >= kWPCount || !D.ok[id]) return;
+        for (int ti = 0; ti < 4; ti++) if (TownCompoundContains({ x, z }, ti, TownCompoundBaseDepth(ti), 26.0f + cullR * 0.3f)) return; // walled towns (2026-09-28)
         D.items.push_back({ id, x, z, rot, sc, tint, cullR });
     };
     const Color frost = { 205, 222, 240, 255 };
@@ -18414,8 +18417,76 @@ static void Wild3DDrawGate(float x, float z, Color post, Color beam, Vector2 fac
 }
 #ifdef TF_TOWNSCAN
 static Vector2 GateLocal(Vector2 p, Vector2 gate, Vector2 f);
+static void TownPlotSearch(int plot) {
+    const HousePlot& hp = kHousePlots[(size_t)plot];
+    float R = SettleWallR(hp.cells) + 30.0f;
+    float best = 1e9f; Vector2 bp = hp.pos;
+    for (float x = R + 40; x < kWildernessWorldSize - R - 40; x += 40)
+        for (float z = R + 40; z < kWildernessWorldSize - R - 40; z += 40) {
+            Vector2 c = { x, z };
+            float d0 = Dist(c, hp.pos);
+            if (d0 > best) continue;
+            bool ok = true;
+            for (float a = 0; a < 6.283f && ok; a += 0.2f)
+                for (float r = 0; r <= R && ok; r += R / 4)
+                    if (WildTerrainAt(x + cosf(a) * r, z + sinf(a) * r) & (kWTWater | kWTRidge)) ok = false;
+            for (size_t i = 0; ok && i < kHousePlots.size(); i++) if ((int)i != plot && Dist(c, kHousePlots[i].pos) < R + SettleWallR(kHousePlots[i].cells) + 30) ok = false;
+            for (const auto& m : kWildernessMonsterSpots) if (ok && Dist(c, m.pos) < R + 20) ok = false;
+            for (const auto& n : kWildernessGatherNodes) if (ok && Dist(c, n.pos) < R + 40) ok = false;
+            for (const auto& e : kWildernessDungeonEntrances) if (ok && Dist(c, e.pos) < R + 120) ok = false;
+            for (const auto& sh : kShrines) if (ok && Dist(c, sh.pos) < R + 100) ok = false;
+            for (const auto& g : kTownGates) if (ok && Dist(c, g.wildernessPos) < R + 650) ok = false;
+            for (const auto& cp : kRivalCampSpots) if (ok && Dist(c, cp) < R + 220) ok = false;
+            if (ok && (Dist(c, kOrcFortPos) < R + kOrcFortRadius + 60 || Dist(c, kWyrmLair) < R + kWyrmLairR + 60 || Dist(c, kFieldsOfSorrow) < R + kFieldsOfSorrowRadius + 40 || Dist(c, kOutlawRefuge) < R + 100)) ok = false;
+            for (const auto& d : kSaltDocks) if (ok && Dist(c, d.pos) < R + 130) ok = false;
+            if (ok) { best = d0; bp = c; }
+        }
+    { // diagnostics: how many grid points survive each check on its own
+        int n[8] = {};
+        for (float x = R + 40; x < kWildernessWorldSize - R - 40; x += 80)
+            for (float z = R + 40; z < kWildernessWorldSize - R - 40; z += 80) {
+                Vector2 c = { x, z }; n[0]++;
+                bool t = true;
+                for (float a = 0; a < 6.283f && t; a += 0.2f) for (float r = 0; r <= R && t; r += R / 4)
+                    if (WildTerrainAt(x + cosf(a) * r, z + sinf(a) * r) & (kWTWater | kWTRidge)) t = false;
+                if (t) n[1]++;
+                bool pl = true; for (size_t i = 0; i < kHousePlots.size(); i++) if ((int)i != plot && Dist(c, kHousePlots[i].pos) < R + SettleWallR(kHousePlots[i].cells) + 30) pl = false;
+                if (pl) n[2]++;
+                bool mo = true; for (const auto& m : kWildernessMonsterSpots) if (Dist(c, m.pos) < R + 20) mo = false;
+                if (mo) n[3]++;
+                bool gt = true; for (const auto& g : kTownGates) if (Dist(c, g.wildernessPos) < R + 650) gt = false;
+                if (gt) n[4]++;
+                if (t && pl) n[5]++;
+                if (t && pl && gt) n[6]++;
+            }
+        for (float x = R + 40; x < kWildernessWorldSize - R - 40; x += 40)
+            for (float z = R + 40; z < kWildernessWorldSize - R - 40; z += 40) {
+                Vector2 c = { x, z };
+                bool t = true;
+                for (float a = 0; a < 6.283f && t; a += 0.2f) for (float r = 0; r <= R && t; r += R / 4)
+                    if (WildTerrainAt(x + cosf(a) * r, z + sinf(a) * r) & (kWTWater | kWTRidge)) t = false;
+                for (size_t i = 0; t && i < kHousePlots.size(); i++) if ((int)i != plot && Dist(c, kHousePlots[i].pos) < R + SettleWallR(kHousePlots[i].cells) + 30) t = false;
+                for (const auto& g : kTownGates) if (t && Dist(c, g.wildernessPos) < R + 650) t = false;
+                if (!t) continue;
+                printf("TOWNSCAN cand (%.0f,%.0f) dist %.0f:", x, z, Dist(c, hp.pos));
+                for (const auto& m : kWildernessMonsterSpots) if (Dist(c, m.pos) < R + 20) printf(" M:%s", m.name.c_str());
+                for (const auto& n : kWildernessGatherNodes) if (Dist(c, n.pos) < R + 40) printf(" N:%s", n.resource.c_str());
+                for (const auto& e : kWildernessDungeonEntrances) if (Dist(c, e.pos) < R + 120) printf(" ENTRANCE");
+                for (const auto& sh : kShrines) if (Dist(c, sh.pos) < R + 100) printf(" SHRINE");
+                for (const auto& cp : kRivalCampSpots) if (Dist(c, cp) < R + 220) printf(" CAMP");
+                if (Dist(c, kOrcFortPos) < R + kOrcFortRadius + 60) printf(" FORT");
+                if (Dist(c, kWyrmLair) < R + kWyrmLairR + 60) printf(" WYRM");
+                if (Dist(c, kFieldsOfSorrow) < R + kFieldsOfSorrowRadius + 40) printf(" SORROW");
+                for (const auto& d : kSaltDocks) if (Dist(c, d.pos) < R + 130) printf(" DOCK");
+                printf("\n");
+            }
+        printf("TOWNSCAN diag total %d terrain %d plots %d monsters %d gates %d terrain+plots %d +gates %d  R=%.0f\n", n[0], n[1], n[2], n[3], n[4], n[5], n[6], R);
+    }
+    printf("TOWNSCAN plot %s from (%.0f,%.0f) best (%.0f,%.0f) = WP(%.0f, %.0f) moved %.0f\n", hp.name, hp.pos.x, hp.pos.y, bp.x, bp.y, bp.x / kWS, bp.y / kWS, best);
+}
 static void TownCompoundScan() {
     WildTerrainEnsure();
+    TownPlotSearch(3);
     for (int ti = 0; ti < 4; ti++) {
         Vector2 g = kTownGates[(size_t)ti].wildernessPos, f = TownGateFacing(ti);
         auto in = [&](Vector2 p) { Vector2 l = GateLocal(p, g, f); return fabsf(l.x) < 300.0f && l.y < 0.0f && l.y > -600.0f; };
@@ -18478,6 +18549,126 @@ static void GateCollide(Vector2& p, Vector2 gate, Vector2 f) {
         float d = Dist(p, t);
         if (d < 24.0f + r && d > 0.01f) { p.x = t.x + (p.x - t.x) / d * (24.0f + r); p.y = t.y + (p.y - t.y) / d * (24.0f + r); }
     }
+}
+static Vector2 TownGateFacing(int townIdx);
+// ---- Walled towns (2026-09-28) ----------------------------------------------
+// From the wilds each town is a walled town behind its gatehouse: side and back
+// walls with towers, a paved main street and that town's own buildings, lamps
+// lit after dusk. (Walk through the gate to go in - the full town is its own
+// map.) Each town's depth fits the ground behind its gate, and shrinks away from
+// your settlement if you own a plot close by.
+static const float kCompoundHalfW = 286.0f;
+static float TownCompoundBaseDepth(int ti) { static const float d[4] = { 340.0f, 360.0f, 250.0f, 320.0f }; return d[std::clamp(ti, 0, 3)]; }
+static float TownCompoundDepth(const GameState& s, int ti) {
+    float D = TownCompoundBaseDepth(ti);
+    if (s.housePlotIdx >= 0 && s.housePlotIdx < (int)kHousePlots.size()) {
+        const HousePlot& hp = kHousePlots[(size_t)s.housePlotIdx];
+        Vector2 g = kTownGates[(size_t)ti].wildernessPos, f = TownGateFacing(ti);
+        Vector2 l = GateLocal(hp.pos, g, f);
+        float R = SettleWallR(hp.cells) + 20.0f;
+        for (; D >= 150.0f; D -= 10.0f) { // nearest point of the walled rectangle to the settlement centre
+            float nx = std::clamp(l.x, -kCompoundHalfW - 20.0f, kCompoundHalfW + 20.0f), nz = std::clamp(l.y, -D - 20.0f, 0.0f);
+            if (hypotf(l.x - nx, l.y - nz) > R) break;
+        }
+        if (D < 150.0f) return 0.0f; // no room: just the gatehouse
+    }
+    return D;
+}
+static bool TownCompoundContains(Vector2 p, int ti, float D, float pad) {
+    Vector2 l = GateLocal(p, kTownGates[(size_t)ti].wildernessPos, TownGateFacing(ti));
+    return fabsf(l.x) < kCompoundHalfW + pad && l.y < pad && l.y > -D - pad;
+}
+static void TownCompoundCollide(Vector2& p, int ti, float D) {
+    if (D <= 0.0f) return;
+    Vector2 g = kTownGates[(size_t)ti].wildernessPos, f = TownGateFacing(ti);
+    Vector2 l = GateLocal(p, g, f);
+    const float r = 17.0f, t = 10.0f;
+    bool moved = false;
+    for (int sx = -1; sx <= 1; sx += 2) { // side walls
+        float wx = sx * kCompoundHalfW;
+        if (l.y < 0.0f && l.y > -D - t && fabsf(l.x - wx) < t + r) { l.x = wx + ((l.x - wx) >= 0 ? 1.0f : -1.0f) * (t + r); moved = true; }
+    }
+    if (fabsf(l.x) < kCompoundHalfW + t && fabsf(l.y + D) < t + r) { l.y = -D + ((l.y + D) >= 0 ? 1.0f : -1.0f) * (t + r); moved = true; } // back wall
+    if (moved) p = GateWorld(l, g, f);
+}
+static void Wild3DDrawTownCompound(const GameState& s, int ti, Color wall, Color dark) {
+    float D = TownCompoundDepth(s, ti);
+    if (D <= 0.0f) return;
+    Town3DLoadModels();
+    Vector2 g = kTownGates[(size_t)ti].wildernessPos, f = TownGateFacing(ti);
+    float gy = WildGroundY(g.x, g.y);
+    auto groundAt = [&](float lx, float lz) { Vector2 w = GateWorld({ lx, lz }, g, f); return WildGroundY(w.x, w.y) - gy; };
+    const bool harbor = ti == 1; // Saltmere stands on a plank deck over the water
+    const Color roof = { 120, 60, 44, 255 };
+    const Color pave = harbor ? Color{ 128, 98, 68, 255 } : ti == 2 ? Color{ 214, 222, 232, 255 } : Color{ 142, 134, 122, 255 };
+    const Color yard = harbor ? Color{ 110, 84, 58, 255 } : ti == 2 ? Color{ 232, 238, 246, 255 } : ti == 3 ? Color{ 118, 112, 100, 255 } : Color{ 104, 132, 80, 255 };
+    T3DLiftScope lift_(g.x, g.y);
+    rlPushMatrix();
+    rlTranslatef(g.x, 0, g.y);
+    rlRotatef(atan2f(f.x, f.y) * RAD2DEG, 0, 1, 0); // local +z = out toward the wilds; the town lies at -z
+    auto at = [&](float lx, float lz) { rlPushMatrix(); rlTranslatef(0.0f, groundAt(lx, lz), 0.0f); };
+    // the grounds: yard tiles on the terrain, a paved street up the middle
+    for (float lx = -kCompoundHalfW + 20.0f; lx < kCompoundHalfW; lx += 40.0f)
+        for (float lz = -20.0f; lz > -D; lz -= 40.0f) {
+            at(lx, lz);
+            DrawCube({ lx, -4.0f, lz }, 41.0f, 12.0f, 41.0f, yard);
+            if (fabsf(lx) < 60.0f) DrawCube({ lx, 2.4f, lz }, 41.0f, 1.0f, 41.0f, pave);
+            rlPopMatrix();
+        }
+    if (harbor) // pilings under the deck
+        for (float lx = -kCompoundHalfW + 30.0f; lx < kCompoundHalfW; lx += 80.0f)
+            for (float lz = -40.0f; lz > -D; lz -= 80.0f) { at(lx, lz); DrawCylinder({ lx, -30.0f, lz }, 5, 5, 30, 6, Color{ 80, 60, 40, 255 }); rlPopMatrix(); }
+    // walls: 40-unit segments, each set on its own ground, with crenels
+    auto wallSeg = [&](float lx, float lz, bool alongZ) {
+        at(lx, lz);
+        DrawCube({ lx, 15.0f, lz }, alongZ ? 18.0f : 41.0f, 90.0f, alongZ ? 41.0f : 18.0f, wall);
+        DrawCube({ lx, 64.0f, lz }, alongZ ? 20.0f : 12.0f, 10.0f, alongZ ? 12.0f : 20.0f, dark);
+        rlPopMatrix();
+    };
+    for (int sx = -1; sx <= 1; sx += 2)
+        for (float lz = -26.0f; lz > -D - 10.0f; lz -= 40.0f) wallSeg(sx * kCompoundHalfW, lz, true);
+    for (float lx = -kCompoundHalfW; lx <= kCompoundHalfW; lx += 40.0f) wallSeg(lx, -D, false);
+    auto tower = [&](float lx, float lz, float r, float h) {
+        at(lx, lz);
+        DrawCylinder({ lx, -20.0f, lz }, r, r - 2.0f, h + 20.0f, 12, wall);
+        DrawCylinder({ lx, h, lz }, r + 3.0f, r + 3.0f, 6.0f, 12, dark);
+        DrawCylinderEx({ lx, h + 6.0f, lz }, { lx, h + 42.0f, lz }, r + 2.0f, 0.0f, 12, roof);
+        rlPopMatrix();
+    };
+    for (int sx = -1; sx <= 1; sx += 2) { tower(sx * kCompoundHalfW, -D, 20.0f, 84.0f); tower(sx * kCompoundHalfW, -D * 0.5f, 16.0f, 74.0f); }
+    // the town's own buildings along the street, the town hall at its head
+    auto nodes = ActiveTownNodes(ti);
+    std::vector<std::string> keys; bool hall = false;
+    for (const auto& n : nodes) { if (n.key == "townhall") hall = true; else keys.push_back(n.key); }
+    size_t k = 0;
+    auto building = [&](const std::string& key, float lx, float lz, float rotDeg) {
+        bool wide = key == "townhall" || key == "bank" || key == "stable";
+        at(lx, lz);
+        rlPushMatrix();
+        rlTranslatef(lx, 0.0f, lz);
+        rlRotatef(rotDeg, 0, 1, 0);
+        DrawCube({ 0, -13.0f, 0 }, wide ? 140.0f : 118.0f, 30.0f, wide ? 96.0f : 118.0f, ColorBrightness(TileColorFor(key), -0.4f));
+        Town3DDrawBuilding(key, 0.0f, 0.0f);
+        rlPopMatrix();
+        rlPopMatrix();
+    };
+    float hallZ = -D + 62.0f;
+    for (float lz = -104.0f; lz > -D + 90.0f && k < keys.size(); lz -= 136.0f)
+        for (int sx = -1; sx <= 1 && k < keys.size(); sx += 2) {
+            bool wide = keys[k] == "bank" || keys[k] == "stable";
+            building(keys[k++], sx * (wide ? 186.0f : 176.0f), lz, sx < 0 ? 90.0f : -90.0f);
+        }
+    if (hall && D >= 200.0f) building("townhall", 0.0f, hallZ, 0.0f);
+    // lamps along the street, lit after dusk
+    for (float lz = -60.0f; lz > -D + 40.0f; lz -= 110.0f)
+        for (int sx = -1; sx <= 1; sx += 2) {
+            float lx = sx * 70.0f;
+            at(lx, lz);
+            DrawCylinder({ lx, 0.0f, lz }, 1.6f, 1.6f, 34.0f, 6, Color{ 50, 44, 40, 255 });
+            DrawSphere({ lx, 36.0f, lz }, 3.4f, g_t3dNight > 0.25f ? Color{ 255, 214, 130, 255 } : Color{ 120, 110, 90, 255 });
+            rlPopMatrix();
+        }
+    rlPopMatrix();
 }
 // Which way a town's gatehouse faces: along the road that leaves it (unit vector,
 // pointing out into the wilds). The town lies behind it.
@@ -19899,6 +20090,15 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
     if (vis(kWildernessTown4GatePos.x, kWildernessTown4GatePos.y, 320.0f))
         Wild3DDrawGate(kWildernessTown4GatePos.x, kWildernessTown4GatePos.y,
                        Color{ 150, 142, 128, 255 }, Color{ 115, 108, 96, 255 }, TownGateFacing(3));
+    { // the walled towns behind the gates (2026-09-28)
+        static const Color walls[4][2] = { { { 168, 150, 124, 255 }, { 128, 110, 88, 255 } }, { { 184, 176, 160, 255 }, { 140, 134, 122, 255 } },
+                                           { { 196, 212, 228, 255 }, { 150, 175, 200, 255 } }, { { 150, 142, 128, 255 }, { 115, 108, 96, 255 } } };
+        for (int ti = 0; ti < 4; ti++) {
+            Vector2 g = kTownGates[(size_t)ti].wildernessPos, f = TownGateFacing(ti);
+            float D = TownCompoundBaseDepth(ti);
+            if (vis(g.x - f.x * D * 0.5f, g.y - f.y * D * 0.5f, 360.0f + D * 0.5f)) Wild3DDrawTownCompound(s, ti, walls[ti][0], walls[ti][1]);
+        }
+    }
 
     // Custom housing (2026-09-25) - for-sale signs on unowned plots; floor slab +
     // wall/door boxes on owned ones. DrawCube rides the active sun/shadow shader
@@ -30223,6 +30423,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     for (int ti = 0; ti < (int)kTownGates.size(); ti++)
         if (Dist(s.wildernessPlayerPos, kTownGates[(size_t)ti].wildernessPos) < 340.0f)
             GateCollide(s.wildernessPlayerPos, kTownGates[(size_t)ti].wildernessPos, TownGateFacing(ti));
+    for (int ti = 0; ti < (int)kTownGates.size(); ti++) // the walled towns (2026-09-28)
+        if (Dist(s.wildernessPlayerPos, kTownGates[(size_t)ti].wildernessPos) < 800.0f) {
+            float D = TownCompoundDepth(s, ti);
+            if (D > 0.0f && TownCompoundContains(s.wildernessPlayerPos, ti, D, -4.0f)) { s.wildernessPlayerPos = TownWildernessSpawn(ti); WalkTargetClear(); } // old saves / knockback: out the gate
+            TownCompoundCollide(s.wildernessPlayerPos, ti, D);
+        }
     // Walk in (2026-09-27): stepping into a doorway or through a town's archway takes
     // you inside - no E, no portal. (E still works as before.)
     if (!s.playerIsGhost && s.playerDeathAnimT <= 0.0f && s.screen == Screen::Wilderness) {
