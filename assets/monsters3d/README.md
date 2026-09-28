@@ -38,6 +38,9 @@ The spider line is not in the game yet and uses the names from its concept art.
 | `fishfolk_warlord.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 3 |
 | `fishfolk_shaman.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 4 |
 | `fishfolk_huntress.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 5 |
+| `world_boss_dragon.glb` | new: world boss (placeholder name) | Three-headed dragon from the battle scene** |
+| `hero.glb` | main hero (static, full PBR) | Hero turnaround: front/side/back views |
+| `hero_animated.glb` | main hero (rigged + animated) | Same model, auto-rigged by Meshy |
 
 \* The ice lineup's figures overlap too much to crop apart, so each was redrawn in
 isolation from the lineup with Meshy image-to-image (`nano-banana-pro`) before 3D
@@ -49,3 +52,17 @@ Generation settings: `ai_model: latest`, `topology: triangle`,
 `target_polycount: 30000`, `should_remesh`, `should_texture`, `enable_pbr`,
 `symmetry_mode: auto`. The textures were then downsized from 2048 to 1024 with
 `gltf-transform resize` and `prune`.
+
+\*\* The dragon was isolated from the battle scene with Meshy image-to-image (wings raised
+so the whole silhouette fits in frame, no breath effects), then generated at a 50k
+triangle target instead of 30k.
+
+## Hero
+
+- `hero.glb` was built with Meshy multi-image-to-3D from all three turnaround views
+  (`source/hero_front|side|back.jpg`), so the backpack and cape match the art.
+- `hero_animated.glb` is the same character run through Meshy auto-rigging: a
+  24-bone humanoid skeleton (`Armature`) with two clips, `Walk` and `Run`, merged into
+  one file. Load it with raylib's `LoadModel` + `LoadModelAnimations`. Meshy's rigging
+  output keeps only the base color texture (no normal/metallic-roughness maps), so it
+  looks slightly flatter than `hero.glb`.
