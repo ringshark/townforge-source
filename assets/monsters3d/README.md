@@ -23,6 +23,25 @@ The spider line is not in the game yet and uses the names from its concept art.
 | `orc_warbringer.glb` | Orc Warbringer (Bloodtusk Hold) | Leather-and-iron orc |
 | `orc_overlord.glb` | Orc Overlord (Bloodtusk Hold boss) | Horned, black-armored orc |
 | `stoneborn.glb` | Stoneborn (Emberveil Hollow) | Mossy stone golem with amber crystals |
+| `bonewalker.glb` | Bonewalker (Sunken Crypt) | Crypt lineup 1 |
+| `rotbound_corpse.glb` | Rotbound Corpse (Sunken Crypt) | Crypt lineup 2 |
+| `gravewretch.glb` | Gravewretch (Sunken Crypt) | Crypt lineup 3 |
+| `grave_warden.glb` | Grave Warden (Sunken Crypt) | Crypt lineup 4 |
+| `crypt_sovereign.glb` | Crypt Sovereign (Sunken Crypt) | Crypt lineup 5 |
+| `glacier_wight.glb` | new: ice undead line, Lvl 1 | Ice lineup, Lvl 1* |
+| `rimebound_horror.glb` | new: ice undead line, Lvl 2 | Ice lineup, Lvl 2* |
+| `hoarfrost_revenant.glb` | new: ice undead line, Lvl 3 | Ice lineup, Lvl 3* |
+| `winters_maw.glb` | new: ice undead line, Lvl 4 | Ice lineup, Lvl 4* |
+| `ice_undead_lvl5.glb` | new: ice undead line, Lvl 5 (placeholder name) | Ice lineup, Lvl 5* |
+| `fishfolk_scout.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 1 |
+| `fishfolk_archer.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 2 |
+| `fishfolk_warlord.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 3 |
+| `fishfolk_shaman.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 4 |
+| `fishfolk_huntress.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 5 |
+
+\* The ice lineup's figures overlap too much to crop apart, so each was redrawn in
+isolation from the lineup with Meshy image-to-image (`nano-banana-pro`) before 3D
+generation. All other inputs are direct crops of the concept art.
 
 `previews/` holds Meshy's render of each model.
 
