@@ -49,7 +49,8 @@ Raider monster.
 | `cinder_imp.glb` | Cinder Imp (Ember Depths) |
 | `magma_hound.glb` | Magma Hound (Ember Depths), quadruped |
 | `obsidian_mauler.glb` | Obsidian Mauler (Ember Depths) |
-| `emberlord.glb` | The Emberlord (Ember Depths boss), static only |
+| `emberlord.glb` | The Emberlord (Ember Depths boss), with greatsword, static |
+| `emberlord_animated.glb` | The Emberlord, rigged (Walk, Run, Death), **no sword** |
 | `warren_rat.glb` | Warren Rat (The Hollow), quadruped |
 | `tunnel_skulker.glb` | Tunnel Skulker (The Hollow) |
 | `pickaxe_wraith.glb` | Pickaxe Wraith (The Hollow) |
@@ -150,5 +151,7 @@ drawn to a per-dungeon palette (obsidian and magma; grey stone, rust and blue-gr
 Seven have `<name>_animated.glb` with Walk, Run and Death clips, like the other rigged
 monsters: `cinder_imp`, `obsidian_mauler`, `tunnel_skulker`, `pickaxe_wraith`, `cave_brute`,
 `deep_marauder` and `hollow_king`. The Magma Hound and Warren Rat are quadrupeds and can't be
-auto-rigged. **The Emberlord failed Meshy's rigging pose check** (its big diagonal sword and
-flame cape), so it is static only; drive it in code or regenerate it without the sword.
+auto-rigged. The Emberlord failed Meshy's rigging pose check with its big diagonal sword, so
+`emberlord_animated.glb` is a version redrawn without the sword (same armor, cape and
+flame crown, open hands). `emberlord.glb` keeps the sword; attach a sword mesh to the
+animated one's hand bone if you want it armed.
