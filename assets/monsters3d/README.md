@@ -46,6 +46,16 @@ Raider monster.
 | `forest_dragon_thornwing.glb` | Forest Dragon variant, sleek, thorned (tameable apex creature) |
 | `forest_dragon_briarlord.glb` | Forest Dragon variant, bark-armored, vine-wrapped (tameable apex creature) |
 | `forest_dragon_wyldheart.glb` | Forest Dragon variant, iridescent, runed (tameable apex creature) |
+| `cinder_imp.glb` | Cinder Imp (Ember Depths) |
+| `magma_hound.glb` | Magma Hound (Ember Depths), quadruped |
+| `obsidian_mauler.glb` | Obsidian Mauler (Ember Depths) |
+| `emberlord.glb` | The Emberlord (Ember Depths boss), static only |
+| `warren_rat.glb` | Warren Rat (The Hollow), quadruped |
+| `tunnel_skulker.glb` | Tunnel Skulker (The Hollow) |
+| `pickaxe_wraith.glb` | Pickaxe Wraith (The Hollow) |
+| `cave_brute.glb` | Cave Brute (The Hollow) |
+| `deep_marauder.glb` | Deep Marauder (The Hollow) |
+| `hollow_king.glb` | The Hollow King (The Hollow boss) |
 | `vyrathax.glb` | Vyrathax the Tri-Wyrm (world boss) \*\* |
 | `hero.glb` | Main hero (static, full PBR) |
 | `hero_animated.glb` | Main hero (rigged, 19 animation clips) |
@@ -131,3 +141,14 @@ The concept art in `source/forest_dragon_*.jpg` was generated with Meshy text-to
 (`nano-banana-pro`), then each was built with image-to-3D at a 50k triangle target, PBR
 textures shrunk to 1024px. Like Vyrathax they have wings, so they aren't auto-riggable and
 would use code-driven motion. Use them as variants or as tamed-dragon looks.
+
+## Ember Depths and The Hollow
+
+Ten new monsters, built from Meshy text-to-image concepts (`source/`, `nano-banana-pro`)
+turned into image-to-3D models: 30k triangles, or 50k for the two bosses. The concepts were
+drawn to a per-dungeon palette (obsidian and magma; grey stone, rust and blue-green crystal).
+Seven have `<name>_animated.glb` with Walk, Run and Death clips, like the other rigged
+monsters: `cinder_imp`, `obsidian_mauler`, `tunnel_skulker`, `pickaxe_wraith`, `cave_brute`,
+`deep_marauder` and `hollow_king`. The Magma Hound and Warren Rat are quadrupeds and can't be
+auto-rigged. **The Emberlord failed Meshy's rigging pose check** (its big diagonal sword and
+flame cape), so it is static only; drive it in code or regenerate it without the sword.
