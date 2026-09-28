@@ -35706,7 +35706,17 @@ static void DrawTrainingGrounds(GameState& s, int screenW, int screenH) {
     }
     if (UOButton({ x + w * 0.58f, y, w * 0.42f, 44 }, g_trainAuto ? "AUTO: on" : "AUTO: off", can)) { g_trainAuto = !g_trainAuto; g_trainTick = 0.0f; PlaySfx(SfxId::Click); }
     if (g_trainAuto) DrawCircleV({ x + w * 0.58f + 16, y + 22 }, 5.0f + sinf((float)GetTime() * 5.0f), Color{ 120, 220, 120, 255 });
-    y += 56;
+    y += 52;
+    { // every other way to practise, in one place (2026-09-28 cleanup)
+        DrawUIText("Free here to 50  -  guild practice to 70  -  past that, only real use.", (int)x, (int)y, 12, soft); y += 18;
+        float bw = (w - 12) / 3.0f;
+        if (UOButton({ x, y, bw, 32 }, "Thieves' Guild", here)) { // Lockpicking, Snooping, Magery to 70
+            g_trainOpen = false; g_trainAuto = false; s.screen = Screen::Provisioner; s.provisionerTab = 2;
+        }
+        if (UOButton({ x + bw + 6, y, bw, 32 }, "Spell practice", true)) { g_trainOpen = false; g_trainAuto = false; s.screen = Screen::Magic; }
+        if (UOButton({ x + 2 * (bw + 6), y, bw, 32 }, "Pet training", true)) { g_trainOpen = false; g_trainAuto = false; s.screen = Screen::Pets; }
+        y += 40;
+    }
     DrawUIText("Choose a skill:", (int)x, (int)y, 13, ink); y += 20;
     // the list
     int top = (int)y, h = (int)(G.y + G.height - 14 - y);
