@@ -38,7 +38,7 @@ The spider line is not in the game yet and uses the names from its concept art.
 | `fishfolk_warlord.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 3 |
 | `fishfolk_shaman.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 4 |
 | `fishfolk_huntress.glb` | new: fish-folk line (placeholder name) | Fish-folk lineup 5 |
-| `world_boss_dragon.glb` | new: world boss (placeholder name) | Three-headed dragon from the battle scene** |
+| `world_boss_dragon.glb` | new: world boss (placeholder name) | Three-headed dragon from the battle scene\*\* |
 | `hero.glb` | main hero (static, full PBR) | Hero turnaround: front/side/back views |
 | `hero_animated.glb` | main hero (rigged + animated) | Same model, auto-rigged by Meshy |
 
