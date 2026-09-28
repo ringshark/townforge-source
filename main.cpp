@@ -34037,6 +34037,43 @@ static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
     BeginScissorMode(0, listTop, screenW, listH);
     float yy = listTop - g_skillsScroll;
     auto visible = [&](Rectangle r) { return r.y >= listTop && r.y + r.height <= listTop + listH; };
+    { // (2026-09-28) your build at a glance: what's equipped, strongest first, and where the points sit
+        std::vector<std::pair<float, int>> eq;
+        for (size_t i = 0; i < kCappedSkills.size(); i++)
+            if (s.skillActive[i] && s.*(kCappedSkills[i].field) >= 0.05f) eq.push_back({ s.*(kCappedSkills[i].field), (int)i });
+        std::sort(eq.begin(), eq.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        float x0 = 22, w = (float)screenW - 44, top = yy;
+        // chips first (to measure the card), drawn after the card background
+        struct Chip { Rectangle r; std::string t; bool gm; };
+        std::vector<Chip> chips;
+        float cx = x0 + 10, cy = top + 50;
+        for (const auto& e : eq) {
+            std::string t = std::string(kCappedSkills[(size_t)e.second].label) + TextFormat(" %.1f", e.first);
+            float cw = (float)MeasureUIText(t.c_str(), 12) + 16;
+            if (cx + cw > x0 + w - 10) { cx = x0 + 10; cy += 26; }
+            chips.push_back({ { cx, cy, cw, 21 }, t, e.first >= 99.95f });
+            cx += cw + 6;
+        }
+        std::string groupsLine;
+        for (const auto& g : kGroups) {
+            float sum = 0; for (int i : g.idx) if (s.skillActive[(size_t)i]) sum += s.*(kCappedSkills[(size_t)i].field);
+            if (sum >= 0.5f) groupsLine += (groupsLine.empty() ? "" : "   ") + std::string(g.name) + " " + std::to_string((int)(sum + 0.5f));
+        }
+        float cardH = (eq.empty() ? 50.0f : cy + 21 - top + 12) + (groupsLine.empty() ? 0.0f : 20.0f);
+        DrawRectangleRounded({ x0 - 6, top, w + 12, cardH }, 0.08f, 6, Fade(Color{ 255, 250, 235, 255 }, 0.7f));
+        DrawRectangleRoundedLines({ x0 - 6, top, w + 12, cardH }, 0.08f, 6, Fade(kColorHeading, 0.35f));
+        DrawUIText("Your build", (int)x0 + 4, (int)top + 8, 15, kColorHeading);
+        std::string title = TopVocationTitle(s);
+        DrawUIText(title.c_str(), (int)(x0 + w - 6 - MeasureUIText(title.c_str(), 13)), (int)top + 10, 13, good);
+        DrawUIText(TextFormat("%d skills equipped", (int)eq.size()), (int)x0 + 4, (int)top + 28, 12, soft);
+        if (eq.empty()) DrawUIText("Nothing trained yet - skills rise as you use them.", (int)x0 + 130, (int)top + 28, 12, soft);
+        for (const auto& c : chips) {
+            DrawRectangleRounded(c.r, 0.5f, 6, c.gm ? Color{ 214, 170, 70, 255 } : Color{ 92, 70, 48, 255 });
+            DrawUIText(c.t.c_str(), (int)c.r.x + 8, (int)c.r.y + 4, 12, Color{ 250, 240, 220, 255 });
+        }
+        if (!groupsLine.empty()) DrawUIText(groupsLine.c_str(), (int)x0 + 4, (int)(top + cardH - 22), 12, soft);
+        yy += cardH + 12;
+    }
     for (const auto& g : kGroups) {
         DrawUIText(g.name, 20, (int)yy + 6, 15, kColorHeading);
         yy += 28;
