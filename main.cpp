@@ -1340,6 +1340,7 @@ static bool IsPlayScreen(Screen sc) {
     return sc == Screen::Town || sc == Screen::Wilderness || sc == Screen::Interior || sc == Screen::Hunt;
 }
 static Screen g_playScreen = Screen::Town;
+static bool g_questOpen = false; // the Town Hall quest board (2026-09-28, #72), over the House screen
 
 struct Corpse {
     std::string monsterName;
@@ -1573,6 +1574,17 @@ struct GameState {
     bool settleRaidLive = false; int settleRaidStrength = 0; int settleRaidFaction = 0; float settleMilitiaCd = 0.0f;
     float settleHpAcc = 0.0f;
     int stableBought = 0;      // PERSISTED (2026-09-28): extra stable slots bought with gold
+    // Town Hall quest board (2026-09-28, #72) - PERSISTED.
+    std::array<int, 3> bladeName = { { 0, 1, 2 } };   // index into kBladeNames: who wears each Blade's colours
+    std::array<int, 3> bladeBounty = { { 0, 0, 0 } }; // extra gold on their heads (grows each time they beat you)
+    int bladeNextName = 3;     // the next recruit's name when one hangs
+    int bountyTarget = -1;     // the Blade you've taken the contract on (-1 none)
+    bool bountyDone = false;   // they're dead: collect at the Town Hall
+    int bountyPay = 0;         // what the magistrate owes you (the bounty when they fell)
+    int taskKind = 0;          // 0 none, 1 slay, 2 deliver
+    std::string taskWhat;      // monster name, or wood/ore/leather/fish
+    int taskNeed = 0, taskHave = 0, taskReward = 0;
+    int taskSeed = 1;          // rolls the board's three offers
     bool autoReagents = false; // PERSISTED (2026-09-27): top reagents up to 30 whenever you walk into a town
     // Options (2026-09-28) - PERSISTED.
     bool optHideWyrm = false;      // no world-boss banners or wake-up countdown
@@ -5623,6 +5635,12 @@ static void BeginPlayerDeath(GameState& s);
 static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& am,
                                   const std::string& name, int baseGold, int baseLeather,
                                   bool clearEngagement = true);
+static void TownTaskOnKill(GameState& s, const std::string& name) { // (#72) a slaying task counts its kills
+    if (s.taskKind != 1 || s.taskHave >= s.taskNeed || name != s.taskWhat) return;
+    s.taskHave++;
+    Journal(s, s.taskHave >= s.taskNeed ? "Town task done: " + std::to_string(s.taskNeed) + " " + s.taskWhat + " slain. Collect your pay at the Town Hall."
+                                        : "Town task: " + s.taskWhat + " " + std::to_string(s.taskHave) + "/" + std::to_string(s.taskNeed));
+}
 static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeonMonster& am,
                                      int dungeonIdx, bool wasBoss, const std::string& name,
                                      int level, int baseGold, int baseLeather,
@@ -7523,6 +7541,11 @@ static void SaveGame(const GameState& s) {
     out << "settleQueue=" << s.settleUpgrading << "|" << s.settleUpgradeT << "\nsettleRaidT=" << s.settleRaidT
         << "\nsettleArrivalT=" << s.settleArrivalT << "\nsettleEpoch=" << (long long)std::time(nullptr) << "\n";
     out << "autoReagents=" << (s.autoReagents ? 1 : 0) << "\nstableBought=" << s.stableBought << "\n";
+    out << "bladeNames=" << s.bladeName[0] << "," << s.bladeName[1] << "," << s.bladeName[2]
+        << "\nbladeBounty=" << s.bladeBounty[0] << "," << s.bladeBounty[1] << "," << s.bladeBounty[2]
+        << "\nbladeNextName=" << s.bladeNextName << "\nbountyTarget=" << s.bountyTarget << "\nbountyDone=" << (s.bountyDone ? 1 : 0) << "\nbountyPay=" << s.bountyPay
+        << "\ntaskKind=" << s.taskKind << "\ntaskWhat=" << s.taskWhat << "\ntaskNeed=" << s.taskNeed << "\ntaskHave=" << s.taskHave
+        << "\ntaskReward=" << s.taskReward << "\ntaskSeed=" << s.taskSeed << "\n";
     out << "optHideWyrm=" << (s.optHideWyrm ? 1 : 0) << "\noptHideDungeonBoss=" << (s.optHideDungeonBoss ? 1 : 0)
         << "\noptClassic2D=" << (s.optClassic2D ? 1 : 0) << "\noptTapWalk=" << (s.optTapWalk ? 1 : 0) << "\noptAlwaysDay=" << (s.optAlwaysDay ? 1 : 0)
         << "\noptSfx=" << (s.optSfx ? 1 : 0) << "\noptMusic=" << (s.optMusic ? 1 : 0) << "\n";
@@ -7822,6 +7845,18 @@ static bool LoadGame(GameState& s) {
         else if (key == "settleEpoch") s.settleEpoch = std::atoll(val.c_str());
         else if (key == "wyrmRespawnT") s.wyrmRespawnT = (float)std::atof(val.c_str());
         else if (key == "autoReagents") s.autoReagents = std::atoi(val.c_str()) != 0;
+        else if (key == "bladeNames") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 3; i++) s.bladeName[i] = std::max(0, std::atoi(p[i].c_str())); }
+        else if (key == "bladeBounty") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 3; i++) s.bladeBounty[i] = std::max(0, std::atoi(p[i].c_str())); }
+        else if (key == "bladeNextName") s.bladeNextName = std::max(3, std::atoi(val.c_str()));
+        else if (key == "bountyTarget") s.bountyTarget = std::clamp(std::atoi(val.c_str()), -1, 2);
+        else if (key == "bountyDone") s.bountyDone = std::atoi(val.c_str()) != 0;
+        else if (key == "bountyPay") s.bountyPay = std::max(0, std::atoi(val.c_str()));
+        else if (key == "taskKind") s.taskKind = std::clamp(std::atoi(val.c_str()), 0, 2);
+        else if (key == "taskWhat") s.taskWhat = val;
+        else if (key == "taskNeed") s.taskNeed = std::max(0, std::atoi(val.c_str()));
+        else if (key == "taskHave") s.taskHave = std::max(0, std::atoi(val.c_str()));
+        else if (key == "taskReward") s.taskReward = std::max(0, std::atoi(val.c_str()));
+        else if (key == "taskSeed") s.taskSeed = std::atoi(val.c_str());
         else if (key == "stableBought") s.stableBought = std::clamp(std::atoi(val.c_str()), 0, 15);
         else if (key == "optHideWyrm") s.optHideWyrm = std::atoi(val.c_str()) != 0;
         else if (key == "optHideDungeonBoss") s.optHideDungeonBoss = std::atoi(val.c_str()) != 0;
@@ -8801,9 +8836,20 @@ static const float kBladeLevelFracMin = 0.45f;    // blades track 45-60% of the 
 static const float kBladeLevelFracMax = 0.60f;    // target power - always beatable, never the main event
 
 // Fixed guild names - no epithet ladder for the crew, just rank numerals.
+// Named killers (2026-09-28, #72): each Blade is a person with a name and a price
+// on their head. Hang one and a new recruit takes the colours; one who beats you
+// walks away richer, with a bigger bounty.
+static const char* kBladeNames[] = {
+    "Varg \"the Knife\" Ostrel", "Mirela Blackthorn", "Osric \"Nine Fingers\" Vane", "Hessa the Quiet",
+    "Dunmore Kell", "Sable Ravenscar", "Tobin \"Rook\" Marrow", "Ilsa Grimwater", "Corvin the Smiling",
+    "Brakka Stonejaw", "Lyle \"Whisper\" Fenn", "Garret Holloway", "Nyx Umbermoor", "Rolf the Butcher",
+    "Ada \"Red Hands\" Crane", "Jory Ashgrave",
+};
+static const int kBladeNameCount = (int)(sizeof(kBladeNames) / sizeof(kBladeNames[0]));
 static std::string BladeName(int bi) {
-    static const char* numerals[3] = { "II", "III", "IV" };
-    return std::string("Murder Inc. Blade ") + numerals[bi < 0 || bi > 2 ? 0 : bi];
+    bi = std::clamp(bi, 0, 2);
+    int n = g_skillOwner ? g_skillOwner->bladeName[(size_t)bi] : bi;
+    return kBladeNames[((n % kBladeNameCount) + kBladeNameCount) % kBladeNameCount];
 }
 // True while the guild has an active threat - used to keep hunts to one at a time.
 static bool GuildThreatActive(const GameState& s, int exceptBlade = -1) {
@@ -8960,6 +9006,9 @@ static void RivalFightEnded(GameState& s, const GameState::ActiveMonster& am) {
 // Called when a fight against a blade ends (win, loss, or disengage) - persists
 // its position and nudges its level toward 45-60% of the champion's target power,
 // never above the champion's own level. The crew stays beneath the boss.
+static int BladeBountyGold(const GameState& s, int bi) {
+    return 150 + (int)(s.blades[(size_t)std::clamp(bi, 0, 2)].level * 6.0f) + s.bladeBounty[(size_t)std::clamp(bi, 0, 2)];
+}
 static void BladeFightEnded(GameState& s, int bi, const GameState::ActiveMonster& am) {
     auto& b = s.blades[bi];
     b.pos = am.pos;
@@ -8974,6 +9023,19 @@ static void BladeFightEnded(GameState& s, int bi, const GameState::ActiveMonster
     m.hpFrac = std::clamp(am.hp / std::max(1.0f, am.maxHp), 0.0f, 1.0f);
     m.task = kGtNone; m.working = false;
     m.huntCooldown = 45.0f + RandUnit() * 45.0f;
+    if (am.hp > 0.0f && s.hp <= 0) { // they beat you and walk free: the price on their head grows (#72)
+        s.bladeBounty[(size_t)bi] += 60;
+        Journal(s, BladeName(bi) + " walks away from your body. The Town Hall raises the bounty to " +
+                   std::to_string(BladeBountyGold(s, bi)) + " gold.");
+    }
+    if (am.hp <= 0.0f && s.bountyTarget == bi && !s.bountyDone) { // the contract is filled (#72)
+        s.bountyDone = true;
+        s.bountyPay = BladeBountyGold(s, bi);
+        Journal(s, "WANTED no more: " + BladeName(bi) + " is dead. Collect your bounty at the Town Hall.");
+        s.rivalBanner = "Bounty filled!"; s.rivalBannerTimer = kRivalBannerTime;
+        s.bladeBounty[(size_t)bi] = 0;
+        s.bladeName[(size_t)bi] = s.bladeNextName++ % kBladeNameCount; // hanged; a new recruit takes the colours
+    }
     if (am.hp <= 0.0f) {
         m.downT = 120.0f + RandUnit() * 90.0f;
         m.gold -= m.gold / 2;
@@ -22232,6 +22294,10 @@ static void DrawBuildingDetailPanel(GameState& s, int screenW) {
                     s.selectedTile.reset();
                 }
             }
+            if (key == "townhall" && Button({ 266, (float)(panelY + 56), 200, 34 }, "Quest Board", true)) { // (2026-09-28, #72)
+                s.screen = Screen::House; g_questOpen = true;
+                s.selectedTile.reset();
+            }
         }
         DrawUIText("Walk away or press [X] to close.", 36, (int)panelBg.y + 190, 13, Fade(DARKGRAY, 0.8f));
     }
@@ -26180,6 +26246,7 @@ static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& 
                                   const std::string& name, int baseGold, int baseLeather,
                                   bool clearEngagement) {
     PetsOnKill(s, EngagedWildMonsterStats(s, am).level); // pet XP & bonding (2026-09-28)
+    TownTaskOnKill(s, name); // Town Hall task (#72)
     GuildWarCredit(s, am, name); // (2026-09-27) before anything resets `am`
     if (auto it = std::find(g_traiders.begin(), g_traiders.end(), am.spotIdx); it != g_traiders.end() && am.spotIdx >= 0) {
         // a chest raider falls: its share of the stolen loot drops in a pouch (#68)
@@ -26238,6 +26305,7 @@ static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeo
                                      int level, int baseGold, int baseLeather,
                                      bool clearEngagement) {
     PetsOnKill(s, level); // pet XP & bonding (2026-09-28)
+    TownTaskOnKill(s, name); // Town Hall task (#72)
     PlaySfx(SfxId::MonsterDie);
     GameState::DyingMonster dm;
     dm.zone = 1;
@@ -31774,6 +31842,8 @@ static bool g_tmapOpen = false;        // the Treasure maps screen (over the Hou
 static bool g_optOpen = false;         // the Options screen (over the House screen, 2026-09-28)
 static void OpenWarWeek(GameState& s); // (2026-09-27) defined with the Guildstone
 // Tap to walk (2026-09-27): a pulsing gold ring on the ground where you're headed.
+static std::string BladeLastSeen(const GameState& s, int bi); // the Town Hall quest board (#72), below
+static int TownTaskHave(const GameState& s);
 static void DrawWalkMarker(const GameState& s) {
     if (g_teleAimZone >= 0) { // Teleport aim: a blue ring shows how far you can reach
         g_teleAimT -= GetFrameTime();
@@ -31830,6 +31900,19 @@ static void DrawWalkMarker(const GameState& s) {
             DrawHudLine(t.c_str(), 20, 280 + line * 18, 13, Color{ 190, 230, 170, 255 });
             line++;
         }
+        if (s.bountyTarget >= 0) { // Town Hall contract (#72)
+            std::string t = s.bountyDone ? "Bounty: " + BladeName(s.bountyTarget) + " is dead - collect at the Town Hall"
+                                         : "WANTED: " + BladeName(s.bountyTarget) + " - " + BladeLastSeen(s, s.bountyTarget);
+            DrawHudLine(t.c_str(), 20, 280 + line * 18, 13, Color{ 255, 160, 140, 255 });
+            line++;
+        }
+        if (s.taskKind != 0) {
+            int have = TownTaskHave(s);
+            std::string t = have >= s.taskNeed ? "Town task done - collect at the Town Hall"
+                          : std::string("Town task: ") + (s.taskKind == 1 ? "slay " : "gather ") + s.taskWhat + TextFormat(" %d/%d", std::min(have, s.taskNeed), s.taskNeed);
+            DrawHudLine(t.c_str(), 20, 280 + line * 18, 13, Color{ 240, 220, 150, 255 });
+            line++;
+        }
     }
     if (!g_walkOn || g_hudCamZone < 0) return;
     float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 6.0f);
@@ -31862,7 +31945,7 @@ static int MenuGroupOf(Screen sc) {
 static void MenuGoScreen(GameState& s, Screen t) {
     if (t == Screen::Craft) GuardZoneConfiscateIfMurderer(s, t);
     s.screen = t;
-    if (t == Screen::House) { g_warOpen = false; g_tmapOpen = false; g_optOpen = false; }
+    if (t == Screen::House) { g_warOpen = false; g_tmapOpen = false; g_optOpen = false; g_questOpen = false; }
     int g = MenuGroupOf(t);
     if (g >= 0 && g < 3 && MenuGroupOf(s.screen) == g) g_menuGroupLast[g] = s.screen;
 }
@@ -31878,7 +31961,7 @@ static bool MenuGroupTab(Rectangle r, const char* label, bool active, bool enabl
 }
 static void DrawMenuGroupTabs(GameState& s) {
     int g = MenuGroupOf(s.screen);
-    if (g < 0 || (s.screen == Screen::House && (g_warOpen || g_tmapOpen || g_optOpen))) return;
+    if (g < 0 || (s.screen == Screen::House && (g_warOpen || g_tmapOpen || g_optOpen || g_questOpen))) return;
     if (g < 3) g_menuGroupLast[g] = s.screen;
     bool en = !s.combat.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f;
     const float x0 = 230, y = 56, h = 40, right = 540.0f - 8; // kScreenW
@@ -35110,6 +35193,114 @@ static void DrawTreasureMaps(GameState& s, int screenW, int screenH) {
         if (!cur.empty()) DrawUIText(cur.c_str(), (int)x, (int)y, 13, gold);
     }
 }
+// ---- The Town Hall quest board (2026-09-28, #72) ------------------------------
+// Wanted posters for the named Blades of Murder Inc., and town tasks - slay so
+// many of a beast, or deliver goods. One contract and one task at a time; the
+// objective shows at the top of your screen, and you're paid here.
+struct TownTaskOffer { int kind; std::string what; int need, reward; };
+static TownTaskOffer TownTaskOfferFor(const GameState& s, int k) {
+    unsigned h = (unsigned)s.taskSeed * 2654435761u + (unsigned)k * 40503u + 17u;
+    h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+    static const char* mons[] = { "Timber Wolf", "Lone Wolf", "Lesser Imp", "Highway Bandit", "Wild Bat", "Ice Wolf",
+                                  "Frostbitten Husk", "Rock Golem", "Mountain Cat", "Orc Grunt" };
+    static const int lv[] = { 5, 9, 14, 20, 2, 25, 28, 30, 26, 22 };
+    TownTaskOffer o;
+    if (k < 2) {
+        int m = (int)(h % 10u);
+        if (k == 1) { int m0 = 0; for (int i = 0; i < 10; i++) if (TownTaskOfferFor(s, 0).what == mons[i]) m0 = i; if (m == m0) m = (m + 1 + (int)(h % 9u)) % 10; }
+        o.kind = 1; o.what = mons[m];
+        o.need = 4 + (int)((h / 10u) % 5u);
+        o.reward = 40 + lv[m] * o.need * 2;
+    } else {
+        static const char* res[] = { "wood", "ore", "leather", "fish" };
+        static const int need[] = { 20, 15, 10, 12 };
+        int r = (int)(h % 4u); o.kind = 2; o.what = res[r]; o.need = need[r]; o.reward = 60 + need[r] * 3;
+    }
+    return o;
+}
+static int TownTaskHave(const GameState& s) {
+    if (s.taskKind == 1) return s.taskHave;
+    const std::string& r = s.taskWhat;
+    return r == "wood" ? s.wood : r == "ore" ? s.ore : r == "leather" ? s.leather : s.fish;
+}
+static int& TownTaskStock(GameState& s, const std::string& r) { return r == "wood" ? s.wood : r == "ore" ? s.ore : r == "leather" ? s.leather : s.fish; }
+static std::string BladeLastSeen(const GameState& s, int bi) {
+    const auto& b = s.blades[(size_t)bi];
+    if (b.mind.downT > 0.0f || b.pos.x < -1000.0f) return "lying low - nobody's seen them lately";
+    Vector2 from = s.screen == Screen::Wilderness || g_playScreen == Screen::Wilderness ? s.wildernessPlayerPos : kTownGates[std::clamp(s.selectedTown, 0, (int)kTownGates.size() - 1)].wildernessPos;
+    return std::string("last seen in the ") + RegionName(RegionAt(b.pos)) + TextFormat(", %d paces ", (int)(Dist(from, b.pos) / 10.0f)) + CompassWord(from, b.pos);
+}
+static void DrawQuestBoard(GameState& s, int screenW, int screenH) {
+    Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
+    UODrawGump(G, kUoParchment);
+    UODrawTitle(G, "Town Hall - Quest Board", 15);
+    const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 }, red = { 150, 30, 24, 255 }, good = { 40, 110, 50, 255 };
+    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_questOpen = false; return; }
+    float x = G.x + 18, y = G.y + 36, w = G.width - 36;
+    DrawUIText("WANTED - by order of the Town Hall", (int)x, (int)y, 16, red); y += 22;
+    for (int bi = 0; bi < 3; bi++) {
+        Rectangle row = { x, y, w, 64 };
+        DrawRectangleRounded(row, 0.1f, 4, Fade(BLACK, 0.07f));
+        bool mine = s.bountyTarget == bi;
+        DrawUIText(BladeName(bi).c_str(), (int)x + 10, (int)y + 6, 15, ink);
+        DrawUIText(TextFormat("Murder Inc. - bounty %d gold", BladeBountyGold(s, bi)), (int)x + 10, (int)y + 25, 12, red);
+        DrawUIText(BladeLastSeen(s, bi).c_str(), (int)x + 10, (int)y + 42, 11, soft);
+        Rectangle b = { x + w - 132, y + 14, 124, 34 };
+        if (mine && s.bountyDone) {
+            if (UOButton(b, "Collect", true)) {
+                int pay = std::max(100, s.bountyPay);
+                s.gold += pay; GainFame(s, 8.0f); GainKarma(s, 8.0f);
+                s.bountyTarget = -1; s.bountyDone = false;
+                s.logLine = TextFormat("The magistrate counts out %d gold. Fame and Karma rise.", pay);
+                PlaySfx(SfxId::Coin);
+            }
+        } else if (mine) {
+            DrawUIText("Your contract", (int)b.x + 12, (int)b.y + 9, 13, good);
+        } else if (UOButton(b, "Take contract", s.bountyTarget < 0)) {
+            s.bountyTarget = bi; s.bountyDone = false;
+            s.logLine = "You take the contract on " + BladeName(bi) + ". Their trail shows at the top of your screen in the wilds.";
+            PlaySfx(SfxId::Quest);
+        }
+        y += 70;
+    }
+    if (s.bountyTarget >= 0 && !s.bountyDone) {
+        if (UOButton({ x, y, 150, 28 }, "Drop the contract", true)) { s.bountyTarget = -1; s.logLine = "You tear up the contract."; }
+        y += 34;
+    }
+    y += 6;
+    DrawUIText("TOWN TASKS", (int)x, (int)y, 16, ink); y += 22;
+    if (s.taskKind != 0) {
+        bool slay = s.taskKind == 1;
+        int have = slay ? s.taskHave : TownTaskStock(s, s.taskWhat);
+        bool done = have >= s.taskNeed;
+        DrawUIText(slay ? TextFormat("Slay %d %s", s.taskNeed, s.taskWhat.c_str()) : TextFormat("Deliver %d %s", s.taskNeed, s.taskWhat.c_str()), (int)x, (int)y, 15, ink);
+        DrawUIText(TextFormat("%d / %d   -   pays %d gold", std::min(have, s.taskNeed), s.taskNeed, s.taskReward), (int)x, (int)y + 20, 13, done ? good : soft);
+        y += 44;
+        if (UOButton({ x, y, 160, 36 }, slay ? "Collect pay" : "Hand over", done)) {
+            if (!slay) TownTaskStock(s, s.taskWhat) -= s.taskNeed;
+            s.gold += s.taskReward; GainFame(s, 3.0f);
+            s.logLine = TextFormat("Task done - the steward pays you %d gold.", s.taskReward);
+            s.taskKind = 0; s.taskHave = 0; s.taskSeed++;
+            PlaySfx(SfxId::Coin);
+        }
+        if (UOButton({ x + 170, y, 120, 36 }, "Abandon", true)) { s.taskKind = 0; s.taskHave = 0; s.taskSeed++; s.logLine = "You give the task back."; }
+        return;
+    }
+    for (int k = 0; k < 3; k++) {
+        TownTaskOffer o = TownTaskOfferFor(s, k);
+        Rectangle row = { x, y, w, 50 };
+        DrawRectangleRounded(row, 0.1f, 4, Fade(BLACK, 0.07f));
+        DrawUIText(o.kind == 1 ? TextFormat("Slay %d %s", o.need, o.what.c_str()) : TextFormat("Deliver %d %s", o.need, o.what.c_str()), (int)x + 10, (int)y + 7, 14, ink);
+        DrawUIText(TextFormat("pays %d gold", o.reward), (int)x + 10, (int)y + 27, 12, soft);
+        if (UOButton({ x + w - 112, y + 8, 104, 34 }, "Accept", true)) {
+            s.taskKind = o.kind; s.taskWhat = o.what; s.taskNeed = o.need; s.taskReward = o.reward; s.taskHave = 0;
+            s.logLine = o.kind == 1 ? "Task taken: slay " + std::to_string(o.need) + " " + o.what + ". Your progress shows at the top of the screen."
+                                    : "Task taken: bring " + std::to_string(o.need) + " " + o.what + " back here.";
+            PlaySfx(SfxId::Quest);
+        }
+        y += 56;
+    }
+}
 // Options (2026-09-28, #60 #75 #57): switches that are the player's taste, saved with the game.
 static void DrawOptions(GameState& s, int screenW, int screenH) {
     Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
@@ -35140,6 +35331,7 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     DrawUIText("Alerts you turn off still go in your journal (LOG).", (int)x, (int)y, 12, soft);
 }
 static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
+    if (g_questOpen) { DrawQuestBoard(s, screenW, screenH); return; }
     if (g_optOpen) { DrawOptions(s, screenW, screenH); return; }
     if (g_tmapOpen) { DrawTreasureMaps(s, screenW, screenH); return; }
     if (g_warOpen) { DrawWarWeek(s, screenW, screenH); return; }
