@@ -1129,21 +1129,30 @@ enum class SfxId {
     Swing, Hit, Cast, Fireball, Heal, Coin, MonsterDie, Hurt,
     Click, Victory, Ghost, Door, Hunt, Buy, Quest,
     Drum, Lute, Harp, // (2026-09-28, #65) the bard's instruments
+    StepGrass, StepWood, StepStone, StepSnow, Chop, Mine, Lock, Book, // (2026-09-28) the audio pass
     Count
 };
-static const char* kSfxFileNames[] = {
-    "swing.wav", "hit.wav", "cast.wav", "fireball.wav", "heal.wav",
-    "coin.wav", "monster_die.wav", "hurt.wav", "click.wav", "victory.wav",
-    "ghost.wav", "door.wav", "hunt.wav", "buy.wav", "quest.wav",
-    "drum.wav", "lute.wav", "harp.wav"
+// The audio pass (2026-09-28): real recordings (Kenney's RPG / Impact / Interface
+// packs and OpenGameArt's "80 CC0 RPG SFX", all CC0 - see assets/sfx/CREDITS.md).
+// Each sound is <base>_1.ogg .. <base>_8.ogg (a variant picked at random, pitched a
+// hair each time so repeats never sound canned); a lone <base>.wav is the fallback.
+static const char* kSfxBase[] = {
+    "swing", "hit", "cast", "fireball", "heal", "coin", "monster_die", "hurt", "click", "victory",
+    "ghost", "door", "hunt", "buy", "quest", "drum", "lute", "harp",
+    "step_grass", "step_wood", "step_concrete", "step_snow", "chop", "mine", "lock", "book"
 };
-static_assert(sizeof(kSfxFileNames) / sizeof(kSfxFileNames[0]) == (int)SfxId::Count,
-              "kSfxFileNames must cover every SfxId");
-struct SfxBank {
-    Sound sounds[(int)SfxId::Count];
-    bool ok[(int)SfxId::Count] = {};
-};
+static_assert(sizeof(kSfxBase) / sizeof(kSfxBase[0]) == (int)SfxId::Count, "kSfxBase must cover every SfxId");
+struct SfxBank { std::vector<Sound> v[(int)SfxId::Count]; };
 static SfxBank g_sfx;
+static bool g_sfxOn = true, g_musicOn = true; // Options (persisted as optSfx / optMusic)
+static float SfxBaseVolume(SfxId id) {
+    switch (id) {
+        case SfxId::StepGrass: case SfxId::StepWood: case SfxId::StepStone: case SfxId::StepSnow: return 0.22f;
+        case SfxId::Click: return 0.4f;
+        case SfxId::Drum: case SfxId::Lute: case SfxId::Harp: return 0.7f;
+        default: return 0.55f;
+    }
+}
 static bool SfxIsFireSpell(int spellIdx) {
     if (spellIdx < 0 || spellIdx >= (int)kSpells.size()) return false;
     const std::string& n = kSpells[spellIdx].name;
@@ -1152,22 +1161,71 @@ static bool SfxIsFireSpell(int spellIdx) {
 static void InitSfx() {
     InitAudioDevice();
     for (int i = 0; i < (int)SfxId::Count; i++) {
-        std::string path = std::string("assets/sfx/") + kSfxFileNames[i];
-        if (!FileExists(path.c_str())) continue; // missing file: stay silent
-        g_sfx.sounds[i] = LoadSound(path.c_str());
-        g_sfx.ok[i] = true;
-        SetSoundVolume(g_sfx.sounds[i], 0.55f);
+        for (int k = 1; k <= 8; k++) {
+            std::string path = std::string("assets/sfx/") + kSfxBase[i] + "_" + std::to_string(k) + ".ogg";
+            if (!FileExists(path.c_str())) break;
+            Sound snd = LoadSound(path.c_str());
+            if (snd.frameCount > 0) g_sfx.v[i].push_back(snd);
+        }
+        if (g_sfx.v[i].empty()) { // missing file: stay silent
+            std::string path = std::string("assets/sfx/") + kSfxBase[i] + ".wav";
+            if (FileExists(path.c_str())) g_sfx.v[i].push_back(LoadSound(path.c_str()));
+        }
+        for (Sound& snd : g_sfx.v[i]) SetSoundVolume(snd, SfxBaseVolume((SfxId)i));
     }
 }
+static void UnloadMusic();
 static void UnloadSfx() {
+    UnloadMusic();
     for (int i = 0; i < (int)SfxId::Count; i++)
-        if (g_sfx.ok[i]) UnloadSound(g_sfx.sounds[i]);
+        for (Sound& snd : g_sfx.v[i]) UnloadSound(snd);
     CloseAudioDevice();
 }
 static void PlaySfx(SfxId id) {
     int i = (int)id;
-    if (i < 0 || i >= (int)SfxId::Count || !g_sfx.ok[i]) return;
-    PlaySound(g_sfx.sounds[i]);
+    if (!g_sfxOn || i < 0 || i >= (int)SfxId::Count || g_sfx.v[i].empty()) return;
+    Sound& snd = g_sfx.v[i][(size_t)(std::rand() % (int)g_sfx.v[i].size())];
+    bool tune = id == SfxId::Drum || id == SfxId::Lute || id == SfxId::Harp || id == SfxId::Victory || id == SfxId::Quest;
+    SetSoundPitch(snd, tune ? 1.0f : 0.94f + 0.12f * (float)(std::rand() % 1000) / 1000.0f);
+    PlaySound(snd);
+}
+// ---- Music (2026-09-28): one CC0 track per kind of place, cross-faded ----------
+// town: "The Old Tower Inn" (RandomMind), the wilds: "Mirror Lake" (joth),
+// dungeons: "Dark Cavern Ambient" (Paul Wortmann) - see assets/sfx/CREDITS.md.
+struct MusicSlot { Music m{}; bool ok = false; float vol = 0.0f; };
+static MusicSlot g_music[3];
+static bool g_musicLoaded = false;
+static void UnloadMusic() {
+    for (auto& ms : g_music) if (ms.ok) { StopMusicStream(ms.m); UnloadMusicStream(ms.m); ms.ok = false; }
+}
+static void MusicTick(int want, float dt) { // want: 0 town, 1 wilds, 2 dungeon, -1 none
+    if (!g_musicLoaded) {
+        g_musicLoaded = true;
+        const char* f[3] = { "assets/music/town.ogg", "assets/music/wild.ogg", "assets/music/dungeon.ogg" };
+        for (int i = 0; i < 3; i++) if (FileExists(f[i])) { g_music[i].m = LoadMusicStream(f[i]); g_music[i].ok = g_music[i].m.frameCount > 0; }
+    }
+    const float peak[3] = { 0.30f, 0.26f, 0.34f };
+    for (int i = 0; i < 3; i++) {
+        MusicSlot& ms = g_music[i];
+        if (!ms.ok) continue;
+        float target = (g_musicOn && i == want) ? peak[i] : 0.0f;
+        ms.vol += std::clamp(target - ms.vol, -dt * 0.35f, dt * 0.35f); // ~1s fades
+        if (ms.vol > 0.001f) {
+            if (!IsMusicStreamPlaying(ms.m)) PlayMusicStream(ms.m);
+            SetMusicVolume(ms.m, ms.vol);
+            UpdateMusicStream(ms.m);
+        } else if (IsMusicStreamPlaying(ms.m)) PauseMusicStream(ms.m);
+    }
+}
+// Footsteps (2026-09-28): a step every ~36 units walked, on whatever is underfoot.
+static void FootstepTick(Vector2 pos, SfxId surface) {
+    static Vector2 last{ -1e9f, -1e9f };
+    static float walked = 0.0f;
+    float d = hypotf(pos.x - last.x, pos.y - last.y);
+    last = pos;
+    if (d > 40.0f) { walked = 0.0f; return; } // a teleport or a zone change, not a step
+    walked += d;
+    if (walked >= 36.0f) { walked = 0.0f; PlaySfx(surface); }
 }
 
 enum class CombatPhase { PlayerTurn, Won, Lost };
@@ -1521,7 +1579,8 @@ struct GameState {
     bool optHideDungeonBoss = false; // no "the boss is now available" notices
     bool optClassic2D = false;     // the old top-down view (a fallback for slow phones)
     bool optTapWalk = true;        // tap the ground to walk there
-    bool optAlwaysDay = false;     // (2026-09-28) keep the world in daylight - no real-clock night
+    bool optAlwaysDay = false;
+    bool optSfx = true, optMusic = true; // (2026-09-28) the audio pass     // (2026-09-28) keep the world in daylight - no real-clock night
     // Stat buffs (2026-09-27) - transient: Bless, Strength and Agility potions.
     float blessT = 0.0f, strPotT = 0.0f, agiPotT = 0.0f;
     int blessAmt = 0, strPotAmt = 0, agiPotAmt = 0;
@@ -4915,6 +4974,7 @@ static void TryStartGather(GameState& s, const std::string& resourceKey, float s
     if (s.ambush.has_value() || s.innocentEncounter.has_value()) { s.logLine = "Deal with what's in front of you first."; return; }
     s.gatheringResource = resourceKey;
     s.gatherSecondsRemaining = seconds;
+    if (resourceKey == "wood") PlaySfx(SfxId::Chop); else if (resourceKey != "fish") PlaySfx(SfxId::Mine); // (2026-09-28)
     s.gatherDuration = seconds;
     s.logLine = (resourceKey == "richore") ? "Mining the rich vein..." : "Gathering " + resourceKey + "..."; // Phase 4
 }
@@ -4947,6 +5007,11 @@ static const char* FishCatchName(int water, bool big) {
 }
 static void UpdateGathering(GameState& s, float dt) {
     if (!s.gatheringResource.has_value()) return;
+    { // a chop or a strike of the pick every so often while you work (2026-09-28)
+        static float beat = 0.0f;
+        const std::string& r = *s.gatheringResource;
+        if ((beat += dt) >= 0.9f) { beat = 0.0f; if (r == "wood") PlaySfx(SfxId::Chop); else if (r != "fish") PlaySfx(SfxId::Mine); }
+    }
     s.gatherSecondsRemaining -= dt;
     if (s.gatherSecondsRemaining <= 0.0f) {
         const std::string type = *s.gatheringResource;
@@ -7459,7 +7524,8 @@ static void SaveGame(const GameState& s) {
         << "\nsettleArrivalT=" << s.settleArrivalT << "\nsettleEpoch=" << (long long)std::time(nullptr) << "\n";
     out << "autoReagents=" << (s.autoReagents ? 1 : 0) << "\nstableBought=" << s.stableBought << "\n";
     out << "optHideWyrm=" << (s.optHideWyrm ? 1 : 0) << "\noptHideDungeonBoss=" << (s.optHideDungeonBoss ? 1 : 0)
-        << "\noptClassic2D=" << (s.optClassic2D ? 1 : 0) << "\noptTapWalk=" << (s.optTapWalk ? 1 : 0) << "\noptAlwaysDay=" << (s.optAlwaysDay ? 1 : 0) << "\n";
+        << "\noptClassic2D=" << (s.optClassic2D ? 1 : 0) << "\noptTapWalk=" << (s.optTapWalk ? 1 : 0) << "\noptAlwaysDay=" << (s.optAlwaysDay ? 1 : 0)
+        << "\noptSfx=" << (s.optSfx ? 1 : 0) << "\noptMusic=" << (s.optMusic ? 1 : 0) << "\n";
     out << "wyrmRespawnT=" << s.wyrmRespawnT << "\nwyrmHp=" << s.wyrmHp << "\nwyrmKills=" << s.wyrmKills << "\n"; // world boss
     out << "warWeek=" << s.warWeek << "\nwarPlayMin=" << s.warPlayMin << "\nwarPts=";
     for (int d = 0; d < 7; d++) out << (d ? "," : "") << s.warPts[(size_t)d];
@@ -7762,6 +7828,8 @@ static bool LoadGame(GameState& s) {
         else if (key == "optClassic2D") s.optClassic2D = std::atoi(val.c_str()) != 0;
         else if (key == "optTapWalk") s.optTapWalk = std::atoi(val.c_str()) != 0;
         else if (key == "optAlwaysDay") s.optAlwaysDay = std::atoi(val.c_str()) != 0;
+        else if (key == "optSfx") s.optSfx = std::atoi(val.c_str()) != 0;
+        else if (key == "optMusic") s.optMusic = std::atoi(val.c_str()) != 0;
         else if (key == "wyrmHp") s.wyrmHp = (float)std::atof(val.c_str());
         else if (key == "wyrmKills") s.wyrmKills = std::atoi(val.c_str());
         else if (key == "warWeek") s.warWeek = std::atoll(val.c_str());
@@ -26835,6 +26903,7 @@ static void TreasureDecode(GameState& s, int i) {
     GameState::TreasureMap& m = s.tmaps[(size_t)i];
     float c = TmapDecodeChance(s, m.tier);
     s.tmapCd = 2.0f;
+    PlaySfx(SfxId::Book);
     float g = SkillUseGain(s.cartography, c / 100.0f, 3.0f);
     std::string note = g > 0 ? " (Cartography +" + std::to_string(g).substr(0, 3) + ")" : "";
     if (RandUnit() * 100.0f < c) {
@@ -26976,6 +27045,7 @@ static void TreasureTick(GameState& s, float dt, bool moved) {
             float c = TchestPickChance(s, s.tchestTier);
             float g = SkillUseGain(s.lockpicking, c / 100.0f, 3.0f);
             std::string note = g > 0 ? " (Lockpicking +" + std::to_string(g).substr(0, 3) + ")" : "";
+            PlaySfx(SfxId::Lock);
             if (RandUnit() * 100.0f < c) TreasureOpen(s, false);
             else s.logLine = "The lock holds. Try again." + note;
         }
@@ -34997,6 +35067,8 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     toggle("Dungeon boss alerts", "\"The boss is now available\" when you unlock one.", showBoss);
     s.optHideWyrm = !showWyrm; s.optHideDungeonBoss = !showBoss;
     toggle("Tap to walk", "Tap the ground to walk there (the stick and WASD always work).", s.optTapWalk);
+    toggle("Music", "A tune for the towns, the wilds and the dungeons.", s.optMusic);
+    toggle("Sound effects", "Footsteps, swords, spells, coins and the rest.", s.optSfx);
     toggle("Always daytime", "Keep the world in daylight instead of following your real clock.", s.optAlwaysDay);
     toggle("Classic 2D view", "The old top-down view - try it if 3D runs slowly on your device.", s.optClassic2D);
     toggle("Auto-restock reagents", "Top up to 30 reagents whenever you enter a town (1 gold each).", s.autoReagents);
@@ -35917,6 +35989,19 @@ static void UpdateDrawFrame() {
         UpdateUpgrade(state, dt);
         RegenMana(state, dt);
         TrainGroundsTick(state, GetFrameTime()); // (2026-09-28, #71)
+        { // the audio pass (2026-09-28): music for where you are, footsteps underfoot
+            Screen sc = state.screen, where = IsPlayScreen(sc) ? sc : g_playScreen;
+            int want = (where == Screen::Town || where == Screen::Interior) ? 0 : where == Screen::Wilderness ? 1
+                     : (where == Screen::Hunt && state.selectedDungeon.has_value()) ? 2 : -1;
+            MusicTick(want, GetFrameTime());
+            if (!state.playerIsGhost && state.playerDeathAnimT <= 0.0f) {
+                if (sc == Screen::Town) FootstepTick(state.townPlayerPos, SfxId::StepStone);
+                else if (sc == Screen::Interior) FootstepTick(state.interiorPlayerPos, SfxId::StepWood);
+                else if (sc == Screen::Wilderness)
+                    FootstepTick(state.wildernessPlayerPos, RegionAt(state.wildernessPlayerPos) == RegionId::Frostwastes ? SfxId::StepSnow : SfxId::StepGrass);
+                else if (sc == Screen::Hunt && state.selectedDungeon.has_value()) FootstepTick(state.dungeonPlayerPos, SfxId::StepStone);
+            }
+        }
         RegenAllPetMana(state, dt);
         UpdateTameAttempt(state, dt);
         RegenNotoriety(state, dt);
@@ -35942,6 +36027,7 @@ static void UpdateDrawFrame() {
         WarNetTick(state, dt); // War Week: Muster minutes, online guild sync (2026-09-27)
         g_tapWalkOn = state.optTapWalk;
         g_alwaysDay = state.optAlwaysDay;
+        g_sfxOn = state.optSfx; g_musicOn = state.optMusic;
         { // (2026-09-28, #75) 3D everywhere unless Options asks for the classic 2D view
             bool v3 = !state.optClassic2D;
             state.town3DView = state.wild3DView = state.interior3DView = state.hunt3DView = v3;
