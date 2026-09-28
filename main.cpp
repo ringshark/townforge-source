@@ -1245,6 +1245,10 @@ struct Pet {
     float mana, maxMana;
     float wrestling = 0, tactics = 0, anatomy = 0, magery = 0, evalInt = 0, meditation = 0;
     bool active = false;
+    int level = 1;        // (2026-09-28) pets level from kills, bond after kBondKills fights together
+    float xp = 0.0f;
+    bool bonded = false;
+    int bondKills = 0;
     Vector2 fpos{};       // (2026-09-28) where an extra follower stands (transient; the lead pet uses companionPos)
     bool fposInit = false;
 };
@@ -1514,6 +1518,7 @@ struct GameState {
     bool optHideDungeonBoss = false; // no "the boss is now available" notices
     bool optClassic2D = false;     // the old top-down view (a fallback for slow phones)
     bool optTapWalk = true;        // tap the ground to walk there
+    bool optAlwaysDay = false;     // (2026-09-28) keep the world in daylight - no real-clock night
     // Stat buffs (2026-09-27) - transient: Bless, Strength and Agility potions.
     float blessT = 0.0f, strPotT = 0.0f, agiPotT = 0.0f;
     int blessAmt = 0, strPotAmt = 0, agiPotAmt = 0;
@@ -5025,6 +5030,52 @@ static std::vector<Pet*> ActivePets(GameState& s) {
     for (auto& p : s.pets) if (p.active && p.hp > 0) v.push_back(&p);
     return v;
 }
+// ---- Pet levels, bonding and death (2026-09-28) ------------------------------
+// Pets take hits, level up from kills (max 30) and bond after kBondKills fights
+// at your side. A bonded pet that falls is only knocked out - revive it with
+// Veterinary on the Pets page. An unbonded pet that falls is gone for good.
+static const int kPetMaxLevel = 30;
+static const int kBondKills = 20;
+static float PetXpToNext(int level) { return 60.0f + 40.0f * level; }
+static void Journal(GameState& s, const std::string& line);
+static void PetFalls(GameState& s, int petId) {
+    for (size_t i = 0; i < s.pets.size(); i++) {
+        Pet& p = s.pets[i];
+        if (p.id != petId) continue;
+        p.hp = 0.0f;
+        if (p.bonded) {
+            s.logLine = p.name + " is knocked out! Revive it with Veterinary on the Pets page.";
+        } else {
+            s.logLine = p.name + " has died. (Bonded pets survive - they bond after " + std::to_string(kBondKills) + " fights with you.)";
+            s.pets.erase(s.pets.begin() + (long)i);
+        }
+        Journal(s, s.logLine);
+        return;
+    }
+}
+static void PetsOnKill(GameState& s, int monsterLevel) {
+    for (Pet* p : ActivePets(s)) {
+        if (!p->bonded && ++p->bondKills >= kBondKills) {
+            p->bonded = true;
+            Journal(s, p->name + " has bonded with you! It can no longer die - only be knocked out.");
+        }
+        if (p->level >= kPetMaxLevel) continue;
+        p->xp += 5.0f + monsterLevel * 4.0f;
+        while (p->level < kPetMaxLevel && p->xp >= PetXpToNext(p->level)) {
+            p->xp -= PetXpToNext(p->level);
+            p->level++;
+            p->str += 2; p->dex += 1;
+            p->maxHp += 5.0f + p->str * 0.1f; p->hp = p->maxHp;
+            p->wrestling = std::min(100.0f, p->wrestling + 1.5f);
+            p->tactics = std::min(100.0f, p->tactics + 1.5f);
+            if (p->role == PetRole::Caster) {
+                p->intStat += 2; p->maxMana += 2.0f;
+                p->magery = std::min(100.0f, p->magery + 1.5f); p->evalInt = std::min(100.0f, p->evalInt + 1.0f);
+            }
+            Journal(s, p->name + " reached level " + std::to_string(p->level) + "!");
+        }
+    }
+}
 
 // A pet's turn in combat: casts its best known offensive spell if it's a Caster with
 // mana for one, otherwise a wrestling-style bite. Mirrors the pet branch of
@@ -6153,6 +6204,7 @@ static bool CheckMonsterDefeatedAndHandleWin(GameState& s) {
         EndMurdererWin(s);
         return true;
     }
+    PetsOnKill(s, c.monster.level); // pet XP & bonding (2026-09-28)
     int goldFound = std::max(1, c.monster.baseGold + (std::rand() % 3) - 1);
     SpawnPanelKillCorpse(s, c.monster.name, goldFound, c.monster.baseLeather); // body beside you, loot on it
     std::string msg = "Defeated the " + c.monster.name + "! Its body lies beside you with " +
@@ -6199,6 +6251,7 @@ static void MonsterCounterAndMaybeEnd(GameState& s) {
         if (targetsPet) {
             pet->hp = std::max(0.0f, pet->hp - dmg);
             c.Log("The " + c.monster.name + " hits " + pet->name + " for " + std::to_string(dmg) + " damage");
+            if (pet->hp <= 0.0f) { std::string pn = pet->name; PetFalls(s, pet->id); c.Log(pn + " falls!"); pet = nullptr; }
         } else {
             s.hp -= dmg;
             c.Log("The " + c.monster.name + " hits you for " + std::to_string(dmg) + " damage");
@@ -6805,7 +6858,10 @@ static void RegenPetMana(Pet& pet, float dt) {
     pet.mana = std::min(pet.maxMana, pet.mana + regenPerSec * dt);
 }
 static void RegenAllPetMana(GameState& s, float dt) {
-    for (auto& p : s.pets) RegenPetMana(p, dt);
+    for (auto& p : s.pets) {
+        RegenPetMana(p, dt);
+        if (p.hp > 0.0f) p.hp = std::min(p.maxHp, p.hp + (0.25f + p.maxHp * 0.002f) * dt); // slow mend (2026-09-28)
+    }
 }
 
 static int RollInRange(const std::array<int, 2>& range) {
@@ -6910,9 +6966,25 @@ static void SellPet(GameState& s, int petId) {
 }
 
 // JS healPet(): Veterinary-scaled success chance and heal amount.
+static int PetReviveFee(const Pet& p) { return 100 + 40 * p.level; } // (2026-09-28) below 80 Veterinary
 static void HealPet(GameState& s, int petId) {
     auto it = std::find_if(s.pets.begin(), s.pets.end(), [&](Pet& p) { return p.id == petId; });
     if (it == s.pets.end() || it->hp >= it->maxHp) return;
+    if (it->hp <= 0.0f) { // a knocked-out bonded pet (2026-09-28): 80 Veterinary brings it round...
+        if (EffectiveSkill(s, &GameState::veterinary) < 80.0f) { // ...or the stable does, for gold
+            int fee = PetReviveFee(*it);
+            if (s.gold < fee) { s.logLine = TextFormat("Reviving takes 80 Veterinary - or %d gold to the stable.", fee); return; }
+            s.gold -= fee; it->hp = it->maxHp * 0.3f;
+            s.logLine = TextFormat("The stable master revives %s for %d gold.", it->name.c_str(), fee);
+            return;
+        }
+        float ch = std::clamp(15.0f + EffectiveSkill(s, &GameState::veterinary) * 0.85f, 15.0f, 95.0f);
+        float g = SkillUseGain(s.veterinary, ch / 100.0f, 4.0f);
+        std::string gn = g > 0 ? " (Vet +" + std::to_string(g).substr(0, 4) + ")" : "";
+        if (RandUnit() * 100.0f < ch) { it->hp = it->maxHp * 0.3f; s.logLine = it->name + " stirs and gets back on its feet!" + gn; }
+        else s.logLine = "You tend to " + it->name + ", but it doesn't wake yet." + gn;
+        return;
+    }
     float successChance = std::clamp(20.0f + EffectiveSkill(s, &GameState::veterinary) * 0.8f, 10.0f, 99.0f);
     bool succeeded = RandUnit() * 100.0f < successChance;
     float gain = SkillUseGain(s.veterinary, successChance / 100.0f, 3.0f);
@@ -7046,7 +7118,8 @@ static std::string PetToLine(const Pet& p) {
     std::ostringstream o;
     o << p.id << "|" << p.name << "|" << (int)p.role << "|" << p.str << "|" << p.dex << "|" << p.intStat << "|"
       << p.hp << "|" << p.maxHp << "|" << p.mana << "|" << p.maxMana << "|" << p.wrestling << "|" << p.tactics << "|"
-      << p.anatomy << "|" << p.magery << "|" << p.evalInt << "|" << p.meditation << "|" << (p.active ? 1 : 0);
+      << p.anatomy << "|" << p.magery << "|" << p.evalInt << "|" << p.meditation << "|" << (p.active ? 1 : 0)
+      << "|" << p.level << "|" << p.xp << "|" << (p.bonded ? 1 : 0) << "|" << p.bondKills;
     return o.str();
 }
 static std::optional<Pet> PetFromLine(const std::string& line) {
@@ -7071,6 +7144,12 @@ static std::optional<Pet> PetFromLine(const std::string& line) {
     p.evalInt = std::min(100.0f, (float)std::atof(parts[14].c_str()));
     p.meditation = std::min(100.0f, (float)std::atof(parts[15].c_str()));
     p.active = std::atoi(parts[16].c_str()) != 0;
+    if (parts.size() >= 21) { // pet levels & bonding (2026-09-28)
+        p.level = std::clamp(std::atoi(parts[17].c_str()), 1, 30);
+        p.xp = (float)std::atof(parts[18].c_str());
+        p.bonded = std::atoi(parts[19].c_str()) != 0;
+        p.bondKills = std::atoi(parts[20].c_str());
+    }
     return p;
 }
 // Corpse <-> "monsterName|baseLeather|gold"
@@ -7340,7 +7419,7 @@ static void SaveGame(const GameState& s) {
         << "\nsettleArrivalT=" << s.settleArrivalT << "\nsettleEpoch=" << (long long)std::time(nullptr) << "\n";
     out << "autoReagents=" << (s.autoReagents ? 1 : 0) << "\n";
     out << "optHideWyrm=" << (s.optHideWyrm ? 1 : 0) << "\noptHideDungeonBoss=" << (s.optHideDungeonBoss ? 1 : 0)
-        << "\noptClassic2D=" << (s.optClassic2D ? 1 : 0) << "\noptTapWalk=" << (s.optTapWalk ? 1 : 0) << "\n";
+        << "\noptClassic2D=" << (s.optClassic2D ? 1 : 0) << "\noptTapWalk=" << (s.optTapWalk ? 1 : 0) << "\noptAlwaysDay=" << (s.optAlwaysDay ? 1 : 0) << "\n";
     out << "wyrmRespawnT=" << s.wyrmRespawnT << "\nwyrmHp=" << s.wyrmHp << "\nwyrmKills=" << s.wyrmKills << "\n"; // world boss
     out << "warWeek=" << s.warWeek << "\nwarPlayMin=" << s.warPlayMin << "\nwarPts=";
     for (int d = 0; d < 7; d++) out << (d ? "," : "") << s.warPts[(size_t)d];
@@ -7640,6 +7719,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "optHideDungeonBoss") s.optHideDungeonBoss = std::atoi(val.c_str()) != 0;
         else if (key == "optClassic2D") s.optClassic2D = std::atoi(val.c_str()) != 0;
         else if (key == "optTapWalk") s.optTapWalk = std::atoi(val.c_str()) != 0;
+        else if (key == "optAlwaysDay") s.optAlwaysDay = std::atoi(val.c_str()) != 0;
         else if (key == "wyrmHp") s.wyrmHp = (float)std::atof(val.c_str());
         else if (key == "wyrmKills") s.wyrmKills = std::atoi(val.c_str());
         else if (key == "warWeek") s.warWeek = std::atoll(val.c_str());
@@ -14348,7 +14428,9 @@ static void T3DPushLight(Shader sh) {
 // Called at the top of each outdoor 3D view (and with noon for interiors).
 // Time of day follows the device's local clock (2026-09-26): dusk in the game
 // when it's dusk where you are. localtime() uses the browser's time zone.
+static bool g_alwaysDay = false; // Options: "Always daytime" (2026-09-28)
 static float T3DLocalTimeOfDay() {
+    if (g_alwaysDay) return 13.0f / 24.0f; // early afternoon, all day long
 #ifdef TF_HOUR
     return (float)TF_HOUR / 24.0f; // debug builds: pin the hour
 #else
@@ -25839,6 +25921,7 @@ static void Wild3DDrawSettlement(GameState& s, bool shadowPass, const Town3DCam*
 static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& am,
                                   const std::string& name, int baseGold, int baseLeather,
                                   bool clearEngagement) {
+    PetsOnKill(s, EngagedWildMonsterStats(s, am).level); // pet XP & bonding (2026-09-28)
     GuildWarCredit(s, am, name); // (2026-09-27) before anything resets `am`
     if (am.spotIdx >= 0 && am.spotIdx != kWyrmSpot && !am.isRival && am.bladeIdx < 0 && // treasure maps (2026-09-28)
         std::find(g_tguards.begin(), g_tguards.end(), am.spotIdx) == g_tguards.end())
@@ -25879,6 +25962,7 @@ static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeo
                                      int dungeonIdx, bool wasBoss, const std::string& name,
                                      int level, int baseGold, int baseLeather,
                                      bool clearEngagement) {
+    PetsOnKill(s, level); // pet XP & bonding (2026-09-28)
     PlaySfx(SfxId::MonsterDie);
     GameState::DyingMonster dm;
     dm.zone = 1;
@@ -26738,6 +26822,25 @@ static int NecroShield(GameState& s, int zone, int dmg) {
         m.hp -= dmg;
         SpawnFloatText(s, zone, m.pos, std::to_string(dmg), Color{ 220, 220, 200, 255 });
         return 0;
+    }
+    { // following pets step in and take some hits (2026-09-28)
+        std::vector<Pet*> near;
+        for (Pet* p : ActivePets(s)) {
+            Vector2 at = p == ActivePet(s) ? s.companionPos : p->fpos;
+            if (Dist(at, me) < 170.0f) near.push_back(p);
+        }
+        if (!near.empty()) {
+            Pet* p = near[(size_t)(std::rand() % (int)near.size())];
+            float ch = p->role == PetRole::Tank ? 0.4f : p->role == PetRole::Caster ? 0.12f : 0.25f;
+            if (RandUnit() < std::min(0.55f, ch * (0.7f + 0.3f * near.size()))) {
+                int pd = std::max(1, (int)std::round(dmg * (p->role == PetRole::Tank ? 0.75f : 1.0f)));
+                p->hp -= (float)pd;
+                Vector2 at = p == ActivePet(s) ? s.companionPos : p->fpos;
+                SpawnFloatText(s, zone, at, std::to_string(pd), Color{ 255, 170, 120, 255 });
+                if (p->hp <= 0.0f) PetFalls(s, p->id);
+                return 0;
+            }
+        }
     }
     if (s.boneArmor > 0.0f) {
         float a = std::min(s.boneArmor, (float)dmg);
@@ -33562,18 +33665,32 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
 
         std::string roleName = pet.role == PetRole::Tank ? "Tank" : pet.role == PetRole::Caster ? "Caster" : "Melee";
         int cost = PetFollowerCost(pet);
-        std::string header = pet.name + (pet.active ? " (following)" : "") + " - " + roleName +
-                             TextFormat("  [%d slot%s]", cost, cost == 1 ? "" : "s");
-        DrawUIText(header.c_str(), 20, (int)rowY, 13, kColorText);
+        bool down = pet.hp <= 0.0f;
+        std::string header = pet.name + TextFormat("  Lv %d", pet.level) + (down ? " (knocked out)" : pet.active ? " (following)" : "") +
+                             " - " + roleName + TextFormat("  [%d slot%s]", cost, cost == 1 ? "" : "s");
+        DrawUIText(header.c_str(), 20, (int)rowY, 13, down ? Color{ 170, 60, 50, 255 } : kColorText);
         std::string stats = TextFormat("HP %.0f/%.0f  Str %d Dex %d Int %d", pet.hp, pet.maxHp,
                                          pet.str, pet.dex, pet.intStat);
         DrawUIText(stats.c_str(), 20, (int)rowY + 16, 13, DARKGRAY);
+        { // level progress + bond (2026-09-28)
+            Rectangle xb = { (float)screenW - 220, rowY + 20, 90, 6 };
+            DrawRectangleRec(xb, Fade(BLACK, 0.18f));
+            float xf = pet.level >= kPetMaxLevel ? 1.0f : std::clamp(pet.xp / PetXpToNext(pet.level), 0.0f, 1.0f);
+            DrawRectangleRec({ xb.x, xb.y, xb.width * xf, xb.height }, Color{ 200, 160, 60, 255 });
+            DrawUIText(pet.bonded ? "Bonded" : TextFormat("Bond %d/%d", pet.bondKills, kBondKills), (int)(xb.x + xb.width + 8), (int)rowY + 14, 12,
+                       pet.bonded ? Color{ 60, 130, 70, 255 } : DARKGRAY);
+        }
 
         if (Button({ 20, rowY + 34, 70, 22 }, pet.active ? "Stay" : "Follow",
                    pet.active || FollowersUsed(s) + cost <= kFollowerSlots)) SetPetActive(s, pet.id);
-        if (Button({ 96, rowY + 34, 60, 22 }, "Heal", pet.hp < pet.maxHp)) HealPet(s, pet.id);
+        bool vetRes = EffectiveSkill(s, &GameState::veterinary) >= 80.0f;
+        if (down && !vetRes) {
+            if (Button({ 96, rowY + 34, 156, 22 }, TextFormat("Revive (%d gold)", PetReviveFee(pet)), s.gold >= PetReviveFee(pet))) HealPet(s, pet.id);
+        } else {
+        if (Button({ 96, rowY + 34, 60, 22 }, down ? "Revive" : "Heal", pet.hp < pet.maxHp)) HealPet(s, pet.id);
         if (Button({ 162, rowY + 34, 90, 22 }, "Train Wrest.", pet.wrestling < kPetTrainTarget && s.gold >= 1))
             TrainPetSkillGold(s, pet.id, &Pet::wrestling, "Wrestling");
+        }
         if (Button({ (float)(screenW - 150), rowY + 34, 70, 22 }, "Release", true)) ReleasePet(s, pet.id);
         if (Button({ (float)(screenW - 74), rowY + 34, 60, 22 }, "Sell", true)) SellPet(s, pet.id);
     }
@@ -34645,6 +34762,7 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     toggle("Dungeon boss alerts", "\"The boss is now available\" when you unlock one.", showBoss);
     s.optHideWyrm = !showWyrm; s.optHideDungeonBoss = !showBoss;
     toggle("Tap to walk", "Tap the ground to walk there (the stick and WASD always work).", s.optTapWalk);
+    toggle("Always daytime", "Keep the world in daylight instead of following your real clock.", s.optAlwaysDay);
     toggle("Classic 2D view", "The old top-down view - try it if 3D runs slowly on your device.", s.optClassic2D);
     toggle("Auto-restock reagents", "Top up to 30 reagents whenever you enter a town (1 gold each).", s.autoReagents);
     y += 6;
@@ -35496,6 +35614,7 @@ static void UpdateDrawFrame() {
         WyrmTick(state, dt);   // the world boss's wake timer and heads (2026-09-27)
         WarNetTick(state, dt); // War Week: Muster minutes, online guild sync (2026-09-27)
         g_tapWalkOn = state.optTapWalk;
+        g_alwaysDay = state.optAlwaysDay;
         { // (2026-09-28, #75) 3D everywhere unless Options asks for the classic 2D view
             bool v3 = !state.optClassic2D;
             state.town3DView = state.wild3DView = state.interior3DView = state.hunt3DView = v3;
