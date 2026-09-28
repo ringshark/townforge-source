@@ -105,3 +105,17 @@ files, run through Meshy auto-rigging (2.0 m tall) and given six clips each: `Id
 Sword Slash), `HitReact` (1.7s, 178) and `Death` (2.3s, 189 Dying Backwards). As with the
 hero, the rig keeps only the base color texture. The static files remain for anything
 that doesn't need animation. The Archer, Shaman and Brute can share the Grunt's file.
+
+## Rigged monsters
+
+Each of these has a `<name>_animated.glb` next to its static `<name>.glb`:
+`bonewalker`, `rotbound_corpse`, `gravewretch`, `grave_warden`, `crypt_sovereign`, `glacier_wight`, `rimebound_horror`, `hoarfrost_revenant`, `winters_maw`, `frostbound_king`, `scalekin_raider_scout`, `scalekin_raider_archer`, `scalekin_raider_warlord`, `scalekin_raider_shaman`, `scalekin_raider_huntress`, `rock_golem`.
+
+They're the same models, run through Meshy auto-rigging (2.0 m tall) with three clips:
+`Walk` (1.1s) and `Run` (0.7s) from the rig, and `Death` (2.3s, Meshy 189 Dying
+Backwards). There are no Idle, Attack or HitReact clips for these; drive those in code
+(a lunge, a red flash) the way the unrigged spiders do, or generate more clips from
+Meshy's animation library (3 credits each). The Orcs and the hero have fuller sets,
+described above. Like the other rigged files, the rig keeps only the base color texture.
+Rigging worked on every monster here, including the robed Hoarfrost Revenant and the
+blocky Rock Golem and Winter's Maw, but check the deformation in-game.
