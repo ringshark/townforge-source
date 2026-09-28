@@ -2266,7 +2266,11 @@ static Vector2 VirtualJoystickDir() {
     Vector2 delta = { mouse.x - g_joystickOrigin.x, mouse.y - g_joystickOrigin.y };
     float len = std::sqrt(delta.x * delta.x + delta.y * delta.y);
     if (len < 8.0f) return { 0, 0 }; // dead zone - avoids jitter right at the touch point
-    return { delta.x / len, delta.y / len };
+    // Analog (2026-09-28): how far the knob is pushed sets the pace - a light
+    // push walks, a full push runs (the vector's length is the speed, 0.2..1).
+    float t = std::clamp((len - 8.0f) / (kJoystickMaxDrag - 8.0f), 0.0f, 1.0f);
+    float mag = 0.2f + 0.8f * powf(t, 1.6f);
+    return { delta.x / len * mag, delta.y / len * mag };
 }
 // Mirrors VirtualJoystickDir()'s own dead-zone check using the globals it just updated
 // this frame (called from UpdatePlayerMovement before this runs) - lets DrawPlayer's
@@ -2322,7 +2326,11 @@ static bool UpdatePlayerMovement(Vector2& pos, Vector2& facing, float dt, float 
     if (len <= 0.0001f) {
         dir = VirtualJoystickDir();
         len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-        if (len > 0.0001f) WalkTargetClear();
+        if (len > 0.0001f) { // the stick: direction, and its push sets the speed
+            WalkTargetClear();
+            step *= std::min(len, 1.0f);
+            dir.x /= len; dir.y /= len;
+        }
         else if (g_walkOn) { // tap to walk
             Vector2 d = { g_walkTarget.x - pos.x, g_walkTarget.y - pos.y };
             float dl = std::sqrt(d.x * d.x + d.y * d.y);
