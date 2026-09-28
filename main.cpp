@@ -4887,6 +4887,23 @@ static std::string NextAutoGatherType(const GameState& s) {
 }
 
 static const float kAutoGatherMinSkill = 30.0f; // JS AUTO_GATHER_MIN_SKILL
+// Paying vendors from the bank (2026-09-28, #67): carried gold goes first; any
+// shortfall comes out of your bank box with a 2% fee (rounded up).
+static int BankFeeFor(int shortfall) { return shortfall <= 0 ? 0 : (shortfall * 2 + 99) / 100; }
+static bool CanAfford(const GameState& s, int cost) {
+    if (s.gold >= cost) return true;
+    int shortfall = cost - std::max(0, s.gold);
+    return s.bankGold >= shortfall + BankFeeFor(shortfall);
+}
+static std::string g_bankPayNote; // tacked onto the purchase line (the caller writes its own after paying)
+static void PayGold(GameState& s, int cost) {
+    if (s.gold >= cost) { s.gold -= cost; return; }
+    int shortfall = cost - std::max(0, s.gold), fee = BankFeeFor(shortfall);
+    s.gold = 0;
+    s.bankGold -= shortfall + fee;
+    Journal(s, TextFormat("Paid %dg from your bank (+%dg fee, 2%%).", shortfall, fee));
+    g_bankPayNote = TextFormat("(%dg from your bank, +%dg fee)", shortfall, fee);
+}
 
 // `seconds` defaults to the JS-matched Town rate (8s per action); the Wilderness's
 // walk-up-to-a-node gather nodes pass 3s instead (2026-09-27, was 5s), rewarding active
@@ -6007,13 +6024,13 @@ static void MerchantBuy(GameState& s, int stockIdx) {
     if (s.merchantStock[stockIdx] <= 0) return;
     if (s.innocentMem[2].murdered > 0) { s.logLine = "Silas wants nothing to do with you."; return; }
     int price = MerchantPrice(s, stockIdx);
-    if (s.gold < price) { s.logLine = "Not enough gold for that."; return; }
+    if (!CanAfford(s, price)) { s.logLine = "Not enough gold for that."; return; }
     int kind = kMerchantStockDefs[stockIdx].kind;
     if ((kind == 3 || kind == 4) && (int)s.backpack.size() >= BackpackCap(s)) {
         s.logLine = "Your backpack is full (" + std::to_string(BackpackCap(s)) + " items).";
         return;
     }
-    s.gold -= price;
+    PayGold(s, price);
     s.merchantStock[stockIdx]--;
     if (kind == 0) { // heal potion - mirrors TryBuyHealPotion
         auto it = std::find_if(s.potions.begin(), s.potions.end(),
@@ -6506,8 +6523,8 @@ static void CraftBandages(GameState& s) {
     s.logLine = "Crafted 5 bandages from 2 leather.";
 }
 static void TryBuyBandages(GameState& s, int amount, int cost) {
-    if (s.gold < cost) { s.logLine = "Not enough gold to buy bandages."; return; }
-    s.gold -= cost;
+    if (!CanAfford(s, cost)) { s.logLine = "Not enough gold to buy bandages."; return; }
+    PayGold(s, cost);
     s.bandages += amount;
     s.logLine = "Bought " + std::to_string(amount) + " bandages for " + std::to_string(cost) + " gold.";
 }
@@ -6784,8 +6801,8 @@ static void TryPracticeSpell(GameState& s, int spellIdx) {
 // so Magic doesn't get permanently stuck once the starting 5 run out.
 static void TryBuyReagents(GameState& s, int amount) {
     int cost = amount; // 1 gold per reagent - arbitrary, flagged as a stand-in
-    if (s.gold < cost) { s.logLine = "Not enough gold to buy reagents."; return; }
-    s.gold -= cost;
+    if (!CanAfford(s, cost)) { s.logLine = "Not enough gold to buy reagents."; return; }
+    PayGold(s, cost);
     s.reagents += amount;
     s.logLine = "Bought " + std::to_string(amount) + " reagents for " + std::to_string(cost) + " gold.";
 }
@@ -6803,9 +6820,9 @@ static const std::array<FurGear, 5> kFurTraderGear = {{
     { "Fur Bracers", "arms", 30, 200 },
 }};
 static void TryBuyFurGear(GameState& s, const FurGear& gear) {
-    if (s.gold < gear.price) { s.logLine = "Not enough gold for the " + std::string(gear.name) + "."; return; }
+    if (!CanAfford(s, gear.price)) { s.logLine = "Not enough gold for the " + std::string(gear.name) + "."; return; }
     if ((int)s.backpack.size() >= BackpackCap(s)) { s.logLine = "Your backpack is full."; return; }
-    s.gold -= gear.price;
+    PayGold(s, gear.price);
     s.backpack.push_back(Item{ s.nextItemId++, gear.name, ItemType::Armor, gear.slot, "", gear.power, "" });
     s.logLine = "Bought " + std::string(gear.name) + " for " + std::to_string(gear.price) + " gold.";
 }
@@ -6993,8 +7010,8 @@ static void HealPet(GameState& s, int petId) {
     if (it->hp <= 0.0f) { // a knocked-out bonded pet (2026-09-28): 80 Veterinary brings it round...
         if (EffectiveSkill(s, &GameState::veterinary) < 80.0f) { // ...or the stable does, for gold
             int fee = PetReviveFee(*it);
-            if (s.gold < fee) { s.logLine = TextFormat("Reviving takes 80 Veterinary - or %d gold to the stable.", fee); return; }
-            s.gold -= fee; it->hp = it->maxHp * 0.3f;
+            if (!CanAfford(s, fee)) { s.logLine = TextFormat("Reviving takes 80 Veterinary - or %d gold to the stable.", fee); return; }
+            PayGold(s, fee); it->hp = it->maxHp * 0.3f;
             s.logLine = TextFormat("The stable master revives %s for %d gold.", it->name.c_str(), fee);
             return;
         }
@@ -7030,8 +7047,8 @@ static void TrainPetSkillGold(GameState& s, int petId, float Pet::* skillField, 
     float current = (*it).*skillField;
     if (current >= kPetTrainTarget) return;
     int cost = (int)std::ceil((kPetTrainTarget - current) * kTrainCostPerPoint);
-    if (s.gold < cost) { s.logLine = "Not enough gold to train that."; return; }
-    s.gold -= cost;
+    if (!CanAfford(s, cost)) { s.logLine = "Not enough gold to train that."; return; }
+    PayGold(s, cost);
     (*it).*skillField = kPetTrainTarget;
     s.logLine = "Trained " + it->name + "'s " + label + " to 30 for " + std::to_string(cost) + " gold.";
 }
@@ -8058,8 +8075,8 @@ static void TryBuyPremadeItem(GameState& s, int buildingIdx, int recipeIdx) {
         return;
     }
     int price = VendorPriceFor(r);
-    if (s.gold < price) { s.logLine = "Not enough gold for a Standard " + r.name + " (" + std::to_string(price) + "g)."; return; }
-    s.gold -= price;
+    if (!CanAfford(s, price)) { s.logLine = "Not enough gold for a Standard " + r.name + " (" + std::to_string(price) + "g)."; return; }
+    PayGold(s, price);
     auto [qualityLabel, qualityMult] = QualityFor(0.0f);
     int finalPower = std::max(1, (int)std::round(r.power * qualityMult));
     Item item{ s.nextItemId++, qualityLabel + " " + r.name, r.type, r.slot, r.handed, finalPower, r.category };
@@ -8074,8 +8091,8 @@ static void TryBuyPremadePotion(GameState& s, int recipeIdx) {
     if (recipeIdx < 0 || recipeIdx >= (int)alchemy.recipes.size()) return;
     const Recipe& r = alchemy.recipes[recipeIdx];
     int price = VendorPriceFor(r);
-    if (s.gold < price) { s.logLine = "Not enough gold for a " + r.name + " (" + std::to_string(price) + "g)."; return; }
-    s.gold -= price;
+    if (!CanAfford(s, price)) { s.logLine = "Not enough gold for a " + r.name + " (" + std::to_string(price) + "g)."; return; }
+    PayGold(s, price);
     auto stack = std::find_if(s.potions.begin(), s.potions.end(), [&](const PotionStack& p) { return p.name == r.name; });
     if (stack == s.potions.end()) s.potions.push_back({ r.name, r.category, r.power, 1 });
     else stack->count += 1;
@@ -8268,8 +8285,8 @@ static void WithdrawItem(GameState& s, int bankIdx) {
 static void BuyHouseTier(GameState& s, int targetIdx) {
     if (targetIdx <= s.houseTierIdx || targetIdx >= (int)kHouseTiers.size()) return;
     int cost = kHouseTiers[targetIdx].cost - kHouseTiers[s.houseTierIdx].cost;
-    if (s.gold < cost) return;
-    s.gold -= cost;
+    if (!CanAfford(s, cost)) return;
+    PayGold(s, cost);
     s.houseTierIdx = targetIdx;
     s.logLine = "Purchased a " + kHouseTiers[targetIdx].name + " for " + std::to_string(cost) + " gold.";
 }
@@ -8295,8 +8312,8 @@ static void BuildHouseModule(GameState& s, int moduleIdx) {
     if (s.houseModuleLevel[moduleIdx] > 0) return;
     if (BuiltHouseModuleCount(s) >= kHouseTiers[s.houseTierIdx].moduleSlots) return;
     int cost = kHomeModuleLevels[0].cost;
-    if (s.gold < cost) return;
-    s.gold -= cost;
+    if (!CanAfford(s, cost)) return;
+    PayGold(s, cost);
     s.houseModuleLevel[moduleIdx] = 1;
     s.logLine = "Built a " + kHomeModuleDefs[moduleIdx].label + " onto your home for " + std::to_string(cost) + " gold.";
 }
@@ -8305,8 +8322,8 @@ static void UpgradeHouseModule(GameState& s, int moduleIdx) {
     int current = s.houseModuleLevel[moduleIdx];
     if (current <= 0 || current >= (int)kHomeModuleLevels.size()) return;
     int cost = kHomeModuleLevels[current].cost; // levels are 1-based; index by current = next level's cost entry
-    if (s.gold < cost) return;
-    s.gold -= cost;
+    if (!CanAfford(s, cost)) return;
+    PayGold(s, cost);
     s.houseModuleLevel[moduleIdx] = current + 1;
     s.logLine = "Upgraded your " + kHomeModuleDefs[moduleIdx].label + " to level " + std::to_string(current + 1) +
                  " for " + std::to_string(cost) + " gold.";
@@ -29552,11 +29569,11 @@ static void TryBuyHousePlot(GameState& s, int plotIdx) {
     }
     if (plotIdx < 0 || plotIdx >= (int)kHousePlots.size()) return;
     const HousePlot& p = kHousePlots[plotIdx];
-    if (s.gold < p.price) {
+    if (!CanAfford(s, p.price)) {
         s.logLine = "The " + std::string(p.name) + " costs " + std::to_string(p.price) + "g.";
         return;
     }
-    s.gold -= p.price;
+    PayGold(s, p.price);
     s.housePlotIdx = plotIdx;
     s.houseLayout = HouseEmptyLayout(p.cells);
     s.hearthBound = false;
@@ -32904,8 +32921,8 @@ static void DrawDyeTub(GameState& s, int y, int screenW, int screenH) {
         DrawItemIcon(pv, 26, (float)y + 6, 58);
         DrawUIText(TextFormat("%s  ->  %s", target->name.c_str(), hueName), 100, y + 10, 14, kColorText);
         bool same = target->hue == g_dyeHue;
-        if (Button({ 100, (float)y + 34, 170, 30 }, same ? "Already that color" : TextFormat("Dye it (%dg)", kDyeCost), !same && s.gold >= kDyeCost)) {
-            s.gold -= kDyeCost;
+        if (Button({ 100, (float)y + 34, 170, 30 }, same ? "Already that color" : TextFormat("Dye it (%dg)", kDyeCost), !same && CanAfford(s, kDyeCost))) {
+            PayGold(s, kDyeCost);
             if (g_dyeHue >= 0 && kDyeHues[g_dyeHue].rare && tailoring < 80.0f && s.rareDyeCharges > 0) s.rareDyeCharges--; // a rare dye bottle
             target->hue = g_dyeHue;
             s.logLine = "You dip the " + target->name + " in the tub - it comes out " + (g_dyeHue < 0 ? std::string("its natural color") : std::string(kDyeHues[g_dyeHue].name)) + ".";
@@ -33099,7 +33116,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
     if (s.craftModeTab == 3 && s.craftBuildingTab == 2) { DrawDyeTub(s, y, screenW, screenH); return; }
     if (s.craftModeTab == 2) { DrawCommissions(s, y, screenW, screenH); return; }
     if (s.craftModeTab == 1) {
-        DrawInfoLine(TextFormat("Gold: %d", s.gold), 20, y, 13, kColorAccent);
+        DrawInfoLine(s.bankGold > 0 ? TextFormat("Gold: %d   Bank: %d (short? the rest comes from your bank, +2%% fee)", s.gold, s.bankGold) : TextFormat("Gold: %d", s.gold), 20, y, 13, kColorAccent);
         y += 20;
         int listTop = y;
         int listHeight = screenH - listTop - 40;
@@ -33119,7 +33136,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
                 : TextFormat("Standard %s  (%d %s)", r.name.c_str(), r.power, r.type == ItemType::Armor ? "def" : "pwr");
             DrawUIText(line.c_str(), 20, (int)rowY + 6, 12, kColorText);
             std::string priceLabel = TextFormat("Buy (%dg)", price);
-            if (Button({ (float)(screenW - 110), rowY, 90, 24 }, priceLabel, s.gold >= price)) {
+            if (Button({ (float)(screenW - 110), rowY, 90, 24 }, priceLabel, CanAfford(s, price))) {
                 if (isAlchemy) TryBuyPremadePotion(s, (int)i);
                 else TryBuyPremadeItem(s, s.craftBuildingTab, (int)i);
             }
@@ -33271,8 +33288,8 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
 static const int kProvisionerHealPotionCost = 15;
 
 static void TryBuyHealPotion(GameState& s) {
-    if (s.gold < kProvisionerHealPotionCost) { s.logLine = "Not enough gold for a Heal Potion."; return; }
-    s.gold -= kProvisionerHealPotionCost;
+    if (!CanAfford(s, kProvisionerHealPotionCost)) { s.logLine = "Not enough gold for a Heal Potion."; return; }
+    PayGold(s, kProvisionerHealPotionCost);
     auto stack = std::find_if(s.potions.begin(), s.potions.end(), [](const PotionStack& p) { return p.name == "Heal Potion"; });
     if (stack == s.potions.end()) s.potions.push_back({ "Heal Potion", "heal", 30, 1 });
     else stack->count += 1;
@@ -33296,11 +33313,11 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
     y += 34;
 
     if (s.provisionerTab == 0) {
-        DrawInfoLine(TextFormat("Gold: %d", s.gold), 20, y, 13, kColorAccent);
+        DrawInfoLine(s.bankGold > 0 ? TextFormat("Gold: %d   Bank: %d (short? the rest comes from your bank, +2%% fee)", s.gold, s.bankGold) : TextFormat("Gold: %d", s.gold), 20, y, 13, kColorAccent);
         y += 24;
 
         DrawInfoLine(TextFormat("Reagents: %d", s.reagents), 20, y + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Buy 5 (5g)", s.gold >= 5)) TryBuyReagents(s, 5);
+        if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Buy 5 (5g)", CanAfford(s, 5))) TryBuyReagents(s, 5);
         y += 34;
         // (2026-09-27) never walk out dry again
         if (Button({ 20, (float)y, (float)screenW - 40, 28 }, s.autoReagents ? "Auto-restock reagents: ON (tops up to 30 in any town)"
@@ -33311,7 +33328,7 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
         y += 36;
 
         DrawInfoLine(TextFormat("Bandages: %d", s.bandages), 20, y + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Buy 5 (40g)", s.gold >= 40)) TryBuyBandages(s, 5, 40);
+        if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Buy 5 (40g)", CanAfford(s, 40))) TryBuyBandages(s, 5, 40);
         y += 34;
 
         int healCount = 0;
@@ -33319,15 +33336,15 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
         if (healStack != s.potions.end()) healCount = healStack->count;
         DrawInfoLine(TextFormat("Heal Potions: %d", healCount), 20, y + 6, 12, kColorText);
         if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, TextFormat("Buy 1 (%dg)", kProvisionerHealPotionCost),
-                    s.gold >= kProvisionerHealPotionCost)) TryBuyHealPotion(s);
+                    CanAfford(s, kProvisionerHealPotionCost))) TryBuyHealPotion(s);
         y += 34;
         { // Instruments (2026-09-28, #65): bard songs need one; a better one plays better
             int next = s.instrument + 1;
             DrawInfoLine(s.instrument > 0 ? TextFormat("Instrument: %s", kInstrumentName[s.instrument]) : "Instrument: none (bard songs need one)",
                          20, y + 6, 12, kColorText);
             if (next <= 3 && Button({ (float)(screenW - 170), (float)y, 150, 26 }, TextFormat("%s (%dg)", kInstrumentName[next], kInstrumentCost[next]),
-                                    s.gold >= kInstrumentCost[next])) {
-                s.gold -= kInstrumentCost[next]; s.instrument = next;
+                                    CanAfford(s, kInstrumentCost[next]))) {
+                PayGold(s, kInstrumentCost[next]); s.instrument = next;
                 PlaySfx(next == 3 ? SfxId::Harp : next == 2 ? SfxId::Lute : SfxId::Drum);
                 s.logLine = std::string("You buy a ") + kInstrumentName[next] + (next == 1 ? " - Peacemaking and Provocation can now be played." : " - your songs will ring truer.");
             }
@@ -33341,10 +33358,10 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
         for (int k = 0; k < 3; k++) {
             DrawInfoLine(jn[k], 20, y + 6, 12, kColorText);
             bool room = (int)s.backpack.size() < BackpackCap(s);
-            if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, TextFormat("Buy (%dg)", jewelCost), s.gold >= jewelCost && room)) {
+            if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, TextFormat("Buy (%dg)", jewelCost), CanAfford(s, jewelCost) && room)) {
                 Item it = MakeJewel(s, k, 2);
                 it.bStr = k == 0 ? 2 : 0; it.bDex = k == 1 ? 2 : 0; it.bInt = k == 2 ? 2 : 0; // exactly as labelled
-                s.gold -= jewelCost; s.backpack.push_back(it);
+                PayGold(s, jewelCost); s.backpack.push_back(it);
                 s.logLine = "You buy a " + it.name + ". Wear it on your paperdoll's Jewels page.";
                 PlaySfx(SfxId::Buy);
             }
@@ -33401,12 +33418,12 @@ static void DrawFurTraderScreen(GameState& s, int screenW, int screenH) {
     y += 34;
 
     if (s.furTraderTab == 0) {
-        DrawInfoLine(TextFormat("Gold: %d", s.gold), 20, y, 13, kColorAccent);
+        DrawInfoLine(s.bankGold > 0 ? TextFormat("Gold: %d   Bank: %d (short? the rest comes from your bank, +2%% fee)", s.gold, s.bankGold) : TextFormat("Gold: %d", s.gold), 20, y, 13, kColorAccent);
         y += 24;
         for (const FurGear& gear : kFurTraderGear) {
             DrawInfoLine(TextFormat("%s (power %d, %s)", gear.name, gear.power, gear.slot), 20, y + 6, 12, kColorText);
             if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, TextFormat("Buy 1 (%dg)", gear.price),
-                        s.gold >= gear.price)) TryBuyFurGear(s, gear);
+                        CanAfford(s, gear.price))) TryBuyFurGear(s, gear);
             y += 34;
         }
         DrawInfoLine(TextFormat("Furs: %d", s.furs), 20, y + 6, 12, kColorText);
@@ -33456,16 +33473,16 @@ static void TrySellOreToGuild(GameState& s) { // Guild bulk rate: 8g per ore
     PlaySfx(SfxId::Coin);
 }
 static void TryBuyOreFromGuild(GameState& s) { // 12g per ore - for crafters who don't mine
-    if (s.gold < 12) { s.logLine = "Not enough gold for Guild ore (12g)."; return; }
-    s.gold -= 12;
+    if (!CanAfford(s, 12)) { s.logLine = "Not enough gold for Guild ore (12g)."; return; }
+    PayGold(s, 12);
     s.ore += 1;
     s.logLine = "Bought 1 ore from the Guild for 12 gold.";
     PlaySfx(SfxId::Coin);
 }
 static void TryGuildMiningTraining(GameState& s) { // 100g - supervised Mining practice
-    if (s.gold < 100) { s.logLine = "Not enough gold for Guild training (100g)."; return; }
+    if (!CanAfford(s, 100)) { s.logLine = "Not enough gold for Guild training (100g)."; return; }
     float gain = SkillUseGain(s.mining, 0.5f, 10.0f); // paid, supervised practice
-    s.gold -= 100;
+    PayGold(s, 100);
     s.logLine = gain > 0 ? "Guild training complete. (Mining +" + std::to_string(gain).substr(0, 4) + ")"
                          : "Guild training complete - no further progress to make.";
     PlaySfx(SfxId::Click);
@@ -33490,10 +33507,10 @@ static void DrawMinersGuildScreen(GameState& s, int screenW, int screenH) {
         DrawInfoLine(TextFormat("Gold: %d   Ore: %d", s.gold, s.ore), 20, y, 13, kColorAccent);
         y += 26;
         DrawInfoLine("Guild ore (12g each) - for crafters who don't mine", 20, y + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Buy 1 (12g)", s.gold >= 12)) TryBuyOreFromGuild(s);
+        if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Buy 1 (12g)", CanAfford(s, 12))) TryBuyOreFromGuild(s);
         y += 36;
         DrawInfoLine("Supervised training (100g) - Mining practice, Guild masters watching", 20, y + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Train (100g)", s.gold >= 100)) TryGuildMiningTraining(s);
+        if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Train (100g)", CanAfford(s, 100))) TryGuildMiningTraining(s);
         y += 36;
         DrawInfoLine(TextFormat("Mining: %.1f", s.mining), 20, y + 6, 12, kColorText);
         return;
@@ -33524,28 +33541,28 @@ static void DrawRefugeScreen(GameState& s, int screenW, int screenH) {
     y += 30;
 
     DrawInfoLine("Forged Pardon (500g) - wipes your notoriety clean, no questions", 20, y + 6, 12, kColorText);
-    if (Button({ (float)(screenW - 150), (float)y, 130, 26 }, "Buy (500g)", s.gold >= 500 && s.notoriety > 0)) {
-        s.gold -= 500;
+    if (Button({ (float)(screenW - 150), (float)y, 130, 26 }, "Buy (500g)", CanAfford(s, 500) && s.notoriety > 0)) {
+        PayGold(s, 500);
         s.notoriety = 0;
         s.logLine = "The broker burns your wanted poster. You're nobody again - for now.";
         PlaySfx(SfxId::Coin);
     }
     y += 36;
     DrawInfoLine("Reagents: 5 for 8g (fugitive's markup)", 20, y + 6, 12, kColorText);
-    if (Button({ (float)(screenW - 150), (float)y, 130, 26 }, "Buy 5 (8g)", s.gold >= 8)) {
-        s.gold -= 8; s.reagents += 5;
+    if (Button({ (float)(screenW - 150), (float)y, 130, 26 }, "Buy 5 (8g)", CanAfford(s, 8))) {
+        PayGold(s, 8); s.reagents += 5;
         s.logLine = "Bought 5 reagents for 8 gold.";
         PlaySfx(SfxId::Coin);
     }
     y += 36;
     DrawInfoLine("Bandages: 5 for 60g (fugitive's markup)", 20, y + 6, 12, kColorText);
-    if (Button({ (float)(screenW - 150), (float)y, 130, 26 }, "Buy 5 (60g)", s.gold >= 60)) TryBuyBandages(s, 5, 60);
+    if (Button({ (float)(screenW - 150), (float)y, 130, 26 }, "Buy 5 (60g)", CanAfford(s, 60))) TryBuyBandages(s, 5, 60);
     y += 36;
     DrawInfoLine(TextFormat("Heal Potion: 1 for %dg (fugitive's markup)", (kProvisionerHealPotionCost * 3) / 2), 20, y + 6, 12, kColorText);
     if (Button({ (float)(screenW - 150), (float)y, 130, 26 }, TextFormat("Buy 1 (%dg)", (kProvisionerHealPotionCost * 3) / 2),
-                s.gold >= (kProvisionerHealPotionCost * 3) / 2)) {
+                CanAfford(s, (kProvisionerHealPotionCost * 3) / 2))) {
         int cost = (kProvisionerHealPotionCost * 3) / 2;
-        s.gold -= cost;
+        PayGold(s, cost);
         // Mirror TryBuyHealPotion's stack add without its fixed price.
         auto it = std::find_if(s.potions.begin(), s.potions.end(),
                                [](const PotionStack& p) { return p.name == "Heal Potion"; });
@@ -33741,8 +33758,8 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
     y += 18;
     if (s.stableBought < kStableMaxBought) {
         int price = StableSlotPrice(s);
-        if (Button({ (float)screenW - 190, (float)y - 3, 170, 22 }, TextFormat("+1 stable slot (%d g)", price), s.gold >= price)) {
-            s.gold -= price; s.stableBought++; PlaySfx(SfxId::Buy);
+        if (Button({ (float)screenW - 190, (float)y - 3, 170, 22 }, TextFormat("+1 stable slot (%d g)", price), CanAfford(s, price))) {
+            PayGold(s, price); s.stableBought++; PlaySfx(SfxId::Buy);
             s.logLine = TextFormat("Your stable now holds %d pets.", PetSlotCapacity(s));
         }
     }
@@ -33825,10 +33842,10 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
                    pet.active || FollowersUsed(s) + cost <= kFollowerSlots)) SetPetActive(s, pet.id);
         bool vetRes = EffectiveSkill(s, &GameState::veterinary) >= 80.0f;
         if (down && !vetRes) {
-            if (Button({ 96, rowY + 34, 156, 22 }, TextFormat("Revive (%d gold)", PetReviveFee(pet)), s.gold >= PetReviveFee(pet))) HealPet(s, pet.id);
+            if (Button({ 96, rowY + 34, 156, 22 }, TextFormat("Revive (%d gold)", PetReviveFee(pet)), CanAfford(s, PetReviveFee(pet)))) HealPet(s, pet.id);
         } else {
         if (Button({ 96, rowY + 34, 60, 22 }, down ? "Revive" : "Heal", pet.hp < pet.maxHp)) HealPet(s, pet.id);
-        if (Button({ 162, rowY + 34, 90, 22 }, "Train Wrest.", pet.wrestling < kPetTrainTarget && s.gold >= 1))
+        if (Button({ 162, rowY + 34, 90, 22 }, "Train Wrest.", pet.wrestling < kPetTrainTarget && CanAfford(s, 1)))
             TrainPetSkillGold(s, pet.id, &Pet::wrestling, "Wrestling");
         }
         if (Button({ (float)(screenW - 150), rowY + 34, 70, 22 }, "Release", true)) ReleasePet(s, pet.id);
@@ -33912,7 +33929,7 @@ static void DrawInnocentPanel(GameState& s, int screenW) {
                               std::to_string(price) + "g";
             DrawUIText(row.c_str(), 20, y + 6, 13, kColorText);
             if (Button({ (float)screenW - 140, (float)y, 120, 26 },
-                       "Buy", s.merchantStock[si] > 0 && s.gold >= price))
+                       "Buy", s.merchantStock[si] > 0 && CanAfford(s, price)))
                 MerchantBuy(s, si);
             y += 32;
         }
@@ -34032,7 +34049,9 @@ static void DrawBankScreen(GameState& s, int screenW, int screenH) {
     if (Button({ 172, (float)y, 80, 26 }, "Dep All", s.gold > 0)) DepositGold(s, s.gold);
     if (Button({ 258, (float)y, 80, 26 }, "With 50g", s.bankGold >= 50)) WithdrawGold(s, 50);
     if (Button({ 344, (float)y, 90, 26 }, "With All", s.bankGold > 0)) WithdrawGold(s, s.bankGold);
-    y += 36;
+    y += 32;
+    DrawUIText("Short at a shop? Vendors take the rest from your bank for a 2% fee.", 20, y, 12, Fade(DARKGRAY, 0.9f));
+    y += 20;
 
     DrawUIText("Your backpack (Deposit):", 20, y, 12, kColorAccent);
     y += 18;
@@ -34258,8 +34277,8 @@ static void DrawSettlement(GameState& s, int screenW, int screenH) {
                 if (unlocked && B.damaged) {
                     int rc = SettleRepairCost(s, k);
                     bx -= 110;
-                    if (Button({ bx, row.y + 34, 104, 24 }, TextFormat("Repair %dg", rc), s.gold >= rc) && s.gold >= rc) {
-                        s.gold -= rc; B.damaged = false; s.logLine = std::string(d.name) + " repaired.";
+                    if (Button({ bx, row.y + 34, 104, 24 }, TextFormat("Repair %dg", rc), CanAfford(s, rc)) && CanAfford(s, rc)) {
+                        PayGold(s, rc); B.damaged = false; s.logLine = std::string(d.name) + " repaired.";
                         PlaySfx(SfxId::Buy);
                     }
                 } else if (unlocked && B.level < SettleMaxLevel(s, k)) {
@@ -35620,6 +35639,7 @@ static bool ToastIsChatter(const std::string& t) {
 }
 static void UpdateDrawToasts(GameState& s, int screenW, int screenH, bool play) {
     float dt = GetFrameTime();
+    if (!g_bankPayNote.empty()) { s.logLine += " " + g_bankPayNote; g_bankPayNote.clear(); }
     if (s.logLine != g_toastLast) {
         g_toastLast = s.logLine;
         bool boring = s.logLine.empty() || s.logLine == "Welcome to Town Forge." || ToastIsChatter(s.logLine);
