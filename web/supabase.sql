@@ -149,3 +149,132 @@ revoke all on function public.tf_create_guild(text, text, text, int), public.tf_
   public.tf_leave_guild(), public.tf_submit(text, int, int, text, int, text), public.tf_standings(text) from public, anon;
 grant execute on function public.tf_create_guild(text, text, text, int), public.tf_join_guild(uuid, text, int),
   public.tf_leave_guild(), public.tf_submit(text, int, int, text, int, text), public.tf_standings(text) to authenticated;
+
+-- ===================================================================
+-- Guild management (2026-09-28): ranks, message of the day, guild wars.
+-- rank: 0 member, 1 officer, 2 leader. Safe to re-run.
+-- ===================================================================
+alter table public.guild_members add column if not exists rank int not null default 0 check (rank between 0 and 2);
+alter table public.guilds add column if not exists motd text not null default '' check (char_length(motd) <= 140);
+-- every guild gets a leader: its founder if still in it, else its longest-standing member
+update public.guild_members m set rank = 2
+  from public.guilds g where g.id = m.guild_id and m.user_id = g.created_by
+  and not exists (select 1 from public.guild_members x where x.guild_id = g.id and x.rank = 2);
+update public.guild_members m set rank = 2
+  where m.user_id = (select x.user_id from public.guild_members x where x.guild_id = m.guild_id order by x.joined_at limit 1)
+  and not exists (select 1 from public.guild_members x where x.guild_id = m.guild_id and x.rank = 2);
+
+create table if not exists public.guild_wars (
+  guild_id    uuid not null references public.guilds (id) on delete cascade,
+  target_id   uuid not null references public.guilds (id) on delete cascade,
+  declared_by uuid references auth.users (id) on delete set null,
+  declared_at timestamptz not null default now(),
+  primary key (guild_id, target_id),
+  check (guild_id <> target_id)
+);
+alter table public.guild_wars enable row level security;
+drop policy if exists "signed-in players can see guild wars" on public.guild_wars;
+create policy "signed-in players can see guild wars" on public.guild_wars for select to authenticated using (true);
+
+-- the founder leads
+create or replace function public.tf_create_guild(p_name text, p_tag text, p_char text default 'Adventurer', p_power int default 0)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); gid uuid;
+begin
+  if me is null then raise exception 'Sign in first.'; end if;
+  if exists (select 1 from guild_members where user_id = me) then raise exception 'Leave your guild first.'; end if;
+  p_name := coalesce(tf_clean(p_name, 40), '');
+  p_tag  := upper(btrim(regexp_replace(coalesce(p_tag, ''), '[^A-Za-z0-9]', '', 'g')));
+  if char_length(p_name) not between 3 and 24 then raise exception 'Guild names are 3-24 letters.'; end if;
+  if char_length(p_tag) not between 2 and 4 then raise exception 'Tags are 2-4 letters or digits.'; end if;
+  if exists (select 1 from guilds where lower(name) = lower(p_name)) then raise exception 'That guild name is taken.'; end if;
+  insert into guilds (name, tag, created_by) values (p_name, p_tag, me) returning id into gid;
+  insert into guild_members (user_id, guild_id, char_name, power, rank)
+    values (me, gid, coalesce(nullif(tf_clean(p_char, 24), ''), 'Adventurer'), greatest(0, least(coalesce(p_power, 0), 100000)), 2);
+  return gid;
+end $$;
+
+-- a leader who leaves hands the guild to the highest-ranked, longest-standing member
+create or replace function public.tf_leave_guild() returns void
+language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); gid uuid; r int;
+begin
+  delete from guild_members where user_id = me returning guild_id, rank into gid, r;
+  if gid is null then return; end if;
+  if not exists (select 1 from guild_members where guild_id = gid) then
+    delete from guilds where id = gid;   -- the last one out closes the hall
+  elsif r = 2 then
+    update guild_members set rank = 2 where user_id =
+      (select user_id from guild_members where guild_id = gid order by rank desc, joined_at limit 1);
+  end if;
+end $$;
+
+create or replace function public.tf_my_rank(out gid uuid, out r int)
+language sql stable security definer set search_path = public as $$
+  select guild_id, rank from guild_members where user_id = auth.uid();
+$$;
+
+create or replace function public.tf_set_motd(p_text text) returns void
+language plpgsql security definer set search_path = public as $$
+declare gid uuid; r int;
+begin
+  select * into gid, r from tf_my_rank();
+  if gid is null then raise exception 'You are not in a guild.'; end if;
+  if r < 1 then raise exception 'Only officers can change the message.'; end if;
+  update guilds set motd = coalesce(tf_clean(p_text, 140), '') where id = gid;
+end $$;
+
+create or replace function public.tf_kick(p_user uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare gid uuid; r int; tr int;
+begin
+  select * into gid, r from tf_my_rank();
+  if gid is null or r < 1 then raise exception 'Only officers can remove members.'; end if;
+  select rank into tr from guild_members where user_id = p_user and guild_id = gid;
+  if tr is null then raise exception 'They are not in your guild.'; end if;
+  if tr >= r then raise exception 'You can only remove members ranked below you.'; end if;
+  delete from guild_members where user_id = p_user;
+end $$;
+
+-- leader only: 0 member / 1 officer; 2 hands over leadership (you become an officer)
+create or replace function public.tf_set_rank(p_user uuid, p_rank int) returns void
+language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); gid uuid; r int;
+begin
+  select * into gid, r from tf_my_rank();
+  if gid is null or r < 2 then raise exception 'Only the guild leader can change ranks.'; end if;
+  if p_user = me then raise exception 'Pick another member.'; end if;
+  if not exists (select 1 from guild_members where user_id = p_user and guild_id = gid) then raise exception 'They are not in your guild.'; end if;
+  if p_rank = 2 then
+    update guild_members set rank = 1 where user_id = me;
+    update guild_members set rank = 2 where user_id = p_user;
+  else
+    update guild_members set rank = greatest(0, least(p_rank, 1)) where user_id = p_user;
+  end if;
+end $$;
+
+create or replace function public.tf_declare_war(p_target uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare gid uuid; r int;
+begin
+  select * into gid, r from tf_my_rank();
+  if gid is null or r < 1 then raise exception 'Only officers can declare war.'; end if;
+  if p_target = gid then raise exception 'You cannot declare war on yourselves.'; end if;
+  if not exists (select 1 from guilds where id = p_target) then raise exception 'That guild no longer exists.'; end if;
+  if (select count(*) from guild_wars where guild_id = gid) >= 5 then raise exception 'A guild can wage at most 5 wars at once.'; end if;
+  insert into guild_wars (guild_id, target_id, declared_by) values (gid, p_target, auth.uid()) on conflict do nothing;
+end $$;
+
+create or replace function public.tf_end_war(p_target uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare gid uuid; r int;
+begin
+  select * into gid, r from tf_my_rank();
+  if gid is null or r < 1 then raise exception 'Only officers can end a war.'; end if;
+  delete from guild_wars where guild_id = gid and target_id = p_target;
+end $$;
+
+revoke all on function public.tf_my_rank(), public.tf_set_motd(text), public.tf_kick(uuid), public.tf_set_rank(uuid, int),
+  public.tf_declare_war(uuid), public.tf_end_war(uuid) from public, anon;
+grant execute on function public.tf_set_motd(text), public.tf_kick(uuid), public.tf_set_rank(uuid, int),
+  public.tf_declare_war(uuid), public.tf_end_war(uuid) to authenticated;

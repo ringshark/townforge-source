@@ -31088,6 +31088,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 // a dungeon, the Magery escape); picking one navigates and closes it.
 static float g_resetArmedTimer = 0.0f; // >0 while the Reset button is armed, waiting for a confirm click
 static bool g_warOpen = false;         // the War Week screen (over the House screen)
+static int g_guildTab = 0; // the Guild screen's tab: 0 Overview, 1 Wars, 2 Members, 3 Guildmates (2026-09-28)
 static bool g_tmapOpen = false;        // the Treasure maps screen (over the House screen, 2026-09-28)
 static void OpenWarWeek(GameState& s); // (2026-09-27) defined with the Guildstone
 // Tap to walk (2026-09-27): a pulsing gold ring on the ground where you're headed.
@@ -31220,7 +31221,7 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
                 DrawCircle((int)(cb.x + cb.width - 10), (int)cb.y + 10, 5.0f, dot);
             }
 #endif
-            if (Button({ bx1, ry, 152, 40 }, "War Week", tabsEnabled)) { s.screen = Screen::House; OpenWarWeek(s); open = false; }
+            if (Button({ bx1, ry, 152, 40 }, "Guild", tabsEnabled)) { s.screen = Screen::House; OpenWarWeek(s); g_guildTab = 0; open = false; }
             if (Button({ bx0, ry + 48, 312, 40 }, s.tmaps.empty() ? "Treasure maps" : TextFormat("Treasure maps (%d)", (int)s.tmaps.size()), tabsEnabled)) {
                 s.screen = Screen::House; g_tmapOpen = true; g_warOpen = false; open = false; // (2026-09-28)
             }
@@ -33771,6 +33772,11 @@ EM_JS(void, JS_GuildNetJoin, (const char* id, const char* ch, int power), {
     if (window.TFGuildNet) TFGuildNet.join(UTF8ToString(id), UTF8ToString(ch), power);
 });
 EM_JS(void, JS_GuildNetLeave, (), { if (window.TFGuildNet) TFGuildNet.leave(); });
+EM_JS(void, JS_GuildNetSetMotd, (const char* t), { if (window.TFGuildNet) TFGuildNet.setMotd(UTF8ToString(t)); });
+EM_JS(void, JS_GuildNetKick, (const char* id), { if (window.TFGuildNet) TFGuildNet.kick(UTF8ToString(id)); });
+EM_JS(void, JS_GuildNetSetRank, (const char* id, int r), { if (window.TFGuildNet) TFGuildNet.setRank(UTF8ToString(id), r); });
+EM_JS(void, JS_GuildNetDeclareWar, (const char* id), { if (window.TFGuildNet) TFGuildNet.declareWar(UTF8ToString(id)); });
+EM_JS(void, JS_GuildNetEndWar, (const char* id), { if (window.TFGuildNet) TFGuildNet.endWar(UTF8ToString(id)); });
 EM_JS(void, JS_GuildNetSubmit, (const char* week, int day, int pts, const char* ch, int power), {
     if (window.TFGuildNet) TFGuildNet.submit(UTF8ToString(week), day, pts, UTF8ToString(ch), power);
 });
@@ -33780,15 +33786,23 @@ static void JS_GuildNetRefresh(const char*) {}
 static void JS_GuildNetCreate(const char*, const char*, const char*, int) {}
 static void JS_GuildNetJoin(const char*, const char*, int) {}
 static void JS_GuildNetLeave() {}
+static void JS_GuildNetSetMotd(const char*) {}
+static void JS_GuildNetKick(const char*) {}
+static void JS_GuildNetSetRank(const char*, int) {}
+static void JS_GuildNetDeclareWar(const char*) {}
+static void JS_GuildNetEndWar(const char*) {}
 static void JS_GuildNetSubmit(const char*, int, int, const char*, int) {}
 #endif
 struct GuildNetRow { std::string id, name, tag; int members = 0; long long points = 0; };
-struct GuildNetMember { std::string name; int power = 0; int points = 0; };
+struct GuildNetMember { std::string name; int power = 0; int points = 0; std::string uid; int rank = 0; int seen = -1; };
+struct GuildNetWar { std::string id, name, tag, dir; };
 static struct {
     bool cfg = false, ready = false, busy = false;
-    std::string msg, myId, myName, myTag;
+    std::string msg, myId, myName, myTag, myUid, motd;
+    int myRank = 0;
     std::vector<GuildNetRow> guilds;
     std::vector<GuildNetMember> roster;
+    std::vector<GuildNetWar> wars;
 } g_gnet;
 static float g_warScroll = 0.0f;
 static float g_leaveArmT = 0.0f;
@@ -33798,7 +33812,8 @@ static std::string WarCharName(const GameState& s) { return s.characterName.empt
 static void GuildNetPoll() {
     static char buf[16384];
     if (!JS_GuildNetState(buf, (int)sizeof(buf))) { g_gnet.cfg = g_gnet.ready = false; return; }
-    g_gnet.guilds.clear(); g_gnet.roster.clear(); g_gnet.myId.clear(); g_gnet.myName.clear(); g_gnet.myTag.clear();
+    g_gnet.guilds.clear(); g_gnet.roster.clear(); g_gnet.wars.clear(); g_gnet.myId.clear(); g_gnet.myName.clear(); g_gnet.myTag.clear();
+    g_gnet.myUid.clear(); g_gnet.motd.clear(); g_gnet.myRank = 0;
     std::string all(buf);
     size_t a = 0;
     while (a < all.size()) {
@@ -33813,7 +33828,14 @@ static void GuildNetPoll() {
         else if (k == "msg") g_gnet.msg = v;
         else if (k == "my" && p.size() >= 3) { g_gnet.myId = p[0]; g_gnet.myName = p[1]; g_gnet.myTag = p[2]; }
         else if (k == "g" && p.size() >= 5) g_gnet.guilds.push_back({ p[0], p[1], p[2], std::atoi(p[3].c_str()), std::atoll(p[4].c_str()) });
-        else if (k == "m" && p.size() >= 3) g_gnet.roster.push_back({ p[0], std::atoi(p[1].c_str()), std::atoi(p[2].c_str()) });
+        else if (k == "m" && p.size() >= 3) {
+            GuildNetMember m{ p[0], std::atoi(p[1].c_str()), std::atoi(p[2].c_str()) };
+            if (p.size() >= 6) { m.uid = p[3]; m.rank = std::atoi(p[4].c_str()); m.seen = std::atoi(p[5].c_str()); }
+            g_gnet.roster.push_back(m);
+        }
+        else if (k == "me" && p.size() >= 2) { g_gnet.myUid = p[0]; g_gnet.myRank = std::atoi(p[1].c_str()); }
+        else if (k == "motd") g_gnet.motd = v;
+        else if (k == "war" && p.size() >= 4) g_gnet.wars.push_back({ p[0], p[1], p[2], p[3] });
     }
 }
 // Every frame: Muster minutes, then (online) keep the guild table fresh and report today's points.
@@ -33843,19 +33865,34 @@ static void OpenWarWeek(GameState& s) {
     WarCheckWeek(s);
     JS_GuildNetRefresh(WarWeekKey(s).c_str());
 }
+static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int section);
 static void DrawWarWeek(GameState& s, int screenW, int screenH) {
     Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
     UODrawGump(G, kUoParchment);
-    UODrawTitle(G, "War Week", 15);
+    UODrawTitle(G, "Guild", 15);
     const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 }, gold = { 150, 100, 20, 255 }, bad = { 150, 40, 30, 255 };
     if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_warOpen = false; return; }
     WarCheckWeek(s);
     int today = WarDayNow();
-    Rectangle area = { G.x + 8, G.y + 30, G.width - 16, G.height - 40 };
+    { // the tabs (2026-09-28: one Guild screen for everything guild)
+        static const char* kTabs[4] = { "Overview", "Wars", "Members", "Guildmates" };
+        float tw = (G.width - 36) / 4.0f;
+        for (int t = 0; t < 4; t++) {
+            Rectangle tb = { G.x + 18 + t * tw, G.y + 34, tw - 6, 32 };
+            bool on = g_guildTab == t;
+            DrawRectangleRounded(tb, 0.3f, 6, on ? Color{ 110, 70, 36, 255 } : Color{ 70, 50, 34, 200 });
+            DrawRectangleRoundedLines(tb, 0.3f, 6, on ? kUoBronzeHi : kUoBronze);
+            int lw = MeasureUIText(kTabs[t], 14);
+            DrawUIText(kTabs[t], (int)(tb.x + (tb.width - lw) / 2), (int)tb.y + 8, 14, on ? kUoGoldText : Color{ 236, 220, 190, 255 });
+            if (!on && UOTapped(tb)) { g_guildTab = t; g_warScroll = 0.0f; PlaySfx(SfxId::Click); }
+        }
+    }
+    Rectangle area = { G.x + 8, G.y + 74, G.width - 16, G.height - 84 };
     g_warScroll -= ScrollDelta(area);
     float x = G.x + 18, w = G.width - 36, y = area.y + 4 - g_warScroll;
     auto vis = [&](Rectangle r) { return r.y >= area.y && r.y + r.height <= area.y + area.height; };
     BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
+    if (g_guildTab == 0) { // ---- Overview: War Week and your online guild ----
     // the week: one theme a day
     long long secsLeft = 86400LL - ((long long)std::time(nullptr) - 345600LL) % 86400LL;
     DrawUIText(TextFormat("Today: %s  -  %dh %02dm left (days turn at midnight UTC)", kWarDayName[today], (int)(secsLeft / 3600), (int)(secsLeft / 60 % 60)),
@@ -33922,6 +33959,20 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
         for (size_t i = 0; i < g_gnet.guilds.size(); i++) if (g_gnet.guilds[i].id == g_gnet.myId) { rank = (int)i + 1; myPts = g_gnet.guilds[i].points; }
         DrawUIText(TextFormat("[%s] %s", g_gnet.myTag.c_str(), g_gnet.myName.c_str()), (int)x, (int)y, 16, gold);
         y += 22;
+        { // message of the day - officers and the leader can change it
+            Rectangle mb = { x, y, w, 40 };
+            DrawRectangleRounded(mb, 0.2f, 6, Fade(Color{ 255, 250, 235, 255 }, 0.7f));
+            DrawUIText(g_gnet.motd.empty() ? "No message of the day." : g_gnet.motd.c_str(), (int)x + 8, (int)y + 12, 13, g_gnet.motd.empty() ? soft : ink);
+            if (g_gnet.myRank >= 1) {
+                Rectangle eb = { x + w - 70, y + 5, 64, 30 };
+                if (UOButton(eb, "Edit", !g_gnet.busy) && vis(eb)) {
+                    std::string t = g_gnet.motd;
+                    PromptTextInto("Message of the day (up to 140 letters)", t, 140);
+                    JS_GuildNetSetMotd(t.c_str());
+                }
+            }
+            y += 48;
+        }
         DrawUIText(rank > 0 ? TextFormat("Rank %d of %d  -  %lld guild points this week", rank, (int)g_gnet.guilds.size(), myPts) : "Counting...",
                    (int)x, (int)y, 13, ink);
         y += 24;
@@ -33945,39 +33996,135 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
             DrawUIText(pp, (int)(x + w - 6 - MeasureUIText(pp, 13)), (int)y, 13, ink);
             y += 20;
         }
-        y += 14;
-        g_leaveArmT = std::max(0.0f, g_leaveArmT - GetFrameTime());
-        Rectangle lb = { x, y, 200, 32 };
-        if (UOButton(lb, g_leaveArmT > 0.0f ? "Tap again to leave" : "Leave guild", !g_gnet.busy) && vis(lb)) {
-            if (g_leaveArmT > 0.0f) { JS_GuildNetLeave(); g_leaveArmT = 0.0f; } else g_leaveArmT = 3.0f;
-        }
-        y += 40;
-        DrawUIText("Points you earned for a guild stay with it if you leave.", (int)x, (int)y, 11, soft);
+        y += 10;
+        DrawUIText("Ranks, removing members and leaving are on the Members tab.", (int)x, (int)y, 11, soft);
         y += 18;
+    }
+    } else if (g_guildTab == 1) { // ---- Wars ----
+        const Color war = { 150, 30, 30, 255 };
+        bool inGuild = g_gnet.ready && !g_gnet.myId.empty();
+        bool officer = g_gnet.myRank >= 1;
+        DrawUIText("Guild wars", (int)x, (int)y, 16, ink); y += 22;
+        if (!inGuild) {
+            DrawUIText(g_gnet.cfg ? "Join or found an online guild (Overview) to wage war on other guilds." : "Online guilds aren't switched on for this version yet.", (int)x, (int)y, 12, soft);
+            y += 28;
+        } else {
+            DrawUIText("Wars show here for both guilds. (Battle Day - guild vs guild fights - is coming.)", (int)x, (int)y, 11, soft); y += 20;
+            if (g_gnet.wars.empty()) { DrawUIText("You're at peace with every guild.", (int)x, (int)y, 13, ink); y += 22; }
+            for (const auto& wr : g_gnet.wars) {
+                Rectangle row = { x, y, w, 40 };
+                DrawRectangleRec(row, Fade(war, 0.10f));
+                DrawUIText(TextFormat("[%s] %s", wr.tag.c_str(), wr.name.c_str()), (int)x + 8, (int)y + 4, 14, war);
+                const char* how = wr.dir == "out" ? "you declared war" : wr.dir == "in" ? "they declared war on you" : "at war both ways";
+                DrawUIText(how, (int)x + 8, (int)y + 22, 11, soft);
+                if (officer && wr.dir != "in") {
+                    Rectangle pb = { x + w - 124, y + 4, 120, 32 };
+                    if (UOButton(pb, "Make peace", !g_gnet.busy) && vis(pb)) JS_GuildNetEndWar(wr.id.c_str());
+                }
+                y += 44;
+            }
+            y += 6;
+            if (officer) {
+                DrawUIText("Declare war (officers, up to 5 at once)", (int)x, (int)y, 13, ink); y += 20;
+                int shown = 0;
+                for (const auto& g : g_gnet.guilds) {
+                    if (g.id == g_gnet.myId) continue;
+                    bool already = false; for (const auto& wr : g_gnet.wars) if (wr.id == g.id && wr.dir != "in") already = true;
+                    if (already) continue;
+                    DrawUIText(TextFormat("[%s] %s  -  %d members", g.tag.c_str(), g.name.c_str(), g.members), (int)x + 6, (int)y + 8, 13, ink);
+                    Rectangle db = { x + w - 124, y, 120, 30 };
+                    if (UOButton(db, "Declare war", !g_gnet.busy && g_gnet.wars.size() < 5) && vis(db)) JS_GuildNetDeclareWar(g.id.c_str());
+                    y += 36;
+                    if (++shown >= 12) break;
+                }
+                if (shown == 0) { DrawUIText("No other guilds yet.", (int)x + 6, (int)y, 12, soft); y += 20; }
+            } else {
+                DrawUIText("Officers and the leader declare wars.", (int)x, (int)y, 12, soft); y += 20;
+            }
+        }
+        y += 16;
+        DrawRectangleRec({ x, y, w, 1 }, Fade(ink, 0.25f)); y += 12;
+        y = DrawGuildstoneBody(s, x, y, w, 1);
+    } else if (g_guildTab == 2) { // ---- Members ----
+        bool inGuild = g_gnet.ready && !g_gnet.myId.empty();
+        if (!inGuild) {
+            DrawUIText("Join or found an online guild (Overview) to see its members.", (int)x, (int)y, 12, soft); y += 24;
+        } else {
+            static const char* kRankName[3] = { "Member", "Officer", "Leader" };
+            static std::string armUid; static int armAct = -1; static float armT = 0.0f;
+            armT = std::max(0.0f, armT - GetFrameTime());
+            if (armT <= 0.0f) { armUid.clear(); armAct = -1; }
+            auto confirm = [&](const std::string& uid, int act) { // two taps for anything drastic
+                if (armUid == uid && armAct == act && armT > 0.0f) { armUid.clear(); armAct = -1; return true; }
+                armUid = uid; armAct = act; armT = 3.0f; return false;
+            };
+            DrawUIText(TextFormat("[%s] %s  -  %d members", g_gnet.myTag.c_str(), g_gnet.myName.c_str(), (int)g_gnet.roster.size()), (int)x, (int)y, 15, gold);
+            y += 22;
+            DrawUIText(TextFormat("You are the guild's %s.", kRankName[std::clamp(g_gnet.myRank, 0, 2)]), (int)x, (int)y, 12, soft); y += 22;
+            std::vector<const GuildNetMember*> ms;
+            for (const auto& m : g_gnet.roster) ms.push_back(&m);
+            std::stable_sort(ms.begin(), ms.end(), [](const GuildNetMember* a, const GuildNetMember* b) { return a->rank > b->rank; });
+            for (const GuildNetMember* m : ms) {
+                bool self = m->uid == g_gnet.myUid;
+                Rectangle row = { x, y, w, 52 };
+                DrawRectangleRec(row, Fade(self ? Color{ 255, 214, 110, 255 } : BLACK, self ? 0.25f : 0.05f));
+                Color rc = m->rank == 2 ? gold : m->rank == 1 ? Color{ 60, 90, 150, 255 } : soft;
+                DrawUIText(m->name.c_str(), (int)x + 8, (int)y + 5, 14, ink);
+                DrawUIText(kRankName[std::clamp(m->rank, 0, 2)], (int)(x + 8 + MeasureUIText(m->name.c_str(), 14) + 8), (int)y + 7, 12, rc);
+                std::string seen = m->seen < 0 ? "" : m->seen < 600 ? "online recently" : m->seen < 86400 ? TextFormat("seen %dh ago", m->seen / 3600) : TextFormat("seen %dd ago", m->seen / 86400);
+                DrawUIText(TextFormat("power %d  -  %d pts this week  -  %s", m->power, m->points, seen.c_str()), (int)x + 8, (int)y + 28, 11, soft);
+                float bx = x + w - 4;
+                if (!self && g_gnet.myRank >= 1 && m->rank < g_gnet.myRank) {
+                    Rectangle kb = { bx - 84, y + 10, 84, 32 }; bx -= 90;
+                    bool armed = armUid == m->uid && armAct == 0;
+                    if (UOButton(kb, armed ? "Sure?" : "Remove", !g_gnet.busy) && vis(kb) && confirm(m->uid, 0)) JS_GuildNetKick(m->uid.c_str());
+                }
+                if (!self && g_gnet.myRank == 2) {
+                    Rectangle pb = { bx - 96, y + 10, 96, 32 }; bx -= 102;
+                    if (UOButton(pb, m->rank == 1 ? "Demote" : "Promote", !g_gnet.busy) && vis(pb)) JS_GuildNetSetRank(m->uid.c_str(), m->rank == 1 ? 0 : 1);
+                    Rectangle lb = { bx - 96, y + 10, 96, 32 };
+                    bool armed = armUid == m->uid && armAct == 1;
+                    if (UOButton(lb, armed ? "Sure?" : "Make leader", !g_gnet.busy) && vis(lb) && confirm(m->uid, 1)) JS_GuildNetSetRank(m->uid.c_str(), 2);
+                }
+                y += 56;
+            }
+            y += 10;
+            g_leaveArmT = std::max(0.0f, g_leaveArmT - GetFrameTime());
+            Rectangle lb = { x, y, 200, 32 };
+            if (UOButton(lb, g_leaveArmT > 0.0f ? "Tap again to leave" : "Leave guild", !g_gnet.busy) && vis(lb)) {
+                if (g_leaveArmT > 0.0f) { JS_GuildNetLeave(); g_leaveArmT = 0.0f; } else g_leaveArmT = 3.0f;
+            }
+            y += 40;
+            DrawUIText(g_gnet.myRank == 2 ? "If you leave, the highest-ranked member takes over." : "Points you earned for a guild stay with it if you leave.", (int)x, (int)y, 11, soft);
+            y += 18;
+        }
+    } else { // ---- Guildmates (the household guild) ----
+        y = DrawGuildstoneBody(s, x, y, w, 0);
     }
     if (!g_gnet.msg.empty()) { DrawUIText(g_gnet.msg.c_str(), (int)x, (int)y, 12, g_gnet.msg.back() == '!' ? Color{ 40, 110, 40, 255 } : bad); y += 18; }
     float contentH = y + g_warScroll - area.y + 10;
     EndScissorMode();
     g_warScroll = std::clamp(g_warScroll, 0.0f, std::max(0.0f, contentH - area.height));
 }
-static void DrawGuildstone(GameState& s, int screenW, int screenH) {
-    Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
-    UODrawGump(G, kUoParchment);
+// The household guild - your hired guildmates, colors and wars on Murder Inc.
+// and the orcs - drawn inside the Guild screen (2026-09-28: was its own gump).
+// section 0: founding / colors / guildmates; 1: the wars. Returns where it ended.
+static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int section) {
     Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 };
-    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_guildOpen = false; return; }
-    float x = G.x + 22, y = G.y + 18, w = G.width - 44;
     if (s.guildName.empty()) {
-        UODrawTitle(G, "Guildstone", 15);
-        y += 16;
+        if (section == 1) {
+            DrawUIText("Found your household guild (Guildmates tab) to wage war", (int)x, (int)y, 13, soft); y += 18;
+            DrawUIText("on Murder Inc. or the orcs of Grimtusk Hold.", (int)x, (int)y, 13, soft); y += 24;
+            return y;
+        }
+        DrawUIText("Your household guild", (int)x, (int)y, 16, ink); y += 26;
         DrawUIText("Found a guild and you won't face the wilds alone:", (int)x, (int)y, 14, ink); y += 22;
         DrawUIText("- hire up to three guildmates who fight at your side", (int)x, (int)y, 13, soft); y += 18;
         DrawUIText("- wear your guild's colors and tag", (int)x, (int)y, 13, soft); y += 18;
         DrawUIText("- declare war on Murder Inc. or the orcs of Grimtusk Hold", (int)x, (int)y, 13, soft); y += 30;
-        if (UOButton({ x, y, 260, 34 }, "Online guilds & War Week")) { OpenWarWeek(s); return; }
-        y += 46;
         if (s.housePlotIdx < 0) {
             DrawUIText("A guild needs a home: buy a house plot in the wilderness first.", (int)x, (int)y, 13, Color{ 150, 40, 30, 255 });
-            return;
+            return y + 24;
         }
         UpdateTextInput(g_guildDraft, 24);
         Rectangle box = { x, y, w, 32 };
@@ -33997,12 +34144,11 @@ static void DrawGuildstone(GameState& s, int screenW, int screenH) {
             Journal(s, s.logLine);
             PlaySfx(SfxId::Quest);
         }
-        return;
+        return y + 44;
     }
-    UODrawTitle(G, s.guildName + "  [" + s.guildTag + "]", 15);
-    y += 8;
+    if (section == 0) {
+    DrawUIText((s.guildName + "  [" + s.guildTag + "]").c_str(), (int)x, (int)y, 16, ink); y += 22;
     DrawUIText(TextFormat("Renown %d    Wars won: %d", s.guildRenown, s.guildWarWins[0] + s.guildWarWins[1]), (int)x, (int)y, 13, soft);
-    if (UOButton({ x + w - 250, y - 6, 250, 32 }, "Online guild & War Week")) { OpenWarWeek(s); return; }
     y += 30;
     // tabard color
     DrawUIText("Guild colors", (int)x, (int)y, 14, ink); y += 20;
@@ -34057,9 +34203,10 @@ static void DrawGuildstone(GameState& s, int screenW, int screenH) {
         DrawUIText("Warriors hold the line, archers shoot from range, healers mend you.", (int)x, (int)y, 11, soft);
         y += 18;
     }
-    y += 10;
+    return y + 10;
+    }
     // wars
-    DrawUIText("Wars", (int)x, (int)y, 14, ink); y += 22;
+    DrawUIText("Against Murder Inc. and the orcs", (int)x, (int)y, 14, ink); y += 22;
     const char* foes[2] = { "Murder Inc.", "Grimtusk Hold (orcs)" };
     const char* what[2] = { "Their killers hunt you far more often.", "War parties range much further from the Hold." };
     for (int k = 0; k < 2; k++) {
@@ -34091,6 +34238,7 @@ static void DrawGuildstone(GameState& s, int screenW, int screenH) {
         }
         y += 64;
     }
+    return y;
 }
 
 // Treasure maps (2026-09-28): your maps - decode them, and pick the one to follow.
@@ -34144,7 +34292,6 @@ static void DrawTreasureMaps(GameState& s, int screenW, int screenH) {
 static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     if (g_tmapOpen) { DrawTreasureMaps(s, screenW, screenH); return; }
     if (g_warOpen) { DrawWarWeek(s, screenW, screenH); return; }
-    if (g_guildOpen) { DrawGuildstone(s, screenW, screenH); return; }
     if (g_settleOpen) { DrawSettlement(s, screenW, screenH); return; }
     UpdateTextInput(s.houseName, 24);
     const HouseTier& tier = kHouseTiers[s.houseTierIdx];
@@ -34152,7 +34299,7 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     int y = 116;
     DrawUIText("Your Home", 20, y, 18, kColorHeading); (void)tier;
     if (Button({ (float)screenW - 150, (float)y - 4, 130, 28 }, s.guildName.empty() ? "Guildstone" : ("Guild [" + s.guildTag + "]").c_str(), true))
-        g_guildOpen = true; // (2026-09-27)
+        { OpenWarWeek(s); g_guildTab = 3; } // (2026-09-28) the Guild screen, on its Guildmates tab
     if (Button({ (float)screenW - 290, (float)y - 4, 130, 28 }, SettleHall(s) > 0 ? TextFormat("Settlement %d", SettleHall(s)) : "Settlement", true))
         { g_settleOpen = true; g_settleScroll = 0.0f; } // (2026-09-27)
     y += 24;
