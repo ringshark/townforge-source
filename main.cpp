@@ -9864,7 +9864,20 @@ static void DrawDyingWorldNode(Vector2 screenPos, float radius, const Texture2D*
 // tap too. The panel's own buttons set g_uiShieldBypass while drawing.
 static Rectangle g_uiShield = { 0, 0, 0, 0 };
 static bool g_uiShieldOn = false, g_uiShieldBypass = false;
+// Every button registers where it was drawn (2026-09-28, #57): a tap on any of
+// them - or just beside one - never also counts as a tap on the world below
+// (tap to walk, flag, Teleport). The list from the last frame is what counts.
+static std::vector<Rectangle> g_uiRects, g_uiRectsPrev;
+static void UIRegister(Rectangle r) { if (g_uiRects.size() < 256) g_uiRects.push_back(r); }
+static void UIFrameReset() { g_uiRectsPrev.swap(g_uiRects); g_uiRects.clear(); }
+static bool UIHit(Vector2 m) {
+    const float pad = 14.0f; // the finger is fat: a near miss is still "the button"
+    for (const Rectangle& r : g_uiRectsPrev)
+        if (m.x > r.x - pad && m.x < r.x + r.width + pad && m.y > r.y - pad && m.y < r.y + r.height + pad) return true;
+    return false;
+}
 static bool Button(Rectangle r, const std::string& label, bool enabled) {
+    UIRegister(r);
     // A small (1.5px/side) outset on both the visual rect and the click/tap hit-test -
     // enough to feel a bit more generous without crowding neighboring buttons the way
     // a bigger outset plus a drop shadow did (both have been tried and back out).
@@ -9984,6 +9997,7 @@ static bool UOCloseButton(Rectangle gump) {
 }
 // Bronze-and-leather action button in the gump style.
 static bool UOButton(Rectangle r, const std::string& label, bool enabled = true) {
+    UIRegister(r);
     Vector2 m = GetMousePosition();
     bool hover = enabled && CheckCollisionPointRec(m, r);
     DrawRectangleRec(r, enabled ? (hover ? Color{ 96, 62, 34, 255 } : Color{ 70, 44, 24, 255 }) : Color{ 60, 56, 52, 255 });
@@ -9998,6 +10012,7 @@ static bool UOButton(Rectangle r, const std::string& label, bool enabled = true)
     return clicked;
 }
 static bool UOTapped(Rectangle r) {
+    UIRegister(r);
     Vector2 m = GetMousePosition();
     bool clicked = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(m, r);
     if (clicked && g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(m, g_uiShield)) clicked = false;
@@ -10111,6 +10126,7 @@ static Vector2 UOScatter(Rectangle area, int i, float cell, int seed) {
 static bool DrawInteractButton(const std::string& label) {
     // (2026-09-27) gold, pulsing, and wide enough for "Fight Timber Wolf"
     Rectangle r = { kViewport.x + kViewport.width - 186.0f, kViewport.y + kViewport.height - 92.0f, 170.0f, 64.0f };
+    UIRegister(r);
     Vector2 m = GetMousePosition();
     bool hover = CheckCollisionPointRec(m, r);
     float p = 0.5f + 0.5f * sinf((float)GetTime() * 4.0f);
@@ -10474,7 +10490,7 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
             (peaceUp ? 1 : 0) + (provoUp ? 1 : 0);
     const float sz = 42.0f, gap = 8.0f;
     Rectangle bar = { 166.0f, y - 6.0f, n * sz + (n - 1) * gap + 18.0f, sz + 12.0f };
-    g_beltRect = bar; g_beltDrawnAt = GetTime();
+    g_beltRect = bar; g_beltDrawnAt = GetTime(); UIRegister(bar);
     UODrawGump(bar, kUoDarkWood);
     auto slot = [&](int k, bool enabled, int count, auto drawIcon) {
         Rectangle r = { 175.0f + k * (sz + gap), y, sz, sz };
@@ -16233,7 +16249,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_t3dOrbiting) {
         bool wasClick = g_t3dDragDist < 8.0f;
         g_t3dOrbiting = false;
-        if (wasClick && !panelOpen &&
+        if (wasClick && !panelOpen && !UIHit(mouse) &&
             CheckCollisionPointRec(mouse, kViewport) && !Town3DPointInUI(mouse, s, screenW))
             Town3DPick(s, mouse, screenW, screenH);
     }
@@ -20570,7 +20586,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
         // same way the 2D click does - flagging it for auto-approach.
         bool wasClick = g_t3dDragDist < 8.0f;
         g_t3dOrbiting = false;
-        if (wasClick && CheckCollisionPointRec(mouse, kViewport) && !Wild3DPointInUI(mouse, s)) {
+        if (wasClick && CheckCollisionPointRec(mouse, kViewport) && !Wild3DPointInUI(mouse, s) && !UIHit(mouse)) {
             Town3DCam pc = Wild3DGetCam(s, screenW, screenH);
             Wild3DPickFlag(s, pc, mouse);
         }
@@ -21403,7 +21419,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         // same way the 2D click does - flagging it for auto-approach.
         bool wasClick = g_t3dDragDist < 8.0f;
         g_t3dOrbiting = false;
-        if (wasClick && CheckCollisionPointRec(mouse, kViewport) && !Dung3DPointInUI(mouse, s)) {
+        if (wasClick && CheckCollisionPointRec(mouse, kViewport) && !Dung3DPointInUI(mouse, s) && !UIHit(mouse)) {
             Town3DCam pc = Dungeon3DGetCam(s, screenW, screenH);
             Dungeon3DPickFlag(s, pc, mouse);
         }
@@ -26319,6 +26335,7 @@ static Vector2 TreasureRollSpot(const GameState& s) {
         if (WildBlocked(p)) continue;
         bool nearTown = false;
         for (const auto& g : kTownGates) if (Dist(p, g.wildernessPos) < 700.0f) nearTown = true;
+        for (int ti = 0; ti < 4; ti++) if (TownCompoundContains(p, ti, TownCompoundBaseDepth(ti), 80.0f)) nearTown = true; // never inside a walled town
         if (nearTown || Dist(p, kWyrmLair) < kWyrmLairR + 200.0f || Dist(p, s.wildernessPlayerPos) < 500.0f) continue;
         return p;
     }
@@ -26357,9 +26374,15 @@ static void TreasureRemoveMap(GameState& s, int i) {
     if (s.tmapTrack == i) s.tmapTrack = -1; else if (s.tmapTrack > i) s.tmapTrack--;
     if (s.tchestMap == i) s.tchestMap = -1; else if (s.tchestMap > i) s.tchestMap--;
 }
-static bool TreasureGuardsUp(const GameState& s) {
-    for (int i : g_tguards) if (s.wildSpotRespawn[(size_t)i] <= 0.0f) return true;
-    return false;
+// A guardian counts while it's still fighting for the chest (2026-09-28, #56): once
+// it dies or gives up it's struck off the list - its spot respawning later as an
+// ordinary wandering monster must not lock the chest again.
+static bool TreasureGuardsUp(GameState& s) {
+    g_tguards.erase(std::remove_if(g_tguards.begin(), g_tguards.end(), [&](int i) {
+        bool fighting = (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == i) || FindWildExtra(s, i) != nullptr;
+        return !fighting || s.wildSpotRespawn[(size_t)i] > 0.0f;
+    }), g_tguards.end());
+    return !g_tguards.empty();
 }
 // The dig finishes: the chest breaks the surface and its guardians rise around you.
 static void TreasureUnearth(GameState& s) {
@@ -34901,6 +34924,7 @@ static RenderTexture2D g_zoomTarget;
 // pattern raylib's own web examples use instead, with the browser's requestAnimationFrame
 // driving each call rather than a C++-side blocking sleep.
 static void UpdateDrawFrame() {
+    UIFrameReset(); // (2026-09-28) buttons drawn last frame guard this frame's world taps
 #ifdef __EMSCRIPTEN__
     // Hold off on everything else until the async IndexedDB load (kicked off by
     // JS_InitPersistence in main()) has actually landed - reading the save file before
