@@ -19341,6 +19341,14 @@ static void Wild3DDrawCorpse(const GameState::WorldCorpse& c, bool shadowPass) {
         Town3DDrawPiece(g_t3dModels.chest, { c.pos.x, 0.0f, c.pos.y }, 30.0f, 1.15f);
         return;
     }
+    if (c.name == "Stolen Loot") { // a raider's pouch of treasure (#68)
+        T3DLiftScope lift_(c.pos.x, c.pos.y);
+        DrawSphereEx({ c.pos.x, 7.0f, c.pos.y }, 8.0f, 8, 8, Color{ 120, 84, 46, 255 });
+        DrawCylinderEx({ c.pos.x, 13.0f, c.pos.y }, { c.pos.x, 18.0f, c.pos.y }, 2.5f, 3.5f, 6, Color{ 100, 70, 38, 255 });
+        DrawSphereEx({ c.pos.x + 6.0f, 3.0f, c.pos.y + 4.0f }, 2.2f, 5, 5, Color{ 240, 200, 80, 255 });
+        if (!shadowPass) CorpseDrawGlint(c);
+        return;
+    }
     float sink = c.timer < 10.0f ? (1.0f - c.timer / 10.0f) * 26.0f : 0.0f;
     rlPushMatrix();
     rlTranslatef(0.0f, -sink, 0.0f);
@@ -25398,6 +25406,12 @@ static float GuildRecruitsFight(GameState& s, const GameState::ActiveMonster& am
 }
 // A kill while your guild is at war with the victim's side counts toward the war.
 static std::vector<int> g_tguards; // treasure guardians (2026-09-28) - see Treasure hunting
+// Chest raiders (2026-09-28, #68): the spots of a raiding band, what they carried off
+// and the jewel the last of them holds. Each one that falls drops its share.
+static std::vector<int> g_traiders;
+static int g_traidGold = 0, g_traidJewelTier = 0, g_traidFaction = 0;
+static bool g_traided = false; // this chest was raided (it opens lighter)
+static GameState::WorldCorpse& AddWorldCorpse(GameState& s, GameState::WorldCorpse c);
 static void TreasureMaybeDrop(GameState& s, int level, bool boss);
 static void GuildWarCredit(GameState& s, const GameState::ActiveMonster& am, const std::string& name) {
     if (!GuildFounded(s)) return;
@@ -26033,6 +26047,23 @@ static void BeginWildMonsterDeath(GameState& s, const GameState::ActiveMonster& 
                                   bool clearEngagement) {
     PetsOnKill(s, EngagedWildMonsterStats(s, am).level); // pet XP & bonding (2026-09-28)
     GuildWarCredit(s, am, name); // (2026-09-27) before anything resets `am`
+    if (auto it = std::find(g_traiders.begin(), g_traiders.end(), am.spotIdx); it != g_traiders.end() && am.spotIdx >= 0) {
+        // a chest raider falls: its share of the stolen loot drops in a pouch (#68)
+        g_traiders.erase(it);
+        GameState::WorldCorpse pouch;
+        pouch.pos = { am.pos.x + 18.0f, am.pos.y + 10.0f }; pouch.zone = 0; pouch.name = "Stolen Loot";
+        pouch.timer = pouch.duration = 600.0f;
+        int share = g_traiders.empty() ? g_traidGold : g_traidGold / ((int)g_traiders.size() + 1);
+        g_traidGold -= share;
+        pouch.loot.push_back({ GameState::kClGold, std::max(1, share), std::nullopt });
+        if (g_traiders.empty() && g_traidJewelTier > 0) {
+            pouch.loot.push_back({ GameState::kClItem, 1, MakeJewel(s, GetRandomValue(0, 2), g_traidJewelTier) });
+            g_traidJewelTier = 0;
+        }
+        AddWorldCorpse(s, pouch);
+        Journal(s, g_traiders.empty() ? "The last raider falls - the stolen treasure is yours again. Loot the pouches."
+                                      : "A raider drops a pouch of stolen treasure.");
+    }
     if (am.spotIdx >= 0 && am.spotIdx != kWyrmSpot && !am.isRival && am.bladeIdx < 0 && // treasure maps (2026-09-28)
         std::find(g_tguards.begin(), g_tguards.end(), am.spotIdx) == g_tguards.end())
         TreasureMaybeDrop(s, kWildernessMonsterSpots[(size_t)am.spotIdx].level, false);
@@ -26752,7 +26783,7 @@ static GameState::WorldCorpse* NecroFindCorpse(GameState& s, int zone, Vector2 n
     GameState::WorldCorpse* best = nullptr;
     float bd = range;
     for (auto& c : s.worldCorpses) {
-        if (!CorpseHere(s, c, zone) || c.timer <= 0.5f || c.name == "Treasure Chest") continue;
+        if (!CorpseHere(s, c, zone) || c.timer <= 0.5f || c.name == "Treasure Chest" || c.name == "Stolen Loot") continue;
         float d = Dist(c.pos, near);
         if (d < bd) { bd = d; best = &c; }
     }
@@ -26833,7 +26864,47 @@ static void TreasureUnearth(GameState& s) {
     const GameState::TreasureMap& m = s.tmaps[(size_t)s.tmapTrack];
     s.tchestOn = true; s.tchestPos = m.spot; s.tchestTier = m.tier; s.tchestMap = s.tmapTrack;
     s.pickT = -1.0f;
-    g_tguards.clear();
+    g_tguards.clear(); g_traiders.clear(); g_traided = false;
+    if (m.tier >= 2 && RandUnit() < 0.15f + 0.06f * m.tier) { // raiders got here first (#68)
+        bool wo = s.guildWarOn[kGuildWarOrcs], wm = s.guildWarOn[kGuildWarMurderInc];
+        int faction = (wo && !wm) ? 0 : ((wm && !wo) ? 1 : GetRandomValue(0, 1));
+        int wantR = m.tier >= 4 ? 3 : 2;
+        std::vector<int> band;
+        for (size_t i = 0; i < kWildernessMonsterSpots.size() && (int)band.size() < wantR; i++) {
+            const std::string& n = kWildernessMonsterSpots[i].name;
+            bool fits = faction == 0 ? (MonsterFaction(n) == "Orc" && n != "Orc Warlord") : (n == "Highway Bandit" || n == "Mountain Bandit");
+            if (!fits || s.wildSpotRespawn[i] > 0.0f || FindWildExtra(s, (int)i) || SettleIsRaider((int)i)) continue;
+            if (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == (int)i) continue;
+            band.push_back((int)i);
+        }
+        if (!band.empty()) {
+            bool fleeing = RandUnit() < 0.5f; // caught in the act, or making off with it
+            Vector2 away = { cosf(RandUnit() * 6.283f), sinf(RandUnit() * 6.283f) };
+            for (size_t k = 0; k < band.size(); k++) {
+                GameState::ActiveMonster am;
+                am.spotIdx = band[k];
+                float a = (float)k * 2.1f + RandUnit();
+                am.pos = fleeing ? Vector2{ m.spot.x + away.x * 230.0f + cosf(a) * 40.0f, m.spot.y + away.y * 230.0f + sinf(a) * 40.0f }
+                                 : Vector2{ m.spot.x + cosf(a) * 60.0f, m.spot.y + sinf(a) * 60.0f };
+                if (WildBlocked(am.pos)) am.pos = WildNearestFree(am.pos);
+                am.spawnPos = am.pos;
+                am.maxHp = WildSpotMaxHp(band[k]);
+                am.hp = am.maxHp;
+                if (!s.wildEngaged.has_value()) s.wildEngaged = am; else s.wildExtraAttackers.push_back(am);
+            }
+            g_tguards = band; g_traiders = band; g_traided = true; g_traidFaction = faction;
+            g_traidGold = (int)(m.tier * (150 + GetRandomValue(0, 150)) * 0.6f);
+            g_traidJewelTier = m.tier * 2 + GetRandomValue(0, 2);
+            const char* who = faction == 0 ? "A Grimtusk war band" : "Murder Inc. cutthroats";
+            s.rivalBanner = fleeing ? "Raiders are making off with it!" : "Raiders at the chest!";
+            s.rivalBannerTimer = kRivalBannerTime;
+            s.logLine = std::string("Your shovel strikes wood - but ") + who + (fleeing ? " already cracked it and are running off with the loot! Cut them down to get it back."
+                                                                                 : " are looting it right now! Cut them down to get it back.");
+            Journal(s, s.logLine);
+            PlaySfx(SfxId::Hunt);
+            return;
+        }
+    }
     int want = m.tier >= 4 ? 3 : (m.tier >= 2 ? 2 : 1);
     int target = 6 + m.tier * 7; // guardian strength by tier: ~13 .. ~41
     std::vector<std::pair<int, int>> cand; // |level - target|, spot
@@ -26869,11 +26940,13 @@ static void TreasureOpen(GameState& s, bool forced) {
     c.timer = c.duration = 900.0f;
     int gold = t * (150 + GetRandomValue(0, 150));
     if (forced) gold /= 2;
+    if (g_traided) gold = gold * 2 / 5; // the raiders took the lion's share (#68)
     c.loot.push_back({ GameState::kClGold, gold, std::nullopt });
     c.loot.push_back({ GameState::kClReagents, 8 * t, std::nullopt });
     c.loot.push_back({ GameState::kClBandages, 4 * t, std::nullopt });
     int jewels = (t >= 3 ? 2 : 1) + (t == 5 ? 1 : 0);
     if (forced) jewels = std::max(0, jewels - 1);
+    if (g_traided) jewels = std::max(0, jewels - 1);
     for (int j = 0; j < jewels; j++) c.loot.push_back({ GameState::kClItem, 1, MakeJewel(s, GetRandomValue(0, 2), t * 2 + GetRandomValue(0, 2)) });
     if (t >= 4 && !forced) s.rareDyeCharges += t - 3;
     AddWorldCorpse(s, c);
@@ -26881,7 +26954,7 @@ static void TreasureOpen(GameState& s, bool forced) {
     GainFame(s, (float)t);
     TreasureRemoveMap(s, s.tchestMap);
     s.tchestOn = false; s.tchestMap = -1; s.pickT = -1.0f;
-    g_tguards.clear();
+    g_tguards.clear(); g_traiders.clear(); g_traided = false;
     s.logLine = forced ? "You smash the chest open - some of what was inside is ruined, but the rest is yours."
                        : std::string("The lock clicks open - the ") + kTmapTierName[t] + " chest is yours!" + (t >= 4 ? " (and rare dyes)" : "");
     Journal(s, s.logLine);
@@ -26906,7 +26979,7 @@ static void TreasureTick(GameState& s, float dt, bool moved) {
         }
     }
     if (s.tchestOn && Dist(s.wildernessPlayerPos, s.tchestPos) > 1500.0f) { // left it behind: it sinks back (the map keeps)
-        s.tchestOn = false; s.tchestMap = -1; g_tguards.clear();
+        s.tchestOn = false; s.tchestMap = -1; g_tguards.clear(); g_traiders.clear(); g_traided = false;
         s.logLine = "You left the treasure behind - the earth swallows it again. Dig again with the same map.";
     }
 }
