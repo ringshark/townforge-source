@@ -4505,7 +4505,7 @@ static const int kWarDayCap = 5000;
 static const char* kWarDayName[7] = { "Muster", "Harvest", "Forge", "Hunt", "Hold the Walls", "The Wyrm", "Battle Day" };
 static const char* kWarDayShort[7] = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
 static const char* kWarDayHow[7] = {
-    "Play: 1 point a minute (up to 60). Hire a guildmate: +10.",
+    "Play: 1 point a minute (up to 60). Hire a warband member: +10.",
     "Gather wood, ore, fish and ice, or skin hides: 1 point each.",
     "Craft or brew: 5 each. Turn in a commission: 25.",
     "Slay monsters: 5 each. Tame: 10. Dungeon boss: 50.",
@@ -25699,7 +25699,7 @@ static void GuildWarCredit(GameState& s, const GameState::ActiveMonster& am, con
         s.guildRenown += 10; s.gold += 800;
         s.rivalBanner = std::string("VICTORY over ") + foe + "!";
         s.rivalBannerTimer = kRivalBannerTime * 1.5f;
-        s.logLine = std::string("Your guild has won the war against ") + foe + "! +800 gold, +10 renown.";
+        s.logLine = std::string("Your warband has won the war against ") + foe + "! +800 gold, +10 renown.";
         Journal(s, s.logLine);
         PlaySfx(SfxId::Victory);
     } else {
@@ -34765,7 +34765,7 @@ static void DrawSettlement(GameState& s, int screenW, int screenH) {
         DrawUIText(TextFormat("Great Hall townsfolk: %d", hall * 6), (int)x, (int)yy, 13, ink); yy += 20;
         DrawUIText(TextFormat("Walls (level %d): %d", SettleLv(s, kSbWalls), (int)(SettleEff(s, kSbWalls) * 14.0f)), (int)x, (int)yy, 13, ink); yy += 20;
         DrawUIText(TextFormat("Guards (%d, Barracks %d): %d", guards, SettleLv(s, kSbBarracks), (int)(guards * (6.0f + SettleEff(s, kSbBarracks) * 2.0f))), (int)x, (int)yy, 13, ink); yy += 20;
-        DrawUIText(TextFormat("Guildmates left at home: %d", (int)mates), (int)x, (int)yy, 13, ink); yy += 20;
+        DrawUIText(TextFormat("Warband left at home: %d", (int)mates), (int)x, (int)yy, 13, ink); yy += 20;
         DrawUIText(TextFormat("Total defense %d  -  raiders come ~%d strong%s", (int)def, (int)str,
                               (s.guildWarOn[0] || s.guildWarOn[1]) ? " (and often: you're at war)" : ""), (int)x, (int)yy, 13, def >= str ? good : bad);
         yy += 26;
@@ -34921,7 +34921,7 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
     WarCheckWeek(s);
     int today = WarDayNow();
     { // the tabs (2026-09-28: one Guild screen for everything guild)
-        static const char* kTabs[4] = { "Overview", "Wars", "Members", "Guildmates" };
+        static const char* kTabs[4] = { "Overview", "Wars", "Members", "Warband" };
         float tw = (G.width - 36) / 4.0f;
         for (int t = 0; t < 4; t++) {
             Rectangle tb = { G.x + 18 + t * tw, G.y + 34, tw - 6, 32 };
@@ -35159,34 +35159,34 @@ static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int sec
     Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 };
     if (s.guildName.empty()) {
         if (section == 1) {
-            DrawUIText("Found your household guild (Guildmates tab) to wage war", (int)x, (int)y, 13, soft); y += 18;
+            DrawUIText("Raise a warband (Warband tab) to wage war", (int)x, (int)y, 13, soft); y += 18;
             DrawUIText("on Murder Inc. or the orcs of Grimtusk Hold.", (int)x, (int)y, 13, soft); y += 24;
             return y;
         }
-        DrawUIText("Your household guild", (int)x, (int)y, 16, ink); y += 26;
-        DrawUIText("Found a guild and you won't face the wilds alone:", (int)x, (int)y, 14, ink); y += 22;
-        DrawUIText("- hire up to three guildmates who fight at your side", (int)x, (int)y, 13, soft); y += 18;
-        DrawUIText("- wear your guild's colors and tag", (int)x, (int)y, 13, soft); y += 18;
+        DrawUIText("Your warband", (int)x, (int)y, 16, ink); y += 26;
+        DrawUIText("Raise a warband and you won't face the wilds alone:", (int)x, (int)y, 14, ink); y += 22;
+        DrawUIText("- hire up to three companions who fight at your side", (int)x, (int)y, 13, soft); y += 18;
+        DrawUIText("- wear your warband's colors and tag", (int)x, (int)y, 13, soft); y += 18;
         DrawUIText("- declare war on Murder Inc. or the orcs of Grimtusk Hold", (int)x, (int)y, 13, soft); y += 30;
         if (s.housePlotIdx < 0) {
-            DrawUIText("A guild needs a home: buy a house plot in the wilderness first.", (int)x, (int)y, 13, Color{ 150, 40, 30, 255 });
+            DrawUIText("A warband needs a home: buy a house plot in the wilderness first.", (int)x, (int)y, 13, Color{ 150, 40, 30, 255 });
             return y + 24;
         }
         UpdateTextInput(g_guildDraft, 24);
         Rectangle box = { x, y, w, 32 };
         DrawRectangleRec(box, Fade(WHITE, 0.6f));
         DrawRectangleLinesEx(box, 1.0f, kUoBronze);
-        TapToEditText(box, "Name your guild", g_guildDraft, 24);
-        DrawUIText(g_guildDraft.empty() ? "Tap to name your guild" : g_guildDraft.c_str(), (int)x + 8, (int)y + 8, 15,
+        TapToEditText(box, "Name your warband", g_guildDraft, 24);
+        DrawUIText(g_guildDraft.empty() ? "Tap to name your warband" : g_guildDraft.c_str(), (int)x + 8, (int)y + 8, 15,
                    g_guildDraft.empty() ? Fade(ink, 0.5f) : ink);
         y += 42;
         if (!g_guildDraft.empty()) { DrawUIText(("Tag: [" + GuildTagFor(g_guildDraft) + "]").c_str(), (int)x, (int)y, 13, soft); }
         y += 24;
         bool ok = !g_guildDraft.empty() && s.gold >= kGuildFoundCost;
-        if (UOButton({ x, y, 240, 36 }, TextFormat("Found the guild (%dg)", kGuildFoundCost), ok)) {
+        if (UOButton({ x, y, 240, 36 }, TextFormat("Raise the warband (%dg)", kGuildFoundCost), ok)) {
             s.gold -= kGuildFoundCost;
             s.guildName = g_guildDraft; s.guildTag = GuildTagFor(g_guildDraft);
-            s.logLine = "You set the guildstone: " + s.guildName + " [" + s.guildTag + "] is founded!";
+            s.logLine = "Your banner flies: the warband " + s.guildName + " [" + s.guildTag + "] is raised!";
             Journal(s, s.logLine);
             PlaySfx(SfxId::Quest);
         }
@@ -35197,7 +35197,7 @@ static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int sec
     DrawUIText(TextFormat("Renown %d    Wars won: %d", s.guildRenown, s.guildWarWins[0] + s.guildWarWins[1]), (int)x, (int)y, 13, soft);
     y += 30;
     // tabard color
-    DrawUIText("Guild colors", (int)x, (int)y, 14, ink); y += 20;
+    DrawUIText("Warband colors", (int)x, (int)y, 14, ink); y += 20;
     for (int k = 0; k < 21; k++) {
         Rectangle r = { x + (k % 11) * 44.0f, y + (k / 11) * 34.0f, 38, 28 };
         DrawRectangleRounded(r, 0.25f, 6, kDyeHues[k].c);
@@ -35208,7 +35208,7 @@ static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int sec
     }
     y += 76;
     // members
-    DrawUIText(TextFormat("Guildmates  %d/%d", (int)s.guildRecruits.size(), kGuildMaxRecruits), (int)x, (int)y, 14, ink); y += 22;
+    DrawUIText(TextFormat("Warband  %d/%d", (int)s.guildRecruits.size(), kGuildMaxRecruits), (int)x, (int)y, 14, ink); y += 22;
     int dismiss = -1;
     for (size_t i = 0; i < s.guildRecruits.size(); i++) {
         GuildRecruit& r = s.guildRecruits[i];
@@ -35222,7 +35222,7 @@ static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int sec
         y += 48;
     }
     if (dismiss >= 0) {
-        s.logLine = s.guildRecruits[(size_t)dismiss].name + " leaves the guild.";
+        s.logLine = s.guildRecruits[(size_t)dismiss].name + " leaves the warband.";
         s.guildRecruits.erase(s.guildRecruits.begin() + dismiss);
         for (auto& L : s.guildLive) L.init = false;
     }
@@ -35266,7 +35266,7 @@ static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int sec
             DrawRectangleRec({ x + 8, y + 42, 200 * fr, 8 }, Color{ 180, 40, 30, 255 });
             if (UOButton({ x + w - 150, y + 12, 146, 34 }, "Sue for peace (200g)", s.gold >= 200)) {
                 s.gold -= 200; s.guildWarOn[k] = false; s.guildWarKills[k] = 0;
-                s.logLine = std::string("Your guild makes peace with ") + foes[k] + ".";
+                s.logLine = std::string("Your warband makes peace with ") + foes[k] + ".";
             }
         } else {
             DrawUIText(what[k], (int)x + 8, (int)y + 24, 11, soft);
@@ -35280,7 +35280,7 @@ static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int sec
                 Journal(s, s.logLine);
                 PlaySfx(SfxId::Hunt);
             }
-            if (needMates) DrawUIText("hire a guildmate first", (int)(x + w - 146), (int)y + 46, 10, soft);
+            if (needMates) DrawUIText("hire a companion first", (int)(x + w - 146), (int)y + 46, 10, soft);
         }
         y += 64;
     }
@@ -35528,7 +35528,7 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
 
     int y = 116;
     DrawUIText("Your Home", 20, y, 18, kColorHeading); (void)tier;
-    if (Button({ (float)screenW - 150, (float)y - 4, 130, 28 }, s.guildName.empty() ? "Guildstone" : ("Guild [" + s.guildTag + "]").c_str(), true))
+    if (Button({ (float)screenW - 150, (float)y - 4, 130, 28 }, s.guildName.empty() ? "Warband" : ("Warband [" + s.guildTag + "]").c_str(), true))
         { OpenWarWeek(s); g_guildTab = 3; } // (2026-09-28) the Guild screen, on its Guildmates tab
     if (Button({ (float)screenW - 290, (float)y - 4, 130, 28 }, SettleHall(s) > 0 ? TextFormat("Settlement %d", SettleHall(s)) : "Settlement", true))
         { g_settleOpen = true; g_settleScroll = 0.0f; } // (2026-09-27)
