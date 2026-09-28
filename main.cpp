@@ -4688,6 +4688,14 @@ static float MountSpeedFor(const std::string& species) {
     if (species == "Plains Bison") return 1.45f;
     return 0.0f;
 }
+// How the rider sits: the classic body is lifted by MountSeatLift; the sculpted
+// hero sits his hips at MountSaddleY (world units above the ground).
+static float MountSeatLift(const std::string& n) {
+    return n == "War Horse" ? 26.0f : n == "Plains Bison" ? 30.0f : n == "Storm Griffin" ? 28.0f : 20.0f;
+}
+static float MountSaddleY(const std::string& n) {
+    return n == "War Horse" ? 50.0f : n == "Plains Bison" ? 48.0f : n == "Storm Griffin" ? 46.0f : 40.0f;
+}
 static Pet* RideablePet(GameState& s) { // the fastest mountable pet at your side (or the one you're on)
     Pet* best = nullptr;
     for (auto& p : s.pets) {
@@ -11877,7 +11885,7 @@ static void AnimalsEnsure() {
     struct Def { const char* file; float height; };
     static const Def defs[kAnCount] = {
         { "assets/animals/ShibaInu.glb", 30.0f }, { "assets/animals/Wolf.glb", 40.0f },
-        { "assets/animals/Horse.glb", 66.0f },    { "assets/animals/Deer.glb", 52.0f },
+        { "assets/animals/Horse.glb", 80.0f }, // (2026-09-28) a rider's horse, not a pony    { "assets/animals/Deer.glb", 52.0f },
         { "assets/animals/Stag.glb", 64.0f },     { "assets/animals/Fox.glb", 24.0f },
         { "assets/animals/Cow.glb", 56.0f }, // Plains Bison (recolored, 2026-09-27)
     };
@@ -13646,6 +13654,12 @@ struct SkinChar {
     int spine = -1, head = -1, armR = -1, armL = -1, foreArmR = -1, upLegR = -1, upLegL = -1, legR = -1, legL = -1;
     std::vector<unsigned char> dyeReg; // mesh 0, per vertex: 0 none, 1 cloak, 2 shirt, 3 trousers
     Color dyeNow[4] = {};
+    // Armor fit per bone (2026-09-28): the body kit's pieces are built "+Y along
+    // the bone, +Z forward"; Meshy's head bone leans 35 degrees forward and its
+    // leg bones face backwards, so each piece is turned to match (from the rest pose).
+    std::vector<Matrix> armorRot;
+    ModelAnimation sit{};   // a seated pose for riding: idle with the thighs forward, shins down
+    float hipsY = 0.0f;     // hips above the feet at rest, model units
 };
 // The hero's cloth, dyed: cloak / shirt / trousers (index 1..3). The file marks
 // those vertices; their texels are neutral grey, so the vertex colour is the dye.
@@ -13690,12 +13704,50 @@ static SkinChar* SkinCharGet(int id) {
                                 : (c[0] < 60 && c[1] < 60 && c[2] > 200) ? 3 : 0;
         }
     }
+    { // armor turned to each bone's rest frame (see armorRot)
+        const int nb = C.model.skeleton.boneCount;
+        C.armorRot.assign((size_t)nb, MatrixIdentity());
+        for (int b = 0; b < nb; b++) {
+            Quaternion q = C.model.skeleton.bindPose[b].rotation, qi = QuaternionInvert(q);
+            if (b == C.head || b == C.spine) { C.armorRot[(size_t)b] = QuaternionToMatrix(qi); continue; } // world-upright at rest
+            Vector3 f = Vector3RotateByQuaternion({ 0, 0, 1 }, qi); // body-forward, in bone space
+            C.armorRot[(size_t)b] = MatrixRotateY(atan2f(f.x, f.z));  // keep +Y down the bone, face +Z forward
+        }
+        // Seated pose: idle's first frame, each thigh swung forward about its
+        // hip and splayed a little, each shin swung back down at the knee.
+        const ModelAnimation& idle = C.anims[C.clip[kSkIdle]];
+        C.sit.boneCount = nb;
+        C.sit.keyframeCount = 1;
+        C.sit.keyframePoses = (ModelAnimPose*)MemAlloc(sizeof(ModelAnimPose));
+        C.sit.keyframePoses[0] = (Transform*)MemAlloc((unsigned int)(nb * sizeof(Transform)));
+        Transform* P = C.sit.keyframePoses[0];
+        for (int b = 0; b < nb; b++) P[b] = idle.keyframePoses[0][b];
+        auto isUnder = [&](int b, int root) { for (int k = b; k >= 0; k = C.model.skeleton.bones[k].parent) if (k == root) return true; return false; };
+        auto swing = [&](int root, Quaternion q) {
+            Vector3 pivot = P[root].translation;
+            for (int b = 0; b < nb; b++) {
+                if (!isUnder(b, root)) continue;
+                P[b].translation = Vector3Add(pivot, Vector3RotateByQuaternion(Vector3Subtract(P[b].translation, pivot), q));
+                P[b].rotation = QuaternionMultiply(q, P[b].rotation);
+            }
+        };
+        for (int side = 0; side < 2; side++) {
+            int up = side ? C.upLegL : C.upLegR, low = side ? C.legL : C.legR;
+            if (up < 0 || low < 0) continue;
+            float out = side ? 1.0f : -1.0f; // left leg is +x
+            swing(up, QuaternionMultiply(QuaternionFromAxisAngle({ 0, 0, 1 }, out * 16.0f * DEG2RAD),
+                                         QuaternionFromAxisAngle({ 1, 0, 0 }, -80.0f * DEG2RAD)));
+            swing(low, QuaternionFromAxisAngle({ 1, 0, 0 }, 82.0f * DEG2RAD));
+        }
+    }
     UpdateModelAnimation(C.model, C.anims[C.clip[kSkIdle]], 0.0f);
     BoundingBox bb = GetModelBoundingBox(C.model);
     float h = std::max(0.001f, bb.max.y - bb.min.y);
     C.baseScale = 1.0f / h; // x the wanted height in world units
     C.unit = h / 1.8f;      // model units per metre
     C.minY = bb.min.y;
+    { int hips = -1; for (int b = 0; b < C.model.skeleton.boneCount; b++) if (!strcmp(C.model.skeleton.bones[b].name, "Hips")) hips = b;
+      C.hipsY = hips >= 0 ? C.model.skeleton.bindPose[hips].translation.y - bb.min.y : h * 0.5f; }
     Town3DApplyLitShader(C.model);
     C.ok = true;
     return &C;
@@ -13708,6 +13760,7 @@ struct SkinPose {
     float hurtT = -1.0f;
     float deathT = -1.0f;  // 0..1 through dying
     bool engaged = false, blocking = false, sneaking = false, kneeling = false;
+    float saddle = -1.0f;  // >=0: riding - hips go this far above the draw origin
     int gather = 0;        // 1 chopping, 2 mining, 3 fishing
     int style = kHsOneHand;
 };
@@ -13781,7 +13834,9 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     float a0 = 0.0f, a1 = 1.0f, ph = -1.0f; // one-shot: play [a0,a1] of the clip at phase ph; ph<0 loops
     float speed = 1.0f;
     bool gathering = p.gather > 0 && !attacking && !casting && !hurting && !st.moving && p.deathT < 0.0f;
+    const bool riding = p.saddle >= 0.0f && C.sit.keyframeCount > 0 && p.deathT < 0.0f;
     if (p.deathT >= 0.0f && has(kSkDeath)) { k = kSkDeath; ph = std::min(p.deathT, 1.0f); }
+    else if (riding) k = kSkIdle; // posed seated below
     else if (attacking) {
         ph = atkT;
         if (p.style == kHsBow && has(kSkBow)) { k = kSkBow; a0 = 0.50f; a1 = 0.80f; }            // the draw and loose
@@ -13841,7 +13896,8 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     if (st.clip != clip) { st.prevClip = st.clip; st.prevFrame = st.frame; st.switchT = now; st.clip = clip; }
     st.frame = frame;
     float fade = (float)((now - st.switchT) / 0.16);
-    if (runW > 0.02f) { // walk <-> run blend on the shared stride phase
+    if (riding) UpdateModelAnimation(C.model, C.sit, 0.0f);
+    else if (runW > 0.02f) { // walk <-> run blend on the shared stride phase
         const ModelAnimation& ra = C.anims[C.clip[kSkRun]];
         float rf = st.cycle * (float)(std::max(2, ra.keyframeCount) - 1);
         if (runW > 0.98f) UpdateModelAnimation(C.model, ra, rf);
@@ -13863,12 +13919,14 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     float sc = C.baseScale * heightW;
     T3CDrawBlobShadow(g_t3cHumans[2].parts.merged, x, z, yawRad, heightW / 64.0f);
     float rotDeg = 90.0f - yawRad * RAD2DEG; // model faces +Z
-    DrawModelEx(C.model, { x, -C.minY * sc, z }, { 0.0f, 1.0f, 0.0f }, rotDeg, { sc, sc, sc }, tint);
+    float baseY = -C.minY * sc;
+    if (riding) baseY += p.saddle - C.hipsY * sc; // hips in the saddle
+    DrawModelEx(C.model, { x, baseY, z }, { 0.0f, 1.0f, 0.0f }, rotDeg, { sc, sc, sc }, tint);
     // ---- in hand: the weapon (or the gathering tool) and the shield ----
     if (gear && g_human.ok && p.deathT < 0.0f) {
         HumanRig& H = g_human;
         Matrix world = MatrixMultiply(MatrixMultiply(MatrixScale(sc, sc, sc), MatrixRotateY(rotDeg * DEG2RAD)),
-                                      MatrixTranslate(x, -C.minY * sc, z));
+                                      MatrixTranslate(x, baseY, z));
         auto boneM = [&](int b) {
             const Transform& t = C.model.currentPose[b];
             return MatrixMultiply(QuaternionToMatrix(t.rotation), MatrixTranslate(t.translation.x, t.translation.y, t.translation.z));
@@ -13910,8 +13968,9 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         flat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
         auto piece = [&](const Model& m, int bone, const SkinArmorFit& fit, Color c) {
             if (bone < 0 || m.meshCount <= 0) return;
-            Matrix local = MatrixMultiply(MatrixScale(u * fit.s * fit.sx, u * fit.s, u * fit.s * fit.sx),
-                                          MatrixTranslate(0.0f, fit.oy * u, fit.oz * u));
+            Matrix rot = bone < (int)C.armorRot.size() ? C.armorRot[(size_t)bone] : MatrixIdentity();
+            Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(u * fit.s * fit.sx, u * fit.s, u * fit.s * fit.sx),
+                                                         MatrixTranslate(0.0f, fit.oy * u, fit.oz * u)), rot);
             HumanDrawAttached(m, &flat, local, boneM(bone), world, HumanMul(c, tint));
         };
         if (o.armChest && !o.robe) piece(H.armor[o.armChest == 2 ? kArChestH : kArChestL], C.spine, g_skinFitChest, o.armChestCol);
@@ -13986,6 +14045,11 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
         sp.blocking = s.playerBlockT >= 0.0f && s.playerBlockT < 0.35f && s.playerDeathAnimT <= 0.0f;
         sp.sneaking = s.hidden;
         sp.kneeling = g_meditating;
+        if (g_mountPetId >= 0 && trackId == kT3CTrackPlayerWild)
+            if (Pet* mnt = MountedPet(const_cast<GameState&>(s))) {
+                sp.saddle = MountSaddleY(mnt->name) - MountSeatLift(mnt->name);
+                x -= cosf(yawRad) * 16.0f; z -= sinf(yawRad) * 16.0f; // back from the withers into the saddle
+            }
         SkinDye dye; // clothing dyes on his cloak, shirt and trousers; a robe dyes the lot
         const Equipment& e = s.equipped;
         auto dyed = [](const Item& it) { return ColorBrightness(ClothColor(it), 0.12f); };
@@ -21186,7 +21250,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
             T3CAnim ma = pa3; ma.seed = 7.0f;
             Vector2 under = { s.wildernessPlayerPos.x - cosf(pyaw) * 14.0f, s.wildernessPlayerPos.y - sinf(pyaw) * 14.0f }; // the saddle under you
             DrawCompanionPet(*mnt, s, ma, pyaw, kitDist(under.x, under.y), shadowPass, under, kT3CTrackFollowerBase);
-            seat = mnt->name == "War Horse" ? 26.0f : mnt->name == "Plains Bison" ? 30.0f : mnt->name == "Storm Griffin" ? 28.0f : 20.0f;
+            seat = MountSeatLift(mnt->name);
             pmove = 0.0f;
         }
         rlPushMatrix();
