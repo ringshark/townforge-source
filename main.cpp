@@ -1512,6 +1512,7 @@ struct GameState {
     std::vector<std::string> settleReports; // newest last, up to 6
     bool settleRaidLive = false; int settleRaidStrength = 0; int settleRaidFaction = 0; float settleMilitiaCd = 0.0f;
     float settleHpAcc = 0.0f;
+    int stableBought = 0;      // PERSISTED (2026-09-28): extra stable slots bought with gold
     bool autoReagents = false; // PERSISTED (2026-09-27): top reagents up to 30 whenever you walk into a town
     // Options (2026-09-28) - PERSISTED.
     bool optHideWyrm = false;      // no world-boss banners or wake-up countdown
@@ -6846,11 +6847,10 @@ static float TameChance(const GameState& s, const WildCreature& creature) {
 }
 
 // JS petSlotCapacity(): 1-5 slots from Taming+Lore+Veterinary combined.
-static int PetSlotCapacity(const GameState& s) {
-    float total = EffectiveSkill(s, &GameState::animalTaming) + EffectiveSkill(s, &GameState::animalLore) +
-                    EffectiveSkill(s, &GameState::veterinary);
-    return std::clamp(1 + (int)(total / 60.0f), 1, 5);
-}
+// Stable (2026-09-28): 15 pets to start; buy up to 15 more slots with gold.
+static const int kStableBase = 15, kStableMaxBought = 15;
+static int PetSlotCapacity(const GameState& s) { return kStableBase + std::clamp(s.stableBought, 0, kStableMaxBought); }
+static int StableSlotPrice(const GameState& s) { return 500 + 250 * s.stableBought; }
 
 
 static void RegenPetMana(Pet& pet, float dt) {
@@ -7417,7 +7417,7 @@ static void SaveGame(const GameState& s) {
         out << "settle" << k << "=" << s.settle[(size_t)k].level << "|" << s.settle[(size_t)k].stored << "|" << s.settle[(size_t)k].workers << "|" << (s.settle[(size_t)k].damaged ? 1 : 0) << "\n";
     out << "settleQueue=" << s.settleUpgrading << "|" << s.settleUpgradeT << "\nsettleRaidT=" << s.settleRaidT
         << "\nsettleArrivalT=" << s.settleArrivalT << "\nsettleEpoch=" << (long long)std::time(nullptr) << "\n";
-    out << "autoReagents=" << (s.autoReagents ? 1 : 0) << "\n";
+    out << "autoReagents=" << (s.autoReagents ? 1 : 0) << "\nstableBought=" << s.stableBought << "\n";
     out << "optHideWyrm=" << (s.optHideWyrm ? 1 : 0) << "\noptHideDungeonBoss=" << (s.optHideDungeonBoss ? 1 : 0)
         << "\noptClassic2D=" << (s.optClassic2D ? 1 : 0) << "\noptTapWalk=" << (s.optTapWalk ? 1 : 0) << "\noptAlwaysDay=" << (s.optAlwaysDay ? 1 : 0) << "\n";
     out << "wyrmRespawnT=" << s.wyrmRespawnT << "\nwyrmHp=" << s.wyrmHp << "\nwyrmKills=" << s.wyrmKills << "\n"; // world boss
@@ -7715,6 +7715,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "settleEpoch") s.settleEpoch = std::atoll(val.c_str());
         else if (key == "wyrmRespawnT") s.wyrmRespawnT = (float)std::atof(val.c_str());
         else if (key == "autoReagents") s.autoReagents = std::atoi(val.c_str()) != 0;
+        else if (key == "stableBought") s.stableBought = std::clamp(std::atoi(val.c_str()), 0, 15);
         else if (key == "optHideWyrm") s.optHideWyrm = std::atoi(val.c_str()) != 0;
         else if (key == "optHideDungeonBoss") s.optHideDungeonBoss = std::atoi(val.c_str()) != 0;
         else if (key == "optClassic2D") s.optClassic2D = std::atoi(val.c_str()) != 0;
@@ -33606,6 +33607,13 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
     DrawUIText(TextFormat("Taming: %.1f   Lore: %.1f   Veterinary: %.1f", s.animalTaming, s.animalLore, s.veterinary),
                20, y, 13, kColorText);
     y += 18;
+    if (s.stableBought < kStableMaxBought) {
+        int price = StableSlotPrice(s);
+        if (Button({ (float)screenW - 190, (float)y - 3, 170, 22 }, TextFormat("+1 stable slot (%d g)", price), s.gold >= price)) {
+            s.gold -= price; s.stableBought++; PlaySfx(SfxId::Buy);
+            s.logLine = TextFormat("Your stable now holds %d pets.", PetSlotCapacity(s));
+        }
+    }
     DrawUIText(TextFormat("Stable: %d / %d pets     Followers: %d / %d slots", (int)s.pets.size(), PetSlotCapacity(s),
                           FollowersUsed(s), kFollowerSlots), 20, y, 13, DARKGRAY);
     y += 22;
