@@ -1245,6 +1245,8 @@ struct Pet {
     float mana, maxMana;
     float wrestling = 0, tactics = 0, anatomy = 0, magery = 0, evalInt = 0, meditation = 0;
     bool active = false;
+    Vector2 fpos{};       // (2026-09-28) where an extra follower stands (transient; the lead pet uses companionPos)
+    bool fposInit = false;
 };
 
 struct TamingAttempt {
@@ -5004,14 +5006,38 @@ static Pet* ActivePet(GameState& s) {
     for (auto& p : s.pets) if (p.active && p.hp > 0) return &p;
     return nullptr;
 }
+// Follower slots (2026-09-28), UO-style: five slots; a dog or a wolf takes one,
+// a war horse two, a griffin three, a drake four, a dragon all five. The first
+// active pet leads (s.companionPos); the others walk and fight beside it.
+static const int kFollowerSlots = 5;
+static int PetFollowerCost(const Pet& p) {
+    int d = 0;
+    for (const auto& c : kWildCreatures) if (c.name == p.name) { d = c.isApex ? 999 : c.difficulty; break; }
+    return d >= 999 ? 5 : d >= 90 ? 4 : d >= 70 ? 3 : d >= 40 ? 2 : 1;
+}
+static int FollowersUsed(const GameState& s) {
+    int n = 0;
+    for (const auto& p : s.pets) if (p.active) n += PetFollowerCost(p);
+    return n;
+}
+static std::vector<Pet*> ActivePets(GameState& s) {
+    std::vector<Pet*> v;
+    for (auto& p : s.pets) if (p.active && p.hp > 0) v.push_back(&p);
+    return v;
+}
 
 // A pet's turn in combat: casts its best known offensive spell if it's a Caster with
 // mana for one, otherwise a wrestling-style bite. Mirrors the pet branch of
 // combatRound(). Called after the player's action and before the monster's counter.
-static void ResolvePetTurn(GameState& s) {
-    if (!s.combat.has_value()) return;
-    Pet* pet = ActivePet(s);
-    if (!pet) return;
+static void ResolvePetTurnOne(GameState& s, Pet* pet);
+static void ResolvePetTurn(GameState& s) { // every follower takes a turn (2026-09-28)
+    for (Pet* p : ActivePets(s)) {
+        if (!s.combat.has_value() || s.combat->monsterHP <= 0) return;
+        ResolvePetTurnOne(s, p);
+    }
+}
+static void ResolvePetTurnOne(GameState& s, Pet* pet) {
+    if (!s.combat.has_value() || !pet) return;
     CombatState& c = *s.combat;
 
     if (pet->role == PetRole::Caster) {
@@ -5062,8 +5088,14 @@ static void ResolvePetTurn(GameState& s) {
 // live-combat work adapted ApplyWeaponTraining/CheckMonsterDefeatedAndHandleWin into
 // their Live* counterparts. The caller checks targetHp<=0 afterward and resolves the
 // win the same way it already does for the player's own live attacks.
-static void ResolvePetTurnLive(GameState& s, float& targetHp, int targetLevel) {
-    Pet* pet = ActivePet(s);
+static void ResolvePetTurnLiveOne(GameState& s, Pet* pet, float& targetHp, int targetLevel);
+static void ResolvePetTurnLive(GameState& s, float& targetHp, int targetLevel) { // every follower (2026-09-28)
+    for (Pet* p : ActivePets(s)) {
+        if (targetHp <= 0) return;
+        ResolvePetTurnLiveOne(s, p, targetHp, targetLevel);
+    }
+}
+static void ResolvePetTurnLiveOne(GameState& s, Pet* pet, float& targetHp, int targetLevel) {
     if (!pet) return;
 
     if (pet->role == PetRole::Caster) {
@@ -5145,6 +5177,32 @@ static void UpdateCompanionFollow(GameState& s, Vector2 playerPos, Vector2 playe
         float step = std::min(dist, kCompanionFollowSpeed * dt);
         s.companionPos.x += dir.x * step;
         s.companionPos.y += dir.y * step;
+    }
+}
+
+// Extra followers (2026-09-28): walk in a loose V behind you, and in a fight
+// spread around the foe so every bite shows.
+static void UpdateExtraFollowers(GameState& s, Vector2 playerPos, Vector2 playerFacing, float dt, const Vector2* foe) {
+    std::vector<Pet*> v = ActivePets(s);
+    for (size_t k = 1; k < v.size(); k++) {
+        Pet& p = *v[k];
+        float side = (k % 2) ? -1.0f : 1.0f, row = (float)((k + 1) / 2);
+        Vector2 f = playerFacing, r = { -playerFacing.y, playerFacing.x };
+        Vector2 target = { playerPos.x - f.x * (kCompanionFollowDistance + 16.0f * row) + r.x * side * 30.0f * row,
+                           playerPos.y - f.y * (kCompanionFollowDistance + 16.0f * row) + r.y * side * 30.0f * row };
+        if (foe) {
+            Vector2 d = { playerPos.x - foe->x, playerPos.y - foe->y };
+            float L = std::max(1.0f, sqrtf(d.x * d.x + d.y * d.y));
+            float base = atan2f(d.y / L, d.x / L), ang = base + side * (1.2f + 0.7f * (row - 1.0f));
+            target = { foe->x + cosf(ang) * 34.0f, foe->y + sinf(ang) * 34.0f };
+        }
+        if (!p.fposInit || Dist(p.fpos, playerPos) > 400.0f) { p.fpos = target; p.fposInit = true; continue; }
+        Vector2 dir = { target.x - p.fpos.x, target.y - p.fpos.y };
+        float dist = sqrtf(dir.x * dir.x + dir.y * dir.y);
+        if (dist > 4.0f) {
+            float step = std::min(dist, kCompanionFollowSpeed * dt);
+            p.fpos.x += dir.x / dist * step; p.fpos.y += dir.y / dist * step;
+        }
     }
 }
 
@@ -6128,7 +6186,8 @@ static void MonsterCounterAndMaybeEnd(GameState& s) {
     CombatState& c = *s.combat;
     // JS: an active pet can draw the monster's attack instead of the player, at a
     // chance depending on its role (tank draws aggro most, caster least).
-    Pet* pet = ActivePet(s);
+    std::vector<Pet*> followers = ActivePets(s);
+    Pet* pet = followers.empty() ? nullptr : followers[(size_t)(std::rand() % (int)followers.size())]; // any follower can draw it
     float petTargetChance = !pet ? 0.0f : (pet->role == PetRole::Tank ? 0.6f
                                           : pet->role == PetRole::Caster ? 0.2f : 0.4f);
     bool targetsPet = pet && RandUnit() < petTargetChance;
@@ -6795,7 +6854,7 @@ static void ResolveTameAttempt(GameState& s) {
             pet.str = str; pet.dex = dex; pet.intStat = intV;
             pet.maxHp = 50.0f + str; pet.hp = pet.maxHp;
             pet.maxMana = (float)intV; pet.mana = pet.maxMana;
-            pet.active = s.pets.empty();
+            pet.active = FollowersUsed(s) + PetFollowerCost(pet) <= kFollowerSlots; // follows if there is room (2026-09-28)
             s.pets.push_back(pet);
             s.logLine = "Tamed a " + creature.name + " (Str " + std::to_string(str) + ", Dex " +
                          std::to_string(dex) + ", Int " + std::to_string(intV) + ")!" + gainNote;
@@ -6816,8 +6875,20 @@ static void UpdateTameAttempt(GameState& s, float dt) {
     }
 }
 
+// Follow / Stay (2026-09-28): any number of pets may follow while the slots last.
 static void SetPetActive(GameState& s, int petId) {
-    for (auto& p : s.pets) p.active = (p.id == petId);
+    for (auto& p : s.pets) {
+        if (p.id != petId) continue;
+        if (p.active) { p.active = false; s.logLine = p.name + " stays at the stable."; return; }
+        int cost = PetFollowerCost(p), used = FollowersUsed(s);
+        if (used + cost > kFollowerSlots) {
+            s.logLine = TextFormat("%s needs %d follower slot%s - you have %d free. Send a pet to stay first.",
+                                   p.name.c_str(), cost, cost == 1 ? "" : "s", kFollowerSlots - used);
+            return;
+        }
+        p.active = true; p.fposInit = false;
+        s.logLine = p.name + " follows you.";
+    }
 }
 
 static void ReleasePet(GameState& s, int petId) {
@@ -8793,7 +8864,7 @@ static int ThreatOf(const GameState& s, int monsterLevel) {
     float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
     float hit = PlayerHitChance(s, monsterLevel) / 100.0f;
     float myDps = hit * power / PlayerSwingCooldown(s);
-    if (ActivePet(const_cast<GameState&>(s))) myDps *= 1.35f; // a pet adds roughly a third again
+    myDps *= 1.0f + 0.35f * (float)ActivePets(const_cast<GameState&>(s)).size(); // each pet adds roughly a third again
     float itsHit = MonsterHitChance(s) / 100.0f;
     float itsDmg = std::max(1.0f, monsterLevel * 1.1f - TotalDefense(s) * 0.3f);
     float itsDps = itsHit * itsDmg / kWildMonsterAttackCooldown;
@@ -12016,6 +12087,7 @@ static const int kT3CTrackRival = 90;
 static const int kT3CTrackBladeWild = 91; // + blade idx (0..2) - one track per blade so they don't animate in lockstep
 static const int kT3CTrackInnocentWild = 100; // + innocent idx
 static const int kT3CTrackCompanion = 120;
+static const int kT3CTrackFollowerBase = 160; // extra followers 161..167 (2026-09-28)
 static const int kT3CTrackPlayerDungeon = 130;
 static const int kT3CTrackMonsterDungeon = 140; // + monster idx (0..8), engaged = +9
 // ==== T3C-KIT-END ====
@@ -12176,17 +12248,18 @@ static Color AnimalRecolorForMonsterName(const std::string& name) {
 // model where one exists (dog, wolf, bison, horse), else that species' kit
 // body - no longer a generic wolf/bear/drake by role. Bites/claws play on
 // s.companionAtkT.
-static void DrawCompanionPet(const Pet& pet, const GameState& s, T3CAnim a, float face, float kitDist, bool shadowPass) {
+static void DrawCompanionPet(const Pet& pet, const GameState& s, T3CAnim a, float face, float kitDist, bool shadowPass,
+                             Vector2 at, int track = kT3CTrackCompanion) {
     int ci = CreatureIdxForPetName(pet.name);
     float atk = s.companionAtkT >= 0.0f ? std::clamp(s.companionAtkT / 0.6f, 0.0f, 1.0f) : -1.0f;
     if (ci >= 0) {
-        AnimalPose ap; ap.move = a.move; ap.time = a.t; ap.track = kT3CTrackCompanion;
+        AnimalPose ap; ap.move = a.move; ap.time = a.t; ap.track = track;
         ap.recolor = AnimalRecolorForCreature(ci); ap.attackT = atk;
-        if (DrawAnimal(AnimalForCreature(ci), s.companionPos.x, s.companionPos.y, face, 0.9f, WHITE, ap, shadowPass)) return;
+        if (DrawAnimal(AnimalForCreature(ci), at.x, at.y, face, 0.9f, WHITE, ap, shadowPass)) return;
     }
     T3CQuadLook look = ci >= 0 ? T3CCreatureLook(ci) : T3CPetLook(pet.role);
     if (ci >= 0) look.scale *= 0.85f;
-    T3CDrawQuad(g_t3cQuads[look.specIdx].parts, s.companionPos.x, s.companionPos.y, face, look.scale, look.coat, a,
+    T3CDrawQuad(g_t3cQuads[look.specIdx].parts, at.x, at.y, face, look.scale, look.coat, a,
                 kitDist, shadowPass, atk);
 }
 
@@ -20447,7 +20520,19 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                 if (fd.x * fd.x + fd.y * fd.y > 1.0f) face = atan2f(fd.y, fd.x);
             }
             T3CAnim pa2 = T3CMakeAnim(kT3CTrackCompanion, s.companionPos.x, s.companionPos.y, !shadowPass);
-            DrawCompanionPet(*ap, s, pa2, face, kitDist(s.companionPos.x, s.companionPos.y), shadowPass);
+            DrawCompanionPet(*ap, s, pa2, face, kitDist(s.companionPos.x, s.companionPos.y), shadowPass, s.companionPos);
+        }
+    }
+    { // extra followers (2026-09-28)
+        std::vector<Pet*> fv = ActivePets(s);
+        for (size_t k = 1; k < fv.size() && k < 8; k++) {
+            Vector2 at = fv[k]->fpos;
+            if (!fv[k]->fposInit || !vis(at.x, at.y, 70.0f)) continue;
+            Vector2 d = { s.wildernessPlayerPos.x - at.x, s.wildernessPlayerPos.y - at.y };
+            float face = (d.x * d.x + d.y * d.y > 1.0f) ? atan2f(d.y, d.x) : 0.0f;
+            if (s.wildEngaged.has_value()) { Vector2 fd = { s.wildEngaged->pos.x - at.x, s.wildEngaged->pos.y - at.y }; if (fd.x * fd.x + fd.y * fd.y > 1.0f) face = atan2f(fd.y, fd.x); }
+            T3CAnim pk = T3CMakeAnim(kT3CTrackFollowerBase + (int)k, at.x, at.y, !shadowPass);
+            DrawCompanionPet(*fv[k], s, pk, face, kitDist(at.x, at.y), shadowPass, at, kT3CTrackFollowerBase + (int)k);
         }
     }
     DrawGuildRecruits(s, shadowPass); // guildmates (2026-09-27)
@@ -21643,7 +21728,19 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
             if (fd.x * fd.x + fd.y * fd.y > 1.0f) face = atan2f(fd.y, fd.x);
         }
         T3CAnim pa = T3CMakeAnim(kT3CTrackCompanion, s.companionPos.x, s.companionPos.y);
-        DrawCompanionPet(*ActivePet(s), s, pa, face, 0.0f, false);
+        DrawCompanionPet(*ActivePet(s), s, pa, face, 0.0f, false, s.companionPos);
+    }
+    { // extra followers (2026-09-28)
+        std::vector<Pet*> fv = ActivePets(s);
+        for (size_t k = 1; k < fv.size() && k < 8; k++) {
+            Vector2 at = fv[k]->fpos;
+            if (!fv[k]->fposInit) continue;
+            Vector2 d = { s.dungeonPlayerPos.x - at.x, s.dungeonPlayerPos.y - at.y };
+            float face = (d.x * d.x + d.y * d.y > 1.0f) ? atan2f(d.y, d.x) : 0.0f;
+            if (s.dungeonEngaged.has_value()) { Vector2 fd = { s.dungeonEngaged->pos.x - at.x, s.dungeonEngaged->pos.y - at.y }; if (fd.x * fd.x + fd.y * fd.y > 1.0f) face = atan2f(fd.y, fd.x); }
+            T3CAnim pk = T3CMakeAnim(kT3CTrackFollowerBase + (int)k, at.x, at.y);
+            DrawCompanionPet(*fv[k], s, pk, face, 0.0f, false, at, kT3CTrackFollowerBase + (int)k);
+        }
     }
     if (torchOn) rlEnableShader(rlGetShaderIdDefault());
     // --- Unlit dressing: torch poles + flames, exit portal, rings ---
@@ -30548,6 +30645,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (!moved) SteerTowardFlag(s, s.wildernessPlayerPos, s.playerFacing, GameDt(), kWildernessWorldSize, 0);
         if (ActivePet(s)) UpdateCompanionFollow(s, s.wildernessPlayerPos, s.playerFacing, GameDt(),
                                                 s.wildEngaged.has_value() ? &s.wildEngaged->pos : nullptr);
+        UpdateExtraFollowers(s, s.wildernessPlayerPos, s.playerFacing, GameDt(), s.wildEngaged.has_value() ? &s.wildEngaged->pos : nullptr);
         GuildRecruitsFollow(s, GameDt()); // your guildmates (2026-09-27)
     }
     UpdateLiveSpellFX(s, GameDt()); // combat anim timers, projectiles, debuffs, fiend
@@ -32090,6 +32188,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (!moved) SteerTowardFlag(s, s.dungeonPlayerPos, s.playerFacing, GameDt(), kDungeonWorldSize, 1);
         if (ActivePet(s)) UpdateCompanionFollow(s, s.dungeonPlayerPos, s.playerFacing, GameDt(),
                                                 s.dungeonEngaged.has_value() ? &s.dungeonEngaged->pos : nullptr);
+        UpdateExtraFollowers(s, s.dungeonPlayerPos, s.playerFacing, GameDt(), s.dungeonEngaged.has_value() ? &s.dungeonEngaged->pos : nullptr);
     }
     UpdateLiveSpellFX(s, GameDt()); // combat anim timers, projectiles, debuffs, fiend
     { // The way out is a stair up to daylight (2026-09-27): walk up it to leave. You
@@ -33404,7 +33503,8 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
     DrawUIText(TextFormat("Taming: %.1f   Lore: %.1f   Veterinary: %.1f", s.animalTaming, s.animalLore, s.veterinary),
                20, y, 13, kColorText);
     y += 18;
-    DrawUIText(TextFormat("Pet slots: %d / %d", (int)s.pets.size(), PetSlotCapacity(s)), 20, y, 13, DARKGRAY);
+    DrawUIText(TextFormat("Stable: %d / %d pets     Followers: %d / %d slots", (int)s.pets.size(), PetSlotCapacity(s),
+                          FollowersUsed(s), kFollowerSlots), 20, y, 13, DARKGRAY);
     y += 22;
 
     if (s.tamingAttempt.has_value()) {
@@ -33461,13 +33561,16 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
         if (rowY < rosterTop - 70 || rowY > rosterTop + rosterHeight) continue;
 
         std::string roleName = pet.role == PetRole::Tank ? "Tank" : pet.role == PetRole::Caster ? "Caster" : "Melee";
-        std::string header = pet.name + (pet.active ? " (active)" : "") + " - " + roleName;
+        int cost = PetFollowerCost(pet);
+        std::string header = pet.name + (pet.active ? " (following)" : "") + " - " + roleName +
+                             TextFormat("  [%d slot%s]", cost, cost == 1 ? "" : "s");
         DrawUIText(header.c_str(), 20, (int)rowY, 13, kColorText);
         std::string stats = TextFormat("HP %.0f/%.0f  Str %d Dex %d Int %d", pet.hp, pet.maxHp,
                                          pet.str, pet.dex, pet.intStat);
         DrawUIText(stats.c_str(), 20, (int)rowY + 16, 13, DARKGRAY);
 
-        if (Button({ 20, rowY + 34, 70, 22 }, "Active", !pet.active)) SetPetActive(s, pet.id);
+        if (Button({ 20, rowY + 34, 70, 22 }, pet.active ? "Stay" : "Follow",
+                   pet.active || FollowersUsed(s) + cost <= kFollowerSlots)) SetPetActive(s, pet.id);
         if (Button({ 96, rowY + 34, 60, 22 }, "Heal", pet.hp < pet.maxHp)) HealPet(s, pet.id);
         if (Button({ 162, rowY + 34, 90, 22 }, "Train Wrest.", pet.wrestling < kPetTrainTarget && s.gold >= 1))
             TrainPetSkillGold(s, pet.id, &Pet::wrestling, "Wrestling");
