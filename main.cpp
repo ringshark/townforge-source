@@ -13634,7 +13634,14 @@ struct SkinChar {
     int clip[kSkClipCount];
     float baseScale = 1.0f, unit = 1.0f, minY = 0.0f;
     int handR = -1, handL = -1, foreArmL = -1;
+    // (2026-09-28) armor rides these bones; dye regions come from the file's vertex colours
+    int spine = -1, head = -1, armR = -1, armL = -1, foreArmR = -1, upLegR = -1, upLegL = -1, legR = -1, legL = -1;
+    std::vector<unsigned char> dyeReg; // mesh 0, per vertex: 0 none, 1 cloak, 2 shirt, 3 trousers
+    Color dyeNow[4] = {};
 };
+// The hero's cloth, dyed: cloak / shirt / trousers (index 1..3). The file marks
+// those vertices; their texels are neutral grey, so the vertex colour is the dye.
+struct SkinDye { Color c[4] = { WHITE, { 73, 49, 27, 255 }, { 114, 105, 94, 255 }, { 90, 81, 68, 255 } }; };
 static SkinChar g_skinChars[kScCount];
 static SkinChar* SkinCharGet(int id) {
     SkinChar& C = g_skinChars[id];
@@ -13656,6 +13663,24 @@ static SkinChar* SkinCharGet(int id) {
         if (!strcmp(n, "RightHand")) C.handR = b;
         else if (!strcmp(n, "LeftHand")) C.handL = b;
         else if (!strcmp(n, "LeftForeArm")) C.foreArmL = b;
+        else if (!strcmp(n, "RightForeArm")) C.foreArmR = b;
+        else if (!strcmp(n, "Spine")) C.spine = b;
+        else if (!strcmp(n, "Head")) C.head = b;
+        else if (!strcmp(n, "RightArm")) C.armR = b;
+        else if (!strcmp(n, "LeftArm")) C.armL = b;
+        else if (!strcmp(n, "RightUpLeg")) C.upLegR = b;
+        else if (!strcmp(n, "LeftUpLeg")) C.upLegL = b;
+        else if (!strcmp(n, "RightLeg")) C.legR = b;
+        else if (!strcmp(n, "LeftLeg")) C.legL = b;
+    }
+    if (C.model.meshes[0].colors) { // dye-region markers: pure red / green / blue
+        const Mesh& me = C.model.meshes[0];
+        C.dyeReg.resize((size_t)me.vertexCount);
+        for (int v = 0; v < me.vertexCount; v++) {
+            const unsigned char* c = me.colors + v * 4;
+            C.dyeReg[(size_t)v] = (c[0] > 200 && c[1] < 60 && c[2] < 60) ? 1 : (c[0] < 60 && c[1] > 200 && c[2] < 60) ? 2
+                                : (c[0] < 60 && c[1] < 60 && c[2] > 200) ? 3 : 0;
+        }
     }
     UpdateModelAnimation(C.model, C.anims[C.clip[kSkIdle]], 0.0f);
     BoundingBox bb = GetModelBoundingBox(C.model);
@@ -13689,8 +13714,16 @@ struct SkinAnimState {
 static std::map<int, SkinAnimState> g_skinAnim;
 // Pose and draw one rigged character. heightW: standing height in world units.
 // gear (optional): weapon/shield/tool from a body-kit outfit, drawn in hand.
+// Armor on the sculpted body: the body kit's pieces, per piece a scale and an
+// offset (metres, in the bone's space) to sit over the hero's own leather.
+struct SkinArmorFit { float s, sx, oy, oz; };
+static SkinArmorFit g_skinFitChest = { 1.22f, 1.18f, 0.02f, 0.03f }, g_skinFitPauldron = { 1.02f, 1.0f, -0.01f, 0.0f },
+                    g_skinFitBracer = { 1.25f, 1.0f, 0.0f, 0.0f }, g_skinFitGreave = { 1.25f, 1.0f, 0.0f, 0.0f },
+                    g_skinFitCuisse = { 1.2f, 1.0f, 0.0f, 0.0f }, g_skinFitGorget = { 1.2f, 1.1f, 0.0f, 0.0f },
+                    g_skinFitHelm = { 1.1f, 1.0f, -0.01f, 0.015f };
 static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, float heightW, Color tint,
-                         const SkinPose& p, bool shadowPass, const HumanOutfit* gear = nullptr, float maxDepth = 0.0f) {
+                         const SkinPose& p, bool shadowPass, const HumanOutfit* gear = nullptr, float maxDepth = 0.0f,
+                         const SkinDye* dye = nullptr) {
     SkinChar* Cp = SkinCharGet(id);
     if (!Cp) return false;
     SkinChar& C = *Cp;
@@ -13782,6 +13815,16 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         UpdateModelAnimationEx(C.model, C.anims[st.prevClip], st.prevFrame, an, frame, std::clamp(fade, 0.0f, 1.0f));
     else
         UpdateModelAnimation(C.model, an, frame);
+    if (dye && !C.dyeReg.empty() && memcmp(C.dyeNow, dye->c, sizeof(C.dyeNow)) != 0) { // re-dye (only when it changes)
+        memcpy(C.dyeNow, dye->c, sizeof(C.dyeNow));
+        Mesh& me = C.model.meshes[0];
+        for (int v = 0; v < me.vertexCount; v++) {
+            Color c = dye->c[C.dyeReg[(size_t)v]];
+            unsigned char* d = me.colors + v * 4;
+            d[0] = c.r; d[1] = c.g; d[2] = c.b; d[3] = 255;
+        }
+        UpdateMeshBuffer(me, 3, me.colors, me.vertexCount * 4, 0); // 3: the colour buffer
+    }
     float sc = C.baseScale * heightW;
     T3CDrawBlobShadow(g_t3cHumans[2].parts.merged, x, z, yawRad, heightW / 64.0f);
     float rotDeg = 90.0f - yawRad * RAD2DEG; // model faces +Z
@@ -13825,6 +13868,31 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
             for (int i = 0; i < H.gear[kHwShield].materialCount; i++) H.gear[kHwShield].materials[i].shader = sh;
             HumanDrawAttached(H.gear[kHwShield], nullptr, local, boneM(C.foreArmL), world, tint);
         }
+        // armor: the body kit's shaped pieces and helms, fitted over his own gear
+        const HumanOutfit& o = *gear;
+        Material flat = H.model.materials[0];
+        flat.shader = sh;
+        flat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+        auto piece = [&](const Model& m, int bone, const SkinArmorFit& fit, Color c) {
+            if (bone < 0 || m.meshCount <= 0) return;
+            Matrix local = MatrixMultiply(MatrixScale(u * fit.s * fit.sx, u * fit.s, u * fit.s * fit.sx),
+                                          MatrixTranslate(0.0f, fit.oy * u, fit.oz * u));
+            HumanDrawAttached(m, &flat, local, boneM(bone), world, HumanMul(c, tint));
+        };
+        if (o.armChest && !o.robe) piece(H.armor[o.armChest == 2 ? kArChestH : kArChestL], C.spine, g_skinFitChest, o.armChestCol);
+        if (o.armArms && !o.robe) {
+            const Model& pm = H.armor[o.armArms == 2 ? kArPauldronH : kArPauldronL];
+            const Model& bm = H.armor[o.armArms == 2 ? kArBracerH : kArBracerL];
+            piece(pm, C.armR, g_skinFitPauldron, o.armArmsCol); piece(pm, C.armL, g_skinFitPauldron, o.armArmsCol);
+            piece(bm, C.foreArmR, g_skinFitBracer, o.armArmsCol); piece(bm, C.foreArmL, g_skinFitBracer, o.armArmsCol);
+        }
+        if (o.armLegs && !o.robe) {
+            const Model& gm = H.armor[o.armLegs == 2 ? kArGreaveH : kArGreaveL];
+            piece(gm, C.legR, g_skinFitGreave, o.armLegsCol); piece(gm, C.legL, g_skinFitGreave, o.armLegsCol);
+            if (o.armLegs == 2) { piece(H.armor[kArCuisse], C.upLegR, g_skinFitCuisse, o.armLegsCol); piece(H.armor[kArCuisse], C.upLegL, g_skinFitCuisse, o.armLegsCol); }
+        }
+        if (o.armGorget) piece(H.armor[kArGorget], C.spine, g_skinFitGorget, o.armGorgetCol);
+        if (o.helm != kHhNone) piece(H.helm[o.helm], C.head, g_skinFitHelm, o.helmCol);
     }
     return true;
 }
@@ -13883,7 +13951,14 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
         sp.blocking = s.playerBlockT >= 0.0f && s.playerBlockT < 0.35f && s.playerDeathAnimT <= 0.0f;
         sp.sneaking = s.hidden;
         sp.kneeling = g_meditating;
-        if (DrawSkinChar(kScHero, trackId, x, z, yawRad, 66.0f, tint, sp, shadowPass, &outfit)) return true;
+        SkinDye dye; // clothing dyes on his cloak, shirt and trousers; a robe dyes the lot
+        const Equipment& e = s.equipped;
+        auto dyed = [](const Item& it) { return ColorBrightness(ClothColor(it), 0.12f); };
+        if (e.cloak) dye.c[1] = dyed(*e.cloak);
+        if (e.shirt) dye.c[2] = dyed(*e.shirt);
+        if (e.pants) dye.c[3] = dyed(*e.pants);
+        if (e.robe) dye.c[1] = dye.c[2] = dye.c[3] = dyed(*e.robe);
+        if (DrawSkinChar(kScHero, trackId, x, z, yawRad, 66.0f, tint, sp, shadowPass, &outfit, 0.0f, &dye)) return true;
     }
     return DrawHuman(trackId, x, z, yawRad, 1.0f, tint, outfit, hp, shadowPass);
 }
