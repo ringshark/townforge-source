@@ -1507,6 +1507,11 @@ struct GameState {
     bool settleRaidLive = false; int settleRaidStrength = 0; int settleRaidFaction = 0; float settleMilitiaCd = 0.0f;
     float settleHpAcc = 0.0f;
     bool autoReagents = false; // PERSISTED (2026-09-27): top reagents up to 30 whenever you walk into a town
+    // Options (2026-09-28) - PERSISTED.
+    bool optHideWyrm = false;      // no world-boss banners or wake-up countdown
+    bool optHideDungeonBoss = false; // no "the boss is now available" notices
+    bool optClassic2D = false;     // the old top-down view (a fallback for slow phones)
+    bool optTapWalk = true;        // tap the ground to walk there
     // Stat buffs (2026-09-27) - transient: Bless, Strength and Agility potions.
     float blessT = 0.0f, strPotT = 0.0f, agiPotT = 0.0f;
     int blessAmt = 0, strPotAmt = 0, agiPotAmt = 0;
@@ -2225,7 +2230,9 @@ static const Vector2* g_walkFor = nullptr; // which position it belongs to (town
 static Vector2 g_walkLastPos = { 0, 0 };
 static float g_walkStuckT = 0.0f;
 static void WalkTargetClear() { g_walkOn = false; g_walkFor = nullptr; }
+static bool g_tapWalkOn = true; // mirrors GameState::optTapWalk (2026-09-28)
 static void WalkTargetSet(const Vector2& who, Vector2 target, float groundY) {
+    if (!g_tapWalkOn) return;
     g_walkOn = true; g_walkFor = &who; g_walkTarget = target; g_walkY = groundY;
     g_walkLastPos = who; g_walkStuckT = 0.0f;
 }
@@ -6101,7 +6108,7 @@ static bool CheckMonsterDefeatedAndHandleWin(GameState& s) {
         const DungeonDef& dungeon = kDungeons[c.dungeonIdx];
         if (s.dungeonXP[c.dungeonIdx] >= dungeon.bossUnlockXp &&
             s.dungeonXP[c.dungeonIdx] - c.monster.level < dungeon.bossUnlockXp) {
-            msg += " " + dungeon.boss.name + " is now available!";
+            { if (!s.optHideDungeonBoss) msg += " " + dungeon.boss.name + " is now available!"; else Journal(s, dungeon.boss.name + " is now available."); }
         }
     }
     MaybeGainMagicResist(s, c);
@@ -6471,11 +6478,25 @@ static bool RollSpellDisrupted(const GameState& s) {
     return RandUnit() * 100.0f < std::max(5.0f, 30.0f - EffectiveSkill(s, &GameState::magicResist) * 0.2f);
 }
 // JS regenMana(): passive regen scaled by Meditation, called every frame like gathering.
+// Meditate (2026-09-28, #63): out of a fight, still or walking - mana comes back
+// three times as fast and Meditation trains. A fight or a spell breaks it.
+static bool g_meditating = false;
+static float g_medTrainT = 0.0f;
 static void RegenMana(GameState& s, float dt) {
     float regenPerSec = 0.15f + EffectiveSkill(s, &GameState::meditation) * 0.004f;
     if (IsShaken(s)) regenPerSec *= 0.5f;
     if (HasWeeklyBlessing(s)) regenPerSec *= 1.25f;
     regenPerSec *= 1.0f + 0.08f * SettleEff(s, kSbLibrary); // Library (2026-09-27)
+    if (g_meditating) {
+        bool fighting = s.wildEngaged.has_value() || s.dungeonEngaged.has_value() || s.combat.has_value() ||
+                        !s.wildExtraAttackers.empty() || !s.dungeonExtraAttackers.empty() || s.playerIsGhost;
+        if (fighting) { g_meditating = false; s.logLine = "Your meditation is broken."; }
+        else if (s.mana >= MaxMana(s)) { g_meditating = false; s.logLine = "You finish meditating - your mana is full."; }
+        else {
+            regenPerSec = regenPerSec * 3.0f + 0.5f;
+            if ((g_medTrainT += dt) >= 4.0f) { g_medTrainT = 0.0f; SkillUseGain(s.meditation, 0.5f, 1.0f); }
+        }
+    }
     s.mana = std::min(MaxMana(s), s.mana + regenPerSec * dt);
 }
 
@@ -7242,6 +7263,8 @@ static void SaveGame(const GameState& s) {
     out << "settleQueue=" << s.settleUpgrading << "|" << s.settleUpgradeT << "\nsettleRaidT=" << s.settleRaidT
         << "\nsettleArrivalT=" << s.settleArrivalT << "\nsettleEpoch=" << (long long)std::time(nullptr) << "\n";
     out << "autoReagents=" << (s.autoReagents ? 1 : 0) << "\n";
+    out << "optHideWyrm=" << (s.optHideWyrm ? 1 : 0) << "\noptHideDungeonBoss=" << (s.optHideDungeonBoss ? 1 : 0)
+        << "\noptClassic2D=" << (s.optClassic2D ? 1 : 0) << "\noptTapWalk=" << (s.optTapWalk ? 1 : 0) << "\n";
     out << "wyrmRespawnT=" << s.wyrmRespawnT << "\nwyrmHp=" << s.wyrmHp << "\nwyrmKills=" << s.wyrmKills << "\n"; // world boss
     out << "warWeek=" << s.warWeek << "\nwarPlayMin=" << s.warPlayMin << "\nwarPts=";
     for (int d = 0; d < 7; d++) out << (d ? "," : "") << s.warPts[(size_t)d];
@@ -7537,6 +7560,10 @@ static bool LoadGame(GameState& s) {
         else if (key == "settleEpoch") s.settleEpoch = std::atoll(val.c_str());
         else if (key == "wyrmRespawnT") s.wyrmRespawnT = (float)std::atof(val.c_str());
         else if (key == "autoReagents") s.autoReagents = std::atoi(val.c_str()) != 0;
+        else if (key == "optHideWyrm") s.optHideWyrm = std::atoi(val.c_str()) != 0;
+        else if (key == "optHideDungeonBoss") s.optHideDungeonBoss = std::atoi(val.c_str()) != 0;
+        else if (key == "optClassic2D") s.optClassic2D = std::atoi(val.c_str()) != 0;
+        else if (key == "optTapWalk") s.optTapWalk = std::atoi(val.c_str()) != 0;
         else if (key == "wyrmHp") s.wyrmHp = (float)std::atof(val.c_str());
         else if (key == "wyrmKills") s.wyrmKills = std::atoi(val.c_str());
         else if (key == "warWeek") s.warWeek = std::atoll(val.c_str());
@@ -10335,6 +10362,49 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
 // Full-width overlay listing every known spell (offense + heal/cure) to assign to the
 // open slot, plus a Clear/Cancel option - opened by tapping any hotbar slot while not
 // engaged in a fight (see the DrawCombatHotbarRow call sites).
+// Spell descriptions (2026-09-28, #62): what each spell does, for the spellbook.
+static const char* kSpellDesc[31] = {
+    "A crackling dart of energy at your foe.",                                   // Spark Dart
+    "Heals you a little.",                                                       // Mending Word
+    "Your foe hits 30% softer for 20 seconds.",                                  // Sap Strength
+    "Your foe misses more often for 20 seconds.",                                // Cloud Mind
+    "Your foe attacks half as fast for 20 seconds.",                             // Fumbling Curse
+    "A wounding strike of force at your foe.",                                   // Wounding Touch
+    "You deal 25% more damage for 30 seconds.",                                  // Blessing of Vigor
+    "A burst of flame at your foe.",                                             // Ember Burst
+    "Poison that stings your foe.",                                              // Venom Sting
+    "Heals you a lot.",                                                          // Greater Mending
+    "A lance of lightning at your foe.",                                         // Storm Lance
+    "Shatters your foe's mind.",                                                 // Psychic Shatter
+    "A bolt of lightning at your foe.",                                          // Arc Bolt
+    "An explosion on your foe.",                                                 // Detonation
+    "A column of fire on your foe.",                                             // Inferno Strike
+    "A fiend fights at your side for 25 seconds.",                               // Summon Fiend
+    "Carries you to any town you have visited (40 Magery).",                     // Recall
+    "A spray of bone teeth at your foe.",                                        // Teeth
+    "Raises a skeleton warrior from a nearby body.",                             // Raise Skeleton
+    "Your foe takes more damage for a while.",                                   // Amplify Damage
+    "Bone plates that absorb damage.",                                           // Bone Armor
+    "A spear of bone at your foe.",                                              // Bone Spear
+    "Blows up a body near your foe, hurting everything around it.",              // Corpse Explosion
+    "Raises a skeletal mage from a nearby body.",                                // Raise Skeletal Mage
+    "Your hits on the foe heal you for a while.",                                // Life Tap
+    "+5 to +15 Str, Dex and Int for 3 minutes (with Magery).",                   // Bless
+    "Cast, then tap the ground in reach to blink there.",                        // Teleport
+    "Heals you (stronger with Karma).",                                          // Close Wounds
+    "+30% melee damage for 30 seconds.",                                         // Consecrate Weapon
+    "A bolt of holy light at your foe (stronger with Karma).",                   // Holy Light
+    "A holy ward that absorbs damage (stronger with Karma).",                    // Divine Shield
+};
+static std::string SpellEffectLine(const GameState& s, int idx) { // the short line under the name
+    const Spell& sp = kSpells[(size_t)idx];
+    int pw = SpellPowerFor(s, sp);
+    if (sp.type == SpellType::Offensive && sp.baseDamage > 0) return TextFormat("%d mana - hits ~%d", sp.manaCost, pw);
+    if (sp.type == SpellType::Utility && sp.baseDamage > 0) return TextFormat("%d mana - heals ~%d", sp.manaCost, pw);
+    return TextFormat("%d mana%s", sp.manaCost, SpellNeedsCorpse(idx) ? " - needs a body" : "");
+}
+static int g_spellInfo = -1; // the spell whose card is open in the book
+static double g_spellInfoAt = 0.0;
 static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppressPress) {
     if (!s.hotbarPickerSlot.has_value()) return;
     int slot = *s.hotbarPickerSlot;
@@ -10485,9 +10555,10 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     bool peaceUp = !s.playerIsGhost && s.skillActive[27] && (!PlayerYoung(s) || s.peacemaking > 0.0f);
     bool provoUp = !ooc && bardZone == 0 && !s.playerIsGhost && s.skillActive[28] && (!PlayerYoung(s) || s.provocation > 0.0f) &&
                    s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0;
-    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp && !hideUp && !peaceUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
+    bool medUp = ooc && !s.playerIsGhost && (s.mana < MaxMana(s) - 0.5f || g_meditating); // (2026-09-28, #63) Meditate
+    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp && !hideUp && !peaceUp && !medUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
     int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0) + (teleUp ? 1 : 0) + (hideUp ? 1 : 0) +
-            (peaceUp ? 1 : 0) + (provoUp ? 1 : 0);
+            (peaceUp ? 1 : 0) + (provoUp ? 1 : 0) + (medUp ? 1 : 0);
     const float sz = 42.0f, gap = 8.0f;
     Rectangle bar = { 166.0f, y - 6.0f, n * sz + (n - 1) * gap + 18.0f, sz + 12.0f };
     g_beltRect = bar; g_beltDrawnAt = GetTime(); UIRegister(bar);
@@ -10605,6 +10676,20 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     }
     if (provoUp) {
         if (slot(bk, s.bardCd <= 0.0f, 0, [&](Rectangle r) { note(r, Color{ 255, 120, 90, 255 }, "Provoke"); })) { PlaySfx(SfxId::Click); BardProvoke(s); }
+        bk++;
+    }
+    if (medUp) { // a calm blue lotus: Meditate
+        if (slot(bk, true, 0, [&](Rectangle r) {
+                float cx = r.x + r.width / 2, cy = r.y + r.height / 2 - 3;
+                float glow = g_meditating ? 0.45f + 0.2f * sinf((float)GetTime() * 3.0f) : 0.2f;
+                DrawCircleV({ cx, cy }, 16.0f, Fade(Color{ 120, 160, 255, 255 }, glow));
+                for (int i = -1; i <= 1; i++) DrawEllipse((int)(cx + i * 7), (int)cy + (i ? 2 : -2), 4.5f, 9.0f, Color{ 170, 200, 255, 255 });
+                DrawRectangleRec({ cx - 10, cy + 8, 20, 3 }, Color{ 120, 150, 220, 255 });
+                DrawUIText(g_meditating ? "Stop" : "Meditate", (int)r.x + 2, (int)(r.y + r.height - 14), 10, Color{ 220, 230, 255, 255 }); })) {
+            PlaySfx(SfxId::Click);
+            g_meditating = !g_meditating; g_medTrainT = 0.0f;
+            s.logLine = g_meditating ? "You clear your mind and meditate - mana returns much faster." : "You stop meditating.";
+        }
         bk++;
     }
 }
@@ -15678,7 +15763,7 @@ static bool ExploreHeaderCollapsed(const GameState& s) {
 }
 static const Rectangle kCompactMenuBtn = { 20, 56, 104, 40 };
 static Rectangle CompactMenuPanelRect(bool inDungeon) {
-    return { 12, 104, 336, inDungeon ? 440.0f : 414.0f }; // (2026-09-27) + Cloud/Reset row; (2026-09-28) + Treasure maps
+    return { 12, 104, 336, inDungeon ? 332.0f : 252.0f }; // (2026-09-28) four merged rows (+ the Magery escape in a dungeon)
 }
 static bool ExploreMenuPointInUI(Vector2 m, const GameState& s) {
     if (!ExploreHeaderCollapsed(s)) return false;
@@ -19573,17 +19658,18 @@ static void WyrmTick(GameState& s, float dt) {
         float before = s.wyrmRespawnT;
         s.wyrmRespawnT -= dt;
         if (before > 180.0f && s.wyrmRespawnT <= 180.0f) {
-            s.rivalBanner = "The ground shakes in the south-east...";
-            s.rivalBannerTimer = kRivalBannerTime;
+            if (!s.optHideWyrm) { s.rivalBanner = "The ground shakes in the south-east..."; s.rivalBannerTimer = kRivalBannerTime; }
             Journal(s, "The ground shakes. Something vast stirs in the Cinder Caldera, far south-east - follow the orange arrow (3 minutes).");
         }
         if (s.wyrmRespawnT <= 0.0f) {
             s.wyrmRespawnT = 0.0f; s.wyrmHp = -1.0f; g_wyrmHeadsSeen = 3; g_wyrmCd[0] = 6.0f; g_wyrmCd[1] = 9.0f; g_wyrmCd[2] = 12.0f;
-            s.rivalBanner = "Vyrathax the Tri-Wyrm has awakened!";
-            s.rivalBannerTimer = kRivalBannerTime * 1.4f;
-            s.logLine = "Vyrathax the Tri-Wyrm has awakened in the Cinder Caldera (far south-east)! Bring friends.";
-            Journal(s, s.logLine);
-            PlaySfx(SfxId::Hunt);
+            if (!s.optHideWyrm) {
+                s.rivalBanner = "Vyrathax the Tri-Wyrm has awakened!";
+                s.rivalBannerTimer = kRivalBannerTime * 1.4f;
+                s.logLine = "Vyrathax the Tri-Wyrm has awakened in the Cinder Caldera (far south-east)! Bring friends.";
+                PlaySfx(SfxId::Hunt);
+            }
+            Journal(s, "Vyrathax the Tri-Wyrm has awakened in the Cinder Caldera (far south-east)! Bring friends.");
         }
         s.wildSpotRespawn[kWyrmSpot] = std::max(0.0f, s.wyrmRespawnT);
     } else if (s.wildSpotRespawn[kWyrmSpot] > 0.0f) { // it fell (the usual death code set a respawn)
@@ -21629,7 +21715,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         DrawPromptLabel(prompt, screenW, screenH); // (2026-09-27) readability
     }
     DrawFloatTexts3D(s, c, 1, screenW, screenH); // combat feel: damage numbers / MISS
-    DrawUIText(TextFormat("%s - 3D view: drag to orbit, wheel to zoom. [V] toggles 2D.",
+    DrawUIText(TextFormat("%s - 3D view: drag to orbit, wheel to zoom.",
                           kDungeons[di].name.c_str()),
                20, 196, 12, Color{ 200, 180, 150, 255 });
 }
@@ -23041,6 +23127,36 @@ static Vector2 InteriorCameraTopLeft(Vector2 playerPos) {
 }
 
 // --- 2D interior render: top-down room clipped to the viewport ---
+// #59 (2026-09-28): crafting stations announce themselves - a floating sign
+// over each one, a pulsing ring on the floor once you're close enough to use
+// it, and the verb on the interact button ("Smith at the Anvil").
+static const char* InteriorStationVerb(const std::string& room, const InteriorPropDef& p) {
+    if (!p.action) return nullptr;
+    std::string a = p.action;
+    static const char* kVerb[4] = { "Smith", "Build", "Sew", "Brew" };
+    if (a.rfind("craft", 0) == 0 && a.size() == 6) { int m = a[5] - '0'; return m >= 0 && m < 4 ? kVerb[m] : "Craft"; }
+    if (a != "panel") return nullptr;
+    if (room == "smith") return kVerb[0];
+    if (room == "carpenter") return kVerb[1];
+    if (room == "tailor") return kVerb[2];
+    if (room == "alchemy") return kVerb[3];
+    return nullptr;
+}
+static void DrawStationSign(Vector2 at, const char* verb, const char* label, bool inRange) {
+    float t = (float)GetTime();
+    at.y += sinf(t * 2.4f) * 3.0f;
+    std::string top = inRange ? std::string("Tap to ") + (char)tolower(verb[0]) + (verb + 1) : std::string(verb) + " here";
+    int fs = 14, fs2 = 11;
+    int w = std::max(MeasureText(top.c_str(), fs), MeasureText(label, fs2)) + 20;
+    Rectangle r = { at.x - w / 2.0f, at.y - 40, (float)w, 36 };
+    Color gold = Color{ 255, 200, 90, 255 };
+    DrawRectangleRounded(r, 0.35f, 6, Fade(Color{ 30, 22, 14, 255 }, inRange ? 0.92f : 0.78f));
+    DrawRectangleRoundedLines(r, 0.35f, 6, inRange ? Fade(gold, 0.6f + 0.4f * sinf(t * 6.0f)) : Fade(gold, 0.55f));
+    DrawTriangle({ at.x - 6, r.y + r.height }, { at.x, r.y + r.height + 7 }, { at.x + 6, r.y + r.height }, Fade(Color{ 30, 22, 14, 255 }, 0.85f));
+    DrawUIText(top.c_str(), (int)(at.x - MeasureText(top.c_str(), fs) / 2), (int)r.y + 4, fs, inRange ? gold : WHITE);
+    DrawUIText(label, (int)(at.x - MeasureText(label, fs2) / 2), (int)r.y + 21, fs2, Fade(WHITE, 0.75f));
+}
+
 static void DrawInterior2D(GameState& s, int screenW, int screenH,
                            const InteriorRoomDef& room,
                            const std::vector<InteriorPropDef>& props,
@@ -23097,6 +23213,14 @@ static void DrawInterior2D(GameState& s, int screenW, int screenH,
         int lw = MeasureText(p.label, 11);
         DrawUIText(p.label, (int)sp.x - lw / 2, (int)(sp.y + p.sh / 2) + 3, 11,
                    hl ? WHITE : Fade(BLACK, 0.65f));
+    }
+    for (auto& p : props) { // station signs on top of every prop
+        const char* verb = InteriorStationVerb(s.interiorKey, p);
+        if (!verb) continue;
+        Vector2 sp = WorldToScreen({ p.x, p.y }, cam);
+        bool hl = nearest == &p && !npcNearest;
+        if (hl) DrawCircleLinesV(sp, std::max(p.sw, p.sh) * 0.7f + 6 + 3 * sinf((float)GetTime() * 5), Color{ 255, 200, 90, 255 });
+        DrawStationSign({ sp.x, sp.y - p.sh / 2 - 4 }, verb, p.label, hl);
     }
     // Static shop NPC, if any.
     if (npc) {
@@ -23237,7 +23361,8 @@ static void DrawInteriorNPCs3D(const std::vector<InteriorNPCDef>& npcs) {
 
 static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
                                 const std::vector<InteriorPropDef>& props,
-                                const std::vector<InteriorNPCDef>& npcs, int screenW, int screenH, bool uiOpen) {
+                                const std::vector<InteriorNPCDef>& npcs, int screenW, int screenH, bool uiOpen,
+                                const InteriorPropDef* nearest) {
     (void)room;
     if (IsKeyPressed(KEY_C)) g_t3dFollowMode = !g_t3dFollowMode;
     Town3DPinchZoom(kInt3DDistMin, kInt3DDistMax);
@@ -23301,7 +23426,24 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
                         Color{ 240, 210, 180, 255 }, pa, false);
     }
     DrawInteriorGlows(props, cam3d, night);
+    for (auto& p : props) { // the station you can use glows on the floor
+        if (nearest != &p || !InteriorStationVerb(s.interiorKey, p)) continue;
+        float pr = std::max(std::max(p.bw, p.bh), 30.0f) * 0.7f + 10.0f, t = (float)GetTime();
+        for (int k = 0; k < 3; k++) {
+            float ph = fmodf(t * 0.8f + k / 3.0f, 1.0f);
+            DrawCircle3D({ p.x - hw, 1.5f, p.y - hh }, pr + ph * 18.0f, { 1, 0, 0 }, 90.0f, Fade(Color{ 255, 200, 90, 255 }, 1.0f - ph));
+        }
+    }
     EndMode3D();
+    BeginScissorMode((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height);
+    for (auto& p : props) { // floating signs over every crafting station
+        const char* verb = InteriorStationVerb(s.interiorKey, p);
+        if (!verb) continue;
+        Vector3 top = { p.x - hw, 62.0f + p.yOff, p.y - hh };
+        if (T3VDot(T3VSub(top, cam3d.position), T3VSub(cam3d.target, cam3d.position)) <= 0) continue;
+        DrawStationSign(GetWorldToScreen(top, cam3d), verb, p.label, nearest == &p);
+    }
+    EndScissorMode();
 }
 
 // Runs one E/tap interaction. Returns true when it left the interior.
@@ -23988,7 +24130,11 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
     }
     std::string label, prompt;
     if (npcNearest) label = "Greet " + std::string(npc->name);
-    else if (nearest) label = (std::string(nearest->action) == "exit") ? "Exit" : nearest->label;
+    else if (nearest) {
+        const char* verb = InteriorStationVerb(s.interiorKey, *nearest);
+        label = (std::string(nearest->action) == "exit") ? "Exit"
+              : verb ? std::string(verb) + " at the " + nearest->label : std::string(nearest->label);
+    }
     bool inRange = !label.empty();
     if (inRange) prompt = "[E] " + label;
 
@@ -24005,7 +24151,7 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
         if (inRange && IsKeyPressed(KEY_E) && InteriorDoInteract(s, nearest, npcNearest)) return;
     }
 
-    if (s.interior3DView) DrawInterior3DWorld(s, *room, props, npcs, screenW, screenH, uiOpen);
+    if (s.interior3DView) DrawInterior3DWorld(s, *room, props, npcs, screenW, screenH, uiOpen, npcNearest ? nullptr : nearest);
     else DrawInterior2D(s, screenW, screenH, *room, props, prompt, nearest, npcNearest, npc);
 
     if (!(home && g_hdOn)) DrawVirtualJoystick();
@@ -24015,8 +24161,6 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
 
     // Title + view/camera buttons (same placement language as the town HUD).
     DrawInfoLine(TileNameFor(s.interiorKey).c_str(), 20, 118, 14);
-    if (!s.interior3DView && Button({ 452, 120, 68, 30 }, "3D [V]", true)) // (2026-09-27) 2D is legacy: only the way back
-        s.interior3DView = !s.interior3DView;
     if (s.interior3DView && Button({ 528, 120, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
         g_t3dFollowMode = !g_t3dFollowMode;
 
@@ -24472,7 +24616,6 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     // at nodes in the wilds, and the Settlement brings resources in while you're away.
     (void)canGather;
     // 3D view toggle (2026-09-24 milestone) - same view switch as the V key below.
-    if (!s.town3DView && Button({ 452, 120, 68, 30 }, "3D [V]", true)) s.town3DView = true; // (2026-09-27) 2D is legacy
     // Camera mode button (2026-09-24): Diablo-style follow is the 3D default;
     // C key or this button switches back to the old free-orbit camera.
     // (2026-09-27) the camera-mode button hung off the screen edge; the C key still switches it
@@ -25761,7 +25904,7 @@ static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
         const DungeonDef& dungeon = kDungeons[dm.dungeonIdx];
         if (s.dungeonXP[dm.dungeonIdx] >= dungeon.bossUnlockXp &&
             s.dungeonXP[dm.dungeonIdx] - dm.level < dungeon.bossUnlockXp)
-            msg += " " + dungeon.boss.name + " is now available!";
+            { if (!s.optHideDungeonBoss) msg += " " + dungeon.boss.name + " is now available!"; else Journal(s, dungeon.boss.name + " is now available."); }
     }
     LiveMaybeGainMagicResist(s);
     Journal(s, msg); // kills resolve into the event journal
@@ -28591,6 +28734,7 @@ static void CastLiveDebuffSpell(GameState& s, int spellIdx, int zone) {
 static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
     if (spellIdx < 0 || spellIdx >= (int)kSpells.size()) return;
     RevealFromHiding(s, ""); // spellcasting gives you away (2026-09-28)
+    g_meditating = false;     // ...and ends a meditation
     const Spell& spell = kSpells[spellIdx];
     // UO-style travel: Recall never casts directly - the hotbar/Magic/R-key paths
     // open the town picker instead (costs are paid on destination select).
@@ -31033,7 +31177,6 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     DrawJournalUI(s, JournalWildButtonRect(), true);
 
     // 3D view toggle (2026-09-24, Phase 1) - same view switch as the V key below.
-    if (!s.wild3DView && Button({ 452, 120, 68, 30 }, "3D [V]", true)) s.wild3DView = true; // (2026-09-27) 2D is legacy
     // Camera mode button (2026-09-24): Diablo-style follow is the 3D default;
     // C key or this button switches back to the old free-orbit camera.
     if (s.wild3DView && Button({ 528, 120, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
@@ -31090,6 +31233,7 @@ static float g_resetArmedTimer = 0.0f; // >0 while the Reset button is armed, wa
 static bool g_warOpen = false;         // the War Week screen (over the House screen)
 static int g_guildTab = 0; // the Guild screen's tab: 0 Overview, 1 Wars, 2 Members, 3 Guildmates (2026-09-28)
 static bool g_tmapOpen = false;        // the Treasure maps screen (over the House screen, 2026-09-28)
+static bool g_optOpen = false;         // the Options screen (over the House screen, 2026-09-28)
 static void OpenWarWeek(GameState& s); // (2026-09-27) defined with the Guildstone
 // Tap to walk (2026-09-27): a pulsing gold ring on the ground where you're headed.
 static void DrawWalkMarker(const GameState& s) {
@@ -31146,23 +31290,94 @@ static void DrawWalkMarker(const GameState& s) {
     Vector2 c;
     if (Town3DProject(g_hudCam, { g_walkTarget.x, g_walkY + 2.0f, g_walkTarget.y }, &c)) DrawCircleV(c, 3.5f, Color{ 255, 214, 110, 230 });
 }
+// ---- Merged menu groups (2026-09-28) ----------------------------------------
+// Me & Skills / Craft, Magic, Pets / Bank & House / Help & Save. The MENU opens a
+// group; the tab strip right of "> Play" moves between that group's pages.
+static Screen g_menuGroupLast[3] = { Screen::Character, Screen::Craft, Screen::Bank };
+static int MenuGroupOf(Screen sc) {
+    if (sc == Screen::Character || sc == Screen::Skills) return 0;
+    if (sc == Screen::Craft || sc == Screen::Magic || sc == Screen::Pets) return 1;
+    if (sc == Screen::Bank || sc == Screen::House) return 2;
+    if (sc == Screen::Guide) return 3;
+    return -1;
+}
+static void MenuGoScreen(GameState& s, Screen t) {
+    if (t == Screen::Craft) GuardZoneConfiscateIfMurderer(s, t);
+    s.screen = t;
+    if (t == Screen::House) { g_warOpen = false; g_tmapOpen = false; g_optOpen = false; }
+    int g = MenuGroupOf(t);
+    if (g >= 0 && g < 3 && MenuGroupOf(s.screen) == g) g_menuGroupLast[g] = s.screen;
+}
+static bool MenuGroupTab(Rectangle r, const char* label, bool active, bool enabled) {
+    if (!active) return Button(r, label, enabled);
+    UIRegister(r);
+    DrawRectangleRounded(r, 0.3f, 6, Color{ 70, 50, 30, 255 });
+    DrawRectangleRoundedLines(r, 0.3f, 6, Color{ 255, 200, 90, 255 });
+    DrawRectangle((int)(r.x + 10), (int)(r.y + r.height - 5), (int)(r.width - 20), 3, Color{ 255, 200, 90, 255 });
+    int fs = 15, w = MeasureText(label, fs);
+    DrawUIText(label, (int)(r.x + (r.width - w) / 2), (int)(r.y + (r.height - fs) / 2), fs, Color{ 255, 226, 160, 255 });
+    return false;
+}
+static void DrawMenuGroupTabs(GameState& s) {
+    int g = MenuGroupOf(s.screen);
+    if (g < 0 || (s.screen == Screen::House && (g_warOpen || g_tmapOpen || g_optOpen))) return;
+    if (g < 3) g_menuGroupLast[g] = s.screen;
+    bool en = !s.combat.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f;
+    const float x0 = 230, y = 56, h = 40, right = 540.0f - 8; // kScreenW
+    struct T { const char* l; Screen sc; };
+    std::vector<T> tabs;
+    if (g == 0) tabs = { { "Me", Screen::Character }, { "Skills", Screen::Skills } };
+    else if (g == 1) tabs = { { "Craft", Screen::Craft }, { "Magic", Screen::Magic }, { "Pets", Screen::Pets } };
+    else if (g == 2) tabs = { { "Bank", Screen::Bank }, { "House", Screen::House } };
+    else tabs = { { "Help", Screen::Guide } };
+    int n = (int)tabs.size() + (g == 3 ? 2 : 0);
+    float w = (right - x0 - 4.0f * (n - 1)) / n;
+    for (int i = 0; i < (int)tabs.size(); i++) {
+        Rectangle r = { x0 + i * (w + 4), y, w, h };
+        if (MenuGroupTab(r, tabs[(size_t)i].l, s.screen == tabs[(size_t)i].sc, en)) MenuGoScreen(s, tabs[(size_t)i].sc);
+    }
+    if (g == 3) { // Help & Save: the cloud save and the character reset live with Help
+        Rectangle cb = { x0 + (w + 4), y, w, h }, rb = { x0 + 2 * (w + 4), y, w, h };
+#ifdef __EMSCRIPTEN__
+        int cs = JS_CloudState();
+        if (Button(cb, "Cloud save", cs > 0)) JS_CloudOpen();
+        if (cs > 0) {
+            Color dot = cs == 2 ? Color{ 90, 200, 110, 255 } : cs == 3 ? Color{ 120, 170, 255, 255 }
+                      : cs == 4 ? Color{ 240, 170, 60, 255 } : Color{ 150, 150, 150, 255 };
+            DrawCircle((int)(cb.x + cb.width - 10), (int)cb.y + 10, 5.0f, dot);
+        }
+#else
+        Button(cb, "Cloud save", false);
+#endif
+        bool armed = g_resetArmedTimer > 0.0f;
+        if (armed) DrawRectangleRounded({ rb.x - 3, rb.y - 3, rb.width + 6, rb.height + 6 }, 0.35f, 6, Fade(RED, 0.5f));
+        if (Button(rb, armed ? "Sure? Tap" : "Reset", !s.combat.has_value())) {
+            if (armed) {
+                ResetGame(s); g_resetArmedTimer = 0.0f;
+#ifdef __EMSCRIPTEN__
+                JS_CloudOnReset();
+#endif
+            } else g_resetArmedTimer = 3.0f;
+        }
+    }
+}
 static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
     g_uiShieldBypass = true; // this panel's own buttons sit inside the shield
-    { // (2026-09-27) readable over the world: dark plate, light text, HP and mana
-        DrawRectangleRounded({ 228, 52, 150, 50 }, 0.25f, 6, Fade(Color{ 20, 14, 10, 255 }, 0.74f));
-        DrawUIText(TextFormat("HP %d/%d", s.hp, s.maxHp), 236, 55, 14, Color{ 246, 236, 212, 255 });
-        std::string mt = TextFormat("MP %.0f", s.mana);
-        DrawUIText(mt.c_str(), 370 - MeasureUIText(mt.c_str(), 12), 57, 12, Color{ 170, 195, 255, 255 });
-        Rectangle mb = { 236, 93, 134, 5 };
+    if (IsPlayScreen(s.screen)) { // HP and mana (2026-09-28, #58): down beside the hotbar, where your eyes are in a fight
+        const float px = 8, py = kViewport.y + kViewport.height - 88, pw = 152, ph = 78;
+        UIRegister({ px, py, pw, ph }); // a tap on it never walks
+        DrawRectangleRounded({ px, py, pw, ph }, 0.2f, 6, Fade(Color{ 20, 14, 10, 255 }, 0.78f));
+        DrawRectangleRoundedLines({ px, py, pw, ph }, 0.2f, 6, Fade(Color{ 214, 170, 90, 255 }, 0.6f));
+        float hpPct = std::clamp((float)s.hp / (float)std::max(1, s.maxHp), 0.0f, 1.0f);
+        DrawUIText(TextFormat("HP %d/%d", s.hp, s.maxHp), (int)px + 9, (int)py + 7, 15, hpPct > 0.3f ? Color{ 246, 236, 212, 255 } : Color{ 255, 150, 130, 255 });
+        Rectangle hb = { px + 9, py + 28, pw - 18, 13 };
+        DrawRectangleRec(hb, Fade(BLACK, 0.55f));
+        DrawRectangleRec({ hb.x, hb.y, hb.width * hpPct, hb.height }, hpPct > 0.3f ? Color{ 70, 150, 70, 255 } : Color{ 190, 50, 44, 255 });
+        std::string mt = TextFormat("MP %.0f/%.0f", s.mana, MaxMana(s));
+        DrawUIText(mt.c_str(), (int)px + 9, (int)py + 46, 12, Color{ 170, 195, 255, 255 });
+        Rectangle mb = { px + 9, py + 63, pw - 18, 7 };
         DrawRectangleRec(mb, Fade(BLACK, 0.55f));
         DrawRectangleRec({ mb.x, mb.y, mb.width * std::clamp(s.mana / std::max(1.0f, MaxMana(s)), 0.0f, 1.0f), mb.height }, Color{ 80, 120, 220, 255 });
-    }
-    {
-        Rectangle dhpBg = { 236, 78, 134, 12 };
-        DrawRectangleRec(dhpBg, Fade(BLACK, 0.55f));
-        float dhpPct = std::clamp((float)s.hp / (float)std::max(1, s.maxHp), 0.0f, 1.0f);
-        DrawRectangleRec({ dhpBg.x, dhpBg.y, dhpBg.width * dhpPct, dhpBg.height },
-                         dhpPct > 0.3f ? Color{ 63, 94, 63, 255 } : Color{ 122, 46, 46, 255 });
     }
     if (open) {
         Rectangle panel = CompactMenuPanelRect(inDungeon);
@@ -31183,57 +31398,30 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         bool tabsEnabled = !s.combat.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f;
         std::string townLabel = "Back to game"; // (2026-09-27) was the town's name - it teleported you home from the wilds
         float bx0 = 24.0f, bx1 = 188.0f;
-        if (Button({ bx0, by, 152, 40 }, "Me (gear & bag)", tabsEnabled)) { s.screen = Screen::Character; open = false; }
+        // (2026-09-28) Four merged groups; each opens its first (or last used)
+        // page, and a tab strip beside MENU flips between the group's pages.
+        if (Button({ bx0, by, 152, 40 }, "Me & Skills", tabsEnabled)) { MenuGoScreen(s, g_menuGroupLast[0]); open = false; }
         if (Button({ bx1, by, 152, 40 }, townLabel, tabsEnabled)) { s.screen = g_playScreen; open = false; }
         by += 48;
-        if (Button({ bx0, by, 152, 40 }, "Craft", tabsEnabled)) {
-            Screen target = Screen::Craft;
-            GuardZoneConfiscateIfMurderer(s, target);
-            s.screen = target; open = false;
-        }
-        if (Button({ bx1, by, 152, 40 }, "Magic", tabsEnabled)) { s.screen = Screen::Magic; open = false; }
+        if (Button({ bx0, by, 152, 40 }, "Craft, Magic, Pets", tabsEnabled)) { MenuGoScreen(s, g_menuGroupLast[1]); open = false; }
+        if (Button({ bx1, by, 152, 40 }, "Bank & House", tabsEnabled)) { MenuGoScreen(s, g_menuGroupLast[2]); open = false; }
         by += 48;
-        if (Button({ bx0, by, 152, 40 }, "Pets", tabsEnabled)) { s.screen = Screen::Pets; open = false; }
-        if (Button({ bx1, by, 152, 40 }, "Bank", tabsEnabled)) { s.screen = Screen::Bank; open = false; }
-        by += 48;
-        if (Button({ bx0, by, 152, 40 }, "House", tabsEnabled)) { s.screen = Screen::House; open = false; g_warOpen = false; g_tmapOpen = false; }
-        if (Button({ bx1, by, 152, 40 }, "Skills", tabsEnabled)) { s.screen = Screen::Skills; open = false; }
-        by += 48;
-        if (Button({ bx0, by, 152, 40 }, "Help", tabsEnabled)) { s.screen = Screen::Guide; s.guidePage = 0; open = false; }
-        { // save & reset (2026-09-27: moved here from the old header)
-            float ry = by + 48;
-            bool armed = g_resetArmedTimer > 0.0f;
-            if (Button({ bx1, by, 152, 40 }, armed ? "Tap again to RESET" : "Reset character", !s.combat.has_value())) {
-                if (armed) {
-                    ResetGame(s); g_resetArmedTimer = 0.0f; open = false;
-#ifdef __EMSCRIPTEN__
-                    JS_CloudOnReset();
-#endif
-                } else g_resetArmedTimer = 3.0f;
-            }
-#ifdef __EMSCRIPTEN__
-            int cs = JS_CloudState();
-            if (cs > 0) {
-                Rectangle cb = { bx0, ry, 152, 40 };
-                if (Button(cb, "Cloud save", true)) JS_CloudOpen();
-                Color dot = cs == 2 ? Color{ 90, 200, 110, 255 } : cs == 3 ? Color{ 120, 170, 255, 255 }
-                          : cs == 4 ? Color{ 240, 170, 60, 255 } : Color{ 150, 150, 150, 255 };
-                DrawCircle((int)(cb.x + cb.width - 10), (int)cb.y + 10, 5.0f, dot);
-            }
-#endif
-            if (Button({ bx1, ry, 152, 40 }, "Guild", tabsEnabled)) { s.screen = Screen::House; OpenWarWeek(s); g_guildTab = 0; open = false; }
-            if (Button({ bx0, ry + 48, 312, 40 }, s.tmaps.empty() ? "Treasure maps" : TextFormat("Treasure maps (%d)", (int)s.tmaps.size()), tabsEnabled)) {
-                s.screen = Screen::House; g_tmapOpen = true; g_warOpen = false; open = false; // (2026-09-28)
-            }
+        if (Button({ bx0, by, 152, 40 }, "Guild", tabsEnabled)) { s.screen = Screen::House; OpenWarWeek(s); g_guildTab = 0; open = false; }
+        if (Button({ bx1, by, 152, 40 }, s.tmaps.empty() ? "Treasure maps" : TextFormat("Maps (%d)", (int)s.tmaps.size()), tabsEnabled)) {
+            s.screen = Screen::House; g_tmapOpen = true; g_warOpen = false; g_optOpen = false; open = false; // (2026-09-28)
         }
         by += 48;
-        by += 48; // the Treasure maps row (2026-09-28)
+        if (Button({ bx0, by, 152, 40 }, "Help & Save", tabsEnabled)) { MenuGoScreen(s, Screen::Guide); s.guidePage = 0; open = false; }
+        if (Button({ bx1, by, 152, 40 }, "Options", true)) {
+            s.screen = Screen::House; g_optOpen = true; g_tmapOpen = false; g_warOpen = false; open = false; // (2026-09-28)
+        }
+        by += 48;
         if (inDungeon) {
             // UO-style travel (2026-09-25): magery escape. Allowed mid-fight -
             // the 3s cast breaks on damage, so it can't blank a boss mid-swing.
             by += 48;
             bool canLeave = !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && s.leaveDungT < 0.0f;
-            if (Button({ 24, by, 312, 40 }, "Leave Dungeon (Magery)", canLeave)) TryStartLeaveDungeon(s);
+            if (Button({ 24, by - 48, 312, 40 }, "Leave Dungeon (Magery)", canLeave)) TryStartLeaveDungeon(s);
         }
     }
     if (Button(kCompactMenuBtn, open ? "HIDE" : "MENU", true)) open = !open;
@@ -31242,6 +31430,7 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         DrawRectangleRounded({ pb.x - 3, pb.y - 3, pb.width + 6, pb.height + 6 }, 0.35f, 6,
                              Fade(Color{ 255, 196, 70, 255 }, 0.5f + 0.25f * sinf((float)GetTime() * 3.0f)));
         if (Button(pb, "> Play", !s.playerIsGhost || true)) s.screen = g_playScreen;
+        DrawMenuGroupTabs(s);
     }
     g_uiShieldBypass = false;
 }
@@ -31545,7 +31734,6 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // 3D dungeon view toggle (2026-09-24, Phase 2) - same V-key/button switch as
     // the Town/Wilderness views. Only the explorable arena below goes 3D; the
     // picker tabs, combat panel, and HUD stay 2D.
-    if (!s.hunt3DView && Button({ 452, 116, 68, 30 }, "3D [V]", true)) s.hunt3DView = true; // (2026-09-27) 2D is legacy
     // Camera mode button (2026-09-24): Diablo-style follow is the 3D default;
     // C key or this button switches back to the old free-orbit camera.
     if (s.hunt3DView && Button({ 528, 116, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
@@ -32611,7 +32799,15 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
     float skillVal = s.buildingSkill[s.craftBuildingTab];
     DrawInfoLine(TextFormat("Skill: %.1f  (workshop cap: %d)", skillVal, buildingCap), 20, y, 13,
               kColorText);
-    y += 20;
+    { // what you have to work with (2026-09-28, #61)
+        int have = isAlchemy ? s.reagents : b.resource == Resource::Wood ? s.wood : b.resource == Resource::Ore ? s.ore : s.leather;
+        const char* what = isAlchemy ? "reagents" : b.resource == Resource::Wood ? "wood" : b.resource == Resource::Ore ? "ore" : "leather";
+        std::string h = TextFormat("You have %d %s", have, what);
+        int hw = MeasureUIText(h.c_str(), 15);
+        DrawRectangleRounded({ (float)screenW - 28 - hw, (float)y - 5, (float)hw + 16, 24 }, 0.4f, 6, Fade(Color{ 214, 170, 90, 255 }, 0.35f));
+        DrawUIText(h.c_str(), screenW - 20 - hw, y - 1, 15, kColorHeading);
+    }
+    y += 22;
 
     // --- Scrollable recipe list ---
     int listTop = y;
@@ -32631,8 +32827,9 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
         if (isAlchemy) {
             std::string line = TextFormat("%s  (req %d, %d reagents, %s %d)", r.name.c_str(), r.reqSkill,
                                             r.cost, r.category.c_str(), r.power);
-            DrawUIText(line.c_str(), 20, (int)rowY + 6, 12, kColorText);
             bool canAfford = s.reagents >= r.cost;
+            DrawUIText(line.c_str(), 20, (int)rowY + 6, 12, canAfford && skillOk ? kColorText : Fade(kColorText, 0.5f));
+            if (!canAfford) DrawUIText(TextFormat("need %d more", r.cost - s.reagents), screenW - 180, (int)rowY + 6, 12, Color{ 170, 50, 40, 255 });
             if (Button({ (float)(screenW - 90), rowY, 70, 24 }, "Brew", skillOk && canAfford))
                 TryCraftPotion(s, (int)i);
         } else {
@@ -32643,9 +32840,10 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
                 ? TextFormat("%s  (req %d, %d %s, clothing)", r.name.c_str(), r.reqSkill, r.cost, resName.c_str())
                 : TextFormat("%s  (req %d, %d %s, %d %s)", r.name.c_str(), r.reqSkill,
                                             r.cost, resName.c_str(), r.power, r.type == ItemType::Armor ? "def" : "pwr");
-            DrawUIText(line.c_str(), 20, (int)rowY + 6, 12, kColorText);
             int haveResource = b.resource == Resource::Wood ? s.wood : b.resource == Resource::Ore ? s.ore : s.leather;
             bool canAfford = haveResource >= r.cost;
+            DrawUIText(line.c_str(), 20, (int)rowY + 6, 12, canAfford && skillOk ? kColorText : Fade(kColorText, 0.5f)); // (2026-09-28, #61)
+            if (!canAfford) DrawUIText(TextFormat("need %d more", r.cost - haveResource), screenW - 180, (int)rowY + 6, 12, Color{ 170, 50, 40, 255 });
             bool roomInBackpack = (int)s.backpack.size() < BackpackCap(s);
             if (Button({ (float)(screenW - 90), rowY, 70, 24 }, "Craft", skillOk && canAfford && roomInBackpack))
                 TryCraftItem(s, s.craftBuildingTab, (int)i);
@@ -33128,8 +33326,9 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
             std::string nm = sp.name;
             while (MeasureUIText(nm.c_str(), 14) > pr.width - (tx - pr.x) - 8 && nm.size() > 4) nm = nm.substr(0, nm.size() - 2) + ".";
             DrawUIText(nm.c_str(), (int)tx, (int)y + 5, 14, known ? ink : Fade(ink, 0.45f));
-            std::string info = TextFormat("%d mana%s", sp.manaCost, SpellNeedsCorpse(idx) ? " - corpse" : "");
+            std::string info = SpellEffectLine(s, idx);
             DrawUIText(info.c_str(), (int)tx, (int)y + 24, 11, inkSoft);
+            if (!pickerOpen && g_spellInfo < 0 && UOTapped(ic)) { g_spellInfo = idx; g_spellInfoAt = GetTime(); PlaySfx(SfxId::Click); } // tap the icon: the full card
             if (!known) {
                 DrawUIText(TextFormat("Needs %d %s", sp.minSkill, sp.necro ? "Necromancy" : sp.chiv ? "Chivalry" : "Magery"), (int)tx, (int)y + 40, 11, Color{ 150, 60, 40, 255 });
                 continue;
@@ -33155,6 +33354,29 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
     if (corner(pageR[0], true, spread > 0)) { spread--; PlaySfx(SfxId::Click); }
     if (corner(pageR[1], false, spread < spreads - 1)) { spread++; PlaySfx(SfxId::Click); }
 
+    if (g_spellInfo >= 0 && g_spellInfo < (int)kSpells.size()) { // the spell card (2026-09-28, #62)
+        const Spell& sp = kSpells[(size_t)g_spellInfo];
+        Rectangle C = { 30, cover.y + cover.height - 250, (float)screenW - 60, 200 };
+        UODrawGump(C, kUoParchment);
+        bool fresh = GetTime() - g_spellInfoAt < 0.25; // the opening tap mustn't also close it
+        if (UOCloseButton(C) || (!fresh && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(GetMousePosition(), C))) g_spellInfo = -1;
+        else {
+            float cx = C.x + 18, cy = C.y + 16;
+            if (const Texture2D* icon = SpellIcon(g_spellInfo)) DrawTexturePro(*icon, { 0, 0, (float)icon->width, (float)icon->height }, { cx, cy, 48, 48 }, { 0, 0 }, 0.0f, WHITE);
+            const char* school = sp.necro ? "Necromancy" : sp.chiv ? "Chivalry" : "Magery";
+            DrawUIText(sp.name.c_str(), (int)cx + 60, (int)cy + 2, 17, ink);
+            DrawUIText(TextFormat("%s - circle %d - needs %d %s", school, sp.circle, sp.minSkill, school), (int)cx + 60, (int)cy + 26, 12, inkSoft);
+            cy += 62;
+            DrawUIText(kSpellDesc[std::clamp(g_spellInfo, 0, 30)], (int)cx, (int)cy, 14, ink); cy += 24;
+            int pw = SpellPowerFor(s, sp);
+            std::string amt = sp.type == SpellType::Offensive && sp.baseDamage > 0 ? TextFormat("Damage: about %d (with your skills)", pw)
+                            : sp.type == SpellType::Utility && sp.baseDamage > 0 ? TextFormat("Healing: about %d (with your skills)", pw) : "";
+            if (!amt.empty()) { DrawUIText(amt.c_str(), (int)cx, (int)cy, 13, ink); cy += 20; }
+            int reag = (sp.necro || sp.chiv) ? 0 : (g_spellInfo == kRecallSpellIdx ? sp.reagentCost : kLiveCombatReagentCost);
+            DrawUIText(TextFormat("Cost: %d mana%s", sp.manaCost, reag > 0 ? TextFormat(", %d reagent%s", reag, reag > 1 ? "s" : "") : ", no reagents"), (int)cx, (int)cy, 13, ink); cy += 20;
+            DrawUIText(TextFormat("Your chance to cast it: %d%%", (int)SpellSuccessChance(s, sp)), (int)cx, (int)cy, 13, inkSoft);
+        }
+    }
     DrawHotbarPicker(s, screenW, screenH, pickerSuppress); // over the book
     if (IsKeyPressed(KEY_R) && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f) s.recallPickerOpen = true;
     DrawRecallPicker(s, screenW, screenH);
@@ -34289,7 +34511,34 @@ static void DrawTreasureMaps(GameState& s, int screenW, int screenH) {
         if (!cur.empty()) DrawUIText(cur.c_str(), (int)x, (int)y, 13, gold);
     }
 }
+// Options (2026-09-28, #60 #75 #57): switches that are the player's taste, saved with the game.
+static void DrawOptions(GameState& s, int screenW, int screenH) {
+    Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
+    UODrawGump(G, kUoParchment);
+    UODrawTitle(G, "Options", 15);
+    const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 };
+    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_optOpen = false; return; }
+    float x = G.x + 22, y = G.y + 40, w = G.width - 44;
+    auto toggle = [&](const char* title, const char* what, bool& v) {
+        DrawUIText(title, (int)x, (int)y + 4, 15, ink);
+        DrawUIText(what, (int)x, (int)y + 26, 12, soft);
+        Rectangle b = { x + w - 90, y + 4, 90, 34 };
+        if (UOButton(b, v ? "On" : "Off")) { v = !v; PlaySfx(SfxId::Click); }
+        if (v) DrawCircleV({ b.x + 14, b.y + 17 }, 5.0f, Color{ 120, 220, 120, 255 });
+        y += 62;
+    };
+    bool showWyrm = !s.optHideWyrm, showBoss = !s.optHideDungeonBoss;
+    toggle("World boss alerts", "Vyrathax's wake-up warnings, banner and countdown.", showWyrm);
+    toggle("Dungeon boss alerts", "\"The boss is now available\" when you unlock one.", showBoss);
+    s.optHideWyrm = !showWyrm; s.optHideDungeonBoss = !showBoss;
+    toggle("Tap to walk", "Tap the ground to walk there (the stick and WASD always work).", s.optTapWalk);
+    toggle("Classic 2D view", "The old top-down view - try it if 3D runs slowly on your device.", s.optClassic2D);
+    toggle("Auto-restock reagents", "Top up to 30 reagents whenever you enter a town (1 gold each).", s.autoReagents);
+    y += 6;
+    DrawUIText("Alerts you turn off still go in your journal (LOG).", (int)x, (int)y, 12, soft);
+}
 static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
+    if (g_optOpen) { DrawOptions(s, screenW, screenH); return; }
     if (g_tmapOpen) { DrawTreasureMaps(s, screenW, screenH); return; }
     if (g_warOpen) { DrawWarWeek(s, screenW, screenH); return; }
     if (g_settleOpen) { DrawSettlement(s, screenW, screenH); return; }
@@ -34944,7 +35193,7 @@ static void DrawDirectionsHud(GameState& s, int screenW) {
     // the world boss: a countdown while it stirs, a pointer while it's awake
     bool stirring = s.wyrmRespawnT > 0.0f && s.wyrmRespawnT <= 180.0f;
     bool awake = s.wyrmRespawnT <= 0.0f;
-    if (!(stirring || awake) || s.playerIsGhost || s.worldMapOpen) return;
+    if (!(stirring || awake) || s.playerIsGhost || s.worldMapOpen || s.optHideWyrm) return;
     if (!IsPlayScreen(s.screen) && !IsMenuScreen(s.screen)) return;
     Vector2 d = { kWyrmLair.x - s.wildernessPlayerPos.x, kWyrmLair.y - s.wildernessPlayerPos.y };
     float dist = hypotf(d.x, d.y);
@@ -35133,6 +35382,11 @@ static void UpdateDrawFrame() {
         }
         WyrmTick(state, dt);   // the world boss's wake timer and heads (2026-09-27)
         WarNetTick(state, dt); // War Week: Muster minutes, online guild sync (2026-09-27)
+        g_tapWalkOn = state.optTapWalk;
+        { // (2026-09-28, #75) 3D everywhere unless Options asks for the classic 2D view
+            bool v3 = !state.optClassic2D;
+            state.town3DView = state.wild3DView = state.interior3DView = state.hunt3DView = v3;
+        }
         { // stat buffs run out; HP and mana follow the effective stats (2026-09-27)
             for (float* t : { &state.blessT, &state.strPotT, &state.agiPotT }) if (*t > 0.0f && (*t -= dt) <= 0.0f) {
                 *t = 0.0f;
@@ -35201,10 +35455,10 @@ static void UpdateDrawFrame() {
         // DrawTownScreen itself, since they need the frame's nearest-node lookup. ---
         if (!encounterPending && state.screen == Screen::Town) {
             if (IsKeyPressed(KEY_ESCAPE)) state.selectedTile.reset();
-            if (IsKeyPressed(KEY_V)) state.town3DView = !state.town3DView; // 3D town view toggle
+            if (IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D; // (2026-09-28) unadvertised: Options holds the switch
         }
         if (!encounterPending && state.screen == Screen::Wilderness) {
-            if (IsKeyPressed(KEY_V)) state.wild3DView = !state.wild3DView; // 3D wilderness view toggle
+            if (IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
             if (IsKeyPressed(KEY_M)) { // minimap toggle
                 state.worldMapOpen = false;
                 state.minimapOpen = !state.minimapOpen;
@@ -35214,7 +35468,7 @@ static void UpdateDrawFrame() {
         if (!encounterPending && state.screen == Screen::Interior) {
             // Interiors stay part of the town: V toggles the indoor 2D/3D view,
             // ESC closes a popup or steps back outside through the door.
-            if (IsKeyPressed(KEY_V)) state.interior3DView = !state.interior3DView;
+            if (IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
             if (IsKeyPressed(KEY_ESCAPE)) {
                 if (state.selectedTile.has_value() || state.interiorGreeted) {
                     state.selectedTile.reset();
@@ -35223,7 +35477,7 @@ static void UpdateDrawFrame() {
             }
         }
         if (!encounterPending && state.screen == Screen::Hunt && !state.combat.has_value()) {
-            if (IsKeyPressed(KEY_V)) state.hunt3DView = !state.hunt3DView; // 3D dungeon view toggle
+            if (IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
         }
         // --- Input: combat shortcuts, only meaningful on Hunt while fighting ---
         if (!encounterPending && state.screen == Screen::Hunt && state.combat.has_value()) {
