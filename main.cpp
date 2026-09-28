@@ -13634,7 +13634,8 @@ static HumanPose HumanPlayerPose(const GameState& s, float move, float atk, floa
 // clip changes cross-fade. The hero carries your weapon (or gathering tool)
 // in his right hand and your shield on his left arm, reusing the body kit's
 // gear models.
-enum SkinCharId { kScHero, kScOrcWarbringer, kScOrcOverlord, kScCount };
+// Characters register by file (SkinCharFor); the hero is always 0.
+enum SkinCharId { kScHero = 0 };
 enum SkinClip { kSkIdle, kSkStance, kSkWalk, kSkRun, kSkSneak, kSkSlash, kSkCombo, kSkHammer, kSkAxe, kSkBow,
                 kSkCast, kSkCastCharged, kSkParry, kSkHit, kSkDeath, kSkKneel, kSkDrink, kSkPickup, kSkCollect, kSkClipCount };
 static const char* const kSkClipNames[kSkClipCount] = {
@@ -13664,22 +13665,30 @@ struct SkinChar {
 // The hero's cloth, dyed: cloak / shirt / trousers (index 1..3). The file marks
 // those vertices; their texels are neutral grey, so the vertex colour is the dye.
 struct SkinDye { Color c[4] = { WHITE, { 73, 49, 27, 255 }, { 114, 105, 94, 255 }, { 90, 81, 68, 255 } }; };
-static SkinChar g_skinChars[kScCount];
+static std::deque<SkinChar> g_skinChars;     // (deque: pointers stay put as it grows)
+static std::vector<std::string> g_skinCharFiles = { "hero" };
+// The id of a rigged character by its file stem in assets/characters3d/.
+static int SkinCharFor(const char* stem) {
+    for (size_t i = 0; i < g_skinCharFiles.size(); i++) if (g_skinCharFiles[i] == stem) return (int)i;
+    g_skinCharFiles.push_back(stem);
+    return (int)g_skinCharFiles.size() - 1;
+}
 static SkinChar* SkinCharGet(int id) {
-    SkinChar& C = g_skinChars[id];
+    while ((int)g_skinChars.size() < (int)g_skinCharFiles.size()) g_skinChars.emplace_back();
+    if (id < 0 || id >= (int)g_skinChars.size()) return nullptr;
+    SkinChar& C = g_skinChars[(size_t)id];
     if (C.tried) return C.ok ? &C : nullptr;
     C.tried = true;
-    static const char* const files[kScCount] = { "assets/characters3d/hero.glb", "assets/characters3d/orc_warbringer.glb",
-                                                 "assets/characters3d/orc_overlord.glb" };
-    if (!FileExists(files[id])) return nullptr;
-    C.model = LoadModel(files[id]);
+    std::string file = "assets/characters3d/" + g_skinCharFiles[(size_t)id] + ".glb";
+    if (!FileExists(file.c_str())) return nullptr;
+    C.model = LoadModel(file.c_str());
     if (C.model.meshCount <= 0 || C.model.skeleton.boneCount <= 0) return nullptr;
-    C.anims = LoadModelAnimations(files[id], &C.animCount);
+    C.anims = LoadModelAnimations(file.c_str(), &C.animCount);
     for (int k = 0; k < kSkClipCount; k++) {
         C.clip[k] = -1;
         for (int a = 0; a < C.animCount; a++) if (strcmp(C.anims[a].name, kSkClipNames[k]) == 0) C.clip[k] = a;
     }
-    if (C.clip[kSkIdle] < 0 || C.clip[kSkWalk] < 0) return nullptr;
+    if (C.clip[kSkWalk] < 0) return nullptr; // (monster rigs may have only walk/run/death - see DrawSkinChar)
     for (int b = 0; b < C.model.skeleton.boneCount; b++) {
         const char* n = C.model.skeleton.bones[b].name;
         if (!strcmp(n, "RightHand")) C.handR = b;
@@ -13715,7 +13724,7 @@ static SkinChar* SkinCharGet(int id) {
         }
         // Seated pose: idle's first frame, each thigh swung forward about its
         // hip and splayed a little, each shin swung back down at the knee.
-        const ModelAnimation& idle = C.anims[C.clip[kSkIdle]];
+        const ModelAnimation& idle = C.anims[C.clip[C.clip[kSkIdle] >= 0 ? kSkIdle : kSkWalk]];
         C.sit.boneCount = nb;
         C.sit.keyframeCount = 1;
         C.sit.keyframePoses = (ModelAnimPose*)MemAlloc(sizeof(ModelAnimPose));
@@ -13740,7 +13749,7 @@ static SkinChar* SkinCharGet(int id) {
             swing(low, QuaternionFromAxisAngle({ 1, 0, 0 }, 82.0f * DEG2RAD));
         }
     }
-    UpdateModelAnimation(C.model, C.anims[C.clip[kSkIdle]], 0.0f);
+    UpdateModelAnimation(C.model, C.anims[C.clip[C.clip[kSkIdle] >= 0 ? kSkIdle : kSkWalk]], 0.0f);
     BoundingBox bb = GetModelBoundingBox(C.model);
     float h = std::max(0.001f, bb.max.y - bb.min.y);
     C.baseScale = 1.0f / h; // x the wanted height in world units
@@ -13794,6 +13803,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     SkinChar* Cp = SkinCharGet(id);
     if (!Cp) return false;
     SkinChar& C = *Cp;
+    bool skipSkin = false;
     T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
     if (shadowPass) return true; // skinned meshes skip the shadow map; blob shadow below
     { // off-screen: skip the skinning (the expensive part)
@@ -13807,8 +13817,8 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         if (maxDepth > 0.0f) {
             static double budgetT = -1.0; static int used = 0;
             if (budgetT != g_gameClock) { budgetT = g_gameClock; used = 0; }
-            if (cw > maxDepth || used >= 6) return false;
-            used++;
+            if (cw > maxDepth || used >= 6) skipSkin = true; // far off / over budget: drawn in its last pose
+            else used++;
         }
     }
     const double now = g_gameClock;
@@ -13861,6 +13871,14 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         else k = kSkIdle;
     } else if (p.kneeling && has(kSkKneel)) { k = kSkKneel; ph = 0.42f; }               // down on one knee
     else if (p.engaged && has(kSkStance)) k = kSkStance;
+    // Monster rigs (2026-09-28) come with walk, run and death only: they stand in
+    // the walk's planted frame, and lunge on the run clip for an attack.
+    float lunge = 0.0f;
+    if (!has(k)) {
+        if (attacking || casting) { lunge = sinf(std::clamp(attacking ? atkT : castT, 0.0f, 1.0f) * PI); k = has(kSkRun) ? kSkRun : kSkWalk; ph = 0.25f + 0.2f * lunge; a0 = 0.0f; a1 = 1.0f; }
+        else if (has(kSkIdle)) { k = kSkIdle; ph = -1.0f; }
+        else { k = kSkWalk; ph = 0.0f; a0 = 0.0f; a1 = 0.0f; } // standing
+    }
     int clip = C.clip[k];
     const ModelAnimation& an = C.anims[clip];
     int n = std::max(2, an.keyframeCount);
@@ -13896,7 +13914,8 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     if (st.clip != clip) { st.prevClip = st.clip; st.prevFrame = st.frame; st.switchT = now; st.clip = clip; }
     st.frame = frame;
     float fade = (float)((now - st.switchT) / 0.16);
-    if (riding) UpdateModelAnimation(C.model, C.sit, 0.0f);
+    if (skipSkin) {}
+    else if (riding) UpdateModelAnimation(C.model, C.sit, 0.0f);
     else if (runW > 0.02f) { // walk <-> run blend on the shared stride phase
         const ModelAnimation& ra = C.anims[C.clip[kSkRun]];
         float rf = st.cycle * (float)(std::max(2, ra.keyframeCount) - 1);
@@ -13921,6 +13940,14 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     float rotDeg = 90.0f - yawRad * RAD2DEG; // model faces +Z
     float baseY = -C.minY * sc;
     if (riding) baseY += p.saddle - C.hipsY * sc; // hips in the saddle
+    if (lunge > 0.0f) { // no attack clip: throw the whole body into it
+        rlPushMatrix();
+        rlTranslatef(x + cosf(yawRad) * lunge * heightW * 0.16f, baseY, z + sinf(yawRad) * lunge * heightW * 0.16f);
+        rlRotatef(rotDeg, 0, 1, 0);
+        rlRotatef(lunge * 16.0f, 1, 0, 0);
+        DrawModelEx(C.model, { 0, 0, 0 }, { 0.0f, 1.0f, 0.0f }, 0.0f, { sc, sc, sc }, tint);
+        rlPopMatrix();
+    } else
     DrawModelEx(C.model, { x, baseY, z }, { 0.0f, 1.0f, 0.0f }, rotDeg, { sc, sc, sc }, tint);
     // ---- in hand: the weapon (or the gathering tool) and the shield ----
     if (gear && g_human.ok && p.deathT < 0.0f) {
@@ -19718,24 +19745,41 @@ static void CorpseDrawGlint(const GameState::WorldCorpse& c) {
 // Textured, unrigged models (Meshy image-to-3D, shrunk for the web). They move
 // in code: a walking bob and lean (a skittering jitter for spiders), a lunge on
 // the attack, the usual hit flash, and a topple-and-sink when they die.
-struct MeshMonDef { const char* name; const char* file; float height; bool spider; float yawOff = 0.0f; }; // yawOff: models that don't face +Z
+// rig (2026-09-28): a rigged, animated version in assets/characters3d/ - drawn with
+// DrawSkinChar (walk/run/death clips); file is the static sculpt, if there is one.
+struct MeshMonDef { const char* name; const char* file; float height; bool spider; float yawOff = 0.0f; const char* rig = nullptr; }; // yawOff: models that don't face +Z
 static const MeshMonDef kMeshMons[] = {
     { "Web Spinner", "web_spinner", 38.0f, true },   { "Silk Stalker", "silk_stalker", 44.0f, true },
     { "Venom Weaver", "venom_weaver", 50.0f, true }, { "Brood Hunter", "brood_hunter", 56.0f, true },
     { "Nest Guardian", "nest_guardian", 64.0f, true }, { "The Broodmother", "spider_broodmother", 100.0f, true },
-    { "Orc Grunt", "orc_warbringer", 70.0f, false }, { "Orc Archer", "orc_warbringer", 68.0f, false },
-    { "Orc Shaman", "orc_warbringer", 68.0f, false }, { "Orc Brute", "orc_warbringer", 78.0f, false },
-    { "Orc Warlord", "orc_overlord", 88.0f, false }, { "Rock Golem", "stoneborn", 88.0f, false },
-    // (2026-09-28, #76) the Whisper Crypt, the Frostbound Tomb and the Sunken Vault's raiders
-    { "Bonewalker", "bonewalker", 68.0f, false }, { "Rotbound Corpse", "rotbound_corpse", 64.0f, false },
-    { "Gravewretch", "gravewretch", 66.0f, false }, { "Grave Warden", "grave_warden", 74.0f, false },
-    { "Crypt Sovereign", "crypt_sovereign", 82.0f, false }, { "The Whisper King", "crypt_sovereign", 104.0f, false },
-    { "Frostbite Husk", "glacier_wight", 58.0f, false }, { "Glacier Wight", "glacier_wight", 66.0f, false },
-    { "Rimebound Horror", "rimebound_horror", 80.0f, false }, { "Hoarfrost Revenant", "hoarfrost_revenant", 76.0f, false },
-    { "Winter's Maw", "winters_maw", 92.0f, false }, { "The Frostbound King", "frostbound_king", 112.0f, false },
-    { "Scalekin Raider", "scalekin_raider_scout", 64.0f, false }, // + four variants, picked per raider below
-    { "Scalekin Raider~1", "scalekin_raider_archer", 64.0f, false }, { "Scalekin Raider~2", "scalekin_raider_huntress", 64.0f, false },
-    { "Scalekin Raider~3", "scalekin_raider_shaman", 66.0f, false }, { "Scalekin Raider~4", "scalekin_raider_warlord", 72.0f, false },
+    // Rigged and animated (assets/characters3d/, 2026-09-28): Grimtusk's orcs, the
+    // Whisper Crypt, the Frostbound Tomb, the Sunken Vault's raiders and king, the
+    // Ember Depths, the Hollow, and the wild's golems, imps, husks and wraiths.
+    { "Orc Grunt", "", 70.0f, false, 0.0f, "orc_warbringer" }, { "Orc Archer", "", 68.0f, false, 0.0f, "orc_warbringer" },
+    { "Orc Shaman", "", 68.0f, false, 0.0f, "orc_warbringer" }, { "Orc Brute", "", 78.0f, false, 0.0f, "orc_warbringer" },
+    { "Orc Warlord", "", 88.0f, false, 0.0f, "orc_overlord" }, { "Rock Golem", "", 88.0f, false, 0.0f, "rock_golem" },
+    { "Bonewalker", "", 68.0f, false, 0.0f, "bonewalker" }, { "Rotbound Corpse", "", 64.0f, false, 0.0f, "rotbound_corpse" },
+    { "Gravewretch", "", 66.0f, false, 0.0f, "gravewretch" }, { "Grave Warden", "", 74.0f, false, 0.0f, "grave_warden" },
+    { "Crypt Sovereign", "", 82.0f, false, 0.0f, "crypt_sovereign" }, { "The Whisper King", "", 104.0f, false, 0.0f, "whisper_king" },
+    { "Frostbite Husk", "", 62.0f, false, 0.0f, "frostbite_husk" }, { "Frostbitten Husk", "", 62.0f, false, 0.0f, "frostbite_husk" },
+    { "Glacier Wight", "", 66.0f, false, 0.0f, "glacier_wight" },
+    { "Rimebound Horror", "", 80.0f, false, 0.0f, "rimebound_horror" }, { "Hoarfrost Revenant", "", 76.0f, false, 0.0f, "hoarfrost_revenant" },
+    { "Winter's Maw", "", 92.0f, false, 0.0f, "winters_maw" }, { "The Frostbound King", "", 112.0f, false, 0.0f, "frostbound_king" },
+    { "Scalekin Raider", "", 64.0f, false, 0.0f, "scalekin_scout" }, // + four variants, picked per raider below
+    { "Scalekin Raider~1", "", 64.0f, false, 0.0f, "scalekin_archer" }, { "Scalekin Raider~2", "", 64.0f, false, 0.0f, "scalekin_huntress" },
+    { "Scalekin Raider~3", "", 66.0f, false, 0.0f, "scalekin_shaman" }, { "Scalekin Raider~4", "", 58.0f, false, 0.0f, "scalekin_warlord" },
+    { "The Sunken King", "", 112.0f, false, 0.0f, "sunken_king" },
+    { "Cinder Imp", "", 44.0f, false, 0.0f, "cinder_imp" }, { "Lesser Imp", "", 40.0f, false, 0.0f, "cinder_imp" },
+    { "Obsidian Mauler", "", 84.0f, false, 0.0f, "obsidian_mauler" }, { "Pyroclast Titan", "", 100.0f, false, 0.0f, "pyroclast_titan" },
+    { "The Emberlord", "", 124.0f, false, 0.0f, "emberlord" },
+    { "Pickaxe Wraith", "", 68.0f, false, 0.0f, "pickaxe_wraith" }, { "Cave Brute", "", 90.0f, false, 0.0f, "cave_brute" },
+    { "Deep Marauder", "", 78.0f, false, 0.0f, "deep_marauder" }, { "Sorrow Wraith", "", 72.0f, false, 0.0f, "sorrow_wraith" },
+    // Sculpted, unrigged (moved in code): the Sunken Vault's serpent and drakes, the
+    // Ember Depths' hounds and revenants, the Hollow's rats.
+    { "Fen Serpent", "fen_serpent", 46.0f, false }, { "Brine Drake", "brine_drake", 70.0f, false },
+    { "Stormwyrm", "stormwyrm", 92.0f, false }, { "Abyssal Wyrm", "abyssal_wyrm", 112.0f, false },
+    { "Magma Hound", "magma_hound", 50.0f, false }, { "Ash Revenant", "ash_revenant", 74.0f, false },
+    { "Warren Rat", "warren_rat", 38.0f, false },
     { "Vyrathax", "vyrathax", 150.0f, false }, // the world boss (DrawTriWyrm)
 };
 struct MeshMonModel { bool tried = false, ok = false; Model model{}; float baseH = 1.0f; float halfW = 1.0f; float minY = 0.0f; };
@@ -19770,21 +19814,19 @@ static bool MeshMonDraw(const std::string& name, float x, float z, float yawRad,
                         const T3CAnim& a, float attackT, float deathT, bool shadowPass) {
     int i = MeshMonIndex(name);
     if (i < 0) return false;
-    { // (2026-09-28) the orcs are rigged now: real walk/run/slash/hit/death clips
-        int sc = (name == "Orc Warlord") ? kScOrcOverlord
-               : (name == "Orc Grunt" || name == "Orc Archer" || name == "Orc Shaman" || name == "Orc Brute") ? kScOrcWarbringer : -1;
-        if (sc >= 0) {
-            SkinPose sp;
-            sp.move = std::clamp(a.move, 0.0f, 1.0f);
-            sp.attackT = attackT >= 0.0f ? 1.0f - attackT : -1.0f; // the lunge runs 1 -> 0
-            sp.deathT = deathT;
-            sp.engaged = attackT >= 0.0f;
-            if (DrawSkinChar(sc, (int)a.seed, x, z, yawRad, kMeshMons[i].height * sizeMul * 1.05f, tint, sp, shadowPass, nullptr, 1100.0f)) return true;
-        }
-    }
     if (name == "Scalekin Raider") { // five raider looks, fixed per monster
         int v = ((int)a.seed / 13) % 5;
         if (v > 0) i = MeshMonIndex("Scalekin Raider~" + std::to_string(v));
+    }
+    if (kMeshMons[i].rig) { // rigged: real walk / run / death clips (and a lunge for the attack)
+        SkinPose sp;
+        sp.move = std::clamp(a.move, 0.0f, 1.0f);
+        sp.attackT = attackT >= 0.0f ? 1.0f - attackT : -1.0f; // the lunge runs 1 -> 0
+        sp.deathT = deathT;
+        sp.engaged = attackT >= 0.0f;
+        if (DrawSkinChar(SkinCharFor(kMeshMons[i].rig), (int)a.seed, x, z, yawRad, kMeshMons[i].height * sizeMul * 1.05f, tint, sp, shadowPass, nullptr, 1100.0f))
+            return true;
+        return false;
     }
     MeshMonModel* M = MeshMonGet(i);
     if (!M->ok) return false;
@@ -21006,6 +21048,21 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         Wild3DDrawHouse(s, shadowPass); // textured shell + roof (Housing 2.0)
     }
     Wild3DDrawSettlement(s, shadowPass, cull); // buildings, palisade and settlers (2026-09-27)
+#ifdef TF_MONROW // debug: a row of monsters beside the player (TF_MONROW = first index into the list)
+    {
+        static const char* nm[] = { "Bonewalker", "Rotbound Corpse", "Gravewretch", "Grave Warden", "Crypt Sovereign", "The Whisper King",
+            "Frostbite Husk", "Glacier Wight", "Rimebound Horror", "Hoarfrost Revenant", "Winter's Maw", "The Frostbound King",
+            "Rock Golem", "Scalekin Raider~1", "Scalekin Raider~2", "Scalekin Raider~3", "Scalekin Raider~4", "Scalekin Raider",
+            "The Sunken King", "Cinder Imp", "Obsidian Mauler", "Pyroclast Titan", "The Emberlord", "Pickaxe Wraith",
+            "Cave Brute", "Deep Marauder", "Sorrow Wraith", "Fen Serpent", "Brine Drake", "Stormwyrm", "Abyssal Wyrm",
+            "Magma Hound", "Ash Revenant", "Warren Rat", "Orc Grunt", "Orc Warlord" };
+        const int N = (int)(sizeof(nm) / sizeof(nm[0]));
+        for (int k = 0; k < 6 && TF_MONROW + k < N; k++) {
+            T3CAnim a{ (float)g_gameClock, TF_MONMOVE, (float)(k * 13 + 5) };
+            MeshMonDraw(nm[TF_MONROW + k], s.wildernessPlayerPos.x - 190.0f + k * 76.0f, s.wildernessPlayerPos.y + 60.0f, 1.5708f, 1.0f, WHITE, a, -1.0f, -1.0f, shadowPass);
+        }
+    }
+#endif
 
     bool wasEngaged = s.wildEngaged.has_value();
     // Phase 3 procedural creatures (kit shader matches the sun/shadow pipeline).

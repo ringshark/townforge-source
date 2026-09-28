@@ -11,17 +11,14 @@ the preloaded assets, in `art/monsters3d/`.
 |---|---|
 | web_spinner, silk_stalker, venom_weaver, brood_hunter, nest_guardian | the Weavers' Nest line, in that order |
 | spider_broodmother | The Broodmother (Weavers' Nest boss) |
-| orc_warbringer | Orc Grunt, Orc Archer, Orc Shaman, Orc Brute (Grimtusk Hold) |
-| orc_overlord | Orc Warlord |
-| stoneborn | Rock Golem |
-| bonewalker, rotbound_corpse, gravewretch, grave_warden, crypt_sovereign | the Whisper Crypt line; crypt_sovereign also plays The Whisper King |
-| glacier_wight, rimebound_horror, hoarfrost_revenant, winters_maw, frostbound_king | the Frostbound Tomb; glacier_wight also plays the Frostbite Husk |
-| scalekin_raider_scout / archer / huntress / shaman / warlord | Scalekin Raider (Sunken Vault) - each raider gets one of the five looks |
-| vyrathax | Vyrathax the Tri-Wyrm, the world boss (faces +Z: `yawOff` 180) |
+| fen_serpent, brine_drake, stormwyrm, abyssal_wyrm | the Sunken Vault's serpent and drakes |
+| magma_hound, ash_revenant | the Ember Depths |
+| warren_rat | the Hollow |
+| vyrathax | Vyrathax the Tri-Wyrm, the world boss |
 
-The second batch (#76) was decimated with meshoptimizer's sloppy simplifier
-(`simplifySloppy`, ~7-14k triangles): Meshy's UV seams stop the normal simplifier.
-
-Sizes and the name mapping live in `kMeshMons` (main.cpp). Meshy's generation
-settings: image-to-3D, `target_polycount: 30000`, remesh, textured, PBR; then
-`gltf-transform` simplify + texture resize and a palette PNG re-encode.
+Everything that walks on two legs is now rigged and animated instead: see
+`assets/characters3d/` (orcs, the Whisper Crypt, the Frostbound Tomb, the Scalekin
+raiders and the Sunken King, the Ember Depths' imps, golems and the Emberlord, the
+Hollow's brutes and wraiths, the Rock Golem and the Sorrow Wraith). The 2026-09-28
+batch was simplified with meshoptimizer's attribute-aware permissive mode (UV
+seams kept honest) and re-encoded as 256-colour palette PNGs.
