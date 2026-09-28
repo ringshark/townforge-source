@@ -1128,12 +1128,14 @@ static const float kLeaveDungeonMinMagery = 25.0f;
 enum class SfxId {
     Swing, Hit, Cast, Fireball, Heal, Coin, MonsterDie, Hurt,
     Click, Victory, Ghost, Door, Hunt, Buy, Quest,
+    Drum, Lute, Harp, // (2026-09-28, #65) the bard's instruments
     Count
 };
 static const char* kSfxFileNames[] = {
     "swing.wav", "hit.wav", "cast.wav", "fireball.wav", "heal.wav",
     "coin.wav", "monster_die.wav", "hurt.wav", "click.wav", "victory.wav",
-    "ghost.wav", "door.wav", "hunt.wav", "buy.wav", "quest.wav"
+    "ghost.wav", "door.wav", "hunt.wav", "buy.wav", "quest.wav",
+    "drum.wav", "lute.wav", "harp.wav"
 };
 static_assert(sizeof(kSfxFileNames) / sizeof(kSfxFileNames[0]) == (int)SfxId::Count,
               "kSfxFileNames must cover every SfxId");
@@ -1832,6 +1834,7 @@ struct GameState {
     float chivalry = 0;            // (2026-09-28) holy magic, powered by Karma; capped at 100
     float cartography = 0, lockpicking = 0; // (2026-09-28) treasure hunting; capped at 100
     float musicianship = 0, peacemaking = 0, provocation = 0; // (2026-09-28) bard skills; capped at 100
+    int instrument = 0; // PERSISTED (2026-09-28, #65): 0 none, 1 hand drum, 2 lute, 3 harp - songs need one
     float bardCd = 0.0f; // a moment between songs (transient)
     // Treasure hunting (2026-09-28) - maps PERSISTED; the dig and the chest are transient.
     struct TreasureMap { int tier = 1; bool decoded = false; Vector2 spot{}; };
@@ -7374,6 +7377,7 @@ static void SaveGame(const GameState& s) {
     out << "tracking=" << s.tracking << "\nnecromancy=" << s.necromancy << "\n";
     out << "hiding=" << s.hiding << "\nstealth=" << s.stealth << "\nchivalry=" << s.chivalry << "\n";
     out << "cartography=" << s.cartography << "\nlockpicking=" << s.lockpicking << "\ntmapTrack=" << s.tmapTrack << "\n";
+    out << "instrument=" << s.instrument << "\n";
     out << "musicianship=" << s.musicianship << "\npeacemaking=" << s.peacemaking << "\nprovocation=" << s.provocation << "\n";
     for (size_t i = 0; i < s.tmaps.size(); i++)
         out << "tmap." << i << "=" << s.tmaps[i].tier << "|" << (s.tmaps[i].decoded ? 1 : 0) << "|" << s.tmaps[i].spot.x << "|" << s.tmaps[i].spot.y << "\n";
@@ -7659,6 +7663,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "stealth") s.stealth = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "chivalry") s.chivalry = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "cartography") s.cartography = std::min(100.0f, (float)std::atof(val.c_str()));
+        else if (key == "instrument") s.instrument = std::clamp(std::atoi(val.c_str()), 0, 3);
         else if (key == "musicianship") s.musicianship = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "peacemaking") s.peacemaking = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "provocation") s.provocation = std::min(100.0f, (float)std::atof(val.c_str()));
@@ -10709,8 +10714,8 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
         for (int sp : s.combatHotbar) if (sp == kSpTeleport && CanPracticeSpell(s, kSpells[kSpTeleport])) teleUp = true;
     // (2026-09-28) Bard: Peace any time (with Peacemaking equipped), Provoke in a fight in the wilds
     const int bardZone = ooc ? oocZone : (s.screen == Screen::Wilderness ? 0 : 1);
-    bool peaceUp = !s.playerIsGhost && s.skillActive[27] && (!PlayerYoung(s) || s.peacemaking > 0.0f);
-    bool provoUp = !ooc && bardZone == 0 && !s.playerIsGhost && s.skillActive[28] && (!PlayerYoung(s) || s.provocation > 0.0f) &&
+    bool peaceUp = !s.playerIsGhost && s.instrument > 0 && s.skillActive[27] && (!PlayerYoung(s) || s.peacemaking > 0.0f);
+    bool provoUp = !ooc && bardZone == 0 && !s.playerIsGhost && s.instrument > 0 && s.skillActive[28] && (!PlayerYoung(s) || s.provocation > 0.0f) &&
                    s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0;
     bool medUp = ooc && !s.playerIsGhost && (s.mana < MaxMana(s) - 0.5f || g_meditating); // (2026-09-28, #63) Meditate
     if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp && !hideUp && !peaceUp && !medUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
@@ -27443,10 +27448,16 @@ static int g_provokeKill = -1; // a spot a provoked monster just finished off (r
 static float BardAvg(const GameState& s, float GameState::* skill) {
     return (EffectiveSkill(s, &GameState::musicianship) + EffectiveSkill(s, skill)) * 0.5f;
 }
+// Instruments (2026-09-28, #65): no song without one. A better instrument
+// steadies the Musicianship roll: drum +0, lute +6, harp +12.
+static const char* kInstrumentName[4] = { "", "Hand Drum", "Lute", "Harp" };
+static const int kInstrumentCost[4] = { 0, 60, 280, 900 };
+static float InstrumentBonus(const GameState& s) { return s.instrument >= 3 ? 12.0f : s.instrument == 2 ? 6.0f : 0.0f; }
 static bool BardPlay(GameState& s) { // the Musicianship roll that starts every song
-    float c = std::clamp(55.0f + EffectiveSkill(s, &GameState::musicianship) * 0.45f, 55.0f, 99.0f);
+    if (s.instrument <= 0) { s.logLine = "You need an instrument - the Provisioner sells drums, lutes and harps."; return false; }
+    float c = std::clamp(55.0f + EffectiveSkill(s, &GameState::musicianship) * 0.45f + InstrumentBonus(s), 55.0f, 99.0f);
     SkillUseGain(s.musicianship, c / 100.0f, 2.0f);
-    PlaySfx(SfxId::Quest);
+    PlaySfx(s.instrument >= 3 ? SfxId::Harp : s.instrument == 2 ? SfxId::Lute : SfxId::Drum);
     if (RandUnit() * 100.0f < c) return true;
     s.logLine = "You fumble the tune - nothing happens.";
     return false;
@@ -27471,6 +27482,7 @@ static int BardFoeLevel(const GameState& s, int zone, bool* duel) {
 }
 static void BardPeace(GameState& s, int zone) {
     if (s.bardCd > 0.0f || s.playerIsGhost) return;
+    if (s.instrument <= 0) { s.logLine = "You need an instrument to play - the Provisioner sells them."; return; }
     RevealFromHiding(s, "");
     s.bardCd = 5.0f;
     bool duel = false;
@@ -27500,6 +27512,7 @@ static void BardProvoke(GameState& s) {
     if (s.bardCd > 0.0f || s.playerIsGhost || !s.wildEngaged.has_value()) return;
     GameState::ActiveMonster& a = *s.wildEngaged;
     if (a.isRival || a.bladeIdx >= 0 || a.spotIdx == kWyrmSpot) { s.logLine = "This foe won't be goaded!"; return; }
+    if (s.instrument <= 0) { s.logLine = "You need an instrument to play - the Provisioner sells them."; return; }
     s.bardCd = 5.0f;
     RevealFromHiding(s, "");
     // the other enemy: one already on you, else the nearest monster close by (it joins in)
@@ -33235,6 +33248,18 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
         DrawInfoLine(TextFormat("Heal Potions: %d", healCount), 20, y + 6, 12, kColorText);
         if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, TextFormat("Buy 1 (%dg)", kProvisionerHealPotionCost),
                     s.gold >= kProvisionerHealPotionCost)) TryBuyHealPotion(s);
+        y += 34;
+        { // Instruments (2026-09-28, #65): bard songs need one; a better one plays better
+            int next = s.instrument + 1;
+            DrawInfoLine(s.instrument > 0 ? TextFormat("Instrument: %s", kInstrumentName[s.instrument]) : "Instrument: none (bard songs need one)",
+                         20, y + 6, 12, kColorText);
+            if (next <= 3 && Button({ (float)(screenW - 170), (float)y, 150, 26 }, TextFormat("%s (%dg)", kInstrumentName[next], kInstrumentCost[next]),
+                                    s.gold >= kInstrumentCost[next])) {
+                s.gold -= kInstrumentCost[next]; s.instrument = next;
+                PlaySfx(next == 3 ? SfxId::Harp : next == 2 ? SfxId::Lute : SfxId::Drum);
+                s.logLine = std::string("You buy a ") + kInstrumentName[next] + (next == 1 ? " - Peacemaking and Provocation can now be played." : " - your songs will ring truer.");
+            }
+        }
         y += 44;
         // Jewelry (2026-09-27): plain copper pieces; better ones are won, not bought.
         DrawInfoLine("Jewelry - raises a stat past 100 while worn", 20, y, 13, kColorAccent);
