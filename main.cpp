@@ -19166,7 +19166,7 @@ static void CorpseDrawGlint(const GameState::WorldCorpse& c) {
 // Textured, unrigged models (Meshy image-to-3D, shrunk for the web). They move
 // in code: a walking bob and lean (a skittering jitter for spiders), a lunge on
 // the attack, the usual hit flash, and a topple-and-sink when they die.
-struct MeshMonDef { const char* name; const char* file; float height; bool spider; };
+struct MeshMonDef { const char* name; const char* file; float height; bool spider; float yawOff = 0.0f; }; // yawOff: models that don't face -Z
 static const MeshMonDef kMeshMons[] = {
     { "Web Spinner", "web_spinner", 38.0f, true },   { "Silk Stalker", "silk_stalker", 44.0f, true },
     { "Venom Weaver", "venom_weaver", 50.0f, true }, { "Brood Hunter", "brood_hunter", 56.0f, true },
@@ -19174,6 +19174,17 @@ static const MeshMonDef kMeshMons[] = {
     { "Orc Grunt", "orc_warbringer", 70.0f, false }, { "Orc Archer", "orc_warbringer", 68.0f, false },
     { "Orc Shaman", "orc_warbringer", 68.0f, false }, { "Orc Brute", "orc_warbringer", 78.0f, false },
     { "Orc Warlord", "orc_overlord", 88.0f, false }, { "Rock Golem", "stoneborn", 88.0f, false },
+    // (2026-09-28, #76) the Whisper Crypt, the Frostbound Tomb and the Sunken Vault's raiders
+    { "Bonewalker", "bonewalker", 68.0f, false }, { "Rotbound Corpse", "rotbound_corpse", 64.0f, false },
+    { "Gravewretch", "gravewretch", 66.0f, false }, { "Grave Warden", "grave_warden", 74.0f, false },
+    { "Crypt Sovereign", "crypt_sovereign", 82.0f, false }, { "The Whisper King", "crypt_sovereign", 104.0f, false },
+    { "Frostbite Husk", "glacier_wight", 58.0f, false }, { "Glacier Wight", "glacier_wight", 66.0f, false },
+    { "Rimebound Horror", "rimebound_horror", 80.0f, false }, { "Hoarfrost Revenant", "hoarfrost_revenant", 76.0f, false },
+    { "Winter's Maw", "winters_maw", 92.0f, false }, { "The Frostbound King", "frostbound_king", 112.0f, false },
+    { "Scalekin Raider", "scalekin_raider_scout", 64.0f, false }, // + four variants, picked per raider below
+    { "Scalekin Raider~1", "scalekin_raider_archer", 64.0f, false }, { "Scalekin Raider~2", "scalekin_raider_huntress", 64.0f, false },
+    { "Scalekin Raider~3", "scalekin_raider_shaman", 66.0f, false }, { "Scalekin Raider~4", "scalekin_raider_warlord", 72.0f, false },
+    { "Vyrathax", "vyrathax", 150.0f, false, 180.0f }, // the world boss (DrawTriWyrm)
 };
 struct MeshMonModel { bool tried = false, ok = false; Model model{}; float baseH = 1.0f; float halfW = 1.0f; };
 static MeshMonModel g_meshMon[sizeof(kMeshMons) / sizeof(kMeshMons[0])];
@@ -19206,6 +19217,10 @@ static bool MeshMonDraw(const std::string& name, float x, float z, float yawRad,
                         const T3CAnim& a, float attackT, float deathT, bool shadowPass) {
     int i = MeshMonIndex(name);
     if (i < 0) return false;
+    if (name == "Scalekin Raider") { // five raider looks, fixed per monster
+        int v = ((int)a.seed / 13) % 5;
+        if (v > 0) i = MeshMonIndex("Scalekin Raider~" + std::to_string(v));
+    }
     MeshMonModel* M = MeshMonGet(i);
     if (!M->ok) return false;
     const MeshMonDef& d = kMeshMons[i];
@@ -19242,6 +19257,7 @@ static bool MeshMonDraw(const std::string& name, float x, float z, float yawRad,
     rlRotatef(pitch, 1, 0, 0);
     rlRotatef(roll, 0, 0, 1);
     if (deathT >= 0.0f && d.spider && roll > 90.0f) rlTranslatef(0.0f, -d.height * sizeMul * (roll / 180.0f), 0.0f);
+    if (d.yawOff != 0.0f) rlRotatef(d.yawOff, 0, 1, 0);
     DrawModelEx(M->model, { 0, 0, 0 }, { 0, 1, 0 }, 0.0f, { s, s, s }, tint);
     rlPopMatrix();
     return true;
@@ -19977,7 +19993,40 @@ static void WyrmHeadBuild() { // a long wedge of a dragon head, +x forward; the 
     }
     Town3DApplyLitShader(g_wyrmHead.skull); Town3DApplyLitShader(g_wyrmHead.jaw); Town3DApplyLitShader(g_wyrmHead.acc);
 }
+static void WyrmHeadGlows(float hpFrac) { // each living head glows, brighter as it charges
+    float t = (float)g_gameClock;
+    BeginBlendMode(BLEND_ADDITIVE);
+    rlDisableDepthMask();
+    for (int h = 0; h < 3; h++) {
+        if (!WyrmHeadAlive(h, hpFrac)) continue;
+        float charge = g_wyrmHeadAtk[h] >= 0.0f ? 1.0f : 0.0f;
+        for (const WyrmFx& f : g_wyrmFx) if (f.kind == h && f.t < f.warn) charge = std::max(charge, f.t / f.warn);
+        Color c = kWyHeadCol[h];
+        float pulse = 0.7f + 0.3f * sinf(t * 6.0f + h);
+        c.a = 255;
+        c.r = (unsigned char)(c.r * (0.45f + 0.55f * charge) * pulse); c.g = (unsigned char)(c.g * (0.45f + 0.55f * charge) * pulse);
+        c.b = (unsigned char)(c.b * (0.45f + 0.55f * charge) * pulse);
+        WyrmGlow(g_wyrmHeadWorld[h], 16.0f + 26.0f * charge, c);
+    }
+    rlEnableDepthMask();
+    EndBlendMode();
+}
 static void DrawTriWyrm(Vector2 pos, float yaw, float hurtT, float atkPhase, float hpFrac, float move, float shrink, bool shadowPass) {
+    { // the sculpted Tri-Wyrm (2026-09-28, #76); the glows mark its three heads
+        T3CAnim a{ (float)g_gameClock, move, 5.0f };
+        if (MeshMonDraw("Vyrathax", pos.x, pos.y, yaw, shrink, CombatHitTint(hurtT, WHITE, Color{ 220, 90, 90, 255 }), a,
+                        atkPhase >= 0.0f ? 1.0f - std::clamp(atkPhase, 0.0f, 1.0f) : -1.0f, -1.0f, shadowPass)) {
+            float H = 150.0f * shrink, gy = GroundY(pos.x, pos.y), t = (float)g_gameClock;
+            for (int h = 0; h < 3; h++) {
+                float side = h == kWyHeadFire ? 0.0f : (h == kWyHeadStorm ? -1.0f : 1.0f);
+                float fwd = H * (h == kWyHeadFire ? 0.42f : 0.34f), up = H * (h == kWyHeadFire ? 0.78f : 0.70f) + sinf(t * (0.8f + 0.25f * h) + h * 2.1f) * 2.0f;
+                float lat = side * H * 0.26f;
+                g_wyrmHeadWorld[h] = { pos.x + cosf(yaw) * fwd - sinf(yaw) * lat, gy + up, pos.y + sinf(yaw) * fwd + cosf(yaw) * lat };
+            }
+            if (!shadowPass) WyrmHeadGlows(hpFrac);
+            return;
+        }
+    }
     T3CKitEnsure();
     WyrmHeadBuild();
     const T3CQuadParts& P = g_t3cQuads[6].parts;
@@ -20057,21 +20106,7 @@ static void DrawTriWyrm(Vector2 pos, float yaw, float hurtT, float atkPhase, flo
     }
     rlPopMatrix();
     if (shadowPass) return;
-    BeginBlendMode(BLEND_ADDITIVE);
-    rlDisableDepthMask();
-    for (int h = 0; h < 3; h++) {
-        if (!WyrmHeadAlive(h, hpFrac)) continue;
-        float charge = g_wyrmHeadAtk[h] >= 0.0f ? 1.0f : 0.0f;
-        for (const WyrmFx& f : g_wyrmFx) if (f.kind == h && f.t < f.warn) charge = std::max(charge, f.t / f.warn);
-        Color c = kWyHeadCol[h];
-        float pulse = 0.7f + 0.3f * sinf(t * 6.0f + h);
-        c.a = 255;
-        c.r = (unsigned char)(c.r * (0.45f + 0.55f * charge) * pulse); c.g = (unsigned char)(c.g * (0.45f + 0.55f * charge) * pulse);
-        c.b = (unsigned char)(c.b * (0.45f + 0.55f * charge) * pulse);
-        WyrmGlow(g_wyrmHeadWorld[h], 16.0f + 26.0f * charge, c);
-    }
-    rlEnableDepthMask();
-    EndBlendMode();
+    WyrmHeadGlows(hpFrac);
 }
 // Telegraphs and blasts on the ground (main pass).
 static void WyrmDrawFx() {

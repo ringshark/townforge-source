@@ -14,6 +14,13 @@ the preloaded assets, in `art/monsters3d/`.
 | orc_warbringer | Orc Grunt, Orc Archer, Orc Shaman, Orc Brute (Grimtusk Hold) |
 | orc_overlord | Orc Warlord |
 | stoneborn | Rock Golem |
+| bonewalker, rotbound_corpse, gravewretch, grave_warden, crypt_sovereign | the Whisper Crypt line; crypt_sovereign also plays The Whisper King |
+| glacier_wight, rimebound_horror, hoarfrost_revenant, winters_maw, frostbound_king | the Frostbound Tomb; glacier_wight also plays the Frostbite Husk |
+| scalekin_raider_scout / archer / huntress / shaman / warlord | Scalekin Raider (Sunken Vault) - each raider gets one of the five looks |
+| vyrathax | Vyrathax the Tri-Wyrm, the world boss (faces +Z: `yawOff` 180) |
+
+The second batch (#76) was decimated with meshoptimizer's sloppy simplifier
+(`simplifySloppy`, ~7-14k triangles): Meshy's UV seams stop the normal simplifier.
 
 Sizes and the name mapping live in `kMeshMons` (main.cpp). Meshy's generation
 settings: image-to-3D, `target_polycount: 30000`, remesh, textured, PBR; then
