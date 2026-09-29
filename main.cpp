@@ -35199,13 +35199,13 @@ static float g_trainTick = 0.0f, g_trainTapCd = 0.0f, g_trainScroll = 0.0f;
 static bool TrainGroundsHere(const GameState& s) {
     return (g_playScreen == Screen::Town || g_playScreen == Screen::Interior) && !s.combat.has_value() && !s.playerIsGhost;
 }
-// Every drill lands (2026-09-28): 0.6 a go while the skill is raw, easing to 0.2 as it
-// nears 50 - ~175 drills from 0 to 50 (a minute or two of tapping, ~6 min on AUTO).
+// Every drill lands: a flat +2.5 (2026-09-29), topping out at exactly 50.0 -
+// 20 drills from 0 to 50 (seconds of tapping, ~40s on AUTO).
+static const float kTrainGroundsStep = 2.5f;
 static void TrainGroundsDrill(GameState& s) {
     float& sk = s.*(kCappedSkills[(size_t)g_trainSkill].field);
     if (sk >= kTrainGroundsCap) { g_trainAuto = false; return; }
-    float want = std::clamp((kTrainGroundsCap - sk) * 0.012f, 0.2f, 0.6f);
-    float g = GainSkillCapped(sk, std::round(want * 10.0f) / 10.0f, kTrainGroundsCap); // the 700 loadout cap still applies
+    float g = GainSkillCapped(sk, std::min(kTrainGroundsStep, kTrainGroundsCap - sk), kTrainGroundsCap); // the 700 loadout cap still applies
     if (g > 0.0f) s.logLine = TextFormat("%s %.1f (+%.1f)", kCappedSkills[(size_t)g_trainSkill].label, sk, g);
     if (sk >= kTrainGroundsCap) {
         g_trainAuto = false;
@@ -35226,7 +35226,7 @@ static void DrawTrainingGrounds(GameState& s, int screenW, int screenH) {
     const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 };
     if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_trainOpen = false; g_trainAuto = false; return; }
     float x = G.x + 20, y = G.y + 38, w = G.width - 40;
-    DrawUIText("Drill any skill here for free, up to 50. Tap Train, or turn on AUTO", (int)x, (int)y, 12, soft); y += 16;
+    DrawUIText("Drill any skill here for free: +2.5 a drill, up to 50. Tap Train, or turn on AUTO", (int)x, (int)y, 12, soft); y += 16;
     DrawUIText("and leave it running. Past 50, skills grow only by using them for real.", (int)x, (int)y, 12, soft); y += 22;
     bool here = TrainGroundsHere(s);
     if (!here) { DrawUIText("The Training Grounds are in town - head back to use them.", (int)x, (int)y, 13, Color{ 170, 60, 40, 255 }); y += 20; }
