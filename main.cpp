@@ -11820,7 +11820,9 @@ static void T3CDrawBlobShadow(const Model& merged, float x, float z, float yawRa
 
 // Ground-hugging shadows for static scenery. The caller supplies the visible
 // footprint rather than the full canopy/roof bounding box.
+static bool g_t3dSceneShadowPass = false; // the town scene is being drawn into the sun shadow map
 static void T3CDrawSceneryShadow(float x, float z, float w, float d, float alpha) {
+    if (g_t3dSceneShadowPass) return; // flat ground patches cast nothing - skip the draws
     T3DLiftScope lift_(x, z);
     if (!T3CBlobEnsure()) return;
     rlDrawRenderBatchActive();
@@ -16828,7 +16830,7 @@ static void Town3DDrawFoliageOne(const TownFoliage& f, float x, float z) {
     Town3DModels& M = g_t3dModels;
     float rot = Town3DHash01(x, z) * 360.0f;
     float vs = 0.85f + 0.35f * Town3DHash01(z, x + 17.0f);
-    if (f.variant != 5) {
+    if (f.variant != 5 && !g_t3dSceneShadowPass) {
         T3CDrawSceneryShadow(x, z, 31.0f * vs, 29.0f * vs, 0.42f);
         Town3DTreeBaseEnsure();
         DrawModelEx(g_t3dTreeBase, { x, 0, z }, { 0, 1, 0 }, rot,
@@ -16902,7 +16904,8 @@ static void Town3DDrawGatehouse(float x, float z, int town) {
 static void Town3DDrawGreenery(int town, const Town3DCam* cull); // with the wilderness dressing
 static void Town3DDrawProps(int town, float t);                   // same place
 static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
-    (void)shadowPass;
+    g_t3dSceneShadowPass = shadowPass;
+    struct ResetFlag { ~ResetFlag() { g_t3dSceneShadowPass = false; } } resetFlag_;
     Town3DLoadModels();
     Town3DEnsureGround(s);
 
