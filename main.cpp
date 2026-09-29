@@ -11808,8 +11808,27 @@ static void T3CDrawBlobShadow(const Model& merged, float x, float z, float yawRa
     float alpha = 0.55f * (1.0f - lift);
     rlDrawRenderBatchActive();
     rlDisableDepthMask();
+    // A wide, faint penumbra supplies a little directional depth without a
+    // depth texture. Keep it under the tight contact patch, not over the feet.
+    DrawModelEx(g_blobShadowModel, { x + ox + 6.0f, 0.7f, z + oz + 4.0f }, { 0, 1, 0 },
+                -yawRad * kT3CDeg, { w * 1.65f, 1.0f, d * 1.5f }, Fade(WHITE, alpha * 0.22f));
     DrawModelEx(g_blobShadowModel, { x + ox, 1.0f, z + oz }, { 0.0f, 1.0f, 0.0f },
                 -yawRad * kT3CDeg, { w, 1.0f, d }, Fade(WHITE, alpha));
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
+}
+
+// Ground-hugging shadows for static scenery. The caller supplies the visible
+// footprint rather than the full canopy/roof bounding box.
+static void T3CDrawSceneryShadow(float x, float z, float w, float d, float alpha) {
+    T3DLiftScope lift_(x, z);
+    if (!T3CBlobEnsure()) return;
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
+    DrawModelEx(g_blobShadowModel, { x + 5.0f, 0.7f, z + 4.0f }, { 0, 1, 0 }, 0,
+                { w * 1.5f, 1, d * 1.5f }, Fade(WHITE, alpha * 0.28f));
+    DrawModelEx(g_blobShadowModel, { x, 1.0f, z }, { 0, 1, 0 }, 0,
+                { w, 1, d }, Fade(WHITE, alpha));
     rlDrawRenderBatchActive();
     rlEnableDepthMask();
 }
@@ -16786,10 +16805,35 @@ static void Town3DApplyPropFix(int kind, float& x, float& z) {
 }
 
 // One foliage item at an explicit position (fixes already applied by the caller).
+static Model g_t3dTreeBase{};
+static void Town3DTreeBaseEnsure() {
+    if (g_t3dTreeBase.meshCount > 0) return;
+    T3CMeshBuilder b;
+    const Color bark{ 91, 68, 48, 255 }, barkLight{ 118, 87, 56, 255 };
+    // Root flares and small plants break up the bare stem-to-ground join.
+    T3CCylinder(b, 0, 0, 0, 9, 9, 5, 9, bark);
+    for (int i = 0; i < 5; ++i) {
+        float a = i * 6.2831853f / 5.0f;
+        float root[3] = { 5.0f * cosf(a), 2.0f, 5.0f * sinf(a) };
+        float dir[3] = { cosf(a), -0.13f, sinf(a) };
+        T3CConeDir(b, root, dir, 12.0f, 3.1f, 5, i & 1 ? bark : barkLight);
+        float px = 19.0f * cosf(a + 0.35f), pz = 19.0f * sinf(a + 0.35f);
+        T3CSphere(b, px, 3.2f, pz, 6.0f, 3.8f, 5.0f, 3, 5,
+                   i & 1 ? Color{ 75, 126, 60, 255 } : Color{ 95, 143, 66, 255 });
+    }
+    g_t3dTreeBase = T3CFinish(b);
+    Town3DApplyLitShader(g_t3dTreeBase);
+}
 static void Town3DDrawFoliageOne(const TownFoliage& f, float x, float z) {
     Town3DModels& M = g_t3dModels;
     float rot = Town3DHash01(x, z) * 360.0f;
     float vs = 0.85f + 0.35f * Town3DHash01(z, x + 17.0f);
+    if (f.variant != 5) {
+        T3CDrawSceneryShadow(x, z, 31.0f * vs, 29.0f * vs, 0.42f);
+        Town3DTreeBaseEnsure();
+        DrawModelEx(g_t3dTreeBase, { x, 0, z }, { 0, 1, 0 }, rot,
+                    { vs, vs, vs }, WHITE);
+    }
     switch (f.variant) {
         case 1: // pine
             Town3DDrawPiece(M.treePine, { x, 0, z }, rot, 2.0f * vs);
@@ -18268,6 +18312,7 @@ static void Wild3DDrawScatterOne(const Wild3DScatterItem& it, bool shadowPass) {
     Wild3DModels& W = g_wild3dModels;
     if (it.kind == 0) {
         const Model& t = (it.variant == 0) ? T.treeOak : (it.variant == 1) ? T.treePine : T.treeFat;
+        if (!shadowPass) T3CDrawSceneryShadow(it.x, it.z, 28.0f * it.scale, 28.0f * it.scale, 0.32f);
         Town3DDrawPiece(t, { it.x, 0, it.z }, it.rot, 2.1f * it.scale);
     } else if (it.kind == 1) {
         const Model& r = (it.variant == 0) ? W.rockLargeA : (it.variant == 1) ? W.rockLargeC : W.rockSmallA;
@@ -18673,6 +18718,12 @@ static void Wild3DDrawDressing(const Town3DCam* cull) {
     const Wild3DDressing& D = g_wild3dDress;
     for (const WildDressItem& it : D.items) {
         if (cull && !Wild3DInView(*cull, it.x, it.z, it.cullR)) continue;
+        // Close scenery gets a contact patch. Far trees keep the baked terrain
+        // color and their existing shading to avoid extra draws across the map.
+        if (cull && it.id <= kWPTreeB &&
+            hypotf(it.x - cull->pos.x, it.z - cull->pos.z) < 420.0f)
+            T3CDrawSceneryShadow(it.x, it.z, 24.0f * it.scale / kWPScaleTrees,
+                                 24.0f * it.scale / kWPScaleTrees, 0.3f);
         DrawModelEx(D.models[it.id], { it.x, GroundY(it.x, it.z), it.z }, { 0.0f, 1.0f, 0.0f }, it.rot,
                     { it.scale, it.scale, it.scale }, it.tint);
     }
@@ -18814,6 +18865,7 @@ static void Town3DDrawGreenery(int town, const Town3DCam* cull) {
     for (const TownGreen& g : g_townEnv.trees) {
         if (!D.ok[g.kind]) continue;
         if (cull && !Wild3DInView(*cull, g.x, g.z, 90.0f)) continue;
+        T3CDrawSceneryShadow(g.x, g.z, 28.0f, 28.0f, 0.38f);
         DrawModelEx(D.models[g.kind], { g.x, 0.0f, g.z }, { 0.0f, 1.0f, 0.0f }, g.rot, { g.scale, g.scale, g.scale }, tint);
     }
     for (const TownGreen& b : g_townEnv.bushes) {
@@ -18834,7 +18886,21 @@ enum TownPropModel {
     kTPAnvil, kTPLamp, kTPSheep, kTPChicken, kTPStatue, kTPCount
 };
 static Model g_townPropModels[kTPCount];
+static Model g_townFountainRipple{};
 static bool g_townPropModelsBuilt = false;
+
+static Model TPBuildRipple() {
+    T3CMeshBuilder b;
+    for (int i = 0; i < 24; ++i) {
+        float a0 = i * 6.2831853f / 24.0f, a1 = (i + 1) * 6.2831853f / 24.0f;
+        float p0[3] = { 17.0f * cosf(a0), 15.55f, 17.0f * sinf(a0) };
+        float p1[3] = { 19.0f * cosf(a0), 15.55f, 19.0f * sinf(a0) };
+        float p2[3] = { 19.0f * cosf(a1), 15.55f, 19.0f * sinf(a1) };
+        float p3[3] = { 17.0f * cosf(a1), 15.55f, 17.0f * sinf(a1) };
+        T3CQuad(b, p0, p3, p2, p1, Color{ 154, 211, 220, 255 });
+    }
+    return T3CFinish(b);
+}
 
 static void TPStallCanopy(T3CMeshBuilder& b, float w, float d, float h0, float h1, Color c1, Color c2) {
     const int stripes = 6;
@@ -18867,16 +18933,25 @@ static void TownPropModelsEnsure() {
     g_townPropModelsBuilt = true;
     Color stone = { 168, 164, 156, 255 }, stoneDk = { 132, 128, 122, 255 }, water = { 70, 140, 175, 255 };
     Color wood = { 118, 84, 52, 255 }, woodDk = { 88, 62, 40, 255 }, iron = { 70, 72, 78, 255 };
-    { // fountain: octagonal basin, water, pillar and a small top bowl
+    { // fountain: carved basin, layered water, pillar and a small top bowl
         T3CMeshBuilder b;
         T3CCylinder(b, 0, 0, 0, 3, 54, 54, 16, stoneDk);             // footing
         T3CCylinder(b, 0, 3, 0, 15, 50, 50, 16, stone);              // basin wall
-        T3CCylinder(b, 0, 15, 0, 15.3f, 44, 44, 16, water, true, false); // water inside the rim
+        T3CCylinder(b, 0, 15, 0, 15.3f, 44, 44, 24, water, true, false);
+        // Raised stone lip and carved ribs make the basin read from the orbit camera.
+        T3CCylinder(b, 0, 14.5f, 0, 18, 51, 51, 16, stoneDk, false, false);
+        for (int i = 0; i < 16; ++i) {
+            float a = i * 6.2831853f / 16.0f;
+            T3CSphere(b, 50.0f * cosf(a), 17.0f, 50.0f * sinf(a),
+                       3.8f, 2.3f, 3.8f, 3, 5, stone);
+        }
         T3CCylinder(b, 0, 0, 0, 30, 7, 6, 8, stone);
         T3CCylinder(b, 0, 30, 0, 36, 16, 20, 10, stone);
         T3CCylinder(b, 0, 34, 0, 36.5f, 16, 16, 10, water, true, false);
         T3CSphere(b, 0, 42, 0, 5, 7, 5, 4, 6, stone);
         g_townPropModels[kTPFountain] = T3CFinish(b);
+        g_townFountainRipple = TPBuildRipple();
+        Town3DApplyLitShader(g_townFountainRipple);
     }
     g_townPropModels[kTPStallRed] = TPBuildStall(Color{ 196, 58, 52, 255 });
     g_townPropModels[kTPStallBlue] = TPBuildStall(Color{ 58, 102, 180, 255 });
@@ -19085,7 +19160,20 @@ static void Town3DDrawProps(int town, float t) {
     const Wild3DDressing& D = g_wild3dDress;
     for (const TownDressItem& it : g_townDress) {
         if (it.kind < kTPCount) {
+            if (it.kind != kTPSheep && it.kind != kTPChicken)
+                T3CDrawSceneryShadow(it.x, it.z,
+                    (it.kind == kTPFountain ? 112.0f : it.kind == kTPStallRed || it.kind == kTPStallBlue || it.kind == kTPStallGreen ? 50.0f : 30.0f) * it.scale,
+                    (it.kind == kTPFountain ? 112.0f : 30.0f) * it.scale, 0.32f);
             DrawModelEx(g_townPropModels[it.kind], { it.x, 0, it.z }, { 0, 1, 0 }, it.rot, { it.scale, it.scale, it.scale }, WHITE);
+            if (it.kind == kTPFountain && g_townFountainRipple.meshCount > 0) {
+                // Two slow ripples remain inside the basin, with no extra texture or shader.
+                for (int k = 0; k < 2; ++k) {
+                    float phase = fmodf(t * 0.28f + k * 0.5f, 1.0f);
+                    float size = it.scale * (0.55f + 1.65f * phase);
+                    DrawModelEx(g_townFountainRipple, { it.x, 0, it.z }, { 0, 1, 0 }, 0,
+                                { size, it.scale, size }, Fade(WHITE, 0.45f * (1.0f - phase)));
+                }
+            }
         } else if (it.kind >= kTDKayKit && it.kind < kTDKayKit + kWPCount) {
             int id = it.kind - kTDKayKit;
             if (D.ok[id]) DrawModelEx(D.models[id], { it.x, 0, it.z }, { 0, 1, 0 }, it.rot, { it.scale, it.scale, it.scale }, WHITE);
