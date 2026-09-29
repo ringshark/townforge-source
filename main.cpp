@@ -22248,7 +22248,8 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
 // layer: positions, transitions, and combat all stay in DrawHuntScreen.
 // ---------------------------------------------------------------------
 static const float kDung3DDistMin = 150.0f;  // closest zoom: one room fills the view
-static const float kDung3DDistMax = 700.0f;  // farthest zoom: most of the dungeon in frame
+static const float kDung3DDistMax = 600.0f;  // farthest zoom (2026-09-29: was 700 - UO keeps you close in a dungeon)
+static const float kDung3DDistDefault = 460.0f; // (2026-09-29) where the camera starts on the way in
 static const float kDung3DWallH = 100.0f;    // extruded wall height
 static const float kDung3DCell = 45.0f;      // wall-scan grid cell (1800/45 = 40)
 static const int kDung3DGridN = 40;
@@ -22262,6 +22263,7 @@ struct Dungeon3DTorch {
     bool tried = false;
     Shader shader{};
     int torchPosLoc = -1, torchCountLoc = -1, timeLoc = -1, ambientLoc = -1;
+    int cutInfoLoc = -1, cutOnLoc = -1; // (2026-09-29) UO-style wall cut-away
     Texture2D flameTex{};
 };
 static Dungeon3DTorch g_dung3dTorch;
@@ -22276,9 +22278,12 @@ static void Dungeon3DEnsureTorch() {
     T.torchCountLoc = GetShaderLocation(T.shader, "torchCount");
     T.timeLoc = GetShaderLocation(T.shader, "time");
     T.ambientLoc = GetShaderLocation(T.shader, "ambient");
+    T.cutInfoLoc = GetShaderLocation(T.shader, "cutInfo");
+    T.cutOnLoc = GetShaderLocation(T.shader, "cutOn");
     // Cool dark ambient - the torches do the work. Linear-space value since the
     // 2026-09-25 gamma fix in torchlight.fs (0.30 there read far brighter).
-    float amb[4] = { 0.17f, 0.16f, 0.21f, 1.0f };
+    // (2026-09-29) darker still, UO-style: pools of torchlight in the dark.
+    float amb[4] = { 0.105f, 0.10f, 0.14f, 1.0f };
     SetShaderValue(T.shader, T.ambientLoc, amb, SHADER_UNIFORM_VEC4);
     // Procedural flame sprite (no new assets): white-yellow core fading to
     // transparent orange, teardrop-narrowed toward the top. Drawn as a
@@ -22359,6 +22364,8 @@ static void Dungeon3DEnsureGround(int dungeonIdx) {
             Rectangle dest = { wx * k, wy * k, cell * k + 1.0f, cell * k + 1.0f };
             if (isFloor && floorOk) {
                 ImageDraw(&ground, floorImg, { 0, 0, (float)floorImg.width, (float)floorImg.height }, dest, WHITE);
+            } else if (!isFloor) { // (2026-09-29) solid rock beyond the rooms reads as darkness (UO), not busy brick
+                ImageDrawRectangle(&ground, (int)dest.x, (int)dest.y, (int)dest.width, (int)dest.height, Color{ 12, 11, 14, 255 });
             } else if (!isFloor && wallOk) {
                 // Emberveil's lava wall/floor art reads as nearly identical (see the
                 // 2D view's obsidian multiply tint) - same treatment here.
@@ -22497,6 +22504,8 @@ static void Dungeon3DBuildWalls(int dungeonIdx) {
         // follow camera, textured tops looked like more floor and swamped the
         // screen; dark tops make every room's shape read at a glance.
         if (v.ny > 0.5f) { mesh.colors[i * 4] = 14; mesh.colors[i * 4 + 1] = 12; mesh.colors[i * 4 + 2] = 16; }
+        else if (dungeonIdx == 0) { mesh.colors[i * 4] = 105; mesh.colors[i * 4 + 1] = 112; mesh.colors[i * 4 + 2] = 135; } // (2026-09-29) the Crypt's golden brick, cooled to drowned stone
+        else if (dungeonIdx != 3) { mesh.colors[i * 4] = 190; mesh.colors[i * 4 + 1] = 182; mesh.colors[i * 4 + 2] = 176; } // (2026-09-29) toned-down wall faces
     }
     for (size_t i = 0; i < idx.size(); i++) mesh.indices[i] = idx[i];
     UploadMesh(&mesh, false);
@@ -22721,6 +22730,7 @@ static void Dungeon3DDrawProps() {
 // (Room walls can still occlude at very low zoom - the tight limits keep that
 // rare; the player marker, torchlight, and labels stay readable regardless.)
 static Town3DCam Dungeon3DGetCam(const GameState& s, int screenW, int screenH) {
+    if (g_t3dCamScreen != 2) { g_t3dDist = kDung3DDistDefault; g_t3dDistSm = kDung3DDistDefault; } // (2026-09-29) start close, UO-style
     Town3DCam c = Town3DGetCamFor(s.dungeonPlayerPos, screenW, screenH, 2, kDung3DDistMin, kDung3DDistMax,
                                  kT3DFollowPitch);
     c.pos.x = std::clamp(c.pos.x, 40.0f, kDungeonWorldSize - 40.0f);
@@ -22914,16 +22924,37 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         // Dungeon3DEnsureGround/Dungeon3DBuildWalls); the rlEnableShader here is
         // for the immediate-mode primitives below (monsters, player, pet), which
         // render with whatever shader is currently bound.
+        // (2026-09-29) Slot 0 is a warm light that goes with you (UO lights your
+        // character in the dark); the room torches nearest you fill the rest.
         Vector3 tpos[kDung3DMaxTorches];
-        for (int i = 0; i < torchCount; i++) tpos[i] = { torchSpots[i].x, 62.0f, torchSpots[i].z };
-        SetShaderValueV(g_dung3dTorch.shader, g_dung3dTorch.torchPosLoc, tpos, SHADER_UNIFORM_VEC3, torchCount);
-        SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.torchCountLoc, &torchCount, SHADER_UNIFORM_INT);
+        int lit = 0;
+        tpos[lit++] = { s.dungeonPlayerPos.x, 58.0f, s.dungeonPlayerPos.y };
+        std::vector<int> order(torchCount);
+        for (int i = 0; i < torchCount; i++) order[i] = i;
+        std::sort(order.begin(), order.end(), [&](int a, int b) {
+            return Dist({ torchSpots[a].x, torchSpots[a].z }, s.dungeonPlayerPos) < Dist({ torchSpots[b].x, torchSpots[b].z }, s.dungeonPlayerPos); });
+        for (int i = 0; i < torchCount && lit < kDung3DMaxTorches; i++) tpos[lit++] = { torchSpots[order[i]].x, 62.0f, torchSpots[order[i]].z };
+        SetShaderValueV(g_dung3dTorch.shader, g_dung3dTorch.torchPosLoc, tpos, SHADER_UNIFORM_VEC3, lit);
+        SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.torchCountLoc, &lit, SHADER_UNIFORM_INT);
+        { // the cut-away: walls between the camera and you sink to stumps
+            Vector2 d = { c.pos.x - s.dungeonPlayerPos.x, c.pos.z - s.dungeonPlayerPos.y };
+            float L = std::max(1.0f, sqrtf(d.x * d.x + d.y * d.y));
+            float ci[4] = { s.dungeonPlayerPos.x, s.dungeonPlayerPos.y, d.x / L, d.y / L };
+            SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.cutInfoLoc, ci, SHADER_UNIFORM_VEC4);
+            float off = 0.0f;
+            SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.cutOnLoc, &off, SHADER_UNIFORM_FLOAT);
+        }
         float t = (float)GetTime();
         SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.timeLoc, &t, SHADER_UNIFORM_FLOAT);
         rlEnableShader(g_dung3dTorch.shader.id);
     }
     DrawModel(g_dung3dGround.model, { 900, 0, 900 }, 1.0f, WHITE);
-    if (g_dung3dWalls.loaded) DrawModel(g_dung3dWalls.model, { 0, 0, 0 }, 1.0f, WHITE);
+    if (g_dung3dWalls.loaded) {
+        float on = 1.0f, off = 0.0f; // (2026-09-29) the cut-away and dark tops apply to the wall mesh only
+        if (torchOn) SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.cutOnLoc, &on, SHADER_UNIFORM_FLOAT);
+        DrawModel(g_dung3dWalls.model, { 0, 0, 0 }, 1.0f, WHITE);
+        if (torchOn) SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.cutOnLoc, &off, SHADER_UNIFORM_FLOAT);
+    }
     Dungeon3DDrawProps(); // KayKit wall dressing, same torch lighting as the walls
     // Phase 3 creatures use the same torch shader as the dungeon geometry
     // (falling back to the default shader when torch lighting is off).

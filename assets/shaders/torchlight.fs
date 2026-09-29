@@ -31,6 +31,7 @@ uniform vec4 ambient;          // dark cool ambient, set once at load
 uniform vec3 torchPos[8];
 uniform int torchCount;
 uniform float time;            // seconds, for the flame flicker
+uniform float cutOn;           // (2026-09-29) 1 while drawing the wall mesh
 
 void main()
 {
@@ -60,6 +61,9 @@ void main()
         float flick = 0.82 + 0.18*sin(time*9.0 + float(i)*2.3)*sin(time*5.7 + float(i)*1.1);
         col += albedo*warm*(0.25 + 0.75*diff)*att*flick*2.1;
     }
+
+    // (2026-09-29) Wall tops read as the dark rock beyond the rooms (UO), not lit patterns.
+    if (cutOn > 0.5 && normal.y > 0.8 && fragPosition.y > 10.0) col *= 0.18;
 
     // Gamma correction (matches the sun shader's display-space output)
     col = pow(max(col, vec3(0.0)), vec3(1.0/2.2));
