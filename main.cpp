@@ -398,6 +398,10 @@ static const std::array<BuildingDef, 4> kCraftBuildings = {{
         {"Lesser Strength Potion", ItemType::Potion, "strength", "", "", 10, 4, 5},
         {"Strength Potion", ItemType::Potion, "strength", "", "", 45, 7, 10},
         {"Greater Strength Potion", ItemType::Potion, "strength", "", "", 85, 11, 15},
+        // (2026-09-29) Cure: clears poison up to its strength (1 lesser, 2 regular, 3 deadly)
+        {"Lesser Cure Potion", ItemType::Potion, "cure", "", "", 15, 4, 1},
+        {"Cure Potion", ItemType::Potion, "cure", "", "", 50, 7, 2},
+        {"Greater Cure Potion", ItemType::Potion, "cure", "", "", 85, 10, 3},
     } },
 }};
 
@@ -2054,6 +2058,9 @@ struct GameState {
         // champion's tactical AI and the "as if a monster spot" stats path, but never
         // loot, never earn epithets, and never touch the champion's kill counter.
         int bladeIdx = -1;
+        // (2026-09-29) UO-style duels & poison - transient like the rest of the fight
+        int castSpell = -1; float castT = 0.0f, castDur = 0.0f; int comboStep = 0; float healCd = 0.0f; // Murder Inc.'s visible casts
+        float poisonT = 0.0f, poisonTick = 0.0f; int poisonLvl = 0;                                      // poisoned (Venom Sting / a coated blade)
     };
     std::optional<ActiveMonster> wildEngaged;
     // Duel softlock safety valve (2026-09-25): seconds the current locked duel's
@@ -2088,6 +2095,7 @@ struct GameState {
         float monsterHurtT = -1.0f;  // >=0: seconds since the player last hurt this monster
         int debuffKind = 0;          // 0 none, 1 Sap Strength, 2 Cloud Mind, 3 Fumbling Curse
         float debuffT = 0.0f;        // seconds remaining on debuffKind
+        float poisonT = 0.0f, poisonTick = 0.0f; int poisonLvl = 0; // (2026-09-29) poisoned
     };
     std::optional<ActiveDungeonMonster> dungeonEngaged;
     // Dungeon pack attackers (2026-09-25) - same pattern as wildExtraAttackers.
@@ -2125,8 +2133,12 @@ struct GameState {
         // hitting the wrong opponent.
         bool castByRival = false;
         int castByBladeIdx = -1;
+        int enemySpell = -1; // (2026-09-29) a Murder Inc. duel spell (kDs*), -1 the old shadow bolt
     };
     SpellProjectile spellProjectiles[8];
+    // (2026-09-29) you, poisoned (transient); a bandage being applied
+    float poisonT = 0.0f, poisonTick = 0.0f; int poisonLvl = 0; std::string poisonBy;
+    float bandageT = -1.0f, bandageDur = 0.0f;
     struct SpellImpact {
         bool active = false;
         int zone = 0;
@@ -4962,6 +4974,7 @@ static const float kCompanionAttackCooldown = 1.5f;
 // - longer than a plain melee swing so alternating melee/ranged still feels paced, not
 // spammy.
 static const float kTacticalRangedCooldown = 3.0f;
+static const float kDuelSwingCooldown = 2.4f; // (2026-09-29) Murder Inc.'s melee pace in a duel
 static void UpdateCompanionFollow(GameState& s, Vector2 playerPos, Vector2 playerFacing, float dt,
                                   const Vector2* foe = nullptr) {
     if (s.companionAtkT >= 0.0f) { s.companionAtkT += dt; if (s.companionAtkT > 0.7f) s.companionAtkT = -1.0f; }
@@ -5182,7 +5195,7 @@ static float MurderIncMaxHp(const GameState& s, float level, int rank) { // rank
 // they outclass you, less if you outclass them), so a duel is five-plus exchanges.
 static int PvpHitCap(const GameState& s, float level, int dmg) {
     float ratio = std::clamp(level / std::max(1.0f, (float)CombatPower(s)), 0.6f, 1.4f);
-    float cap = (float)s.maxHp * (0.10f + 0.08f * ratio) * (0.85f + RandUnit() * 0.3f);
+    float cap = (float)s.maxHp * (0.08f + 0.06f * ratio) * (0.85f + RandUnit() * 0.3f); // ~11-16% at even odds
     return std::max(1, std::min(dmg, (int)std::round(cap)));
 }
 
@@ -6278,6 +6291,10 @@ static void TryBuyBandages(GameState& s, int amount, int cost) {
     s.bandages += amount;
     s.logLine = "Bought " + std::to_string(amount) + " bandages for " + std::to_string(cost) + " gold.";
 }
+// Bandages take time now (UO): a few seconds' work, quicker with DEX; finished in the main loop's UO-style timers.
+static float BandageDelay(const GameState& s) { return std::clamp(5.5f - EffDex(s) / 60.0f, 3.0f, 5.5f); }
+static float g_healPotCd = 0.0f; // heal potions share a 10s timer
+static const float kHealPotCooldown = 10.0f;
 // JS: successChance = clamp(20 + effectiveSkill('healing')*0.8, 10, 99).
 static float BandageSuccessChance(const GameState& s) {
     return std::clamp(20.0f + EffectiveSkill(s, &GameState::healing) * 0.8f, 10.0f, 99.0f);
@@ -6299,6 +6316,13 @@ static std::string ApplyBandage(GameState& s) {
         float aGain = SkillUseGain(s.anatomy, 0.5f, 0.8f);
         if (aGain > 0) note += " (Anatomy +" + std::to_string(aGain).substr(0, 4) + ")";
     }
+    if (succeeded && s.poisonT > 0.0f) { // (2026-09-29) a bandage cures poison instead of healing
+        if (RandUnit() * 100.0f < 100.0f - 18.0f * s.poisonLvl + EffectiveSkill(s, &GameState::anatomy) * 0.3f) {
+            s.poisonT = 0.0f; s.poisonLvl = 0;
+            return "You cure the poison." + note;
+        }
+        return "You fail to cure the poison." + note;
+    }
     if (succeeded) {
         int healAmt = BandageHealAmount(s);
         s.hp = std::min(s.maxHp, s.hp + healAmt);
@@ -6309,8 +6333,11 @@ static std::string ApplyBandage(GameState& s) {
 static void UseBandageOutOfCombat(GameState& s) {
     if (s.combat.has_value()) return;
     if (s.bandages < 1) { s.logLine = "No bandages left."; return; }
-    if (s.hp >= s.maxHp) { s.logLine = "Already at full HP."; return; }
-    s.logLine = ApplyBandage(s);
+    if (s.hp >= s.maxHp && s.poisonT <= 0.0f) { s.logLine = "Already at full HP."; return; }
+    if (s.bandageT >= 0.0f) { s.logLine = "You're already applying a bandage."; return; }
+    // (2026-09-29) UO: a bandage takes a few seconds' work (quicker with DEX)
+    s.bandageDur = s.bandageT = BandageDelay(s);
+    s.logLine = "You begin applying a bandage...";
 }
 // Mirrors combatBandage(): healing yourself still counts as your turn, so the pet
 // and monster still take theirs afterward - same shape as CastHealSpell above.
@@ -7906,8 +7933,17 @@ static void DrinkPotion(GameState& s, int potionIdx) {
         return;
     }
     if (p.effect == "heal") {
+        // (2026-09-29) UO: heal potions share a 10s timer and won't take while you're poisoned
+        if (s.poisonT > 0.0f) { s.logLine = "You can't heal while poisoned - cure it first (bandage, heal spell or cure potion)."; return; }
+        if (g_healPotCd > 0.0f) { s.logLine = TextFormat("You must wait %.0fs before drinking another heal potion.", ceilf(g_healPotCd)); return; }
+        g_healPotCd = kHealPotCooldown;
         s.hp = std::min(s.maxHp, s.hp + p.potency);
         s.logLine = "Drank " + p.name + " - healed " + std::to_string(p.potency) + ".";
+    } else if (p.effect == "cure") { // (2026-09-29)
+        if (s.poisonT <= 0.0f) { s.logLine = "You aren't poisoned."; return; }
+        if (p.potency >= s.poisonLvl || RandUnit() < 0.4f) { s.poisonT = 0.0f; s.poisonLvl = 0; s.logLine = "Drank " + p.name + " - the poison is gone."; }
+        else s.logLine = "Drank " + p.name + " - it's too weak for this poison!";
+        PlaySfx(SfxId::Heal);
     } else if (p.effect == "strength") { // (2026-09-27)
         s.strPotAmt = std::min(15, p.potency); s.strPotT = 180.0f;
         s.logLine = "Drank " + p.name + " - +" + std::to_string(s.strPotAmt) + " Strength for 3 minutes.";
@@ -10588,6 +10624,9 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     // 2026-09-27) it also carries your heal spell, and only shows while you're hurt.
     float y = kViewport.y + kViewport.height - 146.0f;
     std::vector<int> potions;
+    if (s.poisonT > 0.0f) // (2026-09-29) poisoned: your best cure comes first
+        for (size_t i = 0; i < s.potions.size() && potions.empty(); i++)
+            if (s.potions[i].effect == "cure") potions.push_back((int)i);
     for (size_t i = 0; i < s.potions.size() && potions.size() < 2; i++)
         if (s.potions[i].effect == "heal") potions.push_back((int)i);
     const bool ooc = oocZone >= 0;
@@ -10619,7 +10658,7 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     Pet* rideable = (ooc && oocZone == 0 && !s.playerIsGhost) ? RideablePet(s) : nullptr;
     bool rideUp = rideable != nullptr; // (2026-09-28, #74) Ride / Dismount
     bool trackUp = ooc && oocZone == 0 && !s.playerIsGhost && s.skillActive[kTrackingSkillIdx]; // (2026-09-29) Track
-    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp && !hideUp && !peaceUp && !medUp && !fishUp && !rideUp && !trackUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
+    if (ooc && ((s.hp >= s.maxHp && s.poisonT <= 0.0f && s.bandageT < 0.0f && raiseIdx < 0 && !blessUp && !teleUp && !hideUp && !peaceUp && !medUp && !fishUp && !rideUp && !trackUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
     int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0) + (teleUp ? 1 : 0) + (hideUp ? 1 : 0) +
             (peaceUp ? 1 : 0) + (provoUp ? 1 : 0) + (medUp ? 1 : 0) + (fishUp ? 1 : 0) + (rideUp ? 1 : 0) + (trackUp ? 1 : 0);
     const float sz = 42.0f, gap = 8.0f;
@@ -10635,17 +10674,21 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
         else if (count == 1) DrawUIText("1", (int)(r.x + r.width - 9), (int)(r.y + r.height - 15), 12, Color{ 255, 244, 214, 255 });
         return enabled && UOTapped(r);
     };
-    if (slot(0, s.bandages > 0 && s.hp < s.maxHp, s.bandages,
-             [&](Rectangle r) { UODrawIcon(kUoiBandages, r.x + r.width / 2, r.y + r.height / 2, 36); })) {
+    if (slot(0, s.bandages > 0 && (s.hp < s.maxHp || s.poisonT > 0.0f) && s.bandageT < 0.0f, s.bandages,
+             [&](Rectangle r) { UODrawIcon(kUoiBandages, r.x + r.width / 2, r.y + r.height / 2, 36);
+                                if (s.bandageT >= 0.0f && s.bandageDur > 0.0f) // (2026-09-29) the bandage in progress
+                                    DrawRectangleRec({ r.x, r.y, r.width, r.height * std::clamp(s.bandageT / s.bandageDur, 0.0f, 1.0f) }, Fade(BLACK, 0.4f)); })) {
         PlaySfx(SfxId::Click);
         UseBandageOutOfCombat(s);
     }
     for (size_t k = 0; k < potions.size(); k++) {
         int pi = potions[k];
         const PotionStack& p = s.potions[(size_t)pi];
-        if (slot(1 + (int)k, true, p.count, [&](Rectangle r) {
+        bool cure = p.effect == "cure";
+        if (slot(1 + (int)k, cure || (g_healPotCd <= 0.0f && s.poisonT <= 0.0f), p.count, [&](Rectangle r) {
                 float cx = r.x + r.width / 2, cy = r.y + r.height / 2 + 4;
-                DrawCircleV({ cx, cy }, 11.0f, Color{ 190, 30, 40, 255 });           // red heal draught
+                DrawCircleV({ cx, cy }, 11.0f, cure ? Color{ 230, 160, 40, 255 } : Color{ 190, 30, 40, 255 }); // red heal draught, orange cure
+                if (!cure && g_healPotCd > 0.0f) DrawUIText(TextFormat("%.0f", ceilf(g_healPotCd)), (int)r.x + 4, (int)r.y + 3, 12, WHITE);
                 DrawCircleV({ cx - 4, cy - 4 }, 3.5f, Fade(WHITE, 0.55f));
                 DrawRectangleRec({ cx - 3.5f, cy - 19, 7, 9 }, Color{ 200, 210, 220, 200 });
                 DrawRectangleRec({ cx - 4.5f, cy - 22, 9, 4 }, Color{ 130, 90, 50, 255 }); })) {
@@ -27037,6 +27080,7 @@ static GameState::SpellProjectile* SpawnSpellProjectile(GameState& s, int zone, 
         p.target = target;
         p.castByRival = false;
         p.castByBladeIdx = -1;
+        p.enemySpell = -1;
         SpellFX fx = SpellFXFor(spellIdx);
         float dist = Dist(from, target);
         p.dur = std::clamp(dist / fx.speed, 0.18f, 0.8f);
@@ -27783,6 +27827,148 @@ static void NecroUpdateMinions(GameState& s, float dt) {
         i++;
     }
 }
+// ---- UO-style duels & poison (2026-09-29) -----------------------------------------
+// Poison ticks for a while and shuts healing down (bandages and heal spells cure it
+// instead, cure potions clear it, heal potions won't take). Monsters can be poisoned
+// by Venom Sting or a poisoned blade - except the dead, the stone and the flame.
+static const Color kPoisonGreen = { 120, 230, 90, 255 };
+static bool PoisonImmune(const std::string& n) {
+    static const char* k[] = { "Bone", "Corpse", "Gravewretch", "Warden", "Sovereign", "Whisper King", "Husk", "Wight",
+                               "Revenant", "Horror", "Frostbound King", "Winter's Maw", "Golem", "Wraith", "Titan", "Tri-Wyrm",
+                               "Emberlord", "Obsidian", "Hollow King", "Imp" };
+    for (const char* w : k) if (n.find(w) != std::string::npos) return true;
+    return false;
+}
+template <typename AM> static void PoisonMonster(GameState& s, AM& am, int zone, int lvl, const std::string& name) {
+    if (lvl <= 0) return;
+    if (PoisonImmune(name)) { SpawnFloatText(s, zone, am.pos, "IMMUNE", Color{ 200, 200, 200, 255 }); return; }
+    lvl = std::clamp(lvl, 1, 3);
+    if (am.poisonT > 0.0f && am.poisonLvl > lvl) return;
+    am.poisonLvl = lvl; am.poisonT = 10.0f + 3.0f * lvl; am.poisonTick = 2.0f;
+    SpawnFloatText(s, zone, am.pos, "POISONED", kPoisonGreen);
+}
+// One frame of a monster's poison; true when the poison finished it.
+template <typename AM> static bool PoisonMonsterTick(GameState& s, AM& am, int zone, float dt) {
+    if (am.poisonT <= 0.0f) return false;
+    am.poisonT -= dt;
+    if ((am.poisonTick -= dt) > 0.0f) return false;
+    am.poisonTick = 2.0f;
+    int d = std::max(1, (int)std::round(am.maxHp * (0.012f + 0.010f * am.poisonLvl)));
+    am.hp -= d; am.monsterHurtT = 0.0f;
+    SpawnFloatText(s, zone, am.pos, std::to_string(d), kPoisonGreen);
+    if (am.poisonT <= 0.0f) am.poisonLvl = 0;
+    return am.hp <= 0.0f;
+}
+// A landed melee blow with a coated weapon: each hit uses a charge, and may poison.
+template <typename AM> static void PlayerWeaponPoison(GameState& s, AM& am, int zone, const std::string& name) {
+    if (s.weaponPoisonCharges <= 0) return;
+    s.weaponPoisonCharges--;
+    float ch = 35.0f + EffectiveSkill(s, &GameState::poisoning) * 0.4f;
+    SkillUseGain(s.poisoning, ch / 100.0f, 3.0f);
+    if (RandUnit() * 100.0f >= ch) return;
+    int lvl = s.weaponPoisonPotency >= 8 ? 3 : s.weaponPoisonPotency >= 5 ? 2 : 1;
+    if (EffectiveSkill(s, &GameState::poisoning) >= 80.0f) lvl++;
+    PoisonMonster(s, am, zone, lvl, name);
+}
+static int VenomStingLevel(const GameState& s) {
+    return 1 + (EffectiveSkill(s, &GameState::magery) >= 60.0f ? 1 : 0) + (EffectiveSkill(s, &GameState::poisoning) >= 60.0f ? 1 : 0);
+}
+static void PoisonPlayer(GameState& s, int lvl, const std::string& by) {
+    lvl = std::clamp(lvl, 1, 3);
+    if (s.poisonT > 0.0f && s.poisonLvl > lvl) return;
+    s.poisonLvl = lvl; s.poisonT = 10.0f + 2.0f * lvl; s.poisonTick = 2.0f; s.poisonBy = by;
+    static const char* kHow[4] = { "", "lesser", "", "deadly " };
+    s.logLine = std::string("You are ") + (lvl == 3 ? "deadly " : lvl == 1 ? "lightly " : "") + "poisoned! Bandage it, cast a heal or drink a cure potion.";
+    (void)kHow;
+    Journal(s, s.logLine);
+    SpawnFloatText(s, s.screen == Screen::Hunt ? 1 : 0, s.screen == Screen::Hunt ? s.dungeonPlayerPos : s.wildernessPlayerPos, "POISONED", kPoisonGreen);
+}
+// Cure attempt (bandage / heal spell / potion strength): true when the poison is gone.
+static bool CurePlayerPoison(GameState& s, float chance) {
+    if (s.poisonT <= 0.0f) return false;
+    if (RandUnit() * 100.0f >= chance) return false;
+    s.poisonT = 0.0f; s.poisonLvl = 0;
+    return true;
+}
+static void PlayerPoisonTick(GameState& s, float dt) {
+    if (s.poisonT <= 0.0f) return;
+    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.poisonT = 0.0f; s.poisonLvl = 0; return; }
+    s.poisonT -= dt;
+    if ((s.poisonTick -= dt) <= 0.0f) {
+        s.poisonTick = 2.0f;
+        int d = std::max(1, (int)std::round(s.maxHp * (0.020f + 0.012f * s.poisonLvl)));
+        s.hp -= d; s.playerHurtT = 0.0f;
+        int zone = s.screen == Screen::Hunt ? 1 : 0;
+        SpawnFloatText(s, zone, zone ? s.dungeonPlayerPos : s.wildernessPlayerPos, std::to_string(d), kPoisonGreen);
+        if (s.hp <= 0) {
+            if (s.screen == Screen::Wilderness && s.wildEngaged.has_value()) { s.poisonT = 0.0f; s.poisonLvl = 0; EndWildMonsterLoss(s, s.poisonBy); return; }
+            s.hp = 1; // out of a fight the poison leaves you at death's door, no further
+        }
+    }
+    if (s.poisonT <= 0.0f) { s.poisonLvl = 0; s.logLine = "The poison wears off."; }
+}
+
+// Murder Inc.'s duel magic: a visible cast (their words over their heads and in the
+// target frame) that any blow of yours interrupts. They open with a combo now and
+// then (Explosion into Energy Bolt), poison you, and heal when hurt - interrupt that.
+enum { kDsArrow, kDsBolt, kDsExplo, kDsPoison, kDsHeal, kDsCount };
+struct DuelSpellDef { const char* name; const char* words; float cast; };
+static const DuelSpellDef kDuelSpells[kDsCount] = {
+    { "Magic Arrow", "In Por Ylem", 0.8f }, { "Energy Bolt", "Corp Por", 2.0f }, { "Explosion", "Vas Ort Flam", 2.2f },
+    { "Poison", "In Nox", 1.4f }, { "Greater Heal", "In Vas Mani", 2.6f },
+};
+static void DuelStartCast(GameState& s, GameState::ActiveMonster& am, const std::string& name) {
+    int k;
+    float frac = am.hp / std::max(1.0f, am.maxHp);
+    if (am.comboStep == 1) k = kDsBolt;                                              // the combo's follow-up
+    else if (frac < 0.55f && am.healCd <= 0.0f && RandUnit() < 0.75f) k = kDsHeal;
+    else if (s.poisonT <= 0.0f && RandUnit() < 0.28f) k = kDsPoison;
+    else if (RandUnit() < (am.isRival ? 0.30f : 0.20f)) { k = kDsExplo; am.comboStep = 1; }
+    else k = RandUnit() < 0.5f ? kDsBolt : kDsArrow;
+    if (k == kDsBolt && am.comboStep == 1 && kDuelSpells[k].cast > 0.0f) am.comboStep = 2;
+    am.castSpell = k;
+    am.castDur = am.castT = kDuelSpells[k].cast * (am.debuffKind == 3 ? 1.3f : 1.0f);
+    am.monsterAttackT = 0.0f; // the cast gesture
+    SpawnFloatText(s, 0, { am.pos.x, am.pos.y - 30.0f }, kDuelSpells[k].words, Color{ 255, 220, 120, 255 });
+    if (k == kDsExplo) s.logLine = name + " begins a dump - " + kDuelSpells[k].name + " first! Interrupt or brace.";
+    else if (k == kDsHeal) s.logLine = name + " starts to cast Greater Heal - hit them to break it!";
+}
+// Any blow that lands during a cast breaks it.
+static void DuelDisrupt(GameState& s, GameState::ActiveMonster& am) {
+    if (am.castSpell < 0) return;
+    std::string nm = EngagedWildMonsterStats(s, am).name;
+    s.logLine = "You disrupt " + nm + "'s " + kDuelSpells[am.castSpell].name + "!";
+    SpawnFloatText(s, 0, { am.pos.x, am.pos.y - 30.0f }, "FIZZLE", Color{ 200, 200, 255, 255 });
+    am.castSpell = -1; am.comboStep = 0;
+    am.monsterSpecialCooldown = std::max(am.monsterSpecialCooldown, 1.8f);
+}
+static void DuelDisrupt(GameState&, GameState::ActiveDungeonMonster&) {}
+static void DuelFinishCast(GameState& s, GameState::ActiveMonster& am, const std::string& name, float level) {
+    int k = am.castSpell;
+    am.castSpell = -1;
+    if (k == kDsHeal) {
+        float h = am.maxHp * (0.25f + 0.1f * RandUnit());
+        am.hp = std::min(am.maxHp, am.hp + h);
+        am.healCd = 12.0f;
+        SpawnFloatText(s, 0, am.pos, "+" + std::to_string((int)h), Color{ 120, 255, 150, 255 });
+        s.logLine = name + " heals themself!";
+        am.monsterSpecialCooldown = 2.5f + RandUnit() * 1.5f;
+        return;
+    }
+    if (k == kDsPoison) {
+        float resist = std::min(40.0f, EffectiveSkill(s, &GameState::magicResist) * 0.4f);
+        if (RandUnit() * 100.0f < resist) { s.logLine = "You resist " + name + "'s poison."; SkillUseGain(s.magicResist, 0.5f, 0.5f); }
+        else PoisonPlayer(s, (am.isRival ? 2 : 1) + (level >= 50.0f ? 1 : 0), name);
+        am.monsterSpecialCooldown = 2.0f + RandUnit() * 1.5f;
+        return;
+    }
+    if (auto* bp = SpawnSpellProjectile(s, 0, am.pos, s.wildernessPlayerPos, -2, false)) {
+        bp->castByRival = am.isRival; bp->castByBladeIdx = am.bladeIdx; bp->enemySpell = k;
+    }
+    if (am.comboStep == 1) am.monsterSpecialCooldown = 0.4f;          // straight into the follow-up
+    else if (am.comboStep == 2) { am.comboStep = 0; am.monsterAttackCooldown = 0.0f; am.monsterSpecialCooldown = 3.0f; } // then the swing
+    else am.monsterSpecialCooldown = 2.2f + RandUnit() * 1.8f;
+}
 static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::string& trainNote, int zone) {
     const Spell& spell = kSpells[spellIdx];
     if (spellIdx == kSpCorpseExplosion) { NecroCorpseExplosion(s, zone, trainNote); return; }
@@ -27798,6 +27984,8 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
             dmg = NecroOnHit(s, am, dmg); // Amplify Damage / Life Tap
             if (spellIdx == kSpTeeth && am.debuffKind == 0) { am.debuffKind = 1; am.debuffT = 4.0f; } // Grave Chill weakens its blows (#70)
             am.hp -= dmg;
+            DuelDisrupt(s, am);                                                               // (2026-09-29) breaks a Murder Inc. cast
+            if (spell.name == "Venom Sting") PoisonMonster(s, am, zone, VenomStingLevel(s), mname); // (2026-09-29) it really poisons now
             am.monsterHurtT = 0.0f;
             PlaySfx(SfxId::Hit);
             SpawnFloatText(s, 0, am.pos, std::to_string(dmg), kFloatDmgColor);
@@ -27876,6 +28064,8 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
             dmg = NecroOnHit(s, am, dmg); // Amplify Damage / Life Tap
             if (spellIdx == kSpTeeth && am.debuffKind == 0) { am.debuffKind = 1; am.debuffT = 4.0f; } // Grave Chill weakens its blows (#70)
             am.hp -= dmg;
+            DuelDisrupt(s, am);                                                               // (2026-09-29) breaks a Murder Inc. cast
+            if (spell.name == "Venom Sting") PoisonMonster(s, am, zone, VenomStingLevel(s), mname); // (2026-09-29) it really poisons now
             am.monsterHurtT = 0.0f;
             PlaySfx(SfxId::Hit);
             SpawnFloatText(s, 1, am.pos, std::to_string(dmg), kFloatDmgColor);
@@ -27962,7 +28152,7 @@ static void ResolvePlayerDebuffImpact(GameState& s, int spellIdx, const std::str
 
 // The Rival/Murder Inc. ranged strike used to damage the player instantly; now
 // a shadow bolt flies first and this runs on arrival. Numbers unchanged.
-static void ResolveEnemyRangedImpact(GameState& s, bool castByRival, int castByBladeIdx) {
+static void ResolveEnemyRangedImpact(GameState& s, bool castByRival, int castByBladeIdx, int enemySpell) {
     if (!s.wildEngaged.has_value()) return;
     auto& am = *s.wildEngaged;
     // The bolt belongs to its caster - if the fight changed hands mid-flight
@@ -27973,15 +28163,27 @@ static void ResolveEnemyRangedImpact(GameState& s, bool castByRival, int castByB
     std::string mname = spot.name;
     float hitCh = MonsterHitChance(s) - (am.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
     bool parried = false; // (2026-09-26) Parrying
-    if (RandUnit() * 100.0f < hitCh && !(parried = TryParry(s, 0, mname, true))) {
-        float raw = spot.level * (0.9f + RandUnit() * 0.5f);
-        if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
-        int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
-        if (am.isRival || am.bladeIdx >= 0) dmg = PvpHitCap(s, (float)spot.level, dmg); // (2026-09-29) a bite, not a life
+    bool dSpell = enemySpell >= 0 && enemySpell <= 2; // (2026-09-29) a duel spell: never misses, Magic Resistance softens it
+    if (dSpell || (RandUnit() * 100.0f < hitCh && !(parried = TryParry(s, 0, mname, true)))) {
+        int dmg;
+        if (dSpell) {
+            static const float kFrac[3] = { 0.06f, 0.15f, 0.19f }; // Magic Arrow, Energy Bolt, Explosion - of your max health
+            float ratio = std::clamp((float)spot.level / std::max(1.0f, (float)CombatPower(s)), 0.7f, 1.3f);
+            float resist = std::min(0.3f, EffectiveSkill(s, &GameState::magicResist) * 0.003f);
+            SkillUseGain(s.magicResist, 0.5f, 0.6f);
+            dmg = std::max(1, (int)std::round(s.maxHp * kFrac[enemySpell] * ratio * (0.85f + RandUnit() * 0.3f) * (1.0f - resist)));
+        } else {
+            float raw = spot.level * (0.9f + RandUnit() * 0.5f);
+            if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
+            dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
+            if (am.isRival || am.bladeIdx >= 0) dmg = PvpHitCap(s, (float)spot.level, dmg); // (2026-09-29) a bite, not a life
+        }
         s.hp -= (dmg = NecroShield(s, 0, dmg)); // skeletons / Bone Armor take it first
         s.playerHurtT = 0.0f;
         PlaySfx(SfxId::Hurt);
-        s.logLine = "The " + mname + " strikes you from range for " + std::to_string(dmg) + " damage!";
+        if (dSpell) CombatShake(enemySpell == 2 ? 9.0f : 5.0f);
+        s.logLine = dSpell ? "The " + mname + "'s " + kDuelSpells[enemySpell].name + " hits you for " + std::to_string(dmg) + "!"
+                           : "The " + mname + " strikes you from range for " + std::to_string(dmg) + " damage!";
         if (s.hp <= 0) {
             if (am.bladeIdx >= 0) { BladeFightEnded(s, am.bladeIdx, am); GuildSay(s, am.bladeIdx, 10, true); EndWildMonsterLoss(s, mname); return; }
             bool wasAlreadyBeaten = s.rivalHasBeatenPlayer;
@@ -28126,7 +28328,7 @@ static void UpdateLiveSpellFX(GameState& s, float dt) {
             p.active = false;
             if (p.spellIdx == -2) {
                 SpawnSpellImpact(s, p.zone, p.target, -2, 1.0f);
-                if (p.zone == 0) ResolveEnemyRangedImpact(s, p.castByRival, p.castByBladeIdx);
+                if (p.zone == 0) ResolveEnemyRangedImpact(s, p.castByRival, p.castByBladeIdx, p.enemySpell);
             } else if (p.spellIdx >= 0 && p.spellIdx < (int)kSpells.size()) {
                 const Spell& sp = kSpells[p.spellIdx];
                 if (sp.type == SpellType::Debuff) {
@@ -28934,6 +29136,19 @@ static void DrawTargetFrame(const GameState& s, int zone) {
     DrawRectangleLinesEx(bg, 1.0f, Fade(RAYWHITE, 0.5f));
     DrawUIText(ti.hpKnown ? TextFormat("%.0f / %.0f", ti.hp, ti.maxHp) : "???",
                (int)(bg.x + bg.width + 8), (int)bg.y - 1, 12, kColorText);
+    if (zone == 0 && s.wildEngaged.has_value()) { // (2026-09-29) their cast - hit them to break it - and their poison
+        const auto& am = *s.wildEngaged;
+        if (am.poisonT > 0.0f) DrawRectangleLinesEx({ bg.x - 1, bg.y - 1, bg.width + 2, bg.height + 2 }, 2.0f, kPoisonGreen);
+        if (am.castSpell >= 0 && am.castSpell < kDsCount) {
+            Rectangle cb = { fr.x, fr.y + fr.height + 3, fr.width, 20 };
+            bool heal = am.castSpell == kDsHeal;
+            DrawRectangleRec(cb, Fade(BLACK, 0.65f));
+            float f = am.castDur > 0.0f ? 1.0f - std::max(0.0f, am.castT) / am.castDur : 1.0f;
+            DrawRectangleRec({ cb.x, cb.y, cb.width * f, cb.height }, Fade(heal ? Color{ 90, 200, 110, 255 } : Color{ 230, 150, 50, 255 }, 0.8f));
+            DrawRectangleLinesEx(cb, 1.0f, Fade(RAYWHITE, 0.6f));
+            DrawUIText(TextFormat("Casting %s - hit to interrupt!", kDuelSpells[am.castSpell].name), (int)cb.x + 6, (int)cb.y + 3, 12, WHITE);
+        }
+    }
 }
 
 // Thumb-friendly TARGET button: the touch equivalent of G, parked above the
@@ -29585,6 +29800,14 @@ static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
         return;
     }
     setCastPose();
+    if (success && s.poisonT > 0.0f) { // (2026-09-29) healing magic cures poison first
+        PlaySfx(SfxId::Heal);
+        if (RandUnit() * 100.0f < 95.0f - 15.0f * s.poisonLvl + EffectiveSkill(s, &GameState::magery) * 0.3f) {
+            s.poisonT = 0.0f; s.poisonLvl = 0;
+            s.logLine = spell.name + " draws the poison out of you." + note;
+        } else s.logLine = spell.name + " fails to cure the poison." + note;
+        return;
+    }
     if (success) {
         int healAmt = SpellPowerFor(s, spell);
         s.hp = std::min(s.maxHp, s.hp + healAmt);
@@ -30617,6 +30840,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             }
         }
 
+        if (PoisonMonsterTick(s, am, 0, dtF)) { BeginWildMonsterDeath(s, am, spot.name, spot.baseGold, spot.baseLeather); return; } // (2026-09-29)
         if (am.provokedT <= 0.0f && Dist(am.pos, s.wildernessPlayerPos) > kWildDisengageRange) {
             s.logLine = "The " + spot.name + " loses interest.";
             s.wildEngaged.reset();
@@ -30699,8 +30923,15 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 
         if (am.monsterAttackCooldown > 0) am.monsterAttackCooldown -= dtF;
         if (am.monsterSpecialCooldown > 0) am.monsterSpecialCooldown -= dtF;
+        if (am.healCd > 0) am.healCd -= dtF;
         if (am.swingEffectTimer > 0) am.swingEffectTimer -= dtF;
         if (am.castEffectTimer > 0) am.castEffectTimer -= dtF;
+        if (PoisonMonsterTick(s, am, 0, dtF)) { // (2026-09-29) the poison finishes them
+            if (am.isRival) { bool wasMurdererTier = s.rivalHasBeatenPlayer; RivalFightEnded(s, am); BeginWildMonsterDeath(s, am, spot.name, spot.baseGold, spot.baseLeather);
+                              if (wasMurdererTier) { GainFame(s, 10.0f); s.notoriety = std::max(0.0f, s.notoriety - 10.0f); } }
+            else { BladeFightEnded(s, am.bladeIdx, am); BeginWildMonsterDeath(s, am, spot.name, spot.baseGold, spot.baseLeather); }
+            return;
+        }
         // The player's own clocks tick in duels too (2026-09-26 fix): without these
         // you got one swing and one cast per spell against the rival or a blade,
         // then nothing - the duel was only winnable by a one-hit kill.
@@ -30752,7 +30983,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // GameState::rivalLevel's comment), so this just prevents runaway movement
         // within a single frame rather than enforcing a real territory.
         float distNow = Dist(am.pos, s.wildernessPlayerPos);
-        if (distNow > kWildMeleeRange) {
+        if (distNow > kWildMeleeRange && am.castSpell < 0) { // (2026-09-29) a caster stands its ground
             Vector2 dir = { s.wildernessPlayerPos.x - am.pos.x, s.wildernessPlayerPos.y - am.pos.y };
             float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
             if (len > 0.0001f) {
@@ -30804,20 +31035,16 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // simple priority rule (not a full utility-AI), matching this project's existing
         // "small, honest simplifications" convention.
         bool inMelee = Dist(am.pos, s.wildernessPlayerPos) < kWildMeleeRange;
-        if (am.monsterSpecialCooldown <= 0) {
-            am.monsterSpecialCooldown = kTacticalRangedCooldown;
-            am.monsterAttackT = 0.0f; // cast gesture for the ranged strike
-            std::string mname = spot.name;
-            // The strike is now a visible shadow bolt: it flies first and the
-            // hit roll + damage run in ResolveEnemyRangedImpact on arrival.
-            // Same cooldown, same formulas - the only change is the travel time.
-            if (auto* bp = SpawnSpellProjectile(s, 0, am.pos, s.wildernessPlayerPos, -2, false)) {
-                bp->castByRival = am.isRival;
-                bp->castByBladeIdx = am.bladeIdx;
-            }
+        // (2026-09-29) UO-style duel magic: a visible cast (words overhead, a bar in your
+        // target frame) that any blow of yours interrupts; it lands when the cast completes.
+        if (am.castSpell >= 0) {
+            if ((am.castT -= dtF) <= 0.0f) DuelFinishCast(s, am, spot.name, (float)spot.level);
+        } else if (am.monsterSpecialCooldown <= 0) {
+            DuelStartCast(s, am, spot.name);
         } else if (inMelee && am.monsterAttackCooldown <= 0) {
             // Fumbling Curse: the monster attacks 50% slower (2026-09-24).
-            am.monsterAttackCooldown = kWildMonsterAttackCooldown * (am.debuffKind == 3 ? 1.5f : 1.0f);
+            // (2026-09-29) a duelist's weapon speed (~2.4s, UO-like), not a beast's 1.3s flurry
+            am.monsterAttackCooldown = kDuelSwingCooldown * (am.debuffKind == 3 ? 1.5f : 1.0f);
             am.monsterAttackT = 0.0f; // world-space lunge anim, synced to this tick
             std::string mname = spot.name;
             float hitCh = MonsterHitChance(s) - (am.debuffKind == 2 ? 15.0f : 0.0f); // Cloud Mind
@@ -31000,6 +31227,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             if (s.consecrateT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.3f)); // Consecrate Weapon
             dmg = NecroOnHit(s, am, dmg); // Amplify Damage / Life Tap
             am.hp -= dmg;
+            DuelDisrupt(s, am);                       // (2026-09-29) a blow breaks their cast
+            PlayerWeaponPoison(s, am, 0, mname);     // (2026-09-29) a coated blade
             am.monsterHurtT = 0.0f; // hit-flash on the monster
             PlaySfx(SfxId::Hit);
             SpawnFloatText(s, 0, am.pos, std::to_string(dmg), kFloatDmgColor);
@@ -31708,7 +31937,16 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         DrawUIText(TextFormat("HP %d/%d", s.hp, s.maxHp), (int)px + 9, (int)py + 7, 15, hpPct > 0.3f ? Color{ 246, 236, 212, 255 } : Color{ 255, 150, 130, 255 });
         Rectangle hb = { px + 9, py + 28, pw - 18, 13 };
         DrawRectangleRec(hb, Fade(BLACK, 0.55f));
-        DrawRectangleRec({ hb.x, hb.y, hb.width * hpPct, hb.height }, hpPct > 0.3f ? Color{ 70, 150, 70, 255 } : Color{ 190, 50, 44, 255 });
+        DrawRectangleRec({ hb.x, hb.y, hb.width * hpPct, hb.height }, s.poisonT > 0.0f ? Color{ 150, 220, 40, 255 } // (2026-09-29) UO: a poisoned bar goes green
+                                                                         : hpPct > 0.3f ? Color{ 70, 150, 70, 255 } : Color{ 190, 50, 44, 255 });
+        if (s.poisonT > 0.0f) {
+            const char* pt = s.poisonLvl >= 3 ? "DEADLY POISON" : "POISONED";
+            DrawUIText(pt, (int)(px + pw - 9 - MeasureUIText(pt, 10)), (int)py + 10, 10, Color{ 170, 240, 90, 255 });
+        }
+        if (s.bandageT >= 0.0f && s.bandageDur > 0.0f) { // the bandage in progress
+            float f = 1.0f - s.bandageT / s.bandageDur;
+            DrawRectangleRec({ hb.x, hb.y + hb.height + 1, hb.width * f, 3 }, Color{ 240, 230, 200, 255 });
+        }
         std::string mt = TextFormat("MP %.0f/%.0f", s.mana, MaxMana(s));
         DrawUIText(mt.c_str(), (int)px + 9, (int)py + 46, 12, Color{ 170, 195, 255, 255 });
         Rectangle mb = { px + 9, py + 63, pw - 18, 7 };
@@ -32180,6 +32418,10 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             }
         }
 
+        if (PoisonMonsterTick(s, am, 1, dtF)) { // (2026-09-29) the poison finishes it
+            BeginDungeonMonsterDeath(s, am, *s.selectedDungeon, am.isBoss, m.name, m.level, m.baseGold, m.baseLeather);
+            return;
+        }
         if (Dist(am.pos, s.dungeonPlayerPos) > kWildDisengageRange) {
             s.logLine = m.name + " loses interest.";
             s.dungeonEngaged.reset();
@@ -32333,6 +32575,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             if (s.consecrateT > 0.0f) dmg = std::max(1, (int)std::round(dmg * 1.3f)); // Consecrate Weapon
             dmg = NecroOnHit(s, am, dmg); // Amplify Damage / Life Tap
             am.hp -= dmg;
+            PlayerWeaponPoison(s, am, 1, mname);     // (2026-09-29) a coated blade
             am.monsterHurtT = 0.0f; // hit-flash on the monster
             PlaySfx(SfxId::Hit);
             SpawnFloatText(s, 1, am.pos, std::to_string(dmg), kFloatDmgColor);
@@ -33196,6 +33439,18 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
         if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, TextFormat("Buy 1 (%dg)", kProvisionerHealPotionCost),
                     CanAfford(s, kProvisionerHealPotionCost))) TryBuyHealPotion(s);
         y += 34;
+        { // (2026-09-29) cure potions: poison is real now
+            auto cs = std::find_if(s.potions.begin(), s.potions.end(), [](const PotionStack& p) { return p.name == "Cure Potion"; });
+            DrawInfoLine(TextFormat("Cure Potions: %d", cs != s.potions.end() ? cs->count : 0), 20, y + 6, 12, kColorText);
+            if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Buy 1 (30g)", CanAfford(s, 30))) {
+                PayGold(s, 30);
+                auto it = std::find_if(s.potions.begin(), s.potions.end(), [](const PotionStack& p) { return p.name == "Cure Potion"; });
+                if (it == s.potions.end()) s.potions.push_back({ "Cure Potion", "cure", 2, 1 }); else it->count++;
+                s.logLine = "Bought a Cure Potion.";
+                PlaySfx(SfxId::Buy);
+            }
+            y += 34;
+        }
         { // Instruments (2026-09-28, #65): bard songs need one; a better one plays better
             int next = s.instrument + 1;
             DrawInfoLine(s.instrument > 0 ? TextFormat("Instrument: %s", kInstrumentName[s.instrument]) : "Instrument: none (bard songs need one)",
@@ -36242,7 +36497,7 @@ static void UpdateDrawFrame() {
             static Screen prevPlay = Screen::Town;
             if (g_playScreen == Screen::Town && (prevPlay == Screen::Wilderness || prevPlay == Screen::Hunt) && !state.playerIsGhost) {
                 bool worn = state.hp < state.maxHp || state.mana < MaxMana(state) - 0.5f;
-                state.hp = state.maxHp; state.mana = MaxMana(state);
+                state.hp = state.maxHp; state.mana = MaxMana(state); state.poisonT = 0.0f; state.poisonLvl = 0;
                 for (auto& p : state.pets) if (p.hp > 0.0f) { p.hp = p.maxHp; p.mana = p.maxMana; }
                 if (worn) { state.logLine = "Safe inside the walls, you rest - health and mana restored."; Journal(state, state.logLine); }
             }
@@ -36263,6 +36518,14 @@ static void UpdateDrawFrame() {
         WyrmTick(state, dt);   // the world boss's wake timer and heads (2026-09-27)
         BreakoutTick(state, dt); // a dungeon boss loose in the wilds, now and then (2026-09-29)
         TrackTick(state, dt);    // Tracking's pointer (2026-09-29)
+        { // (2026-09-29) UO-style timers: poison ticks, the bandage being applied, the heal-potion timer
+            PlayerPoisonTick(state, dt);
+            g_healPotCd = std::max(0.0f, g_healPotCd - dt);
+            if (state.bandageT >= 0.0f) {
+                if (state.playerIsGhost || state.bandages < 1) state.bandageT = -1.0f;
+                else if ((state.bandageT -= dt) <= 0.0f) { state.bandageT = -1.0f; state.logLine = ApplyBandage(state); PlaySfx(SfxId::Heal); }
+            }
+        }
         WarNetTick(state, dt); // War Week: Muster minutes, online guild sync (2026-09-27)
         g_tapWalkOn = state.optTapWalk;
         g_alwaysDay = state.optAlwaysDay;
