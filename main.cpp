@@ -10429,6 +10429,120 @@ static void CastHealOutOfCombat(GameState& s, int zone) {
 static void BardPeace(GameState& s, int zone); // bard songs (2026-09-28), defined with the combat helpers
 static int WildWaterNear(Vector2 p); // (2026-09-28, #66) 0 none, 1 sea, 2 lake, 3 river - defined with the terrain grid
 static void BardProvoke(GameState& s);
+// ---- Tracking (2026-09-29): an active skill, UO's Track --------------------------
+// Tap Track on your belt in the wilds, pick Animals / Monsters / Murder Inc., and see
+// what's out there (range and odds grow with the skill). Pick one and a pointer leads
+// you to it for two minutes. Every search trains Tracking.
+struct TrackHit { int kind = -1, idx = -1; std::string name; }; // kind: 0 animal, 1 monster, 2 a Murder Inc. blade, 3 Kael Vorn
+static bool g_trackOpen = false;
+static int g_trackCat = -1;          // the category last searched (-1: none yet)
+static std::vector<TrackHit> g_trackHits;
+static bool g_trackFailed = false;
+static TrackHit g_tracked;           // who the pointer follows (kind -1: nobody)
+static float g_trackedT = 0.0f;
+static float g_trackCd = 0.0f;       // between searches
+static const int kTrackingSkillIdx = 19;
+static float TrackRange(const GameState& s) { return 500.0f + EffectiveSkill(s, &GameState::tracking) * 28.0f; }
+static float TrackChance(const GameState& s) { return std::clamp(35.0f + EffectiveSkill(s, &GameState::tracking) * 0.62f, 35.0f, 97.0f); }
+static bool TrackPos(const GameState& s, const TrackHit& h, Vector2* out) {
+    switch (h.kind) {
+        case 0: if (h.idx < 0 || h.idx >= (int)kWildernessCreatureSpots.size()) return false;
+                *out = kWildernessCreatureSpots[(size_t)h.idx].pos; return true;
+        case 1: if (h.idx < 0 || h.idx >= (int)kWildernessMonsterSpots.size() || s.wildSpotRespawn[(size_t)h.idx] > 0.0f) return false;
+                *out = WildernessMonsterLivePos(h.idx, s.worldTime); return true;
+        case 2: if (h.idx < 0 || h.idx >= kBladeCount) return false;
+                *out = s.blades[(size_t)h.idx].pos; return true;
+        case 3: *out = s.rivalPos; return true;
+    }
+    return false;
+}
+static void TrackSearch(GameState& s, int cat) {
+    g_trackCat = cat; g_trackHits.clear(); g_trackFailed = false;
+    g_trackCd = 1.5f;
+    float chance = TrackChance(s);
+    float gain = SkillUseGain(s.tracking, chance / 100.0f, 4.0f);
+    std::string gainNote = gain > 0.0f ? TextFormat(" (Tracking +%.1f)", gain) : "";
+    if (RandUnit() * 100.0f > chance) {
+        g_trackFailed = true;
+        s.logLine = "You find no tracks you can follow." + gainNote;
+        return;
+    }
+    Vector2 me = s.wildernessPlayerPos;
+    float R = TrackRange(s);
+    std::vector<std::pair<float, TrackHit>> found;
+    auto consider = [&](int kind, int idx, const std::string& name) {
+        TrackHit h{ kind, idx, name }; Vector2 p;
+        if (!TrackPos(s, h, &p)) return;
+        float d = Dist(me, p);
+        if (d <= R) found.push_back({ d, h });
+    };
+    if (cat == 0) for (size_t i = 0; i < kWildernessCreatureSpots.size(); i++) consider(0, (int)i, kWildCreatures[(size_t)kWildernessCreatureSpots[i].creatureIdx].name);
+    if (cat == 1) for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) consider(1, (int)i, kWildernessMonsterSpots[i].name);
+    if (cat == 2) {
+        for (int bi = 0; bi < kBladeCount; bi++) consider(2, bi, BladeName(bi));
+        consider(3, 0, RivalEpithetName(s));
+    }
+    std::sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (size_t i = 0; i < found.size() && i < 8; i++) g_trackHits.push_back(found[i].second);
+    static const char* kWhat[3] = { "animal", "monster", "Murder Inc." };
+    s.logLine = g_trackHits.empty() ? std::string("No ") + kWhat[cat] + " tracks within " + std::to_string((int)(R / 10.0f) * 10) + " paces." + gainNote
+                                    : std::string(TextFormat("You pick up %d trail%s.", (int)g_trackHits.size(), g_trackHits.size() == 1 ? "" : "s")) + gainNote;
+}
+static void TrackTick(GameState& s, float dt) {
+    g_trackCd = std::max(0.0f, g_trackCd - dt);
+    if (g_tracked.kind < 0) return;
+    Vector2 p;
+    if (s.screen != Screen::Wilderness || (g_trackedT -= dt) <= 0.0f) { g_tracked = TrackHit{}; return; }
+    if (!TrackPos(s, g_tracked, &p)) { s.logLine = "The trail of the " + g_tracked.name + " goes cold."; g_tracked = TrackHit{}; return; }
+    if (Dist(s.wildernessPlayerPos, p) < 140.0f) {
+        s.logLine = "You've tracked down the " + g_tracked.name + ".";
+        SkillUseGain(s.tracking, 0.5f, 4.0f);
+        g_tracked = TrackHit{};
+    }
+}
+// The picker: three categories, then the trails found (nearest first), tap one to follow.
+static void DrawTrackPanel(GameState& s) {
+    if (!g_trackOpen) return;
+    if (s.screen != Screen::Wilderness || s.playerIsGhost || s.wildEngaged.has_value()) { g_trackOpen = false; return; }
+    const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 };
+    int rows = g_trackCat < 0 ? 1 : std::max(1, (int)g_trackHits.size());
+    Rectangle G = { 20, 330, 500, 124.0f + rows * 40.0f };
+    UIRegister(G);
+    UODrawGump(G, kUoParchment);
+    UODrawTitle(G, "Tracking", 15);
+    if (UOCloseButton(G)) { g_trackOpen = false; return; }
+    float x = G.x + 16, y = G.y + 30, w = G.width - 32;
+    DrawUIText(TextFormat("Tracking %.1f  -  range %d paces, %.0f%% to find a trail", EffectiveSkill(s, &GameState::tracking),
+                          (int)(TrackRange(s) / 10.0f) * 10, TrackChance(s)), (int)x, (int)y, 12, soft);
+    y += 22;
+    static const char* kCat[3] = { "Animals", "Monsters", "Murder Inc." };
+    float bw = (w - 12) / 3.0f;
+    for (int c = 0; c < 3; c++) {
+        Rectangle b = { x + c * (bw + 6), y, bw, 36 };
+        if (UOButton(b, kCat[c], g_trackCd <= 0.0f)) TrackSearch(s, c);
+        if (g_trackCat == c) DrawRectangleLinesEx({ b.x - 2, b.y - 2, b.width + 4, b.height + 4 }, 2.0f, Color{ 150, 100, 20, 255 });
+    }
+    y += 46;
+    if (g_trackCat < 0) { DrawUIText("What are you looking for?", (int)x, (int)y + 8, 13, ink); return; }
+    if (g_trackFailed) { DrawUIText("You find no tracks you can follow. Try again.", (int)x, (int)y + 8, 13, ink); return; }
+    if (g_trackHits.empty()) { DrawUIText("Nothing of that kind within range.", (int)x, (int)y + 8, 13, ink); return; }
+    for (const TrackHit& h : g_trackHits) {
+        Vector2 p; if (!TrackPos(s, h, &p)) continue;
+        float d = Dist(s.wildernessPlayerPos, p);
+        bool on = g_tracked.kind == h.kind && g_tracked.idx == h.idx;
+        Rectangle row = { x, y, w, 36 };
+        DrawRectangleRounded(row, 0.2f, 4, Fade(on ? Color{ 255, 214, 110, 255 } : BLACK, on ? 0.3f : 0.06f));
+        DrawUIText(h.name.c_str(), (int)x + 8, (int)y + 4, 14, h.kind >= 2 ? Color{ 150, 30, 30, 255 } : ink);
+        DrawUIText(TextFormat("%s, %d paces", CompassWord(s.wildernessPlayerPos, p).c_str(), (int)(d / 10.0f) * 10), (int)x + 8, (int)y + 21, 11, soft);
+        Rectangle fb = { x + w - 96, y + 4, 90, 28 };
+        if (UOButton(fb, on ? "Following" : "Follow", !on)) {
+            g_tracked = h; g_trackedT = 120.0f; g_trackOpen = false;
+            s.logLine = "You follow the trail of the " + h.name + " (" + CompassWord(s.wildernessPlayerPos, p) + ").";
+            break;
+        }
+        y += 40;
+    }
+}
 static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     // Belt pouch (2026-09-26): bandages and heal potions as framed slots in the
     // spell bar's style, stack counts in the corner. Out of combat (oocZone >= 0,
@@ -10465,9 +10579,10 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     bool fishUp = fishWater > 0; // (2026-09-28, #66) cast a line at any shore
     Pet* rideable = (ooc && oocZone == 0 && !s.playerIsGhost) ? RideablePet(s) : nullptr;
     bool rideUp = rideable != nullptr; // (2026-09-28, #74) Ride / Dismount
-    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp && !hideUp && !peaceUp && !medUp && !fishUp && !rideUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
+    bool trackUp = ooc && oocZone == 0 && !s.playerIsGhost && s.skillActive[kTrackingSkillIdx]; // (2026-09-29) Track
+    if (ooc && ((s.hp >= s.maxHp && raiseIdx < 0 && !blessUp && !teleUp && !hideUp && !peaceUp && !medUp && !fishUp && !rideUp && !trackUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
     int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0) + (teleUp ? 1 : 0) + (hideUp ? 1 : 0) +
-            (peaceUp ? 1 : 0) + (provoUp ? 1 : 0) + (medUp ? 1 : 0) + (fishUp ? 1 : 0) + (rideUp ? 1 : 0);
+            (peaceUp ? 1 : 0) + (provoUp ? 1 : 0) + (medUp ? 1 : 0) + (fishUp ? 1 : 0) + (rideUp ? 1 : 0) + (trackUp ? 1 : 0);
     const float sz = 42.0f, gap = 8.0f;
     Rectangle bar = { 166.0f, y - 6.0f, n * sz + (n - 1) * gap + 18.0f, sz + 12.0f };
     g_beltRect = bar; g_beltDrawnAt = GetTime(); UIRegister(bar);
@@ -10633,6 +10748,21 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
             PlaySfx(SfxId::Click);
             g_meditating = !g_meditating; g_medTrainT = 0.0f;
             s.logLine = g_meditating ? "You clear your mind and meditate - stand still and your mana returns much faster." : "You stop meditating.";
+        }
+        bk++;
+    }
+    if (trackUp) { // a paw print: Track
+        bool on = g_trackOpen || g_tracked.kind >= 0;
+        if (slot(bk, true, 0, [&](Rectangle r) {
+                float cx = r.x + r.width / 2, cy = r.y + r.height / 2 - 3;
+                Color c = on ? Color{ 255, 214, 110, 255 } : Color{ 214, 190, 150, 255 };
+                if (on) DrawCircleV({ cx, cy }, 16.0f, Fade(c, 0.25f));
+                DrawEllipse((int)cx, (int)cy + 4, 6.5f, 5.5f, c);
+                DrawCircleV({ cx - 7, cy - 3 }, 2.6f, c); DrawCircleV({ cx - 2.5f, cy - 7 }, 2.6f, c);
+                DrawCircleV({ cx + 2.5f, cy - 7 }, 2.6f, c); DrawCircleV({ cx + 7, cy - 3 }, 2.6f, c);
+                DrawUIText("Track", (int)r.x + 4, (int)(r.y + r.height - 14), 11, Color{ 240, 236, 220, 255 }); })) {
+            PlaySfx(SfxId::Click);
+            g_trackOpen = !g_trackOpen;
         }
         bk++;
     }
@@ -16358,6 +16488,16 @@ static void DrawMinimap(GameState& s) {
         if (inside(f, -8)) {
             DrawRectangleRec({ f.x - 5, f.y - 4, 10, 8 }, Color{ 110, 40, 30, 255 });
             DrawRectangleLinesEx({ f.x - 5, f.y - 4, 10, 8 }, 1.0f, Color{ 250, 220, 180, 255 });
+        }
+    }
+    if (Vector2 tp; g_tracked.kind >= 0 && TrackPos(s, g_tracked, &tp)) { // (2026-09-29) what you're tracking
+        Vector2 f = toMap(tp);
+        Color c = g_tracked.kind >= 2 ? Color{ 230, 70, 60, 255 } : Color{ 255, 214, 110, 255 };
+        if (inside(f, 2)) { DrawCircleLines((int)f.x, (int)f.y, 5.5f, c); DrawCircleV(f, 2.5f, c); }
+        else {
+            Vector2 ctr = { mm.x + mm.width / 2, mm.y + mm.height / 2 };
+            float a = atan2f(f.y - ctr.y, f.x - ctr.x), r = mm.width / 2 - 12;
+            DrawDirArrow({ ctr.x + cosf(a) * r, ctr.y + sinf(a) * r }, a, 9.0f, c);
         }
     }
     MapIconPlayer(toMap(s.wildernessPlayerPos), s.playerFacing, 5.0f);
@@ -31170,6 +31310,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         DrawLiveCombatQuickItems(s);
     } else {
         DrawLiveCombatQuickItems(s, 0); // hurt and out of a fight: bandage / potion / heal spell
+        DrawTrackPanel(s);              // (2026-09-29) Tracking's picker
         if (IsKeyPressed(KEY_B)) UseBandageOutOfCombat(s);
         if (IsKeyPressed(KEY_H)) CastHealOutOfCombat(s, 0);
         bool atChest = s.tchestOn && Dist(s.wildernessPlayerPos, s.tchestPos) < 80.0f && !s.playerIsGhost;
@@ -35774,6 +35915,23 @@ static float ScreenAngleOf(Vector2 d) {
 }
 static void DrawDirectionsHud(GameState& s, int screenW) {
     bool wild = s.screen == Screen::Wilderness;
+    Vector2 tp;
+    if (wild && g_tracked.kind >= 0 && !s.worldMapOpen && TrackPos(s, g_tracked, &tp)) { // (2026-09-29) Tracking's pointer
+        Vector2 d = { tp.x - s.wildernessPlayerPos.x, tp.y - s.wildernessPlayerPos.y };
+        float dist = hypotf(d.x, d.y);
+        std::string line = "Tracking: " + g_tracked.name;
+        std::string sub = TextFormat("%s, %d paces", CompassWord(d), (int)(dist / 10.0f) * 10);
+        int w = std::max(MeasureUIText(line.c_str(), 14), MeasureUIText(sub.c_str(), 12)) + 52;
+        Rectangle r = { (float)screenW - 10 - w, 370, (float)w, 42 };
+        UIRegister(r);
+        Color c = g_tracked.kind >= 2 ? Color{ 230, 70, 60, 255 } : Color{ 255, 214, 110, 255 };
+        DrawRectangleRounded(r, 0.3f, 8, Fade(Color{ 30, 20, 10, 255 }, 0.85f));
+        DrawRectangleRoundedLinesEx(r, 0.3f, 8, 1.5f, Fade(c, 0.8f));
+        DrawUIText(line.c_str(), (int)r.x + 10, (int)r.y + 4, 14, c);
+        DrawUIText(sub.c_str(), (int)r.x + 10, (int)r.y + 23, 12, Color{ 230, 210, 180, 255 });
+        DrawDirArrow({ r.x + r.width - 22, r.y + r.height / 2 }, ScreenAngleOf(d), 12.0f, c);
+        if (UOTapped(r)) { g_tracked = TrackHit{}; s.logLine = "You stop tracking."; PlaySfx(SfxId::Click); }
+    }
     // a compass under the minimap that turns with the camera (the minimap itself stays north-up)
     if (wild && g_hudCamZone == 0 && s.minimapOpen && !s.worldMapOpen) {
         Rectangle mm = MinimapRect();
@@ -36009,6 +36167,7 @@ static void UpdateDrawFrame() {
         }
         WyrmTick(state, dt);   // the world boss's wake timer and heads (2026-09-27)
         BreakoutTick(state, dt); // a dungeon boss loose in the wilds, now and then (2026-09-29)
+        TrackTick(state, dt);    // Tracking's pointer (2026-09-29)
         WarNetTick(state, dt); // War Week: Muster minutes, online guild sync (2026-09-27)
         g_tapWalkOn = state.optTapWalk;
         g_alwaysDay = state.optAlwaysDay;
