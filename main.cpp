@@ -6623,6 +6623,7 @@ static int RollInRange(const std::array<int, 2>& range) {
 static void TryStartTameAttempt(GameState& s, int creatureIdx) {
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
     if (s.tamingAttempt.has_value() || s.ambush.has_value() || s.innocentEncounter.has_value()) return;
+    if (s.screen != Screen::Wilderness) { s.logLine = "Creatures are tamed out in the wilds - walk up to one and tap it."; return; } // (2026-09-29)
     const WildCreature& creature = kWildCreatures[creatureIdx];
     if (TameChance(s, creature) <= 0.0f) {
         s.logLine = "You need at least " + std::to_string(creature.difficulty) +
@@ -33423,7 +33424,9 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
         return; // wait for the attempt to resolve before showing the creature list
     }
 
-    DrawUIText("Wild creatures - attempt a tame (4s):", 20, y, 13, kColorAccent);
+    // (2026-09-29) Taming happens out in the wilds only - walk up to a creature and tap it.
+    // This list is now a field guide: your odds, and where each one roams.
+    DrawUIText("Wild creatures - tame them out in the wilds (walk up and tap one):", 20, y, 13, kColorAccent);
     y += 20;
     int listTop = y;
     int listHeight = 160;
@@ -33440,9 +33443,17 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
         float chance = TameChance(s, creature);
         std::string line = TextFormat("%s (diff %d) - %.0f%% to tame", creature.name.c_str(),
                                         creature.difficulty, chance);
-        DrawUIText(line.c_str(), 20, (int)rowY + 4, 12, kColorText);
-        if (Button({ (float)(screenW - 90), rowY, 70, 20 }, "Tame", chance > 0))
-            TryStartTameAttempt(s, (int)i);
+        DrawUIText(line.c_str(), 20, (int)rowY + 4, 12, chance > 0 ? kColorText : DARKGRAY);
+        std::string where; // the regions it roams, from its wild spots
+        for (const auto& sp : kWildernessCreatureSpots) {
+            if (sp.creatureIdx != (int)i) continue;
+            std::string r = RegionName(RegionAt(sp.pos));
+            if (where.find(r) == std::string::npos) where += (where.empty() ? "" : ", ") + r;
+        }
+        if (!where.empty()) {
+            int ww = MeasureUIText(where.c_str(), 11);
+            DrawUIText(where.c_str(), screenW - 20 - ww, (int)rowY + 5, 11, DARKGRAY);
+        }
     }
     EndScissorMode();
     y = listTop + listHeight + 8;
