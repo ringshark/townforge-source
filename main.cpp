@@ -31400,6 +31400,12 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         } else if (TreasureNearDig(s) && !s.playerIsGhost) {
             if (DrawInteractButton("Dig for treasure")) { s.digT = 0.0f; RevealFromHiding(s, ""); s.logLine = "You start digging..."; }
         } else if (inRange && !prompt.empty() && DrawInteractButton(prompt)) tryInteract();
+        // (2026-09-29) At your own finished house: a way back into the designer (the door otherwise just lets you in)
+        if (inRange && nearestKind == WildNodeKind::HousePlot && nearestIdx == s.housePlotIdx && !s.playerIsGhost &&
+            HouseHasDoor(s.houseLayout, kHousePlots[(size_t)nearestIdx].cells)) {
+            Rectangle rb = { kViewport.x + kViewport.width - 150.0f, kViewport.y + kViewport.height - 136.0f, 130.0f, 38.0f };
+            if (UOButton(rb, "Redesign")) { s.houseDesignerOpen = true; s.houseDemolishArmed = false; }
+        }
     }
     DrawGhostStatus(s); // death animation / ghost walk banner
     DrawCorpseUI(s, 0); // UO corpse window / Loot button (2026-09-26)
