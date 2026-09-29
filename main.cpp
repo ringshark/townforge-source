@@ -5149,6 +5149,15 @@ static int RollMurdererLevel(const GameState& s) {
     float variance = 0.9f + RandUnit() * 0.2f;
     return std::max(1, (int)std::round(power * variance));
 }
+// Murder Inc. toughness (2026-09-29): they're player killers, not beasts - a fight with
+// one should take a real exchange of blows, not one lucky swing. Health keeps pace with
+// your hitting power: a Blade takes ~6 of your average hits, Kael Vorn ~8, a hired
+// cutthroat or road ambusher ~3.
+static float MurderIncMaxHp(const GameState& s, float level, int rank) { // rank: 0 cutthroat, 1 Blade, 2 Kael Vorn
+    static const float kPerLevel[3] = { 5.0f, 7.5f, 9.0f }, kPerPower[3] = { 3.0f, 6.0f, 8.0f };
+    int r = std::clamp(rank, 0, 2);
+    return std::max(1.0f, std::max(level * kPerLevel[r], (float)CombatPower(s) * kPerPower[r]));
+}
 
 // On hold (2026-09-23) - Mark reported getting "caught in a loop" a few times from
 // these firing (7% base chance after nearly every action - gathering, every monster
@@ -5857,6 +5866,7 @@ static void StartCombat(GameState& s, int dungeonIdx, const DungeonMonster& mons
     c.dungeonIdx = dungeonIdx;
     c.monster = monster;
     c.monsterMaxHP = std::max(1, (int)std::round(monster.level * 3.0f)); // JS: monsterMaxHP()
+    if (monster.isMurderer) c.monsterMaxHP = std::max(c.monsterMaxHP, (int)std::round(MurderIncMaxHp(s, (float)monster.level, 0))); // (2026-09-29) road ambushers
     c.monsterHP = c.monsterMaxHP;
     c.Log("You engage the " + monster.name + "!");
     s.combat = c;
@@ -20116,7 +20126,7 @@ static const MeshMonDef kMeshMons[] = {
     { "Fen Serpent", "fen_serpent", 46.0f, false }, { "Brine Drake", "brine_drake", 70.0f, false },
     { "Stormwyrm", "stormwyrm", 92.0f, false }, { "Abyssal Wyrm", "abyssal_wyrm", 112.0f, false },
     { "Magma Hound", "magma_hound", 50.0f, false }, { "Ash Revenant", "ash_revenant", 74.0f, false },
-    { "Warren Rat", "warren_rat", 38.0f, false },
+    { "Warren Rat", "warren_rat", 28.0f, false }, // (2026-09-29) was 38: long and low, it came out hound-sized
     { "Vyrathax", "vyrathax", 150.0f, false }, // the world boss (DrawTriWyrm)
 };
 struct MeshMonModel { bool tried = false, ok = false; Model model{}; float baseH = 1.0f; float halfW = 1.0f; float minY = 0.0f; };
@@ -22747,6 +22757,7 @@ static bool Dung3DPointInUI(Vector2 m, const GameState& s) {
     return false;
 }
 
+static void IntPushLamplight(float night); // with the interiors
 static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std::string& prompt,
                                bool inRange, Vector2 nearestPos, const std::string& nearestLabel) {
     int di = *s.selectedDungeon; // caller guarantees a selected dungeon
@@ -22804,6 +22815,10 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
     Camera3D cam3d = { c.pos, c.target, { 0, 1, 0 }, c.fovY, CAMERA_PERSPECTIVE };
     T3DUpdateDayNight(0.0f, true); // indoors / underground: always the noon palette
     BeginMode3D(cam3d);
+    // (2026-09-29) The sculpted monsters use the lit shader: give it lamplight, no fog and
+    // THIS camera - it kept the last outdoor camera, so they fogged out pale in the dark.
+    IntPushLamplight(1.0f);
+    if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &c.pos, SHADER_UNIFORM_VEC3);
     bool torchOn = g_dung3dTorch.ready;
     if (torchOn) {
         // Per-frame shader state: torch positions at flame height, count, time.
@@ -26118,6 +26133,7 @@ static void SettleStartRaid(GameState& s) {
                 if (WildBlocked(am.pos)) am.pos = WildNearestFree(am.pos);
                 am.spawnPos = am.pos;
                 am.maxHp = std::max(1.0f, kWildernessMonsterSpots[(size_t)band[k]].level * 3.0f);
+                if (faction == 1) am.maxHp = std::max(am.maxHp, MurderIncMaxHp(s, (float)kWildernessMonsterSpots[(size_t)band[k]].level, 0)); // (2026-09-29) Murder Inc.'s cutthroats
                 am.hp = am.maxHp;
                 if (k == 0) s.wildEngaged = am; else s.wildExtraAttackers.push_back(am);
             }
@@ -27447,6 +27463,7 @@ static void TreasureUnearth(GameState& s) {
                 if (WildBlocked(am.pos)) am.pos = WildNearestFree(am.pos);
                 am.spawnPos = am.pos;
                 am.maxHp = WildSpotMaxHp(band[k]);
+                if (faction == 1) am.maxHp = std::max(am.maxHp, MurderIncMaxHp(s, (float)kWildernessMonsterSpots[(size_t)band[k]].level, 0)); // (2026-09-29) Murder Inc.'s cutthroats
                 am.hp = am.maxHp;
                 if (!s.wildEngaged.has_value()) s.wildEngaged = am; else s.wildExtraAttackers.push_back(am);
             }
@@ -30438,7 +30455,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         am.isRival = true;
         am.pos = s.rivalPos;
         am.spawnPos = s.rivalPos; // unused for the Rival (see updateTacticalOpponentAI's leash comment) but kept sane
-        am.maxHp = std::max(1.0f, s.rivalLevel * 3.0f);
+        am.maxHp = MurderIncMaxHp(s, s.rivalLevel, 2); // (2026-09-29) a real duel, not one swing
         am.hp = std::max(1.0f, am.maxHp * s.rivalMind.hpFrac); // wounds carry over
         s.wildEngaged = am;
         if (s.rivalMind.cornered) GuildSay(s, -1, 12, true);
@@ -30452,7 +30469,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         am.bladeIdx = bi;
         am.pos = s.blades[bi].pos;
         am.spawnPos = s.blades[bi].pos; // unused for blades, kept sane like the champion's
-        am.maxHp = std::max(1.0f, s.blades[bi].level * 3.0f);
+        am.maxHp = MurderIncMaxHp(s, s.blades[bi].level, 1); // (2026-09-29) a real duel, not one swing
         am.hp = std::max(1.0f, am.maxHp * s.blades[bi].mind.hpFrac); // wounds carry over
         s.wildEngaged = am;
         if (s.blades[bi].mind.cornered) GuildSay(s, bi, 12, true);
@@ -36153,6 +36170,16 @@ static void UpdateDrawFrame() {
         if (IsPlayScreen(state.screen)) g_playScreen = state.screen; // remembered for "Play" (2026-09-27)
         for (float& cd : state.commissionCd) if (cd > 0.0f) cd -= dt; // commission offers (2026-09-27)
         SettleTick(state, dt); // the settlement works in real time (2026-09-27)
+        { // (2026-09-29) walking into a town from the wilds or a dungeon restores you (and your pets)
+            static Screen prevPlay = Screen::Town;
+            if (g_playScreen == Screen::Town && (prevPlay == Screen::Wilderness || prevPlay == Screen::Hunt) && !state.playerIsGhost) {
+                bool worn = state.hp < state.maxHp || state.mana < MaxMana(state) - 0.5f;
+                state.hp = state.maxHp; state.mana = MaxMana(state);
+                for (auto& p : state.pets) if (p.hp > 0.0f) { p.hp = p.maxHp; p.mana = p.maxMana; }
+                if (worn) { state.logLine = "Safe inside the walls, you rest - health and mana restored."; Journal(state, state.logLine); }
+            }
+            prevPlay = g_playScreen;
+        }
         { // auto-restock reagents on walking into a town (2026-09-27)
             static Screen prevScr = Screen::Town;
             if (state.screen == Screen::Town && prevScr != Screen::Town && state.autoReagents && state.reagents < 30) {
