@@ -1594,6 +1594,10 @@ struct GameState {
     // reported to the online guild. warWeek = weeks since Monday 1970-01-05 (UTC).
     long long warWeek = -1;
     std::array<int, 7> warPts{};
+    // Guild Hall (2026-09-29): the guild's research levels, as last seen online
+    // (kept so the bonuses hold while offline), and the help request on your build.
+    std::array<int, 10> guildTech{};
+    long long guildHelpId = 0; int guildHelpApplied = 0; int guildHelpBuild = -1;
     float warPlayAcc = 0.0f; // Muster: seconds played toward the next point
     int warPlayMin = 0;      // Muster: minutes already counted today (cap 60) - PERSISTED
     // Commissions (2026-09-27) - PERSISTED.
@@ -4549,6 +4553,35 @@ static const char* FishCatchName(int water, bool big) {
     if (water == 3) return big ? "a huge salmon" : river[std::rand() % 3];
     return big ? "a fat rock crab" : "fish";
 }
+// ---- Guild research (2026-09-29) --------------------------------------------
+// Members donate to these on the Guild Hall; every level helps everyone in the
+// guild. tier: the Hall level a tech needs. res: what a donation costs you
+// (1 wood, 2 ore, 3 leather, 4 gold) - the server keeps the count honest with
+// its donation charges; the resources come out of your own pack.
+struct GuildTechDef { const char* id; const char* name; const char* effect; int tier; int res; };
+enum { kGtTimber, kGtVeins, kGtTanner, kGtBuilders, kGtCoffers, kGtIronhide, kGtKeen, kGtArcane, kGtHands, kGtExpansion, kGtCount };
+static const GuildTechDef kGuildTech[kGtCount] = {
+    { "timber", "Timber Rights", "+5% wood per level, gathered or cut by your settlement", 1, 1 },
+    { "veins", "Deep Veins", "+5% ore per level, mined or dug by your settlement", 1, 2 },
+    { "tanner", "Tanners' Charter", "+5% leather per level, skinned or cured", 1, 3 },
+    { "builders", "Master Builders", "Settlement buildings go up 4% faster per level", 1, 1 },
+    { "coffers", "Guild Coffers", "+4% gold from the monsters you slay, per level", 2, 4 },
+    { "ironhide", "Iron Hide", "Take 2% less damage per level", 2, 3 },
+    { "keen", "Keen Edge", "+2% weapon damage per level", 3, 2 },
+    { "arcane", "Arcane Study", "+2% spell damage per level", 3, 4 },
+    { "hands", "Many Hands", "+2 helps on every request you make, per level", 4, 1 },
+    { "expansion", "Hall Expansion", "+2 member places per level", 4, 4 },
+};
+static int GuildTechLv(const GameState& s, int t) { return (t >= 0 && t < kGtCount) ? s.guildTech[(size_t)t] : 0; }
+// A resource amount with the guild's bonus for it (res as SettleResPtr: 1 wood, 2 ore, 3 leather).
+static int GuildYield(const GameState& s, int res, int n) {
+    int t = res == 1 ? kGtTimber : res == 2 ? kGtVeins : res == 3 ? kGtTanner : -1;
+    if (t < 0 || n <= 0) return n;
+    float f = n * (1.0f + 0.05f * GuildTechLv(s, t));
+    int whole = (int)f;
+    return whole + (RandUnit() < f - whole ? 1 : 0);
+}
+static void GuildSendGift(int kind); // with the Guild Hall screens: 0 dungeon boss, 1 world boss, 2 treasure chest, 3 raid thrown back
 static void UpdateGathering(GameState& s, float dt) {
     if (!s.gatheringResource.has_value()) return;
     { // a chop or a strike of the pick every so often while you work (2026-09-28)
@@ -4568,6 +4601,7 @@ static void UpdateGathering(GameState& s, float dt) {
         const float gatherCap = s.autoGather ? 50.0f : 100.0f;
 
         std::string gainNote;
+        if (type == "wood" || type == "ore" || type == "richore") gained = GuildYield(s, type == "wood" ? 1 : 2, gained); // guild research
         if (type == "wood") {
             float gain = SkillUseGain(s.lumberjacking, 0.6f, gatherW, gatherCap);
             s.wood += gained;
@@ -4972,6 +5006,7 @@ static int CombatPower(const GameState& s) {
 
     if (s.shaken > 0) power *= 0.85f; // JS isShaken(): -15% combat power
     if (HasWeeklyBlessing(s)) power *= 1.1f; // JS hasWeeklyBlessing(): +10%
+    power *= 1.0f + 0.02f * GuildTechLv(s, kGtKeen); // guild research
     return std::max(1, (int)std::round(power));
 }
 
@@ -6253,7 +6288,9 @@ static const int kLiveCombatReagentCost = 1;
 // Live reagent cost for a spell - the dark school needs none (2026-09-27).
 static int LiveReagentCost(int spellIdx) { return (spellIdx >= 0 && spellIdx < (int)kSpells.size() && (kSpells[spellIdx].necro || kSpells[spellIdx].chiv)) ? 0 : kLiveCombatReagentCost; }
 static float MaxMana(const GameState& s) { return (float)EffInt(s); } // JS currentMaxMana(); gear/Bless count (2026-09-27)
-static float EvalIntMultiplier(const GameState& s) { return (EffectiveSkill(s, &GameState::evalInt) * 3.0f / 100.0f) + 1.0f; }
+static float EvalIntMultiplier(const GameState& s) {
+    return ((EffectiveSkill(s, &GameState::evalInt) * 3.0f / 100.0f) + 1.0f) * (1.0f + 0.02f * GuildTechLv(s, kGtArcane)); // + guild research
+}
 // The skill a spell is cast (and trained) with: Necromancy for the dark school.
 static float SpellSkill(const GameState& s, const Spell& spell) {
     return EffectiveSkill(s, spell.necro ? &GameState::necromancy : spell.chiv ? &GameState::chivalry : &GameState::magery);
@@ -6907,7 +6944,8 @@ static float SettleRatePerHour(const GameState& s, int k) {
     float wf = 0.5f; // the building runs itself at half pace; each hand adds a quarter, a natural a half
     for (const Settler& st : s.settlers)
         if (st.job == k) wf += st.trait == k ? 0.5f : 0.25f;
-    return d.perHour * L * wf;
+    float guild = (d.res >= 1 && d.res <= 3) ? 1.0f + 0.05f * GuildTechLv(s, d.res == 1 ? kGtTimber : d.res == 2 ? kGtVeins : kGtTanner) : 1.0f;
+    return d.perHour * L * wf * guild;
 }
 static float SettleCap(const GameState& s, int k) { return std::max(4.0f, SettleRatePerHour(s, k) * 8.0f); }
 static const char* SettleResName(int res) {
@@ -6925,7 +6963,8 @@ static void SettleCost(const GameState& s, int k, int& gold, int& wood, int& ore
     gold = (int)std::round(d.gold * powf(L, 1.6f));
     wood = (int)std::round(d.wood * powf(L, 1.5f));
     ore = (int)std::round(d.ore * powf(L, 1.5f));
-    secs = d.minutes * 60.0f * powf(L, 1.35f) * (1.0f - std::clamp(s.buildingSkill[1], 0.0f, 100.0f) * 0.004f);
+    secs = d.minutes * 60.0f * powf(L, 1.35f) * (1.0f - std::clamp(s.buildingSkill[1], 0.0f, 100.0f) * 0.004f)
+         * (1.0f - 0.04f * GuildTechLv(s, kGtBuilders)); // guild research
 }
 static int SettleRepairCost(const GameState& s, int k) {
     int g, w, o; float t;
@@ -7131,7 +7170,9 @@ static void SaveGame(const GameState& s) {
     out << "wyrmRespawnT=" << s.wyrmRespawnT << "\nwyrmHp=" << s.wyrmHp << "\nwyrmKills=" << s.wyrmKills << "\n"; // world boss
     out << "warWeek=" << s.warWeek << "\nwarPlayMin=" << s.warPlayMin << "\nwarPts=";
     for (int d = 0; d < 7; d++) out << (d ? "," : "") << s.warPts[(size_t)d];
-    out << "\n";
+    out << "\nguildTech=";
+    for (int t = 0; t < 10; t++) out << (t ? "," : "") << s.guildTech[(size_t)t];
+    out << "\nguildHelp=" << s.guildHelpId << "|" << s.guildHelpApplied << "|" << s.guildHelpBuild << "\n";
     for (size_t i = 0; i < s.settlers.size(); i++) out << "settler." << i << "=" << s.settlers[i].name << "|" << s.settlers[i].trait << "|" << s.settlers[i].job << "\n";
     for (size_t i = 0; i < s.settleReports.size(); i++) out << "settleReport." << i << "=" << s.settleReports[i] << "\n";
     out << "commissionMarks=" << s.commissionMarks << "\nrareDyeCharges=" << s.rareDyeCharges << "\n";
@@ -7449,6 +7490,8 @@ static bool LoadGame(GameState& s) {
         else if (key == "wyrmKills") s.wyrmKills = std::atoi(val.c_str());
         else if (key == "warWeek") s.warWeek = std::atoll(val.c_str());
         else if (key == "warPlayMin") s.warPlayMin = std::atoi(val.c_str());
+        else if (key == "guildTech") { auto p = SplitStr(val, ','); for (size_t t = 0; t < p.size() && t < 10; t++) s.guildTech[t] = std::clamp(std::atoi(p[t].c_str()), 0, 5); }
+        else if (key == "guildHelp") { auto p = SplitStr(val, '|'); if (p.size() >= 3) { s.guildHelpId = std::atoll(p[0].c_str()); s.guildHelpApplied = std::atoi(p[1].c_str()); s.guildHelpBuild = std::atoi(p[2].c_str()); } }
         else if (key == "warPts") { auto p = SplitStr(val, ','); for (size_t d = 0; d < p.size() && d < 7; d++) s.warPts[d] = std::atoi(p[d].c_str()); }
         else if (key.rfind("settler.", 0) == 0) { auto p = SplitStr(val, '|'); if (p.size() >= 3) s.settlers.push_back({ p[0], std::atoi(p[1].c_str()), std::atoi(p[2].c_str()) }); }
         else if (key.rfind("settleReport.", 0) == 0) s.settleReports.push_back(val);
@@ -7915,6 +7958,7 @@ static void SkinCorpse(GameState& s, int corpseIdx) {
     // Phase 3: Ice Wolves are skinned for furs, not leather - the Fur Trader's premium.
     bool isIceWolf = (c.monsterName == "Ice Wolf");
     int yieldGained = std::max(1, (int)std::round(c.baseLeather * yieldMult));
+    if (!isIceWolf) yieldGained = GuildYield(s, 3, yieldGained); // guild research
     if (isIceWolf) s.furs += yieldGained; else s.leather += yieldGained;
     s.gold += c.gold;
     PlaySfx(SfxId::Coin);
@@ -20551,6 +20595,7 @@ static void WyrmHurtPlayer(GameState& s, int h, float raw) {
 }
 static void WyrmSlain(GameState& s) {
     s.wyrmKills++;
+    GuildSendGift(1); // every guildmate gets a world-boss gift
     if (s.tmaps.size() < 10) { GameState::TreasureMap m; m.tier = 5; s.tmaps.push_back(m); Journal(s, "Among the wyrm's hoard: a Legendary treasure map!"); }
     WarAward(s, 5, 200); // War Week: The Wyrm
     s.wyrmHp = -1.0f;
@@ -25743,6 +25788,7 @@ static void SettleResolveRaidAway(GameState& s, float strength, int faction) {
     float D = SettleDefense(s) * (0.8f + 0.4f * RandUnit());
     if (D >= strength) {
         WarAward(s, 4, 30); // War Week: Hold the Walls
+        GuildSendGift(3);
         int g = (int)(strength * 3.0f);
         s.gold += g;
         SettleReport(s, std::string(SettleFoeName(faction)) + " hit the settlement and broke on your " +
@@ -25824,6 +25870,7 @@ static void SettleRaidBookkeeping(GameState& s) {
     if (alive == 0 || g_settleRaiders.empty()) {
         s.settleRaidLive = false;
         WarAward(s, 4, 60); // War Week: Hold the Walls
+        GuildSendGift(3);
         int g = s.settleRaidStrength * 3 + 40;
         s.gold += g; GainFame(s, 5.0f);
         s.rivalBanner = "The settlement holds!";
@@ -26445,6 +26492,8 @@ static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
     c.isRival = dm.isRival; c.bladeIdx = dm.bladeIdx;
     c.yaw = T3CHash01(dm.pos.x * 0.37f, dm.pos.y) * 6.2832f;
     int goldFound = std::max(1, dm.baseGold + (std::rand() % 3) - 1);
+    goldFound = (int)std::round(goldFound * (1.0f + 0.04f * GuildTechLv(s, kGtCoffers))); // guild research
+    if (dm.isBoss && dm.zone == 1) GuildSendGift(0); // a dungeon boss: every guildmate gets a gift
     c.loot.push_back({ GameState::kClGold, goldFound, std::nullopt });
     bool packCarrier = dm.isRival || dm.bladeIdx >= 0 || CorpseMonsterHumanoid(c);
     if (packCarrier ? RandUnit() < 0.55f : RandUnit() < 0.15f)
@@ -27157,6 +27206,7 @@ static void TreasureUnearth(GameState& s) {
 // Open it: the loot goes into a chest you loot like a body.
 static void TreasureOpen(GameState& s, bool forced) {
     int t = s.tchestTier;
+    GuildSendGift(2); // every guildmate gets a treasure gift
     GameState::WorldCorpse c;
     c.pos = s.tchestPos; c.zone = 0; c.name = "Treasure Chest";
     c.timer = c.duration = 900.0f;
@@ -27217,6 +27267,8 @@ static void NecroConsumeCorpse(GameState& s, GameState::WorldCorpse& c) {
 }
 // Who takes a monster's blow: a skeleton standing guard, then Bone Armor, then you.
 static int NecroShield(GameState& s, int zone, int dmg) {
+    if (dmg > 0 && GuildTechLv(s, kGtIronhide) > 0) // guild research: Iron Hide
+        dmg = std::max(1, (int)std::round(dmg * (1.0f - 0.02f * GuildTechLv(s, kGtIronhide))));
     Vector2 me = zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
     std::vector<int> guards;
     for (size_t i = 0; i < s.minions.size(); i++) {
@@ -31107,7 +31159,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 // a dungeon, the Magery escape); picking one navigates and closes it.
 static float g_resetArmedTimer = 0.0f; // >0 while the Reset button is armed, waiting for a confirm click
 static bool g_warOpen = false;         // the War Week screen (over the House screen)
-static int g_guildTab = 0; // the Guild screen's tab: 0 Overview, 1 Wars, 2 Members, 3 Guildmates (2026-09-28)
+static int g_guildTab = 0; // the Guild screen's tab: 0 Overview, 1 Hall, 2 Research, 3 Help, 4 Shop, 5 Wars, 6 Members, 7 Warband (2026-09-29)
 static bool g_tmapOpen = false;        // the Treasure maps screen (over the House screen, 2026-09-28)
 static bool g_optOpen = false;         // the Options screen (over the House screen, 2026-09-28)
 static void OpenWarWeek(GameState& s); // (2026-09-27) defined with the Guildstone
@@ -33817,6 +33869,16 @@ EM_JS(void, JS_GuildNetKick, (const char* id), { if (window.TFGuildNet) TFGuildN
 EM_JS(void, JS_GuildNetSetRank, (const char* id, int r), { if (window.TFGuildNet) TFGuildNet.setRank(UTF8ToString(id), r); });
 EM_JS(void, JS_GuildNetDeclareWar, (const char* id), { if (window.TFGuildNet) TFGuildNet.declareWar(UTF8ToString(id)); });
 EM_JS(void, JS_GuildNetEndWar, (const char* id), { if (window.TFGuildNet) TFGuildNet.endWar(UTF8ToString(id)); });
+EM_JS(void, JS_GuildNetDonate, (const char* t), { if (window.TFGuildNet && TFGuildNet.donate) TFGuildNet.donate(UTF8ToString(t)); });
+EM_JS(void, JS_GuildNetRecommend, (const char* t), { if (window.TFGuildNet && TFGuildNet.recommend) TFGuildNet.recommend(UTF8ToString(t)); });
+EM_JS(void, JS_GuildNetHallUpgrade, (), { if (window.TFGuildNet && TFGuildNet.hallUpgrade) TFGuildNet.hallUpgrade(); });
+EM_JS(void, JS_GuildNetLendHand, (), { if (window.TFGuildNet && TFGuildNet.lendHand) TFGuildNet.lendHand(); });
+EM_JS(void, JS_GuildNetRequestHelp, (const char* label, int total), { if (window.TFGuildNet && TFGuildNet.requestHelp) TFGuildNet.requestHelp(UTF8ToString(label), total); });
+EM_JS(void, JS_GuildNetCloseHelp, (), { if (window.TFGuildNet && TFGuildNet.closeHelp) TFGuildNet.closeHelp(); });
+EM_JS(void, JS_GuildNetHelpAll, (), { if (window.TFGuildNet && TFGuildNet.helpAll) TFGuildNet.helpAll(); });
+EM_JS(void, JS_GuildNetShopBuy, (const char* item), { if (window.TFGuildNet && TFGuildNet.shopBuy) TFGuildNet.shopBuy(UTF8ToString(item)); });
+EM_JS(void, JS_GuildNetSendGift, (int kind), { if (window.TFGuildNet && TFGuildNet.sendGift) TFGuildNet.sendGift(kind); });
+EM_JS(void, JS_GuildNetOpenGifts, (), { if (window.TFGuildNet && TFGuildNet.openGifts) TFGuildNet.openGifts(); });
 EM_JS(void, JS_GuildNetSubmit, (const char* week, int day, int pts, const char* ch, int power), {
     if (window.TFGuildNet) TFGuildNet.submit(UTF8ToString(week), day, pts, UTF8ToString(ch), power);
 });
@@ -33832,10 +33894,21 @@ static void JS_GuildNetSetRank(const char*, int) {}
 static void JS_GuildNetDeclareWar(const char*) {}
 static void JS_GuildNetEndWar(const char*) {}
 static void JS_GuildNetSubmit(const char*, int, int, const char*, int) {}
+static void JS_GuildNetDonate(const char*) {}
+static void JS_GuildNetRecommend(const char*) {}
+static void JS_GuildNetHallUpgrade() {}
+static void JS_GuildNetLendHand() {}
+static void JS_GuildNetRequestHelp(const char*, int) {}
+static void JS_GuildNetCloseHelp() {}
+static void JS_GuildNetHelpAll() {}
+static void JS_GuildNetShopBuy(const char*) {}
+static void JS_GuildNetSendGift(int) {}
+static void JS_GuildNetOpenGifts() {}
 #endif
 struct GuildNetRow { std::string id, name, tag; int members = 0; long long points = 0; };
 struct GuildNetMember { std::string name; int power = 0; int points = 0; std::string uid; int rank = 0; int seen = -1; };
 struct GuildNetWar { std::string id, name, tag, dir; };
+struct GuildNetHelp { long long id = 0; std::string who, what; int n = 0, max = 0; bool mine = false, done = false; };
 static struct {
     bool cfg = false, ready = false, busy = false;
     std::string msg, myId, myName, myTag, myUid, motd;
@@ -33843,7 +33916,18 @@ static struct {
     std::vector<GuildNetRow> guilds;
     std::vector<GuildNetMember> roster;
     std::vector<GuildNetWar> wars;
+    // Guild Hall (2026-09-29)
+    bool hub = false;
+    int hall = 1, cap = 30, buildLeft = -1, buildSecs = 0, hands = 0; long long funds = 0; bool lent = false; std::string rec;
+    int merit = 0, charges = 0, nextCharge = 0, contrib = 0, helpMerit = 0;
+    int techLv[kGtCount] = {}, techPr[kGtCount] = {};
+    std::vector<GuildNetHelp> helps;
+    std::vector<std::pair<int, std::string>> gifts; // kind, from
+    std::vector<std::pair<std::string, int>> board;
+    int doneSeq = 0; std::string doneAct, doneRes;
+    double hubAt = 0.0; // when the hub was read (for local countdowns)
 } g_gnet;
+static int GuildTechIndex(const std::string& id) { for (int t = 0; t < kGtCount; t++) if (id == kGuildTech[t].id) return t; return -1; }
 static float g_warScroll = 0.0f;
 static float g_leaveArmT = 0.0f;
 static std::string WarWeekKey(const GameState& s) { return "W" + std::to_string(s.warWeek); }
@@ -33854,6 +33938,9 @@ static void GuildNetPoll() {
     if (!JS_GuildNetState(buf, (int)sizeof(buf))) { g_gnet.cfg = g_gnet.ready = false; return; }
     g_gnet.guilds.clear(); g_gnet.roster.clear(); g_gnet.wars.clear(); g_gnet.myId.clear(); g_gnet.myName.clear(); g_gnet.myTag.clear();
     g_gnet.myUid.clear(); g_gnet.motd.clear(); g_gnet.myRank = 0;
+    bool hadHub = false;
+    g_gnet.helps.clear(); g_gnet.gifts.clear(); g_gnet.board.clear();
+    int techLv[kGtCount] = {}, techPr[kGtCount] = {};
     std::string all(buf);
     size_t a = 0;
     while (a < all.size()) {
@@ -33876,6 +33963,124 @@ static void GuildNetPoll() {
         else if (k == "me" && p.size() >= 2) { g_gnet.myUid = p[0]; g_gnet.myRank = std::atoi(p[1].c_str()); }
         else if (k == "motd") g_gnet.motd = v;
         else if (k == "war" && p.size() >= 4) g_gnet.wars.push_back({ p[0], p[1], p[2], p[3] });
+        else if (k == "hall" && p.size() >= 8) {
+            hadHub = true;
+            int bl = std::atoi(p[3].c_str());
+            if (!g_gnet.hub || bl != g_gnet.buildLeft || std::atoi(p[0].c_str()) != g_gnet.hall) g_gnet.hubAt = GetTime();
+            g_gnet.hall = std::atoi(p[0].c_str()); g_gnet.funds = std::atoll(p[1].c_str()); g_gnet.cap = std::atoi(p[2].c_str());
+            g_gnet.buildLeft = bl; g_gnet.buildSecs = std::atoi(p[4].c_str()); g_gnet.hands = std::atoi(p[5].c_str());
+            g_gnet.lent = p[6] == "1"; g_gnet.rec = p[7];
+        }
+        else if (k == "mine" && p.size() >= 5) {
+            g_gnet.merit = std::atoi(p[0].c_str()); g_gnet.charges = std::atoi(p[1].c_str()); g_gnet.nextCharge = std::atoi(p[2].c_str());
+            g_gnet.contrib = std::atoi(p[3].c_str()); g_gnet.helpMerit = std::atoi(p[4].c_str());
+        }
+        else if (k == "tech" && p.size() >= 3) { int t = GuildTechIndex(p[0]); if (t >= 0) { techLv[t] = std::atoi(p[1].c_str()); techPr[t] = std::atoi(p[2].c_str()); } }
+        else if (k == "help" && p.size() >= 7) {
+            GuildNetHelp h; h.id = std::atoll(p[0].c_str()); h.who = p[1]; h.what = p[2]; h.n = std::atoi(p[3].c_str()); h.max = std::atoi(p[4].c_str());
+            h.mine = p[5] == "1"; h.done = p[6] == "1"; g_gnet.helps.push_back(h);
+        }
+        else if (k == "gift" && p.size() >= 3) g_gnet.gifts.push_back({ std::atoi(p[1].c_str()), p[2] });
+        else if (k == "board" && p.size() >= 2) g_gnet.board.push_back({ p[0], std::atoi(p[1].c_str()) });
+        else if (k == "done" && p.size() >= 2) { g_gnet.doneSeq = std::atoi(p[0].c_str()); g_gnet.doneAct = p[1]; g_gnet.doneRes = p.size() >= 3 ? p[2] : ""; }
+    }
+    g_gnet.hub = hadHub && !g_gnet.myId.empty();
+    if (g_gnet.hub) { memcpy(g_gnet.techLv, techLv, sizeof(techLv)); memcpy(g_gnet.techPr, techPr, sizeof(techPr)); }
+}
+// ---- Guild Hall (2026-09-29): the alliance loop, after Whiteout Survival ----
+static const char* kGuildGiftFrom[4] = { "a dungeon boss", "Vyrathax", "a treasure chest", "a raid thrown back" };
+struct GuildShopItem { const char* id; const char* name; const char* what; int price; };
+static const GuildShopItem kGuildShop[6] = {
+    { "bandages", "Field dressings", "10 bandages", 60 },
+    { "reagents", "Reagent satchel", "15 reagents", 100 },
+    { "potions", "Healer's crate", "3 Greater Heal Potions", 120 },
+    { "horn", "Builder's horn", "Your settlement build finishes 30 minutes sooner", 150 },
+    { "dye", "Rare dye", "One rare-hue dip for your clothes", 300 },
+    { "map", "Surveyor's map", "A Fine (tier 3) treasure map", 500 },
+};
+static struct { int tech = -1, res = 0, amt = 0; } g_pendingDonate;
+static int GuildDonateCost(int tech, int lv) { return kGuildTech[tech].res == 4 ? 40 + 20 * lv : 10 + 5 * lv; }
+static int* GuildDonateRes(GameState& s, int res) { return res == 1 ? &s.wood : res == 2 ? &s.ore : res == 3 ? &s.leather : &s.gold; }
+static const char* GuildResName(int res) { return res == 1 ? "wood" : res == 2 ? "ore" : res == 3 ? "leather" : "gold"; }
+// How much one guildmate's help takes off your current settlement build.
+static float GuildHelpCut(const GameState& s) {
+    if (s.settleUpgrading < 0) return 0.0f;
+    int g, w, o; float secs; SettleCost(s, s.settleUpgrading, g, w, o, secs);
+    return std::max(60.0f, secs * 0.03f);
+}
+static void GuildSendGift(int kind) { if (g_gnet.ready && !g_gnet.myId.empty()) JS_GuildNetSendGift(kind); }
+static std::string GuildGiftOpen(GameState& s, int kind) {
+    switch (kind) {
+        case 0: { int g = 80 + GetRandomValue(0, 80); s.gold += g; s.bandages += 2; return TextFormat("%d gold, 2 bandages", g); }
+        case 1: { int g = 300 + GetRandomValue(0, 200); s.gold += g; s.reagents += 10;
+                  bool dye = GetRandomValue(0, 3) == 0; if (dye) s.rareDyeCharges++;
+                  return TextFormat("%d gold, 10 reagents%s", g, dye ? ", a rare dye" : ""); }
+        case 2: { int g = 120 + GetRandomValue(0, 120); s.gold += g; s.reagents += 5; return TextFormat("%d gold, 5 reagents", g); }
+        default: { int g = 60 + GetRandomValue(0, 60); s.gold += g; s.wood += 10; s.ore += 6; return TextFormat("%d gold, 10 wood, 6 ore", g); }
+    }
+}
+static void GuildShopGrant(GameState& s, const std::string& id) {
+    if (id == "bandages") s.bandages += 10;
+    else if (id == "reagents") s.reagents += 15;
+    else if (id == "potions") {
+        auto it = std::find_if(s.potions.begin(), s.potions.end(), [](const PotionStack& p) { return p.name == "Greater Heal Potion"; });
+        if (it == s.potions.end()) s.potions.push_back({ "Greater Heal Potion", "heal", 50, 3 }); else it->count += 3;
+    }
+    else if (id == "horn") { if (s.settleUpgrading >= 0) s.settleUpgradeT = std::max(1.0f, s.settleUpgradeT - 1800.0f); }
+    else if (id == "dye") s.rareDyeCharges++;
+    else if (id == "map") { GameState::TreasureMap m; m.tier = 3; s.tmaps.push_back(m); }
+    for (const auto& it : kGuildShop) if (id == it.id) { s.logLine = std::string("From the guild quartermaster: ") + it.what + "."; Journal(s, s.logLine); }
+    PlaySfx(SfxId::Buy);
+}
+static void GuildHallTick(GameState& s) {
+    if (g_gnet.hub) for (int t = 0; t < kGtCount; t++) s.guildTech[(size_t)t] = g_gnet.techLv[t];
+    else if (g_gnet.ready && !g_gnet.busy && g_gnet.myId.empty() && !g_gnet.guilds.empty()) s.guildTech = {}; // left the guild: its research goes with it
+    // finished actions
+    static int seen = 0;
+    if (g_gnet.doneSeq > seen) {
+        seen = g_gnet.doneSeq;
+        const std::string& a = g_gnet.doneAct; const std::string& r = g_gnet.doneRes;
+        if (a == "bought") GuildShopGrant(s, r);
+        else if (a == "donated" && g_pendingDonate.tech >= 0) {
+            int* pool = GuildDonateRes(s, g_pendingDonate.res);
+            *pool = std::max(0, *pool - g_pendingDonate.amt);
+            size_t c = r.find(':'); int lv = c == std::string::npos ? 0 : std::atoi(r.c_str() + c + 1);
+            int t = g_pendingDonate.tech;
+            if (lv > s.guildTech[(size_t)t]) { s.logLine = std::string(kGuildTech[t].name) + " reaches level " + std::to_string(lv) + "! " + kGuildTech[t].effect + ".";
+                                               Journal(s, s.logLine); PlaySfx(SfxId::Quest); }
+            else PlaySfx(SfxId::Coin);
+            g_pendingDonate.tech = -1;
+        }
+        else if (a == "opened") {
+            auto kinds = SplitStr(r, ',');
+            std::string got; int n = 0;
+            for (const auto& k : kinds) { if (k.empty()) continue; got += (n++ ? "; " : "") + GuildGiftOpen(s, std::clamp(std::atoi(k.c_str()), 0, 3)); }
+            if (n) { s.logLine = TextFormat("You open %d guild gift%s: ", n, n == 1 ? "" : "s") + got + "."; Journal(s, s.logLine); PlaySfx(SfxId::Coin); }
+        }
+        else if (a == "helped") {
+            int n = std::atoi(r.c_str());
+            s.logLine = n > 0 ? TextFormat("You helped %d guildmate%s with their builds.", n, n == 1 ? "" : "s") : std::string("No one needs help right now.");
+            if (n > 0) PlaySfx(SfxId::Click);
+        }
+        else if (a == "asked") { s.guildHelpBuild = s.settleUpgrading; s.guildHelpId = 0; s.guildHelpApplied = 0; }
+    }
+    // helps on your own request cut your settlement build
+    for (const GuildNetHelp& h : g_gnet.helps) {
+        if (!h.mine) continue;
+        if (h.id != s.guildHelpId) { s.guildHelpId = h.id; s.guildHelpApplied = 0; }
+        int fresh = h.n - s.guildHelpApplied;
+        if (fresh > 0 && s.settleUpgrading >= 0 && s.settleUpgrading == s.guildHelpBuild) {
+            float cut = GuildHelpCut(s) * fresh;
+            s.settleUpgradeT = std::max(1.0f, s.settleUpgradeT - cut);
+            s.logLine = TextFormat("Your guild helps with the %s: %d help%s, %s sooner.", kSettleDefs[s.settleUpgrading].name, fresh, fresh == 1 ? "" : "s",
+                                   SettleClock(cut).c_str());
+            PlaySfx(SfxId::Click);
+        }
+        if (fresh > 0) s.guildHelpApplied = h.n;
+    }
+    if (s.guildHelpBuild >= 0 && s.settleUpgrading != s.guildHelpBuild) { // that build is done: close the request
+        JS_GuildNetCloseHelp();
+        s.guildHelpBuild = -1; s.guildHelpId = 0; s.guildHelpApplied = 0;
     }
 }
 // Every frame: Muster minutes, then (online) keep the guild table fresh and report today's points.
@@ -33887,9 +34092,9 @@ static void WarNetTick(GameState& s, float dt) {
     }
     static float pollT = 0.0f, sendT = 5.0f, refreshT = 0.0f;
     static int sentPts = -1, sentDay = -1;
-    if ((pollT -= dt) <= 0.0f) { pollT = g_warOpen ? 0.3f : 3.0f; GuildNetPoll(); }
+    if ((pollT -= dt) <= 0.0f) { pollT = g_warOpen ? 0.3f : 3.0f; GuildNetPoll(); GuildHallTick(s); }
     if (!g_gnet.ready) return;
-    if ((refreshT -= dt) <= 0.0f) { refreshT = g_warOpen ? 20.0f : 300.0f; JS_GuildNetRefresh(WarWeekKey(s).c_str()); }
+    if ((refreshT -= dt) <= 0.0f) { refreshT = g_warOpen ? 20.0f : s.guildHelpBuild >= 0 ? 60.0f : 300.0f; JS_GuildNetRefresh(WarWeekKey(s).c_str()); }
     if (g_gnet.myId.empty()) return;
     if ((sendT -= dt) <= 0.0f) {
         sendT = 60.0f;
@@ -33906,6 +34111,158 @@ static void OpenWarWeek(GameState& s) {
     JS_GuildNetRefresh(WarWeekKey(s).c_str());
 }
 static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int section);
+// The Guild Hall tabs (2026-09-29): 1 Hall, 2 Research, 3 Help, 4 Shop - the alliance loop, after Whiteout Survival.
+static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangle area) {
+    const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 }, gold = { 150, 100, 20, 255 }, good = { 40, 110, 40, 255 }, bad = { 150, 40, 30, 255 };
+    auto vis = [&](Rectangle r) { return r.y >= area.y && r.y + r.height <= area.y + area.height; };
+    auto bar = [&](float bx, float by, float bw, float f, Color c) {
+        DrawRectangleRec({ bx, by, bw, 10 }, Fade(BLACK, 0.18f));
+        DrawRectangleRec({ bx, by, bw * std::clamp(f, 0.0f, 1.0f), 10 }, c);
+        DrawRectangleLinesEx({ bx, by, bw, 10 }, 1, Fade(ink, 0.4f));
+    };
+    bool inGuild = g_gnet.ready && !g_gnet.myId.empty();
+    if (!inGuild) {
+        DrawUIText(g_gnet.cfg ? "Join or found an online guild (Overview) to share a Guild Hall." : "Online guilds aren't switched on for this version yet.", (int)x, (int)y, 12, soft);
+        return y + 28;
+    }
+    if (!g_gnet.hub) {
+        DrawUIText(g_gnet.busy ? "Reading the Guild Hall..." : "The Guild Hall isn't open on the server yet.", (int)x, (int)y, 13, soft);
+        return y + 28;
+    }
+    if (!g_gnet.msg.empty()) { DrawUIText(g_gnet.msg.c_str(), (int)x, (int)y, 12, bad); y += 20; }
+    bool officer = g_gnet.myRank >= 1;
+    float since = (float)(GetTime() - g_gnet.hubAt);
+    if (g_guildTab == 1) { // ---- Hall ----
+        DrawUIText(TextFormat("Guild Hall  -  level %d", g_gnet.hall), (int)x, (int)y, 18, gold); y += 26;
+        DrawUIText(TextFormat("Funds %lld   Members %d/%d   Your merit %d", g_gnet.funds, (int)g_gnet.roster.size(), g_gnet.cap, g_gnet.merit), (int)x, (int)y, 13, ink); y += 20;
+        DrawUIText("Funds grow with every research donation. Officers spend them to raise the Hall.", (int)x, (int)y, 11, soft); y += 22;
+        if (g_gnet.buildLeft >= 0) {
+            float left = std::max(0.0f, g_gnet.buildLeft - since);
+            DrawUIText(TextFormat("Building level %d  -  %s left  -  %d hand%s lent", g_gnet.hall + 1, SettleClock(left).c_str(), g_gnet.hands, g_gnet.hands == 1 ? "" : "s"), (int)x, (int)y, 13, ink);
+            y += 20;
+            bar(x, y, w, g_gnet.buildSecs > 0 ? 1.0f - left / g_gnet.buildSecs : 1.0f, good); y += 18;
+            Rectangle lb = { x, y, 200, 34 };
+            if (UOButton(lb, g_gnet.lent ? "Hand lent" : "Lend a hand (+20 merit)", !g_gnet.busy && !g_gnet.lent) && vis(lb)) JS_GuildNetLendHand();
+            DrawUIText("Each member's hand cuts 5% of the build.", (int)(x + 212), (int)y + 10, 11, soft);
+            y += 44;
+        } else if (g_gnet.hall < 10) {
+            long long cost = 200LL * g_gnet.hall * g_gnet.hall;
+            DrawUIText(TextFormat("Next level: %lld funds, %d hour%s to build.", cost, g_gnet.hall, g_gnet.hall == 1 ? "" : "s"), (int)x, (int)y, 13, ink); y += 20;
+            if (officer) {
+                Rectangle ub = { x, y, 200, 34 };
+                if (UOButton(ub, "Upgrade the Hall", !g_gnet.busy && g_gnet.funds >= cost) && vis(ub)) JS_GuildNetHallUpgrade();
+                if (g_gnet.funds < cost) DrawUIText(TextFormat("needs %lld more funds", cost - g_gnet.funds), (int)(x + 212), (int)y + 10, 11, bad);
+                y += 44;
+            } else { DrawUIText("Officers start Hall upgrades - everyone can lend a hand.", (int)x, (int)y, 11, soft); y += 20; }
+        } else { DrawUIText("The Hall stands at its greatest.", (int)x, (int)y, 13, good); y += 22; }
+        DrawUIText("Each Hall level adds 2 member places. Research unlocks at Hall level 2: Coffers, Iron Hide;", (int)x, (int)y, 11, soft); y += 16;
+        DrawUIText("level 3: Keen Edge, Arcane Study; level 4: Many Hands, Hall Expansion.", (int)x, (int)y, 11, soft);
+        y += 26;
+        DrawRectangleRec({ x, y, w, 1 }, Fade(ink, 0.25f)); y += 10;
+        DrawUIText(TextFormat("Guild gifts (%d)", (int)g_gnet.gifts.size()), (int)x, (int)y, 15, ink);
+        if (!g_gnet.gifts.empty()) {
+            Rectangle ob = { x + w - 140, y - 4, 136, 30 };
+            if (UOButton(ob, "Open all", !g_gnet.busy) && vis(ob)) JS_GuildNetOpenGifts();
+        }
+        y += 24;
+        if (g_gnet.gifts.empty()) { DrawUIText("When a guildmate slays a boss, opens a treasure chest or throws back a raid, every member gets a gift.", (int)x, (int)y, 11, soft); y += 18; }
+        int shown = 0;
+        for (const auto& gf : g_gnet.gifts) {
+            if (++shown > 8) { DrawUIText(TextFormat("...and %d more", (int)g_gnet.gifts.size() - 8), (int)x + 6, (int)y, 11, soft); y += 16; break; }
+            DrawUIText(TextFormat("From %s: %s", gf.second.c_str(), kGuildGiftFrom[std::clamp(gf.first, 0, 3)]), (int)x + 6, (int)y, 12, ink); y += 17;
+        }
+        y += 8;
+        DrawRectangleRec({ x, y, w, 1 }, Fade(ink, 0.25f)); y += 10;
+        DrawUIText("This week's contributors", (int)x, (int)y, 15, ink); y += 22;
+        int rank = 0;
+        for (const auto& b : g_gnet.board) {
+            DrawUIText(TextFormat("%d. %s", ++rank, b.first.c_str()), (int)x + 6, (int)y, 13, rank <= 3 ? gold : ink);
+            const char* v = TextFormat("%d", b.second);
+            DrawUIText(v, (int)(x + w - 6 - MeasureUIText(v, 13)), (int)y, 13, ink);
+            y += 18;
+            if (rank >= 10) break;
+        }
+        if (g_gnet.board.empty()) { DrawUIText("No donations yet this week.", (int)x + 6, (int)y, 12, soft); y += 18; }
+    } else if (g_guildTab == 2) { // ---- Research ----
+        int ch = g_gnet.charges;
+        float nc = std::max(0.0f, g_gnet.nextCharge - since);
+        DrawUIText(TextFormat("Donations %d/20", ch), (int)x, (int)y, 15, ink);
+        if (ch < 20) DrawUIText(TextFormat("next in %s", SettleClock(nc).c_str()), (int)(x + 150), (int)y + 3, 12, soft);
+        y += 22;
+        DrawUIText("Each donation adds 10 progress (15 on the officers' pick), earns merit and adds to guild funds.", (int)x, (int)y, 11, soft); y += 22;
+        for (int t = 0; t < kGtCount; t++) {
+            const GuildTechDef& d = kGuildTech[t];
+            int lv = g_gnet.techLv[t], pr = g_gnet.techPr[t], need = 100 * (lv + 1);
+            bool locked = g_gnet.hall < d.tier, maxed = lv >= 5, pick = g_gnet.rec == d.id;
+            Rectangle row = { x, y, w, 70 };
+            DrawRectangleRec(row, Fade(pick ? Color{ 255, 214, 110, 255 } : BLACK, pick ? 0.25f : 0.05f));
+            DrawUIText(TextFormat("%s  %d/5%s", d.name, lv, pick ? "   * recommended" : ""), (int)x + 8, (int)y + 5, 14, locked ? soft : ink);
+            DrawUIText(d.effect, (int)x + 8, (int)y + 24, 11, soft);
+            if (locked) DrawUIText(TextFormat("Needs Guild Hall level %d", d.tier), (int)x + 8, (int)y + 44, 12, bad);
+            else if (maxed) DrawUIText("Complete", (int)x + 8, (int)y + 44, 12, good);
+            else {
+                bar(x + 8, y + 48, std::max(60.0f, w - 320), (float)pr / need, gold);
+                DrawUIText(TextFormat("%d/%d", pr, need), (int)(x + 16 + std::max(60.0f, w - 320)), (int)y + 45, 11, soft);
+                int cost = GuildDonateCost(t, lv), have = *GuildDonateRes(s, d.res);
+                Rectangle db = { x + w - 170, y + 6, 164, 30 };
+                bool can = !g_gnet.busy && ch > 0 && have >= cost && g_pendingDonate.tech < 0;
+                if (UOButton(db, TextFormat("Donate %d %s", cost, GuildResName(d.res)), can) && vis(db)) {
+                    g_pendingDonate.tech = t; g_pendingDonate.res = d.res; g_pendingDonate.amt = cost;
+                    JS_GuildNetDonate(d.id);
+                }
+                if (have < cost) DrawUIText(TextFormat("you have %d", have), (int)(x + w - 250), (int)y + 14, 10, bad);
+            }
+            if (officer && !maxed) {
+                Rectangle rb = { x + w - 170, y + 40, 164, 24 };
+                if (UOButton(rb, pick ? "Unmark" : "Recommend", !g_gnet.busy) && vis(rb)) JS_GuildNetRecommend(pick ? "" : d.id);
+            }
+            y += 76;
+        }
+    } else if (g_guildTab == 3) { // ---- Help ----
+        if (s.settleUpgrading >= 0) {
+            int g2, w2, o2; float total; SettleCost(s, s.settleUpgrading, g2, w2, o2, total);
+            std::string label = std::string(kSettleDefs[s.settleUpgrading].name) + " to level " + std::to_string(SettleLv(s, s.settleUpgrading) + 1);
+            DrawUIText(TextFormat("Your build: %s  -  %s left", label.c_str(), SettleClock(s.settleUpgradeT).c_str()), (int)x, (int)y, 13, ink); y += 22;
+            bool asked = s.guildHelpBuild == s.settleUpgrading;
+            const GuildNetHelp* mine = nullptr; for (const auto& h : g_gnet.helps) if (h.mine) mine = &h;
+            if (asked && mine) { DrawUIText(TextFormat("Helps received: %d/%d  (each cuts %s)", mine->n, mine->max, SettleClock(GuildHelpCut(s)).c_str()), (int)x, (int)y, 12, good); y += 22; }
+            else {
+                Rectangle ab = { x, y, 240, 34 };
+                if (UOButton(ab, "Ask the guild for help", !g_gnet.busy && !asked) && vis(ab)) JS_GuildNetRequestHelp(label.c_str(), (int)total);
+                DrawUIText(TextFormat("each help cuts %s", SettleClock(GuildHelpCut(s)).c_str()), (int)(x + 252), (int)y + 10, 11, soft);
+                y += 44;
+            }
+        } else { DrawUIText("Start a settlement build, then ask your guild to help speed it up.", (int)x, (int)y, 12, soft); y += 22; }
+        int open = 0; for (const auto& h : g_gnet.helps) if (!h.mine && !h.done) open++;
+        Rectangle hb = { x, y, 200, 34 };
+        if (UOButton(hb, TextFormat("Help all (%d)", open), !g_gnet.busy && open > 0) && vis(hb)) JS_GuildNetHelpAll();
+        DrawUIText(TextFormat("Help merit today %d/50", g_gnet.helpMerit), (int)(x + 212), (int)y + 10, 12, g_gnet.helpMerit >= 50 ? bad : soft);
+        y += 44;
+        for (const auto& h : g_gnet.helps) {
+            Rectangle row = { x, y, w, 40 };
+            DrawRectangleRec(row, Fade(h.mine ? Color{ 255, 214, 110, 255 } : BLACK, h.mine ? 0.25f : 0.05f));
+            DrawUIText(TextFormat("%s: %s", h.who.c_str(), h.what.c_str()), (int)x + 8, (int)y + 4, 13, ink);
+            DrawUIText(TextFormat("%d/%d helps%s", h.n, h.max, h.done ? "  -  you helped" : ""), (int)x + 8, (int)y + 22, 11, h.done ? good : soft);
+            y += 44;
+        }
+        if (g_gnet.helps.empty()) { DrawUIText("No one has asked for help yet.", (int)x, (int)y, 12, soft); y += 20; }
+    } else { // ---- Shop ----
+        DrawUIText(TextFormat("Merit %d", g_gnet.merit), (int)x, (int)y, 16, gold); y += 22;
+        DrawUIText("Earn merit by donating to research, lending a hand and helping guildmates.", (int)x, (int)y, 11, soft); y += 22;
+        for (const auto& it : kGuildShop) {
+            bool horn = std::string(it.id) == "horn";
+            Rectangle row = { x, y, w, 48 };
+            DrawRectangleRec(row, Fade(BLACK, 0.05f));
+            DrawUIText(it.name, (int)x + 8, (int)y + 5, 14, ink);
+            DrawUIText(it.what, (int)x + 8, (int)y + 26, 11, soft);
+            Rectangle bb = { x + w - 150, y + 8, 144, 32 };
+            bool can = !g_gnet.busy && g_gnet.merit >= it.price && (!horn || s.settleUpgrading >= 0);
+            if (UOButton(bb, TextFormat("%d merit", it.price), can) && vis(bb)) JS_GuildNetShopBuy(it.id);
+            y += 54;
+        }
+    }
+    return y + 10;
+}
 static void DrawWarWeek(GameState& s, int screenW, int screenH) {
     Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
     UODrawGump(G, kUoParchment);
@@ -33915,19 +34272,23 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
     WarCheckWeek(s);
     int today = WarDayNow();
     { // the tabs (2026-09-28: one Guild screen for everything guild)
-        static const char* kTabs[4] = { "Overview", "Wars", "Members", "Warband" };
+        static const char* kTabs[8] = { "Overview", "Hall", "Research", "Help", "Shop", "Wars", "Members", "Warband" };
         float tw = (G.width - 36) / 4.0f;
-        for (int t = 0; t < 4; t++) {
-            Rectangle tb = { G.x + 18 + t * tw, G.y + 34, tw - 6, 32 };
+        bool hub = g_gnet.hub;
+        bool helpDot = false; for (const auto& h : g_gnet.helps) if (!h.mine && !h.done) helpDot = true;
+        bool hallDot = !g_gnet.gifts.empty() || (g_gnet.buildLeft >= 0 && !g_gnet.lent);
+        for (int t = 0; t < 8; t++) {
+            Rectangle tb = { G.x + 18 + (t % 4) * tw, G.y + 34 + (t / 4) * 36, tw - 6, 32 };
             bool on = g_guildTab == t;
             DrawRectangleRounded(tb, 0.3f, 6, on ? Color{ 110, 70, 36, 255 } : Color{ 70, 50, 34, 200 });
             DrawRectangleRoundedLines(tb, 0.3f, 6, on ? kUoBronzeHi : kUoBronze);
             int lw = MeasureUIText(kTabs[t], 14);
             DrawUIText(kTabs[t], (int)(tb.x + (tb.width - lw) / 2), (int)tb.y + 8, 14, on ? kUoGoldText : Color{ 236, 220, 190, 255 });
+            if (hub && ((t == 3 && helpDot) || (t == 1 && hallDot))) DrawCircle((int)(tb.x + tb.width - 8), (int)tb.y + 8, 5, Color{ 210, 40, 30, 255 });
             if (!on && UOTapped(tb)) { g_guildTab = t; g_warScroll = 0.0f; PlaySfx(SfxId::Click); }
         }
     }
-    Rectangle area = { G.x + 8, G.y + 74, G.width - 16, G.height - 84 };
+    Rectangle area = { G.x + 8, G.y + 110, G.width - 16, G.height - 120 };
     g_warScroll -= ScrollDelta(area);
     float x = G.x + 18, w = G.width - 36, y = area.y + 4 - g_warScroll;
     auto vis = [&](Rectangle r) { return r.y >= area.y && r.y + r.height <= area.y + area.height; };
@@ -34040,7 +34401,9 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
         DrawUIText("Ranks, removing members and leaving are on the Members tab.", (int)x, (int)y, 11, soft);
         y += 18;
     }
-    } else if (g_guildTab == 1) { // ---- Wars ----
+    } else if (g_guildTab >= 1 && g_guildTab <= 4) { // ---- Hall, Research, Help, Shop ----
+        y = DrawGuildHallTabs(s, x, y, w, area);
+    } else if (g_guildTab == 5) { // ---- Wars ----
         const Color war = { 150, 30, 30, 255 };
         bool inGuild = g_gnet.ready && !g_gnet.myId.empty();
         bool officer = g_gnet.myRank >= 1;
@@ -34085,7 +34448,7 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
         y += 16;
         DrawRectangleRec({ x, y, w, 1 }, Fade(ink, 0.25f)); y += 12;
         y = DrawGuildstoneBody(s, x, y, w, 1);
-    } else if (g_guildTab == 2) { // ---- Members ----
+    } else if (g_guildTab == 6) { // ---- Members ----
         bool inGuild = g_gnet.ready && !g_gnet.myId.empty();
         if (!inGuild) {
             DrawUIText("Join or found an online guild (Overview) to see its members.", (int)x, (int)y, 12, soft); y += 24;
@@ -34523,7 +34886,7 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     int y = 116;
     DrawUIText("Your Home", 20, y, 18, kColorHeading); (void)tier;
     if (Button({ (float)screenW - 150, (float)y - 4, 130, 28 }, s.guildName.empty() ? "Warband" : ("Warband [" + s.guildTag + "]").c_str(), true))
-        { OpenWarWeek(s); g_guildTab = 3; } // (2026-09-28) the Guild screen, on its Guildmates tab
+        { OpenWarWeek(s); g_guildTab = 7; } // (2026-09-28) the Guild screen, on its Guildmates tab
     if (Button({ (float)screenW - 290, (float)y - 4, 130, 28 }, SettleHall(s) > 0 ? TextFormat("Settlement %d", SettleHall(s)) : "Settlement", true))
         { g_settleOpen = true; g_settleScroll = 0.0f; } // (2026-09-27)
     y += 24;

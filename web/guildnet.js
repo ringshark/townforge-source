@@ -8,8 +8,15 @@
 //   m=<char name>|<power>|<week points>|<user id>|<rank>|<seconds since seen>  (my roster, best first)
 //   me=<my user id>|<my rank>   motd=<message of the day>   rank: 0 member, 1 officer, 2 leader
 //   war=<guild id>|<name>|<tag>|<out|in|both>     (wars we declared / declared on us)
+// Guild Hall (2026-09-29, tf_guild_hub):
+//   hall=<level>|<funds>|<member cap>|<build secs left, -1 none>|<build total secs>|<hands>|<I lent 0|1>|<recommended tech>
+//   mine=<merit>|<donations left>|<secs to next>|<contribution this week>|<help merit today>
+//   tech=<id>|<level>|<progress>      help=<id>|<who>|<what>|<helps>|<max>|<mine 0|1>|<I helped 0|1>
+//   gift=<id>|<kind>|<from>           board=<name>|<contribution this week>
+//   done=<seq>|<action>|<result>      (the latest finished action: bought / opened / helped / donated)
 (function () {
   var busy = false, msg = '', my = null, guilds = [], roster = [], wars = [], motd = '', myRank = 0, lastWeek = '', lastRefresh = 0;
+  var hub = null, doneSeq = 0, done = '';
   function sb() { return window.TFCloud && TFCloud.client && TFCloud.client(); }
   function me() { return window.TFCloud && TFCloud.user && TFCloud.user(); }
   function clean(s) { return String(s == null ? '' : s).replace(/[|\r\n]/g, ' '); }
@@ -27,7 +34,7 @@
       if (r[1].error) throw r[1].error;
       guilds = r[0].data || [];
       var gid = r[1].data && r[1].data.guild_id;
-      my = null; roster = []; wars = []; motd = ''; myRank = 0;
+      my = null; roster = []; wars = []; motd = ''; myRank = 0; hub = null;
       if (!gid) { busy = false; return; }
       guilds.forEach(function (g) { if (g.id === gid) my = g; });
       if (!my) my = { id: gid, name: '?', tag: '?' };
@@ -36,6 +43,7 @@
         c.from('war_scores').select('user_id, points').eq('guild_id', gid).eq('week', lastWeek),
         c.from('guilds').select('motd').eq('id', gid).maybeSingle(),
         c.from('guild_wars').select('guild_id, target_id').or('guild_id.eq.' + gid + ',target_id.eq.' + gid),
+        c.rpc('tf_guild_hub'),
       ]).then(function (q) {
         // A failed wars/score query must not look like peace or zero progress.
         q.forEach(function (result) { if (result.error) throw result.error; });
@@ -48,6 +56,7 @@
                    seen: m.seen_at ? Math.max(0, Math.round((now - Date.parse(m.seen_at)) / 1000)) : -1 };
         });
         motd = (q[2] && q[2].data && q[2].data.motd) || '';
+        hub = q[4].data || null;
         var byId = {}; guilds.forEach(function (g) { byId[g.id] = g; });
         var w = {};
         ((q[3] && q[3].data) || []).forEach(function (r) {
@@ -68,10 +77,11 @@
     c.rpc(fn, args).then(function (r) {
       busy = false;
       if (r.error) { msg = r.error.message; return; }
-      if (after) after();
+      if (after) after(r.data);
       refresh(lastWeek);
     }, fail);
   }
+  function finished(action, result) { doneSeq++; done = action + '|' + clean(result); }
 
   window.TFGuildNet = {
     refresh: refresh,
@@ -90,6 +100,17 @@
       c.rpc('tf_submit', { p_week: week, p_day: day | 0, p_points: points | 0, p_char: ch, p_power: power | 0, p_snap: snap || null })
         .then(function (r) { if (r.error) msg = r.error.message; else if (Date.now() - lastRefresh > 20000) refresh(week); });
     },
+    // Guild Hall (2026-09-29)
+    donate: function (t) { call('tf_donate', { p_tech: t }, function (lv) { finished('donated', t + ':' + lv); }); },
+    recommend: function (t) { call('tf_recommend', { p_tech: t }, function () { msg = t ? 'Research recommended!' : 'Recommendation cleared!'; }); },
+    hallUpgrade: function () { call('tf_hall_upgrade', {}, function () { msg = 'The builders start on the Hall!'; }); },
+    lendHand: function () { call('tf_lend_hand', {}, function () { msg = 'You lend a hand - the Hall rises faster!'; }); },
+    requestHelp: function (label, total) { call('tf_request_help', { p_label: label, p_total: total | 0 }, function () { msg = 'Your guild has been asked for help!'; finished('asked', label); }); },
+    closeHelp: function () { var c = sb(); if (c && me()) c.rpc('tf_close_help', {}); },
+    helpAll: function () { call('tf_help_all', {}, function (n) { finished('helped', n | 0); }); },
+    shopBuy: function (item) { call('tf_shop_buy', { p_item: item }, function (left) { finished('bought', item); }); },
+    sendGift: function (kind) { var c = sb(); if (c && me()) c.rpc('tf_send_gift', { p_kind: kind | 0 }); },
+    openGifts: function () { call('tf_open_gifts', {}, function (kinds) { finished('opened', (kinds || []).join(',')); }); },
     clearMsg: function () { msg = ''; },
     state: function () {
       var out = [];
@@ -102,6 +123,15 @@
       roster.slice(0, 30).forEach(function (m) { out.push('m=' + [clean(m.name), m.power, m.points, m.id, m.rank, m.seen].join('|')); });
       if (my) { var u = me(); out.push('me=' + (u ? u.id : '') + '|' + myRank); out.push('motd=' + clean(motd)); }
       wars.forEach(function (w) { out.push('war=' + [w.id, clean(w.name), clean(w.tag), w.dir].join('|')); });
+      if (hub) {
+        out.push('hall=' + [hub.hall, hub.funds, hub.cap, hub.build_left, hub.build_secs, hub.hands, hub.lent ? 1 : 0, clean(hub.rec)].join('|'));
+        out.push('mine=' + [hub.merit, hub.charges, hub.next_charge, hub.contrib, hub.help_merit].join('|'));
+        (hub.tech || []).forEach(function (t) { out.push('tech=' + [clean(t.t), t.l, t.p].join('|')); });
+        (hub.helps || []).forEach(function (h) { out.push('help=' + [h.id, clean(h.who), clean(h.what), h.n, h.max, h.mine ? 1 : 0, h.done ? 1 : 0].join('|')); });
+        (hub.gifts || []).forEach(function (g) { out.push('gift=' + [g.id, g.k, clean(g.from)].join('|')); });
+        (hub.board || []).slice(0, 30).forEach(function (b) { out.push('board=' + [clean(b.n), b.c].join('|')); });
+      }
+      if (doneSeq) out.push('done=' + doneSeq + '|' + done);
       return out.join('\n');
     },
   };

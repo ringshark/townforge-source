@@ -278,3 +278,329 @@ revoke all on function public.tf_my_rank(), public.tf_set_motd(text), public.tf_
   public.tf_declare_war(uuid), public.tf_end_war(uuid) from public, anon;
 grant execute on function public.tf_set_motd(text), public.tf_kick(uuid), public.tf_set_rank(uuid, int),
   public.tf_declare_war(uuid), public.tf_end_war(uuid) to authenticated;
+
+-- ===================================================================
+-- Guild Hall (2026-09-29): the alliance loop, after Whiteout Survival.
+-- Safe to re-run. As before, players never touch these tables directly;
+-- everything goes through the tf_* functions, which check membership and rank,
+-- enforce the daily limits server-side and do each change in one transaction.
+--   Hall      shared level; officers spend guild funds to upgrade it (a timed
+--             build that every member can lend a hand to, once each)
+--   Research  members donate to techs; donations come from a charge pool that
+--             refills over time (20 max, one per 12 minutes) - the pool is the
+--             anti-abuse limit, whatever a client claims to have in its pack
+--   Help      ask the guild to speed your settlement build; each help cuts it
+--   Merit     your guild currency (donations, helping); spent in the shop
+--   Gifts     boss kills and treasure chests send every member a gift
+-- ===================================================================
+alter table public.guilds add column if not exists hall_level  int    not null default 1 check (hall_level between 1 and 10);
+alter table public.guilds add column if not exists funds       bigint not null default 0 check (funds >= 0);
+alter table public.guilds add column if not exists build_until timestamptz;           -- upgrading to hall_level + 1 until then
+alter table public.guilds add column if not exists build_secs  int    not null default 0;
+alter table public.guilds add column if not exists build_hands int    not null default 0;
+alter table public.guilds add column if not exists recommended text   not null default '';
+
+alter table public.guild_members add column if not exists merit        int  not null default 0 check (merit >= 0);
+alter table public.guild_members add column if not exists charges      real not null default 20;
+alter table public.guild_members add column if not exists charges_at   timestamptz not null default now();
+alter table public.guild_members add column if not exists contrib      int  not null default 0;    -- this week
+alter table public.guild_members add column if not exists contrib_week text not null default '';
+alter table public.guild_members add column if not exists help_day     int  not null default -1;   -- merit from helping, per day
+alter table public.guild_members add column if not exists help_merit   int  not null default 0;
+alter table public.guild_members add column if not exists lent_build   timestamptz;               -- the build they lent a hand to
+alter table public.guild_members add column if not exists gift_seen    bigint not null default 0;
+
+create table if not exists public.guild_tech (
+  guild_id uuid not null references public.guilds (id) on delete cascade,
+  tech     text not null,
+  level    int  not null default 0 check (level between 0 and 5),
+  progress int  not null default 0,
+  primary key (guild_id, tech)
+);
+create table if not exists public.guild_helps (
+  id         bigserial primary key,
+  guild_id   uuid not null references public.guilds (id) on delete cascade,
+  user_id    uuid not null references auth.users (id) on delete cascade,
+  char_name  text not null default 'Adventurer',
+  label      text not null default '',
+  total_secs int  not null default 0,
+  helps      int  not null default 0,
+  max_helps  int  not null default 6,
+  open       boolean not null default true,
+  created_at timestamptz not null default now()
+);
+create index if not exists guild_helps_open on public.guild_helps (guild_id) where open;
+create table if not exists public.guild_help_by (
+  help_id bigint not null references public.guild_helps (id) on delete cascade,
+  helper  uuid   not null references auth.users (id) on delete cascade,
+  primary key (help_id, helper)
+);
+create table if not exists public.guild_gifts (
+  id         bigserial primary key,
+  guild_id   uuid not null references public.guilds (id) on delete cascade,
+  kind       int  not null check (kind between 0 and 3),   -- 0 dungeon boss, 1 world boss, 2 treasure chest, 3 raid repelled
+  from_user  uuid references auth.users (id) on delete set null,
+  from_name  text not null default '',
+  created_at timestamptz not null default now()
+);
+create index if not exists guild_gifts_guild on public.guild_gifts (guild_id, id);
+alter table public.guild_tech    enable row level security;
+alter table public.guild_helps   enable row level security;
+alter table public.guild_help_by enable row level security;
+alter table public.guild_gifts   enable row level security;
+-- (no policies: only the functions below read or write these)
+
+-- The research tree. tier = the Hall level it needs; kind = what donations cost
+-- in the game (1 wood, 2 ore, 3 leather, 4 gold) - the game debits it locally.
+create or replace function public.tf_tech_tier(t text) returns int language sql immutable as $$
+  select case t when 'timber' then 1 when 'veins' then 1 when 'tanner' then 1 when 'builders' then 1
+                when 'coffers' then 2 when 'ironhide' then 2 when 'keen' then 3 when 'arcane' then 3
+                when 'hands' then 4 when 'expansion' then 4 else 0 end;
+$$;
+create or replace function public.tf_day_key() returns int language sql stable as $$
+  select floor((extract(epoch from now()) - 345600) / 86400)::int;
+$$;
+create or replace function public.tf_member_cap(gid uuid) returns int language sql stable as $$
+  select 30 + 2 * (g.hall_level - 1) + 2 * coalesce((select level from guild_tech where guild_id = gid and tech = 'expansion'), 0)
+  from guilds g where g.id = gid;
+$$;
+-- Finish a hall build whose time is up (called before anything reads or changes the hall).
+create or replace function public.tf_hall_settle(gid uuid) returns void language plpgsql security definer set search_path = public as $$
+begin
+  update guilds set hall_level = least(10, hall_level + 1), build_until = null, build_secs = 0, build_hands = 0
+  where id = gid and build_until is not null and build_until <= now();
+end $$;
+-- A hall build's identity: its original finish time (every hand lent cuts exactly build_secs / 20).
+create or replace function public.tf_build_key(g guilds) returns timestamptz language sql immutable as $$
+  select g.build_until + make_interval(secs => g.build_hands * (g.build_secs / 20));
+$$;
+-- A member's donation charges, refilled up to now (20 max, one per 720 s).
+create or replace function public.tf_charges(m guild_members) returns real language sql stable as $$
+  select least(20, m.charges + extract(epoch from (now() - m.charges_at))::real / 720);
+$$;
+
+-- joining respects the Hall's member cap now
+create or replace function public.tf_join_guild(p_guild uuid, p_char text default 'Adventurer', p_power int default 0)
+returns void language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid();
+begin
+  if me is null then raise exception 'Sign in first.'; end if;
+  if exists (select 1 from guild_members where user_id = me) then raise exception 'Leave your guild first.'; end if;
+  perform 1 from guilds where id = p_guild for update;
+  if not found then raise exception 'That guild no longer exists.'; end if;
+  if (select count(*) from guild_members where guild_id = p_guild) >= tf_member_cap(p_guild) then
+    raise exception 'That guild is full.'; end if;
+  insert into guild_members (user_id, guild_id, char_name, power)
+    values (me, p_guild, coalesce(nullif(tf_clean(p_char, 24), ''), 'Adventurer'), greatest(0, least(coalesce(p_power, 0), 100000)));
+end $$;
+
+-- Everything the Guild Hall screens show, as one JSON document.
+create or replace function public.tf_guild_hub() returns json
+language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); m guild_members; g guilds; wk text := tf_week_now(); res json;
+begin
+  select * into m from guild_members where user_id = me;
+  if m.user_id is null then return null; end if;
+  perform tf_hall_settle(m.guild_id);
+  if m.contrib_week <> wk then update guild_members set contrib = 0, contrib_week = wk where user_id = me; m.contrib := 0; end if;
+  select * into g from guilds where id = m.guild_id;
+  select json_build_object(
+    'hall', g.hall_level, 'funds', g.funds, 'cap', tf_member_cap(g.id), 'rec', g.recommended,
+    'build_left', case when g.build_until is null then -1 else greatest(0, extract(epoch from (g.build_until - now()))::int) end,
+    'build_secs', g.build_secs, 'hands', g.build_hands,
+    'lent', (g.build_until is not null and m.lent_build = tf_build_key(g)),
+    'merit', m.merit, 'charges', floor(tf_charges(m))::int,
+    'next_charge', case when tf_charges(m) >= 20 then 0 else ceil(720 - (tf_charges(m) - floor(tf_charges(m))) * 720)::int end,
+    'contrib', m.contrib, 'help_merit', case when m.help_day = tf_day_key() then m.help_merit else 0 end,
+    'tech', coalesce((select json_agg(json_build_object('t', t.tech, 'l', t.level, 'p', t.progress)) from guild_tech t where t.guild_id = g.id), '[]'::json),
+    'helps', coalesce((select json_agg(json_build_object('id', h.id, 'who', h.char_name, 'what', h.label, 'n', h.helps, 'max', h.max_helps,
+                                                         'mine', h.user_id = me,
+                                                         'done', exists (select 1 from guild_help_by b where b.help_id = h.id and b.helper = me))
+                                       order by h.id)
+                       from guild_helps h where h.guild_id = g.id and h.open and h.created_at > now() - interval '1 day'), '[]'::json),
+    'gifts', coalesce((select json_agg(json_build_object('id', x.id, 'k', x.kind, 'from', x.from_name) order by x.id)
+                       from guild_gifts x where x.guild_id = g.id and x.id > m.gift_seen and x.created_at > now() - interval '3 days'), '[]'::json),
+    'board', coalesce((select json_agg(json_build_object('n', b.char_name, 'c', b.contrib) order by b.contrib desc)
+                       from guild_members b where b.guild_id = g.id and b.contrib_week = wk and b.contrib > 0), '[]'::json)
+  ) into res;
+  return res;
+end $$;
+
+-- Donate one charge to a tech. Returns the tech's new level.
+create or replace function public.tf_donate(p_tech text) returns int
+language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); m guild_members; g guilds; ch real; lv int; pr int; need int; gain int; wk text := tf_week_now();
+begin
+  select * into m from guild_members where user_id = me for update;
+  if m.user_id is null then raise exception 'You are not in a guild.'; end if;
+  if tf_tech_tier(p_tech) = 0 then raise exception 'Unknown research.'; end if;
+  perform tf_hall_settle(m.guild_id);
+  select * into g from guilds where id = m.guild_id for update;
+  if g.hall_level < tf_tech_tier(p_tech) then raise exception 'The Guild Hall must be level % first.', tf_tech_tier(p_tech); end if;
+  ch := tf_charges(m);
+  if ch < 1 then raise exception 'No donations left - one refills every 12 minutes.'; end if;
+  insert into guild_tech (guild_id, tech) values (g.id, p_tech) on conflict do nothing;
+  select level, progress into lv, pr from guild_tech where guild_id = g.id and tech = p_tech for update;
+  if lv >= 5 then raise exception 'That research is complete.'; end if;
+  gain := case when g.recommended = p_tech then 15 else 10 end;
+  need := 100 * (lv + 1);
+  pr := pr + gain;
+  if pr >= need then lv := lv + 1; pr := 0; end if;
+  update guild_tech set level = lv, progress = pr where guild_id = g.id and tech = p_tech;
+  update guild_members set charges = ch - 1, charges_at = now(), merit = merit + gain,
+    contrib = case when contrib_week = wk then contrib else 0 end + gain, contrib_week = wk
+  where user_id = me;
+  update guilds set funds = funds + gain where id = g.id;
+  return lv;
+end $$;
+
+create or replace function public.tf_recommend(p_tech text) returns void
+language plpgsql security definer set search_path = public as $$
+declare gid uuid; r int;
+begin
+  select * into gid, r from tf_my_rank();
+  if gid is null or r < 1 then raise exception 'Only officers can recommend research.'; end if;
+  if p_tech <> '' and tf_tech_tier(p_tech) = 0 then raise exception 'Unknown research.'; end if;
+  update guilds set recommended = p_tech where id = gid;
+end $$;
+
+-- Officers start the next Hall level: costs funds, takes (level) hours.
+create or replace function public.tf_hall_upgrade() returns void
+language plpgsql security definer set search_path = public as $$
+declare gid uuid; r int; g guilds; cost bigint; secs int;
+begin
+  select * into gid, r from tf_my_rank();
+  if gid is null or r < 1 then raise exception 'Only officers can upgrade the Hall.'; end if;
+  perform tf_hall_settle(gid);
+  select * into g from guilds where id = gid for update;
+  if g.build_until is not null then raise exception 'The Hall is already being built.'; end if;
+  if g.hall_level >= 10 then raise exception 'The Hall is at its greatest.'; end if;
+  cost := 200 * g.hall_level * g.hall_level;
+  if g.funds < cost then raise exception 'The guild needs % funds (it has %).', cost, g.funds; end if;
+  secs := 3600 * g.hall_level;
+  update guilds set funds = funds - cost, build_until = now() + make_interval(secs => secs), build_secs = secs, build_hands = 0 where id = gid;
+end $$;
+
+-- Every member can lend a hand once per build: each cuts 5% of its full time.
+create or replace function public.tf_lend_hand() returns void
+language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); m guild_members; g guilds;
+begin
+  select * into m from guild_members where user_id = me for update;
+  if m.user_id is null then raise exception 'You are not in a guild.'; end if;
+  perform tf_hall_settle(m.guild_id);
+  select * into g from guilds where id = m.guild_id for update;
+  if g.build_until is null then raise exception 'Nothing is being built.'; end if;
+  if m.lent_build = tf_build_key(g) then raise exception 'You have already lent a hand to this build.'; end if;
+  update guild_members set lent_build = tf_build_key(g), merit = merit + 20 where user_id = me;
+  update guilds set build_until = build_until - make_interval(secs => g.build_secs / 20), build_hands = build_hands + 1 where id = g.id;
+  perform tf_hall_settle(g.id);
+end $$;
+
+-- Ask the guild to help with a timer (your settlement build). One open request each.
+create or replace function public.tf_request_help(p_label text, p_total int) returns bigint
+language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); m guild_members; g guilds; hid bigint; mx int;
+begin
+  select * into m from guild_members where user_id = me;
+  if m.user_id is null then raise exception 'You are not in a guild.'; end if;
+  select * into g from guilds where id = m.guild_id;
+  update guild_helps set open = false where user_id = me and open;
+  mx := 5 + g.hall_level + 2 * coalesce((select level from guild_tech where guild_id = g.id and tech = 'hands'), 0);
+  insert into guild_helps (guild_id, user_id, char_name, label, total_secs, max_helps)
+    values (g.id, me, m.char_name, coalesce(tf_clean(p_label, 40), ''), greatest(0, least(coalesce(p_total, 0), 864000)), mx)
+    returning id into hid;
+  return hid;
+end $$;
+create or replace function public.tf_close_help() returns void
+language sql security definer set search_path = public as $$
+  update guild_helps set open = false where user_id = auth.uid() and open;
+$$;
+
+-- Help everyone who asked. Returns how many you helped. Helping earns 5 merit
+-- each, up to 50 a day.
+create or replace function public.tf_help_all() returns int
+language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); m guild_members; n int := 0; h record; today int := tf_day_key(); earned int;
+begin
+  select * into m from guild_members where user_id = me for update;
+  if m.user_id is null then raise exception 'You are not in a guild.'; end if;
+  for h in select id from guild_helps
+           where guild_id = m.guild_id and open and user_id <> me and helps < max_helps and created_at > now() - interval '1 day'
+             and not exists (select 1 from guild_help_by b where b.help_id = guild_helps.id and b.helper = me)
+           for update loop
+    insert into guild_help_by (help_id, helper) values (h.id, me);
+    update guild_helps set helps = helps + 1 where id = h.id;
+    n := n + 1;
+  end loop;
+  if n > 0 then
+    earned := case when m.help_day = today then m.help_merit else 0 end;
+    update guild_members set help_day = today, help_merit = least(50, earned + 5 * n),
+      merit = merit + greatest(0, least(50, earned + 5 * n) - earned)
+    where user_id = me;
+  end if;
+  return n;
+end $$;
+
+-- The shop: prices live here, so a client can't name its own.
+create or replace function public.tf_shop_buy(p_item text) returns int
+language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); price int; left_ int;
+begin
+  price := case p_item when 'bandages' then 60 when 'potions' then 120 when 'reagents' then 100
+                        when 'horn' then 150 when 'dye' then 300 when 'map' then 500 else null end;
+  if price is null then raise exception 'That is not for sale.'; end if;
+  update guild_members set merit = merit - price where user_id = me and merit >= price returning merit into left_;
+  if left_ is null then raise exception 'Not enough merit (% needed).', price; end if;
+  return left_;
+end $$;
+
+-- A member's deed sends every member a gift (up to 12 a day each).
+create or replace function public.tf_send_gift(p_kind int) returns void
+language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); m guild_members;
+begin
+  select * into m from guild_members where user_id = me;
+  if m.user_id is null then return; end if;
+  if p_kind not between 0 and 3 then raise exception 'Unknown gift.'; end if;
+  if (select count(*) from guild_gifts where from_user = me and created_at > now() - interval '1 day') >= 12 then return; end if;
+  insert into guild_gifts (guild_id, kind, from_user, from_name) values (m.guild_id, p_kind, me, m.char_name);
+  update guilds set funds = funds + 5 where id = m.guild_id;
+end $$;
+-- Open every waiting gift: returns their kinds (the game rolls what's inside).
+create or replace function public.tf_open_gifts() returns int[]
+language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); m guild_members; kinds int[]; top bigint;
+begin
+  select * into m from guild_members where user_id = me for update;
+  if m.user_id is null then return '{}'; end if;
+  select array_agg(kind order by id), max(id) into kinds, top from guild_gifts
+    where guild_id = m.guild_id and id > m.gift_seen and created_at > now() - interval '3 days';
+  if top is not null then update guild_members set gift_seen = top where user_id = me; end if;
+  return coalesce(kinds, '{}');
+end $$;
+
+-- someone who leaves or is removed takes their open help request with them
+create or replace function public.tf_leave_cleanup() returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  update guild_helps set open = false where user_id = old.user_id and open;
+  return old;
+end $$;
+drop trigger if exists tf_member_left on public.guild_members;
+create trigger tf_member_left after delete on public.guild_members for each row execute function public.tf_leave_cleanup();
+-- a new member starts fresh (merit, charges and gifts don't follow people between guilds)
+create or replace function public.tf_join_reset() returns trigger language plpgsql as $$
+begin
+  new.gift_seen := coalesce((select max(id) from public.guild_gifts where guild_id = new.guild_id), 0);
+  return new;
+end $$;
+drop trigger if exists tf_member_joined on public.guild_members;
+create trigger tf_member_joined before insert on public.guild_members for each row execute function public.tf_join_reset();
+
+revoke all on function public.tf_guild_hub(), public.tf_donate(text), public.tf_recommend(text), public.tf_hall_upgrade(),
+  public.tf_lend_hand(), public.tf_request_help(text, int), public.tf_close_help(), public.tf_help_all(),
+  public.tf_shop_buy(text), public.tf_send_gift(int), public.tf_open_gifts(), public.tf_hall_settle(uuid),
+  public.tf_member_cap(uuid), public.tf_charges(guild_members) from public, anon;
+grant execute on function public.tf_guild_hub(), public.tf_donate(text), public.tf_recommend(text), public.tf_hall_upgrade(),
+  public.tf_lend_hand(), public.tf_request_help(text, int), public.tf_close_help(), public.tf_help_all(),
+  public.tf_shop_buy(text), public.tf_send_gift(int), public.tf_open_gifts() to authenticated;
