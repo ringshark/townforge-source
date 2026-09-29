@@ -570,14 +570,20 @@ static const std::array<ShrineDef, 7> kShrines = {{
 }};
 static const Vector2 kFieldsOfSorrow = WP(1900, 2300); // haunted battlefield, deep south wilds
 static constexpr float kFieldsOfSorrowRadius = 220.0f;
+// (2026-09-29) Moved to clearings where the bigger camp (kCampRadius 250) sits clear of
+// ridges, water, spawns, gather spots, dungeon doors, house plots and town gates -
+// the old sites had a Mountain Cat, a Lone Wolf and a tame-able creature inside the walls.
 static const std::array<Vector2, 5> kRivalCampSpots = {{ // Murder Inc.'s camp relocates between these
-    WP(500, 2300), WP(2300, 1500), WP(1300, 1100), WP(2700, 1900), WP(400, 800)
+    WP(513, 2053), WP(2773, 1153), WP(1273, 1073), WP(2793, 2113), WP(233, 513)
 }};
+static const float kCampRadius = 250.0f; // (2026-09-29) was 170 - room to fight inside the palisade
+static const float kCampS = kCampRadius / 170.0f; // the interior layout spreads out with it
 static const Vector2 kOutlawRefuge = WP(2750, 2450); // hidden black market, far southeast corner
 // Grimtusk Hold (2026-09-27): the orc fortress, far south past the river below the
 // Fields of Sorrow. Its gate faces west-northwest, where the river can be walked round.
 static const Vector2 kOrcFortPos = WP(1800, 2880);
-static const float kOrcFortRadius = 205.0f;
+static const float kOrcFortRadius = 290.0f; // (2026-09-29) was 205 - the yard was a scrum
+static const float kFortS = kOrcFortRadius / 205.0f; // the interior layout spreads out with it
 // World boss (2026-09-27): Vyrathax the Tri-Wyrm sleeps in the Cinder Caldera, far
 // south-east, and wakes on a timer - three heads (fire, storm, venom), each with
 // its own third of the health and its own telegraphed attack.
@@ -8324,7 +8330,7 @@ struct WildernessCreatureSpot { Vector2 pos; int creatureIdx; };
 static const std::array<WildernessCreatureSpot, 17> kWildernessCreatureSpots = {{
     { WP(700, 1550), 0 },  // Stray Dog (difficulty 0)
     { WP(1100, 1550), 1 }, // Timber Wolf (difficulty 20)
-    { WP(300, 500), 2 },   // Grizzly Bear (difficulty 30)
+    { WP(300, 330), 2 },   // Grizzly Bear (difficulty 30) - (2026-09-29) up the valley, out of the Frostwastes war camp
     { WP(1500, 300), 7 },  // Storm Griffin (difficulty 80)
     { WP(900, 150), 10 },  // Forest Dragon (difficulty 100)
     { WP(1650, 600), 1 },  // Timber Wolf #2 - Dense Forest zone (NE)
@@ -8451,13 +8457,13 @@ static std::array<WildernessMonsterSpot, 31> kWildernessMonsterSpots = {{
     { WP(450, 2300), "Mountain Cat", 33, 18, 27, 8, RegionAt(WP(450, 2300)) },
     // Grimtusk Hold (2026-09-27) - the orc fortress (iconIdx 9 orcs, 10 the Warlord).
     // One faction (MonsterFaction): strike one and the whole hold answers.
-    { WP(1681, 2794), "Orc Grunt", 22, 8, 14, 9, RegionAt(WP(1681, 2794)) },   // inside the gate
-    { WP(1653, 2879), "Orc Grunt", 22, 8, 14, 9, RegionAt(WP(1653, 2879)) },
-    { WP(1801, 2749), "Orc Archer", 24, 6, 16, 9, RegionAt(WP(1801, 2749)) },  // by the walls
-    { WP(1723, 2986), "Orc Archer", 24, 6, 16, 9, RegionAt(WP(1723, 2986)) },
-    { WP(1829, 2824), "Orc Brute", 30, 12, 20, 9, RegionAt(WP(1829, 2824)) },  // at the bonfire
-    { WP(1832, 2975), "Orc Shaman", 30, 4, 22, 9, RegionAt(WP(1832, 2975)) },  // at the war drum
-    { WP(1919, 2919), "Orc Warlord", 42, 20, 60, 10, RegionAt(WP(1919, 2919)) }, // before his hall
+    { WP(1632, 2758), "Orc Grunt", 22, 8, 14, 9, RegionAt(WP(1632, 2758)) },   // inside the gate
+    { WP(1592, 2879), "Orc Grunt", 22, 8, 14, 9, RegionAt(WP(1592, 2879)) },
+    { WP(1801, 2695), "Orc Archer", 24, 6, 16, 9, RegionAt(WP(1801, 2695)) },  // by the walls
+    { WP(1691, 3030), "Orc Archer", 24, 6, 16, 9, RegionAt(WP(1691, 3030)) },
+    { WP(1841, 2801), "Orc Brute", 30, 12, 20, 9, RegionAt(WP(1841, 2801)) },  // at the bonfire
+    { WP(1845, 3014), "Orc Shaman", 30, 4, 22, 9, RegionAt(WP(1845, 3014)) },  // at the war drum
+    { WP(1968, 2935), "Orc Warlord", 42, 20, 60, 10, RegionAt(WP(1968, 2935)) }, // before his hall
     // The Fields of Sorrow (2026-09-27) - live wraiths replace the old pop-up ambush.
     { WP(1880, 2280), "Sorrow Wraith", 26, 0, 18, 6, RegionAt(WP(1880, 2280)) },
     { WP(2010, 2310), "Sorrow Wraith", 32, 0, 24, 6, RegionAt(WP(2010, 2310)) },
@@ -9011,7 +9017,7 @@ static Vector2 GuildCampPos(const GameState& s, int who) {
     Vector2 c = kRivalCampSpots[s.rivalCampIdx];
     if (who < 0) return c;
     float a = 1.3f + who * 2.1f;
-    return { c.x + cosf(a) * 70.0f, c.y + sinf(a) * 70.0f };
+    return { c.x + cosf(a) * 70.0f * kCampS, c.y + sinf(a) * 70.0f * kCampS };
 }
 static Vector2 GuildNearestGate(Vector2 p) {
     const Vector2 gates[4] = { kWildernessReturnGatePos, kWildernessTown2GatePos, kWildernessTown3GatePos, kWildernessTown4GatePos };
@@ -17427,7 +17433,7 @@ static void WildHeightEnsure() {
     for (const auto& e : kWildernessDungeonEntrances) flats.push_back({ e.pos.x, e.pos.y, 130.0f });
     for (const auto& g : kTownGates) flats.push_back({ g.wildernessPos.x, g.wildernessPos.y, 220.0f });
     for (const auto& hp : kHousePlots) flats.push_back({ hp.pos.x, hp.pos.y, SettleWallR(hp.cells) + 30.0f }); // room for the settlement (2026-09-27)
-    for (const auto& cp : kRivalCampSpots) flats.push_back({ cp.x, cp.y, 250.0f }); // Murder Inc.'s war camps (2026-09-27)
+    for (const auto& cp : kRivalCampSpots) flats.push_back({ cp.x, cp.y, kCampRadius + 80.0f }); // Murder Inc.'s war camps (2026-09-27)
     flats.push_back({ kOrcFortPos.x, kOrcFortPos.y, kOrcFortRadius + 70.0f }); // Grimtusk Hold
     flats.push_back({ kWyrmLair.x, kWyrmLair.y, kWyrmLairR + 40.0f });          // the Cinder Caldera
     for (const auto& sh : kShrines) flats.push_back({ sh.pos.x, sh.pos.y, 110.0f });
@@ -18219,7 +18225,7 @@ static void Wild3DBuildScatter() {
             if (dx * dx + dz * dz < 110.0f * 110.0f) return false;
         }
         for (const Vector2& p : kRivalCampSpots) // war camps stand in cleared ground
-            if (Dist({ x, z }, p) < 215.0f) return false;
+            if (Dist({ x, z }, p) < kCampRadius + 45.0f) return false;
         if (Dist({ x, z }, kOrcFortPos) < kOrcFortRadius + 70.0f) return false; // and so does Grimtusk Hold
         if (Dist({ x, z }, kWyrmLair) < kWyrmLairR + 40.0f) return false;        // and the Cinder Caldera
         for (const auto& hp : kHousePlots) // settlement grounds (2026-09-27)
@@ -18417,7 +18423,7 @@ static void Wild3DBuildDressing() {
     for (const auto& f : kWildernessFoliage) keep.push_back({ f.pos, 40.0f });
     for (const auto& ip : kWildernessInnocentSpots) keep.push_back({ ip.pos, 80.0f });
     for (const auto& hp : kHousePlots) keep.push_back({ hp.pos, SettleWallR(hp.cells) + 25.0f }); // the settlement grounds (2026-09-27)
-    for (const auto& cp : kRivalCampSpots) keep.push_back({ cp, 215.0f });
+    for (const auto& cp : kRivalCampSpots) keep.push_back({ cp, kCampRadius + 45.0f });
     keep.push_back({ kOrcFortPos, kOrcFortRadius + 70.0f });
     keep.push_back({ kWyrmLair, kWyrmLairR + 40.0f });
     for (const auto& sh : kShrines) keep.push_back({ sh.pos, 100.0f });
@@ -20352,7 +20358,6 @@ static void Wild3DDrawCorpse(const GameState::WorldCorpse& c, bool shadowPass) {
 // hands. The gate faces the middle of the map. Built once per camp site.
 static const Texture2D& GlowTex();                                  // (with the room surfaces)
 static void GlowPool(float x, float z, float y, float r, Color c);
-static const float kCampRadius = 170.0f;
 static float RivalCampGateYaw(Vector2 c) { return atan2f(1600.0f * kWS - c.y, 1600.0f * kWS - c.x); } // gate direction
 static bool RivalCampInGate(Vector2 c, Vector2 p) {
     float a = atan2f(p.y - c.y, p.x - c.x) - RivalCampGateYaw(c);
@@ -20442,13 +20447,13 @@ static void RivalCampBuild(int idx) {
     // log benches round the fire
     for (int i = 0; i < 3; i++) {
         float a = 0.6f + i * 2.1f;
-        float x = cosf(a) * 36.0f, z = sinf(a) * 36.0f;
+        float x = cosf(a) * 36.0f * kCampS, z = sinf(a) * 36.0f * kCampS;
         T3CBox(b, x, 4.0f, z, 26.0f, 7.0f, 7.0f, log);
     }
     // training dummies: post, arms, straw body, sack head
     for (int i = 0; i < 2; i++) {
-        float a = gate + 0.85f + i * 0.35f;
-        float x = cosf(a) * 105.0f, z = sinf(a) * 105.0f;
+        float a = gate + 0.85f + i * 0.25f;
+        float x = cosf(a) * 105.0f * kCampS, z = sinf(a) * 105.0f * kCampS;
         T3CBox(b, x, 22.0f, z, 4.0f, 44.0f, 4.0f, logDk);
         T3CBox(b, x, 34.0f, z, 26.0f, 3.5f, 3.5f, logDk);
         T3CCylinder(b, x, 18.0f, z, 36.0f, 7.0f, 6.0f, 8, Color{ 196, 170, 100, 255 });
@@ -20481,23 +20486,25 @@ static void Wild3DDrawRivalCamp(GameState& s, bool shadowPass, const Town3DCam* 
     };
     float gateDeg = -gate * RAD2DEG;
     // command tent at the back under the banners, soldiers' tents in two rows
-    prop(kWPTent, 3.1416f, 118.0f, gateDeg + 90.0f, kWPScaleProp * 1.2f, Color{ 200, 120, 110, 255 });
-    prop(kWPFlagRed, 3.1416f - 0.42f, 118.0f, gateDeg, kWPScaleProp * 1.3f);
-    prop(kWPFlagRed, 3.1416f + 0.42f, 118.0f, gateDeg, kWPScaleProp * 1.3f);
+    prop(kWPTent, 3.1416f, 118.0f * kCampS, gateDeg + 90.0f, kWPScaleProp * 1.2f, Color{ 200, 120, 110, 255 });
+    prop(kWPFlagRed, 3.1416f - 0.3f, 118.0f * kCampS, gateDeg, kWPScaleProp * 1.3f);
+    prop(kWPFlagRed, 3.1416f + 0.3f, 118.0f * kCampS, gateDeg, kWPScaleProp * 1.3f);
     const float tentA[6] = { 2.05f, 2.45f, -2.05f, -2.45f, 1.6f, -1.6f };
-    for (int i = 0; i < 6; i++) prop(kWPTent, tentA[i], 120.0f, gateDeg + 90.0f - tentA[i] * RAD2DEG, kWPScaleProp * 0.8f, Color{ 170, 150, 140, 255 });
+    for (int i = 0; i < 6; i++) prop(kWPTent, tentA[i], 120.0f * kCampS, gateDeg + 90.0f - tentA[i] * RAD2DEG, kWPScaleProp * 0.8f, Color{ 170, 150, 140, 255 });
+    const float tentB[4] = { 2.25f, -2.25f, 1.82f, -1.82f }; // (2026-09-29) the outer row
+    for (int i = 0; i < 4; i++) prop(kWPTent, tentB[i], kCampRadius - 42.0f, gateDeg + 90.0f - tentB[i] * RAD2DEG, kWPScaleProp * 0.75f, Color{ 160, 140, 132, 255 });
     prop(kWPFlagRed, 0.36f, kCampRadius + 2.0f, gateDeg, kWPScaleProp * 1.1f);
     prop(kWPFlagRed, -0.36f, kCampRadius + 2.0f, gateDeg, kWPScaleProp * 1.1f);
     // arms and supplies
-    prop(kWPWeaponRack, 0.95f, 60.0f, gateDeg + 60.0f, kWPScaleProp);
-    prop(kWPWeaponRack, -0.95f, 60.0f, gateDeg - 60.0f, kWPScaleProp);
-    prop(kWPCrateBig, 2.75f, 70.0f, 20.0f, kWPScaleProp);
-    prop(kWPCrateSmall, 2.9f, 58.0f, 60.0f, kWPScaleProp);
-    prop(kWPBarrel, -2.8f, 66.0f, 0.0f, kWPScaleProp);
-    prop(kWPBarrel, -2.95f, 56.0f, 40.0f, kWPScaleProp);
-    prop(kWPSack, -2.6f, 74.0f, 10.0f, kWPScaleProp);
-    prop(kWPCrateLong, 1.2f, 140.0f, gateDeg, kWPScaleProp);
-    prop(kWPLumber, -1.25f, 140.0f, gateDeg, kWPScaleProp);
+    prop(kWPWeaponRack, 0.95f, 60.0f * kCampS, gateDeg + 60.0f, kWPScaleProp);
+    prop(kWPWeaponRack, -0.95f, 60.0f * kCampS, gateDeg - 60.0f, kWPScaleProp);
+    prop(kWPCrateBig, 2.75f, 70.0f * kCampS, 20.0f, kWPScaleProp);
+    prop(kWPCrateSmall, 2.9f, 58.0f * kCampS, 60.0f, kWPScaleProp);
+    prop(kWPBarrel, -2.8f, 66.0f * kCampS, 0.0f, kWPScaleProp);
+    prop(kWPBarrel, -2.95f, 56.0f * kCampS, 40.0f, kWPScaleProp);
+    prop(kWPSack, -2.6f, 74.0f * kCampS, 10.0f, kWPScaleProp);
+    prop(kWPCrateLong, 1.2f, 140.0f * kCampS, gateDeg, kWPScaleProp);
+    prop(kWPLumber, -1.25f, 140.0f * kCampS, gateDeg, kWPScaleProp);
     // recruits: two gate sentries, one drilling at a dummy, one warming by the fire
     if (!shadowPass || true) {
         float t = (float)GetTime();
@@ -20513,8 +20520,8 @@ static void Wild3DDrawRivalCamp(GameState& s, bool shadowPass, const Town3DCam* 
         }
         {
             float a = gate + 0.85f;
-            float dx = c.x + cosf(a) * 80.0f, dz = c.y + sinf(a) * 80.0f;
-            float face = atan2f(sinf(a) * 105.0f - sinf(a) * 80.0f, cosf(a) * 105.0f - cosf(a) * 80.0f);
+            float dx = c.x + cosf(a) * 80.0f * kCampS, dz = c.y + sinf(a) * 80.0f * kCampS;
+            float face = a;
             HumanOutfit d = HumanOutfitBlade();
             HumanPose hp; hp.engaged = true;
             float ph = fmodf(t, 1.6f);
@@ -20523,7 +20530,7 @@ static void Wild3DDrawRivalCamp(GameState& s, bool shadowPass, const Town3DCam* 
         }
         {
             float a = 0.6f + 2.1f;
-            float x = c.x + cosf(a) * 30.0f, z = c.y + sinf(a) * 30.0f;
+            float x = c.x + cosf(a) * 30.0f * kCampS, z = c.y + sinf(a) * 30.0f * kCampS;
             HumanOutfit f = HumanOutfitBlade();
             f.cloakCol = Color{ 70, 30, 30, 255 };
             HumanPose hp;
@@ -20663,7 +20670,7 @@ static void OrcFortBuild() {
     // hide huts round the yard
     const float hutA[5] = { 1.2f, 1.75f, -1.2f, -1.75f, 2.4f };
     for (int i = 0; i < 5; i++) {
-        Vector2 h = P(hutA[i], 120.0f);
+        Vector2 h = P(hutA[i], 120.0f * kFortS);
         T3CCylinder(b, h.x, 0.0f, h.y, 24.0f, 24.0f, 22.0f, 10, hide);
         T3CCylinder(b, h.x, 24.0f, h.y, 56.0f, 28.0f, 2.0f, 10, ColorBrightness(hide, -0.2f), false, false);
         T3CStake(b, { h.x, 50.0f, h.y }, { h.x + 4.0f, 70.0f, h.y }, 1.2f, logDk); // poles poking out the top
@@ -20671,7 +20678,7 @@ static void OrcFortBuild() {
     }
     // the Warlord's longhouse at the back (beyond his spot), gable roof, antler horns
     {
-        Vector2 c = P(3.1416f, 160.0f);
+        Vector2 c = P(3.1416f, 160.0f * kFortS);
         float fx = cosf(gate), fz = sinf(gate); // local x runs along the gate axis
         float sx = -fz, sz = fx;
         auto W = [&](float lx, float ly, float lz) { return Vector3{ c.x + fx * lx + sx * lz, ly, c.y + fz * lx + sz * lz }; };
@@ -20708,7 +20715,7 @@ static void OrcFortBuild() {
     }
     // war drum on its frame
     {
-        Vector2 d = P(3.1416f + 0.7f, 95.0f);
+        Vector2 d = P(3.1416f + 0.7f, 95.0f * kFortS);
         T3CCylinder(b, d.x, 10.0f, d.y, 34.0f, 16.0f, 16.0f, 12, Color{ 110, 60, 40, 255 });
         T3CCylinder(b, d.x, 34.0f, d.y, 35.0f, 16.5f, 16.5f, 12, Color{ 200, 176, 130, 255 });
         for (int k = 0; k < 4; k++) {
@@ -20718,7 +20725,7 @@ static void OrcFortBuild() {
     }
     // skull totems lining the approach and the yard, bone piles
     const float totA[6] = { 0.45f, -0.45f, 0.9f, -0.9f, 2.9f, -2.9f };
-    const float totR[6] = { R + 50.0f, R + 50.0f, 70.0f, 70.0f, 105.0f, 105.0f };
+    const float totR[6] = { R + 50.0f, R + 50.0f, 70.0f * kFortS, 70.0f * kFortS, 105.0f * kFortS, 105.0f * kFortS };
     for (int i = 0; i < 6; i++) {
         Vector2 t = P(totA[i], totR[i]);
         T3CStake(b, { t.x, 0, t.y }, { t.x, 58.0f, t.y }, 2.8f, logDk);
@@ -20726,7 +20733,7 @@ static void OrcFortBuild() {
         T3CBox(b, t.x, 40.0f, t.y, 16.0f, 3.0f, 3.0f, red); // a strip of red cloth
     }
     for (int i = 0; i < 5; i++) {
-        Vector2 q = P(0.6f + i * 1.1f, 60.0f + (i % 3) * 25.0f);
+        Vector2 q = P(0.6f + i * 1.1f, (60.0f + (i % 3) * 25.0f) * kFortS);
         for (int k = 0; k < 5; k++) {
             float a = k * 1.3f + i;
             T3CStake(b, { q.x + cosf(a) * 5, 1.5f, q.y + sinf(a) * 5 }, { q.x + cosf(a + 2) * 9, 3.0f, q.y + sinf(a + 2) * 9 }, 1.4f, Color{ 222, 214, 190, 255 });
@@ -20771,12 +20778,12 @@ static void Wild3DDrawOrcFort(bool shadowPass, const Town3DCam* cull) {
     float gd = -kOrcFortGateYaw * RAD2DEG;
     const Color warRed = { 170, 60, 50, 255 };
     for (int side = -1; side <= 1; side += 2) prop(kWPFlagRed, side * 0.22f, kOrcFortRadius + 4.0f, 110.0f, gd, kWPScaleProp * 1.4f, warRed);
-    prop(kWPWeaponRack, 0.6f, 80.0f, 0, gd + 50, kWPScaleProp, Color{ 150, 130, 110, 255 });
-    prop(kWPWeaponRack, -0.6f, 80.0f, 0, gd - 50, kWPScaleProp, Color{ 150, 130, 110, 255 });
-    prop(kWPCrateBig, 2.3f, 150.0f, 0, 30, kWPScaleProp, Color{ 150, 130, 110, 255 });
-    prop(kWPBarrel, -2.3f, 150.0f, 0, 0, kWPScaleProp, Color{ 150, 130, 110, 255 });
-    prop(kWPSack, -2.1f, 160.0f, 0, 20, kWPScaleProp, WHITE);
-    prop(kWPLumber, 1.9f, 165.0f, 0, gd, kWPScaleProp, WHITE);
+    prop(kWPWeaponRack, 0.6f, 80.0f * kFortS, 0, gd + 50, kWPScaleProp, Color{ 150, 130, 110, 255 });
+    prop(kWPWeaponRack, -0.6f, 80.0f * kFortS, 0, gd - 50, kWPScaleProp, Color{ 150, 130, 110, 255 });
+    prop(kWPCrateBig, 2.3f, 150.0f * kFortS, 0, 30, kWPScaleProp, Color{ 150, 130, 110, 255 });
+    prop(kWPBarrel, -2.3f, 150.0f * kFortS, 0, 0, kWPScaleProp, Color{ 150, 130, 110, 255 });
+    prop(kWPSack, -2.1f, 160.0f * kFortS, 0, 20, kWPScaleProp, WHITE);
+    prop(kWPLumber, 1.9f, 165.0f * kFortS, 0, gd, kWPScaleProp, WHITE);
     if (shadowPass) return;
     float night = g_t3dNight, t = (float)GetTime();
     BeginBlendMode(BLEND_ADDITIVE);
@@ -22044,11 +22051,16 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     if (wheel != 0.0f && CheckCollisionPointRec(mouse, kViewport) && !Wild3DPointInUI(mouse, s))
         g_t3dDist = std::clamp(g_t3dDist * (1.0f - wheel * 0.12f), kWild3DDistMin, kWild3DDistMax);
     { // (2026-09-29) Vyrathax fills the screen: ease the camera out as you come to fight it (once - zoom back in freely)
+        // (2026-09-29) and the same for Murder Inc.'s war camp and Grimtusk Hold, so the whole yard fits
         static bool eased = false;
-        bool near = s.wyrmRespawnT <= 0.0f && Dist(s.wildernessPlayerPos, kWyrmLair) < kWyrmLairR + 250.0f;
+        bool nearWyrm = s.wyrmRespawnT <= 0.0f && Dist(s.wildernessPlayerPos, kWyrmLair) < kWyrmLairR + 250.0f;
+        bool nearCamp = Dist(s.wildernessPlayerPos, kRivalCampSpots[s.rivalCampIdx]) < kCampRadius + 160.0f ||
+                        Dist(s.wildernessPlayerPos, kOrcFortPos) < kOrcFortRadius + 160.0f;
+        bool near = nearWyrm || nearCamp;
+        float want = nearWyrm ? 1150.0f : 1000.0f;
         if (near && !eased) {
-            g_t3dDist += (std::max(g_t3dDist, 1150.0f) - g_t3dDist) * std::min(1.0f, GetFrameTime() * 2.5f);
-            if (g_t3dDist > 1140.0f) eased = true;
+            g_t3dDist += (std::max(g_t3dDist, want) - g_t3dDist) * std::min(1.0f, GetFrameTime() * 2.5f);
+            if (g_t3dDist > want - 10.0f) eased = true;
         }
         if (!near) eased = false;
     }
@@ -30705,7 +30717,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         }
         // Stumbling into Murder Inc.'s camp starts a hunt - the hard way to find it.
         if (quiet && !GuildThreatActive(s) && !PlayerYoung(s) &&
-            Dist(s.wildernessPlayerPos, kRivalCampSpots[s.rivalCampIdx]) < 130.0f) {
+            Dist(s.wildernessPlayerPos, kRivalCampSpots[s.rivalCampIdx]) < kCampRadius - 40.0f) {
             int nb = -1;
             for (int bi = 0; bi < kBladeCount; bi++) {
                 const auto& b = s.blades[bi];
