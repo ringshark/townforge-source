@@ -578,7 +578,7 @@ static const float kOrcFortRadius = 205.0f;
 // south-east, and wakes on a timer - three heads (fire, storm, venom), each with
 // its own third of the health and its own telegraphed attack.
 static const Vector2 kWyrmLair = WP(2720, 2860);
-static const float kWyrmLairR = 270.0f;
+static const float kWyrmLairR = 420.0f; // (2026-09-29) was 270 - a cramped pit for a 150-unit wyrm
 static const int kWyrmIcon = 11;
 static const float kWyrmMaxHp = 3000.0f;
 static const float kOrcFortGateYaw = -2.8253f; // toward (1250, 2700)
@@ -20254,7 +20254,7 @@ static void Wild3DDrawCorpse(const GameState::WorldCorpse& c, bool shadowPass) {
         T3CMonLook ml = T3CMonsterLook(sp.iconIdx);
         Color rc = { 0, 0, 0, 0 }; float sc = 1.0f;
         T3CAnim still{ 0.0f, 0.0f, 0.0f };
-        bool sculpted = MeshMonDraw(sp.name, c.pos.x, c.pos.y, c.yaw, 1.0f, dim, still, -1.0f, 1.0f, shadowPass);
+        bool sculpted = MeshMonDraw(IsWyrmName(sp.name) ? std::string("Vyrathax") : sp.name, c.pos.x, c.pos.y, c.yaw, 1.0f, dim, still, -1.0f, 1.0f, shadowPass); // (2026-09-29) the wyrm's own body, not a mound
         if (sculpted) drawn = true;
         int an = (ml.humanoid || sculpted) ? -1 : AnimalForMonster(sp.iconIdx, &rc, &sc);
         if (sculpted) {
@@ -21262,14 +21262,20 @@ static void WyrmLairBuild() {
         float o[3] = { 0, 0.5f, 0 }, p0[3] = { cosf(a0) * r, 0.5f, sinf(a0) * r }, p1[3] = { cosf(a1) * r, 0.5f, sinf(a1) * r };
         T3CPushTri(b, o, p1, p0, (i % 2) ? ash : ColorBrightness(ash, -0.08f));
     }
-    int n = 34;
+    // (2026-09-29) Open ground now: low broken crags scattered round the rim with wide gaps
+    // (they no longer wall the fight in or hide it from the camera), a few boulders inside.
+    int n = 18;
     for (int i = 0; i < n; i++) { // crags
-        float a = kWyrmGateYaw + 6.2832f * (i + 0.5f) / n;
-        if (fabsf(atan2f(sinf(a - kWyrmGateYaw), cosf(a - kWyrmGateYaw))) < 0.3f) continue;
-        float h = 60.0f + 70.0f * Town3DHash01((float)i, 11.0f), r = kWyrmLairR + 12.0f + 14.0f * Town3DHash01((float)i, 5.0f);
-        float x = cosf(a) * r, z = sinf(a) * r, w = 26.0f + 12.0f * Town3DHash01((float)i, 2.0f);
+        if (Town3DHash01((float)i, 7.0f) < 0.3f) continue; // gaps
+        float a = kWyrmGateYaw + 6.2832f * (i + 0.5f) / n + 0.12f * (Town3DHash01((float)i, 3.0f) - 0.5f);
+        float h = 22.0f + 26.0f * Town3DHash01((float)i, 11.0f), r = kWyrmLairR - 10.0f + 30.0f * Town3DHash01((float)i, 5.0f);
+        float x = cosf(a) * r, z = sinf(a) * r, w = 24.0f + 14.0f * Town3DHash01((float)i, 2.0f);
         T3CCylinder(b, x, 0.0f, z, h, w, 3.0f, 6, (i % 3) ? rock : rock2, false, false);
-        T3CCylinder(b, x + 14.0f, 0.0f, z - 8.0f, h * 0.55f, w * 0.6f, 2.0f, 5, rock2, false, false);
+        T3CCylinder(b, x + 16.0f, 0.0f, z - 10.0f, h * 0.5f, w * 0.6f, 2.0f, 5, rock2, false, false);
+    }
+    for (int k = 0; k < 6; k++) { // boulders on the ash
+        float a = k * 1.05f + 0.4f, r = 200.0f + 120.0f * Town3DHash01((float)k, 13.0f);
+        T3CSphere(b, cosf(a) * r, 6.0f, sinf(a) * r, 16.0f + 8.0f * Town3DHash01((float)k, 17.0f), 11.0f, 14.0f, 5, 6, rock2);
     }
     // an old ribcage and skulls: those who came before
     for (int k = 0; k < 7; k++) {
@@ -21297,18 +21303,19 @@ static void Wild3DDrawWyrmLair(bool shadowPass, const Town3DCam* cull) {
     float t = (float)GetTime();
     BeginBlendMode(BLEND_ADDITIVE);
     rlDisableDepthMask();
-    for (int i = 0; i < 9; i++) { // lava seams glowing up through the ash
-        float a = i * 0.7f + 0.3f, r = 60.0f + 170.0f * Town3DHash01((float)i, 21.0f);
-        GlowPool(c.x + cosf(a) * r, c.y + sinf(a) * r, gy + 1.2f, 34.0f + 10.0f * sinf(t * 1.5f + i), Color{ 200, 80, 20, 255 });
+    for (int i = 0; i < 14; i++) { // lava seams glowing up through the ash
+        float a = i * 0.7f + 0.3f, r = 60.0f + (kWyrmLairR - 110.0f) * Town3DHash01((float)i, 21.0f);
+        GlowPool(c.x + cosf(a) * r, c.y + sinf(a) * r, gy + 1.2f, 38.0f + 10.0f * sinf(t * 1.5f + i), Color{ 210, 90, 25, 255 });
     }
-    for (int i = 0; i < 14; i++) { // embers rising
-        float ph = fmodf(t * 0.15f + i / 14.0f, 1.0f), a = i * 2.4f, r = 40.0f + 200.0f * Town3DHash01((float)i, 4.0f);
+    for (int i = 0; i < 20; i++) { // embers rising
+        float ph = fmodf(t * 0.15f + i / 20.0f, 1.0f), a = i * 2.4f, r = 40.0f + (kWyrmLairR - 70.0f) * Town3DHash01((float)i, 4.0f);
         WyrmGlow({ c.x + cosf(a) * r, gy + ph * 160.0f, c.y + sinf(a) * r }, 5.0f, Color{ 255, (unsigned char)(150 * (1 - ph)), 40, 255 });
     }
     rlEnableDepthMask();
     EndBlendMode();
 }
 static void WyrmLairResolve(Vector2& p, float r) {
+    return; // (2026-09-29) the Caldera is open ground now - no crag wall to walk round
     const Vector2 c = kWyrmLair;
     const float wallR = kWyrmLairR + 16.0f;
     float d = Dist(p, c);
@@ -21325,7 +21332,7 @@ static void DrawWyrmFrame(const GameState& s, int screenW) {
     Vector2 bp = am ? am->pos : kWyrmLair;
     if (!am && Dist(s.wildernessPlayerPos, bp) > 700.0f) return;
     float frac = WyrmHpFrac(s);
-    Rectangle r = { 60.0f, 300.0f, (float)screenW - 120.0f, 58.0f };
+    Rectangle r = { 60.0f, kViewport.y + kViewport.height - 300.0f, (float)screenW - 120.0f, 58.0f }; // (2026-09-29) low, off the fight (clear of the belt and fight labels)
     DrawRectangleRounded(r, 0.2f, 6, Fade(Color{ 24, 14, 12, 255 }, 0.82f));
     DrawRectangleRoundedLines(r, 0.2f, 6, Fade(Color{ 200, 120, 60, 255 }, 0.9f));
     const char* nm = "VYRATHAX THE TRI-WYRM";
@@ -21964,6 +21971,15 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     float wheel = GetMouseWheelMove();
     if (wheel != 0.0f && CheckCollisionPointRec(mouse, kViewport) && !Wild3DPointInUI(mouse, s))
         g_t3dDist = std::clamp(g_t3dDist * (1.0f - wheel * 0.12f), kWild3DDistMin, kWild3DDistMax);
+    { // (2026-09-29) Vyrathax fills the screen: ease the camera out as you come to fight it (once - zoom back in freely)
+        static bool eased = false;
+        bool near = s.wyrmRespawnT <= 0.0f && Dist(s.wildernessPlayerPos, kWyrmLair) < kWyrmLairR + 250.0f;
+        if (near && !eased) {
+            g_t3dDist += (std::max(g_t3dDist, 1150.0f) - g_t3dDist) * std::min(1.0f, GetFrameTime() * 2.5f);
+            if (g_t3dDist > 1140.0f) eased = true;
+        }
+        if (!near) eased = false;
+    }
 
     // --- 3D scene: sky, then the lit + shadowed wilderness ---
     Town3DEnsureShadow();
