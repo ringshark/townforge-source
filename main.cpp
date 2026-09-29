@@ -601,6 +601,24 @@ static const std::array<HousePlot, 10> kHousePlots = {{
 }};
 // Layout helpers. The layout string always has cells*cells chars for the owned plot.
 static std::string HouseEmptyLayout(int cells) { return std::string((size_t)cells * cells, '.'); }
+// A starter cottage (2026-09-29): a walled square centred on the plot, floored inside, a
+// door mid-front (the bottom row is the front), windows mid-way along the other walls.
+// 7-cell plots get a 5x5 cottage, 9 a 7x7 house, 12 an 8x8 hall - room to grow round it.
+static std::string HouseStarterLayout(int cells) {
+    std::string L = HouseEmptyLayout(cells);
+    int k = cells >= 12 ? 8 : cells >= 9 ? 7 : std::max(3, cells - 2);
+    int x0 = (cells - k) / 2, y0 = (cells - k) / 2, x1 = x0 + k - 1, y1 = y0 + k - 1, mid = x0 + k / 2, midY = y0 + k / 2;
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++) {
+            bool edge = x == x0 || x == x1 || y == y0 || y == y1;
+            L[(size_t)y * cells + x] = edge ? 'W' : 'F';
+        }
+    L[(size_t)y1 * cells + mid] = 'D';                                          // the front door
+    L[(size_t)y0 * cells + mid] = 'N';                                          // back window
+    L[(size_t)midY * cells + x0] = 'N'; L[(size_t)midY * cells + x1] = 'N';   // side windows
+    if (k >= 7) { L[(size_t)y1 * cells + x0 + 1] = 'N'; L[(size_t)y1 * cells + x1 - 1] = 'N'; } // front windows either side
+    return L;
+}
 static bool HouseLayoutValid(const std::string& layout, int cells) {
     if ((int)layout.size() != cells * cells) return false;
     for (char c : layout) if (c != '.' && c != 'F' && c != 'W' && c != 'D' && c != 'N') return false;
@@ -29953,11 +29971,11 @@ static void TryBuyHousePlot(GameState& s, int plotIdx) {
     }
     PayGold(s, p.price);
     s.housePlotIdx = plotIdx;
-    s.houseLayout = HouseEmptyLayout(p.cells);
+    s.houseLayout = HouseStarterLayout(p.cells); // (2026-09-29) a cottage comes with the deed - reshape it in the designer
     s.hearthBound = false;
     s.houseDemolishArmed = false;
     PlaySfx(SfxId::Coin);
-    s.logLine = "You buy the " + std::string(p.name) + "! Press E here to design your house.";
+    s.logLine = "You buy the " + std::string(p.name) + " - a starter cottage stands on it! Walk up to the door to go in, or open the designer to reshape it.";
 }
 
 static void TryEnterHomestead(GameState& s) {
@@ -30087,10 +30105,25 @@ static void DrawHouseDesigner(GameState& s, int screenW, int screenH) {
         if (UOTapped(br) && !on) { s.houseDesignerTool = t; PlaySfx(SfxId::Click); }
     }
 
+    // (2026-09-29) a near-empty plot: one tap for a proper starter cottage (existing tiles refunded in full)
+    bool offerStarter = nF + nW + nN < 8;
+    if (offerStarter) {
+        std::string tpl = HouseStarterLayout(cells);
+        int have = 0, cost = 0;
+        for (char c : s.houseLayout) have += HouseCellValue(c);
+        for (char c : tpl) cost += HouseCellValue(c);
+        int net = std::max(0, cost - have);
+        Rectangle sb = { G.x + 16, G.y + 106, G.width - 32, 38 };
+        if (UOButton(sb, TextFormat("Build a starter cottage (%dg) - reshape it after", net), s.gold >= net)) {
+            s.gold -= net; s.houseLayout = tpl; s.houseDemolishArmed = false;
+            PlaySfx(SfxId::Door);
+            s.logLine = "A starter cottage goes up on your plot - reshape it here, or walk up to the door to go in.";
+        }
+    }
     // the plot grid - tap or drag to paint
     float cellPx = std::min(36.0f, (G.width - 60) / cells);
     float gw = cells * cellPx, gh = cells * cellPx;
-    float gx = G.x + (G.width - gw) / 2.0f, gy = G.y + 114;
+    float gx = G.x + (G.width - gw) / 2.0f, gy = G.y + 114 + (offerStarter ? 44.0f : 0.0f);
     DrawRectangleRec({ gx - 6, gy - 6, gw + 12, gh + 12 }, Color{ 90, 70, 44, 255 });
     DrawRectangleLinesEx({ gx - 6, gy - 6, gw + 12, gh + 12 }, 2.0f, kUoBronze);
     Vector2 m = GetMousePosition();
