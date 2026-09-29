@@ -492,7 +492,8 @@ static const int kHouseChestCap = 60;
 // Every wilderness position is still written in the original 3200-unit layout
 // and scaled by WP() / kWS, so the comments' coordinates keep matching; sizes
 // (radii, widths, camp and fort footprints) are not scaled.
-static constexpr float kWS = 1.5f;
+// (2026-09-29) Grown again, 1.5 -> 1.8 (5760 units): the landmarks were crowding each other.
+static constexpr float kWS = 1.8f;
 static constexpr Vector2 WP(float x, float y) { return { x * kWS, y * kWS }; }
 enum class RegionId { Whisperwood, SaltCoast, Frostwastes, Stonepeaks };
 static constexpr RegionId RegionAt(Vector2 p) {
@@ -584,6 +585,8 @@ static const Vector2 kOutlawRefuge = WP(2750, 2450); // hidden black market, far
 static const Vector2 kOrcFortPos = WP(1800, 2880);
 static const float kOrcFortRadius = 290.0f; // (2026-09-29) was 205 - the yard was a scrum
 static const float kFortS = kOrcFortRadius / 205.0f; // the interior layout spreads out with it
+// The garrison's posts are offsets from the fort's centre: the fort keeps its size when the world grows.
+static Vector2 FortP(float dx, float dz) { return { kOrcFortPos.x + dx, kOrcFortPos.y + dz }; }
 // World boss (2026-09-27): Vyrathax the Tri-Wyrm sleeps in the Cinder Caldera, far
 // south-east, and wakes on a timer - three heads (fire, storm, venom), each with
 // its own third of the health and its own telegraphed attack.
@@ -2240,7 +2243,7 @@ static const float kDungeonWorldSize = 1800.0f; // dungeons get their own, much 
 // session. All of Wilderness's existing content (gather/tame/monster nodes, the 5
 // dungeon entrances, foliage, the Town 1 gate) keeps its original 0-1800 coordinates
 // unchanged; the extra space is new territory toward Town 2's gate.
-static const float kWildernessWorldSize = 3200.0f * kWS; // 4800 since the 1.5x enlargement (2026-09-27)
+static const float kWildernessWorldSize = 3200.0f * kWS; // 4800 since the 1.5x enlargement (2026-09-27), 5760 at 1.8x (2026-09-29)
 // Town 2's name and its gate position out in the newly added Wilderness space - a
 // straight-line ~2000 units from the Town 1 return gate (kWildernessReturnGatePos,
 // {900,1750}), well past the original 1800-unit map's edge, so reaching it is a real
@@ -7165,7 +7168,7 @@ static void SaveGame(const GameState& s) {
     out << "titleLordEarned=" << (s.titleLordEarned ? 1 : 0) << "\nshaken=" << s.shaken << "\n";
     out << "nextItemId=" << s.nextItemId << "\nnextPetId=" << s.nextPetId << "\n";
     out << "lastActiveEpoch=" << (long long)std::time(nullptr) << "\n";
-    out << "wildScale=1.5\n"; // 1.5x wilderness (2026-09-27); missing = positions in the old 3200-unit map
+    out << "wildScale=" << kWS << "\n"; // the wilderness scale the positions were saved at; missing = the old 3200-unit map
     out << "saveVersion=2\n"; // 2 = six-dungeon ladder (2026-09-25); missing/1 = old seven-slot
     out << "rivalLevel=" << s.rivalLevel << "\nrivalPosX=" << s.rivalPos.x << "\nrivalPosY=" << s.rivalPos.y <<
            "\nrivalHasBeatenPlayer=" << (s.rivalHasBeatenPlayer ? 1 : 0) <<
@@ -7358,7 +7361,7 @@ static bool LoadGame(GameState& s) {
 
     long long lastActiveEpoch = 0;
     int saveVersion = 1; // missing = pre-ladder seven-slot format
-    bool wildScaled = false; // saved before the 1.5x wilderness: scale the persisted positions out
+    float wildSavedScale = 1.0f; // (2026-09-29) the scale the save's wilderness positions were written at
     bool clothesInit = false; // saved before clothing existed: dress them in the starter set
     bool sawMarkedTowns = false; // UO-style travel (2026-09-25): pre-marking saves lack the key
     bool sawStarter = false;     // (2026-09-27) saves from before "first steps" are veterans: skip it
@@ -7370,7 +7373,7 @@ static bool LoadGame(GameState& s) {
         std::string key = line.substr(0, eq);
         std::string val = line.substr(eq + 1);
         if (key == "saveVersion") saveVersion = std::atoi(val.c_str());
-        if (key == "wildScale") wildScaled = true;
+        if (key == "wildScale") wildSavedScale = std::max(0.5f, (float)std::atof(val.c_str()));
         else if (key == "characterName") s.characterName = val;
         else if (key == "houseTierIdx") s.houseTierIdx = std::clamp(std::atoi(val.c_str()), 0, (int)kHouseTiers.size() - 1);
         else if (key == "houseHue") s.houseHue = std::atoi(val.c_str());
@@ -7756,10 +7759,12 @@ static bool LoadGame(GameState& s) {
         s.logLine = "You wake in Emberhold, whole once more.";
     }
     if (!clothesInit) DressStarterClothes(s.equipped);
-    if (!wildScaled) { // older save: its wilderness positions were on the 3200-unit map
-        s.rivalPos = { s.rivalPos.x * kWS, s.rivalPos.y * kWS };
+    if (fabsf(wildSavedScale - kWS) > 0.01f) { // saved on a smaller map: scale the persisted positions out
+        const float f = kWS / wildSavedScale;
+        if (!GuildAbsent(s.rivalPos)) s.rivalPos = { s.rivalPos.x * f, s.rivalPos.y * f };
         s.rivalPatrolTarget = s.rivalPos;
-        for (auto& b : s.blades) { b.pos = { b.pos.x * kWS, b.pos.y * kWS }; b.patrolTarget = b.pos; }
+        for (auto& b : s.blades) { if (!GuildAbsent(b.pos)) b.pos = { b.pos.x * f, b.pos.y * f }; b.patrolTarget = b.pos; }
+        for (auto& m : s.tmaps) m.spot = { m.spot.x * f, m.spot.y * f }; // treasure still lies at the same place on the land
     }
     return true;
 }
@@ -8457,13 +8462,13 @@ static std::array<WildernessMonsterSpot, 31> kWildernessMonsterSpots = {{
     { WP(450, 2300), "Mountain Cat", 33, 18, 27, 8, RegionAt(WP(450, 2300)) },
     // Grimtusk Hold (2026-09-27) - the orc fortress (iconIdx 9 orcs, 10 the Warlord).
     // One faction (MonsterFaction): strike one and the whole hold answers.
-    { WP(1632, 2758), "Orc Grunt", 22, 8, 14, 9, RegionAt(WP(1632, 2758)) },   // inside the gate
-    { WP(1592, 2879), "Orc Grunt", 22, 8, 14, 9, RegionAt(WP(1592, 2879)) },
-    { WP(1801, 2695), "Orc Archer", 24, 6, 16, 9, RegionAt(WP(1801, 2695)) },  // by the walls
-    { WP(1691, 3030), "Orc Archer", 24, 6, 16, 9, RegionAt(WP(1691, 3030)) },
-    { WP(1841, 2801), "Orc Brute", 30, 12, 20, 9, RegionAt(WP(1841, 2801)) },  // at the bonfire
-    { WP(1845, 3014), "Orc Shaman", 30, 4, 22, 9, RegionAt(WP(1845, 3014)) },  // at the war drum
-    { WP(1968, 2935), "Orc Warlord", 42, 20, 60, 10, RegionAt(WP(1968, 2935)) }, // before his hall
+    { FortP(-252, -183), "Orc Grunt", 22, 8, 14, 9, RegionAt(FortP(-252, -183)) },   // inside the gate
+    { FortP(-312, -2), "Orc Grunt", 22, 8, 14, 9, RegionAt(FortP(-312, -2)) },
+    { FortP(2, -278), "Orc Archer", 24, 6, 16, 9, RegionAt(FortP(2, -278)) },  // by the walls
+    { FortP(-164, 225), "Orc Archer", 24, 6, 16, 9, RegionAt(FortP(-164, 225)) },
+    { FortP(62, -118), "Orc Brute", 30, 12, 20, 9, RegionAt(FortP(62, -118)) },  // at the bonfire
+    { FortP(68, 201), "Orc Shaman", 30, 4, 22, 9, RegionAt(FortP(68, 201)) },  // at the war drum
+    { FortP(252, 82), "Orc Warlord", 42, 20, 60, 10, RegionAt(FortP(252, 82)) }, // before his hall
     // The Fields of Sorrow (2026-09-27) - live wraiths replace the old pop-up ambush.
     { WP(1880, 2280), "Sorrow Wraith", 26, 0, 18, 6, RegionAt(WP(1880, 2280)) },
     { WP(2010, 2310), "Sorrow Wraith", 32, 0, 24, 6, RegionAt(WP(2010, 2310)) },
@@ -16057,7 +16062,7 @@ static const Vector2 kWildFords[] = { WP(2215, 2250) };
 static const float kWildLakeX = 1450 * kWS, kWildLakeZ = 2540 * kWS, kWildLakeRX = 300 * kWS, kWildLakeRZ = 190 * kWS; // Mirrormere
 
 static const float kWTCell = 8.0f;
-static const int kWTN = 600; // 600 * 8 = 4800 = kWildernessWorldSize (1.5x, 2026-09-27)
+static const int kWTN = 720; // 720 * 8 = 5760 = kWildernessWorldSize (1.8x, 2026-09-29)
 enum : unsigned char {
     kWTWater = 1,   // blocks movement (sea, lake, river away from crossings)
     kWTBridge = 2,  // river under a road: walkable deck
@@ -17936,7 +17941,7 @@ struct T3DGrassField { bool built = false; Model model{}; };
 static T3DGrassField g_t3dGrassTown;
 static int g_t3dGrassTownIdx = -1;
 static const int kT3DGrassChunk = 400;
-static const int kT3DGrassChunksPerSide = 12; // 4800 / 400 (1.5x map)
+static const int kT3DGrassChunksPerSide = 15; // 5760 / 400, rounded up (1.8x map)
 static T3DGrassField g_t3dGrassWild[kT3DGrassChunksPerSide * kT3DGrassChunksPerSide];
 
 static float g_grassBaseY = 0.0f; // ground height under the clump being built (wilderness hills)
