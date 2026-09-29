@@ -62,8 +62,6 @@ void main()
         col += albedo*warm*(0.25 + 0.75*diff)*att*flick*2.1;
     }
 
-    // (2026-09-29) Wall tops read as the dark rock beyond the rooms (UO), not lit patterns.
-    if (cutOn > 0.5 && normal.y > 0.8 && fragPosition.y > 10.0) col *= 0.18;
 
     // Gamma correction (matches the sun shader's display-space output)
     col = pow(max(col, vec3(0.0)), vec3(1.0/2.2));

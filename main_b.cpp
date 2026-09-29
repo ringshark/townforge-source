@@ -36544,6 +36544,9 @@ static void UpdateDrawFrame() {
         bool hadSave = LoadGame(g_state);
         if (hadSave && !g_state.logLine.empty() && g_state.logLine == "Welcome to Town Forge.")
             g_state.logLine = "Welcome back.";
+        g_state.screen = Screen::Hunt; g_state.selectedDungeon = 0;
+        g_state.wildernessPlayerPos = { 2475.0f, 2320.0f };
+        g_state.hp = 100; g_state.maxHp = 100;
         if (hadSave) SettleCatchUp(g_state); // the settlement kept working (2026-09-27)
         if (hadSave && !g_state.characterName.empty() && g_state.screen == Screen::Character)
             g_state.screen = Screen::Town; // returning adventurers open straight into the (3D) town
