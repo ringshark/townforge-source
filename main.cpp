@@ -5176,6 +5176,15 @@ static float MurderIncMaxHp(const GameState& s, float level, int rank) { // rank
     int r = std::clamp(rank, 0, 2);
     return std::max(1.0f, std::max(level * kPerLevel[r], (float)CombatPower(s) * kPerPower[r]));
 }
+// UO-style PvP blows (2026-09-29): Murder Inc.'s level tracks your weapon damage, but your
+// health doesn't grow with it - so their hits came to one-shot a new character. Each of
+// their blows now takes a bite, not a life: at most ~15-22% of your max health (more if
+// they outclass you, less if you outclass them), so a duel is five-plus exchanges.
+static int PvpHitCap(const GameState& s, float level, int dmg) {
+    float ratio = std::clamp(level / std::max(1.0f, (float)CombatPower(s)), 0.6f, 1.4f);
+    float cap = (float)s.maxHp * (0.10f + 0.08f * ratio) * (0.85f + RandUnit() * 0.3f);
+    return std::max(1, std::min(dmg, (int)std::round(cap)));
+}
 
 // On hold (2026-09-23) - Mark reported getting "caught in a loop" a few times from
 // these firing (7% base chance after nearly every action - gathering, every monster
@@ -5937,7 +5946,7 @@ static void GraySnoopChoice(GameState& s) {
     if (s.combat.has_value()) {
         if (RandUnit() * 100.0f < MonsterHitChance(s)) {
             float raw = target.level * (0.8f + RandUnit() * 0.6f);
-            int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
+            int dmg = PvpHitCap(s, (float)target.level, std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f))); // (2026-09-29)
             s.hp = std::max(1, s.hp - dmg); // JS: floored at 1, can't die from the surprise hit itself
             s.combat->Log("Caught off guard - hit for " + std::to_string(dmg) + " damage");
         } else {
@@ -6025,6 +6034,7 @@ static void MonsterCounterAndMaybeEnd(GameState& s) {
     if (RandUnit() * 100.0f < MonsterHitChance(s)) {
         float raw = c.monster.level * (0.8f + RandUnit() * 0.6f);
         int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
+        if (c.monster.isMurderer) dmg = PvpHitCap(s, (float)c.monster.level, dmg); // (2026-09-29) a bite, not a life
         if (targetsPet) {
             pet->hp = std::max(0.0f, pet->hp - dmg);
             c.Log("The " + c.monster.name + " hits " + pet->name + " for " + std::to_string(dmg) + " damage");
@@ -6205,6 +6215,7 @@ static void FleeCombat(GameState& s) {
         if (RandUnit() * 100.0f < MonsterHitChance(s)) {
             float raw = c.monster.level * (0.8f + RandUnit() * 0.6f);
             int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
+            if (c.monster.isMurderer) dmg = PvpHitCap(s, (float)c.monster.level, dmg); // (2026-09-29)
             s.hp = std::max(0, s.hp - dmg);
             s.logLine = "You flee - the " + c.monster.name + " hits you for " + std::to_string(dmg) + " damage.";
         } else {
@@ -27966,6 +27977,7 @@ static void ResolveEnemyRangedImpact(GameState& s, bool castByRival, int castByB
         float raw = spot.level * (0.9f + RandUnit() * 0.5f);
         if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
         int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
+        if (am.isRival || am.bladeIdx >= 0) dmg = PvpHitCap(s, (float)spot.level, dmg); // (2026-09-29) a bite, not a life
         s.hp -= (dmg = NecroShield(s, 0, dmg)); // skeletons / Bone Armor take it first
         s.playerHurtT = 0.0f;
         PlaySfx(SfxId::Hurt);
@@ -30814,6 +30826,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 float raw = spot.level * (0.8f + RandUnit() * 0.6f) * (IsWyrmName(mname) ? 0.25f : 1.0f); // the wyrm's heads do the real work
                 if (am.debuffKind == 1) raw *= 0.7f; // Sap Strength
                 int dmg = std::max(1, (int)std::round(raw - TotalDefense(s) * 0.3f));
+                if (am.isRival || am.bladeIdx >= 0) dmg = PvpHitCap(s, (float)spot.level, dmg); // (2026-09-29) a bite, not a life
                 s.hp -= (dmg = NecroShield(s, 0, dmg)); // skeletons / Bone Armor take it first
                 s.playerHurtT = 0.0f; // hit-flash + knockback
                 CombatShake(7.0f);
