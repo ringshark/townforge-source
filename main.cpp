@@ -1142,6 +1142,7 @@ static_assert(sizeof(kSfxBase) / sizeof(kSfxBase[0]) == (int)SfxId::Count, "kSfx
 struct SfxBank { std::vector<Sound> v[(int)SfxId::Count]; };
 static SfxBank g_sfx;
 static bool g_sfxOn = true, g_musicOn = true; // Options (persisted as optSfx / optMusic)
+static bool g_calmMusic = true; static float g_musicVol = 0.7f, g_sfxVol = 1.0f; // (2026-09-29) optCalmMusic / optMusicVol / optSfxVol
 static float SfxBaseVolume(SfxId id) {
     switch (id) {
         case SfxId::StepGrass: case SfxId::StepWood: case SfxId::StepStone: case SfxId::StepSnow: return 0.22f;
@@ -1177,25 +1178,30 @@ static void PlaySfx(SfxId id) {
     Sound& snd = g_sfx.v[i][(size_t)(std::rand() % (int)g_sfx.v[i].size())];
     bool tune = id == SfxId::Drum || id == SfxId::Lute || id == SfxId::Harp || id == SfxId::Victory || id == SfxId::Quest;
     SetSoundPitch(snd, tune ? 1.0f : 0.94f + 0.12f * (float)(std::rand() % 1000) / 1000.0f);
+    if (g_sfxVol <= 0.001f) return;
+    SetSoundVolume(snd, SfxBaseVolume(id) * g_sfxVol);
     PlaySound(snd);
 }
 // ---- Music (2026-09-28): one CC0 track per kind of place, cross-faded ----------
 // town: "The Old Tower Inn" (RandomMind), the wilds: "Mirror Lake" (joth),
 // dungeons: "Dark Cavern Ambient" (Paul Wortmann) - see assets/sfx/CREDITS.md.
+// (2026-09-29) plus a calm set (slots 3-5, tools/gen_calm_music.py), the default.
 struct MusicSlot { Music m{}; bool ok = false; float vol = 0.0f; };
-static MusicSlot g_music[3];
+static MusicSlot g_music[6];
 static bool g_musicLoaded = false;
 static void MusicTick(int want, float dt) { // want: 0 town, 1 wilds, 2 dungeon, -1 none
     if (!g_musicLoaded) {
         g_musicLoaded = true;
-        const char* f[3] = { "assets/music/town.ogg", "assets/music/wild.ogg", "assets/music/dungeon.ogg" };
-        for (int i = 0; i < 3; i++) if (FileExists(f[i])) { g_music[i].m = LoadMusicStream(f[i]); g_music[i].ok = g_music[i].m.frameCount > 0; }
+        const char* f[6] = { "assets/music/town.ogg", "assets/music/wild.ogg", "assets/music/dungeon.ogg",
+                             "assets/music/town_calm.ogg", "assets/music/wild_calm.ogg", "assets/music/dungeon_calm.ogg" };
+        for (int i = 0; i < 6; i++) if (FileExists(f[i])) { g_music[i].m = LoadMusicStream(f[i]); g_music[i].ok = g_music[i].m.frameCount > 0; }
     }
-    const float peak[3] = { 0.30f, 0.26f, 0.34f };
-    for (int i = 0; i < 3; i++) {
+    const float peak[6] = { 0.30f, 0.26f, 0.34f, 0.42f, 0.36f, 0.42f };
+    if (want >= 0 && g_calmMusic && g_music[want + 3].ok) want += 3;
+    for (int i = 0; i < 6; i++) {
         MusicSlot& ms = g_music[i];
         if (!ms.ok) continue;
-        float target = (g_musicOn && i == want) ? peak[i] : 0.0f;
+        float target = (g_musicOn && i == want) ? peak[i] * g_musicVol : 0.0f;
         ms.vol += std::clamp(target - ms.vol, -dt * 0.35f, dt * 0.35f); // ~1s fades
         if (ms.vol > 0.001f) {
             if (!IsMusicStreamPlaying(ms.m)) PlayMusicStream(ms.m);
@@ -1375,7 +1381,7 @@ static const int kBladeCount = 3;
 // GameState's respawn-timer arrays are sized by these, and the spot tables they
 // must match (kWildernessMonsterSpots, kCenters in DungeonMonsterNodePos) are
 // declared much later. static_asserts next to those tables verify the match.
-static const int kWildMonsterSpotCount = 30; // (2026-09-27) +7 Grimtusk Hold orcs, +2 Sorrow Wraiths, +1 the Tri-Wyrm
+static const int kWildMonsterSpotCount = 31; // (2026-09-27) +7 Grimtusk Hold orcs, +2 Sorrow Wraiths, +1 the Tri-Wyrm; (2026-09-29) +1 the breakout boss
 static const int kDungeonBossSlot = 8; // boss slot index; regular slots are 0..7
 static const int kDungeonSlotCount = kDungeonBossSlot + 1; // 9 slots per dungeon
 static const char* kGhostNoTouch = "Ghosts cannot touch the world of the living.";
@@ -1582,7 +1588,8 @@ struct GameState {
     bool optTapWalk = true;        // tap the ground to walk there
     bool optAlwaysDay = false;
     bool optClassicBody = false; // (2026-09-28) the dressable body kit instead of the sculpted hero
-    bool optSfx = true, optMusic = true; // (2026-09-28) the audio pass     // (2026-09-28) keep the world in daylight - no real-clock night
+    bool optSfx = true, optMusic = true; // (2026-09-28) the audio pass
+    bool optCalmMusic = true; float optMusicVol = 0.7f, optSfxVol = 1.0f; // (2026-09-29)     // (2026-09-28) keep the world in daylight - no real-clock night
     // Stat buffs (2026-09-27) - transient: Bless, Strength and Agility potions.
     float blessT = 0.0f, strPotT = 0.0f, agiPotT = 0.0f;
     int blessAmt = 0, strPotAmt = 0, agiPotAmt = 0;
@@ -1664,6 +1671,7 @@ struct GameState {
         std::string name; int baseGold = 0, baseLeather = 0, level = 1;
         int iconIdx = -1; // wilderness monster icon (for the corpse visual), -1 = generic
         bool guildKill = false; // slain by the rival or a blade: visual only, no rewards for you
+        bool rare = false;      // (2026-09-29) a Dread dungeon boss: a richer hoard
     };
     // Simultaneous deaths (2026-09-25): melee cleaves and AoE spells can kill
     // several monsters in one hit, so the death pipeline is a list - each entry
@@ -1699,6 +1707,12 @@ struct GameState {
     std::vector<Item> rivalStash; // PERSISTED - what the rival took off your body; it's on the rival's corpse
     std::array<float, kWildMonsterSpotCount> wildSpotRespawn{}; // 0 = available, else seconds until the spot refills
     std::array<std::array<float, kDungeonSlotCount>, kDungeons.size()> dungeonSpawnRespawn{}; // [dungeon][slot], 0 = available
+    // Random bosses (2026-09-29). PERSISTED except the roaming path.
+    std::array<int, kDungeons.size()> dungeonBossRare{}; // 1 = the lair's boss is a Dread variant (tougher, richer)
+    float breakoutNext = 4500.0f; // seconds of play until a dungeon boss breaks out into the wilds
+    float breakoutT = -1.0f;      // >0: a breakout boss roams the wilds for this much longer
+    int breakoutBoss = -1;        // whose boss (dungeon index)
+    Vector2 breakoutGoal{ -1.0f, -1.0f }; // where it's heading (transient)
 
     // --- Magic / spellcasting - mirrors state.magery/evalInt/meditation/mana/reagents ---
     float magery = 0, evalInt = 0, meditation = 0; // capped at 100
@@ -7167,6 +7181,12 @@ static void SaveGame(const GameState& s) {
     out << "optHideWyrm=" << (s.optHideWyrm ? 1 : 0) << "\noptHideDungeonBoss=" << (s.optHideDungeonBoss ? 1 : 0)
         << "\noptTapWalk=" << (s.optTapWalk ? 1 : 0) << "\noptAlwaysDay=" << (s.optAlwaysDay ? 1 : 0) << "\noptClassicBody=" << (s.optClassicBody ? 1 : 0)
         << "\noptSfx=" << (s.optSfx ? 1 : 0) << "\noptMusic=" << (s.optMusic ? 1 : 0) << "\n";
+    out << "optCalmMusic=" << (s.optCalmMusic ? 1 : 0) << "\noptMusicVol=" << s.optMusicVol << "\noptSfxVol=" << s.optSfxVol << "\n";
+    { // random bosses (2026-09-29)
+        out << "dungeonBossRare=";
+        for (size_t i = 0; i < s.dungeonBossRare.size(); i++) out << (i ? "," : "") << s.dungeonBossRare[i];
+        out << "\nbreakout=" << s.breakoutNext << "," << s.breakoutT << "," << s.breakoutBoss << "\n";
+    }
     out << "wyrmRespawnT=" << s.wyrmRespawnT << "\nwyrmHp=" << s.wyrmHp << "\nwyrmKills=" << s.wyrmKills << "\n"; // world boss
     out << "warWeek=" << s.warWeek << "\nwarPlayMin=" << s.warPlayMin << "\nwarPts=";
     for (int d = 0; d < 7; d++) out << (d ? "," : "") << s.warPts[(size_t)d];
@@ -7486,6 +7506,15 @@ static bool LoadGame(GameState& s) {
         else if (key == "optClassicBody") s.optClassicBody = std::atoi(val.c_str()) != 0;
         else if (key == "optSfx") s.optSfx = std::atoi(val.c_str()) != 0;
         else if (key == "optMusic") s.optMusic = std::atoi(val.c_str()) != 0;
+        else if (key == "optCalmMusic") s.optCalmMusic = std::atoi(val.c_str()) != 0;
+        else if (key == "optMusicVol") s.optMusicVol = std::clamp((float)std::atof(val.c_str()), 0.0f, 1.0f);
+        else if (key == "optSfxVol") s.optSfxVol = std::clamp((float)std::atof(val.c_str()), 0.0f, 1.0f);
+        else if (key == "dungeonBossRare") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < s.dungeonBossRare.size(); i++) s.dungeonBossRare[i] = std::atoi(p[i].c_str()) != 0; }
+        else if (key == "breakout") {
+            auto p = SplitStr(val, ',');
+            if (p.size() >= 3) { s.breakoutNext = (float)std::atof(p[0].c_str()); s.breakoutT = (float)std::atof(p[1].c_str());
+                                 s.breakoutBoss = std::clamp(std::atoi(p[2].c_str()), -1, (int)kDungeons.size() - 1); }
+        }
         else if (key == "wyrmHp") s.wyrmHp = (float)std::atof(val.c_str());
         else if (key == "wyrmKills") s.wyrmKills = std::atoi(val.c_str());
         else if (key == "warWeek") s.warWeek = std::atoll(val.c_str());
@@ -8308,7 +8337,8 @@ static void UpdateEscort(GameState& s, float dt) {
 // fully separate roaming entity, so every entry left in this array is an ordinary
 // always-melee monster again, no per-entry AI-variant flag needed.
 struct WildernessMonsterSpot { Vector2 pos; std::string name; int level; int baseLeather; int baseGold; int iconIdx; RegionId region; };
-static const std::array<WildernessMonsterSpot, 30> kWildernessMonsterSpots = {{
+// Not const (2026-09-29): the last entry is the breakout boss, rewritten when one breaks out (BreakoutTick).
+static std::array<WildernessMonsterSpot, 31> kWildernessMonsterSpots = {{
     { WP(1150, 1250), "Wild Bat", 2, 1, 2, 0, RegionAt(WP(1150, 1250)) },
     { WP(600, 1000), "Timber Wolf", 5, 3, 4, 2, RegionAt(WP(600, 1000)) }, // Phase 1: Whisperwood signature - was Wandering Goblin
     { WP(1150, 700), "Lone Wolf", 9, 5, 7, 2, RegionAt(WP(1150, 700)) },
@@ -8357,8 +8387,11 @@ static const std::array<WildernessMonsterSpot, 30> kWildernessMonsterSpots = {{
     { WP(2010, 2310), "Sorrow Wraith", 32, 0, 24, 6, RegionAt(WP(2010, 2310)) },
     // The world boss (2026-09-27) - keep it last: kWyrmSpot below.
     { kWyrmLair, "Tri-Wyrm", 60, 40, 300, kWyrmIcon, RegionAt(kWyrmLair) }, // Vyrathax (named in its frame and news)
+    // A dungeon boss loose in the wilds (2026-09-29) - kBreakoutSpot; hidden (respawn held) until one breaks out.
+    { WP(1650, 1650), "The Whisper King", 42, 28, 110, 6, RegionAt(WP(1650, 1650)) },
 }};
 static const int kWyrmSpot = 29;
+static const int kBreakoutSpot = 30;
 static bool IsWyrmName(const std::string& n) { return n == "Tri-Wyrm"; }
 // Health for a spot's monster: level*3, except the world boss.
 static float WildSpotMaxHp(int idx) {
@@ -8954,7 +8987,7 @@ static void GuildPickTask(GameState& s, int who, float level) {
         int best = -1; float bestScore = 1e9f;
         for (int i = 0; i < (int)kWildernessMonsterSpots.size(); i++) {
             const WildernessMonsterSpot& sp = kWildernessMonsterSpots[i];
-            if ((float)sp.level > level * (who < 0 ? 1.15f : 1.3f) || sp.iconIdx == kWyrmIcon) continue;
+            if ((float)sp.level > level * (who < 0 ? 1.15f : 1.3f) || sp.iconIdx == kWyrmIcon || i == kBreakoutSpot) continue;
             float d = Dist(home, sp.pos);
             if (d > range || GuildSpotTaken(s, i, who)) continue;
             float score = d * (0.6f + RandUnit()); // nearish, with some whim
@@ -16392,7 +16425,7 @@ static bool Town3DPointInUI(Vector2 m, const GameState& s, int screenW) {
     if (CheckCollisionPointRec(m, { 160, 120, 120, 30 })) return true;  // Gather Ore
     if (CheckCollisionPointRec(m, { 290, 120, 150, 30 })) return true;  // Auto-Gather
     if (CheckCollisionPointRec(m, { 452, 120, 68, 30 })) return true;   // 3D/2D toggle
-    if (CheckCollisionPointRec(m, { 528, 120, 96, 30 })) return true;   // camera mode button
+    if (CheckCollisionPointRec(m, { 452, 120, 78, 30 })) return true;   // camera mode button
     if (CheckCollisionPointRec(m, { kViewport.x + kViewport.width - 150.0f,
                                     kViewport.y + kViewport.height - 90.0f, 130.0f, 60.0f })) return true; // tap-to-interact
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return true; // TARGET button
@@ -20624,6 +20657,74 @@ static void WyrmSlain(GameState& s) {
     Journal(s, s.logLine);
     PlaySfx(SfxId::Victory);
 }
+// Breakouts (2026-09-29): every hour or two of play, the boss of a dungeon you've reached
+// breaks out and roams the wilds for 25 minutes (kBreakoutSpot - the usual wild-monster
+// code fights it, draws it and leaves its corpse; this places, moves and ends it).
+static bool g_breakoutPlaced = false;
+static void BreakoutPlace(GameState& s, int di) {
+    static const int kIcon[6] = { 6, 3, 4, 7, 6, 6 }; // look fallback where there's no model
+    WildernessMonsterSpot& sp = kWildernessMonsterSpots[kBreakoutSpot];
+    const DungeonMonster& b = kDungeons[(size_t)di].boss;
+    Vector2 at = kWildernessDungeonEntrances[0].pos;
+    for (const auto& e : kWildernessDungeonEntrances) if (e.dungeonIdx == di) at = e.pos;
+    sp.pos = at; sp.name = b.name; sp.level = b.level + 4; sp.baseLeather = b.baseLeather; sp.baseGold = b.baseGold * 2;
+    sp.iconIdx = kIcon[std::clamp(di, 0, 5)]; sp.region = RegionAt(at);
+    s.breakoutGoal = { -1.0f, -1.0f };
+    g_breakoutPlaced = true;
+}
+static void BreakoutEnd(GameState& s) {
+    s.breakoutT = -1.0f; s.breakoutBoss = -1; g_breakoutPlaced = false;
+    s.wildSpotRespawn[kBreakoutSpot] = 999.0f;
+}
+static void BreakoutTick(GameState& s, float dt) {
+    WildernessMonsterSpot& sp = kWildernessMonsterSpots[kBreakoutSpot];
+    if (s.breakoutT <= 0.0f || s.breakoutBoss < 0) {
+        s.wildSpotRespawn[kBreakoutSpot] = 999.0f; // held hidden
+        if (s.playerIsGhost || (s.breakoutNext -= dt) > 0.0f) return;
+        s.breakoutNext = 3600.0f + RandUnit() * 3600.0f; // the next in 1-2 hours of play
+        std::vector<int> ok; // only bosses you've reached
+        for (size_t d = 0; d < kDungeons.size(); d++) if (s.dungeonXP[d] >= kDungeons[d].bossUnlockXp) ok.push_back((int)d);
+        if (ok.empty()) return;
+        int di = ok[(size_t)GetRandomValue(0, (int)ok.size() - 1)];
+        s.breakoutBoss = di; s.breakoutT = 1500.0f;
+        BreakoutPlace(s, di);
+        s.wildSpotRespawn[kBreakoutSpot] = 0.0f;
+        std::string msg = sp.name + " has broken out of " + kDungeons[(size_t)di].name + " and roams the wilds! It returns to its lair in 25 minutes.";
+        s.rivalBanner = sp.name + " is loose in the wilds!"; s.rivalBannerTimer = kRivalBannerTime * 1.3f;
+        s.logLine = msg; Journal(s, msg); PlaySfx(SfxId::Hunt);
+        return;
+    }
+    if (!g_breakoutPlaced) BreakoutPlace(s, s.breakoutBoss); // after a reload: back at its lair's door
+    bool fighting = (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == kBreakoutSpot) || FindWildExtra(s, kBreakoutSpot);
+    if (s.wildSpotRespawn[kBreakoutSpot] > 0.0f) { // it fell (the corpse code ends the breakout); don't let it refill
+        s.wildSpotRespawn[kBreakoutSpot] = std::max(s.wildSpotRespawn[kBreakoutSpot], 30.0f);
+        if ((s.breakoutT -= dt) <= 0.0f) BreakoutEnd(s);
+        return;
+    }
+    if (fighting) return; // it doesn't slip away mid-fight
+    if ((s.breakoutT -= dt) <= 0.0f) {
+        Journal(s, sp.name + " has slunk back into " + kDungeons[(size_t)s.breakoutBoss].name + ".");
+        BreakoutEnd(s);
+        return;
+    }
+    // roam: stroll toward a clear point nearby, pick another on arrival or at an obstacle
+    Vector2& g = s.breakoutGoal;
+    if (g.x < 0.0f || Dist(sp.pos, g) < 24.0f) {
+        g = { -1.0f, -1.0f };
+        for (int t = 0; t < 10; t++) {
+            float a = RandUnit() * 6.2832f, r = 250.0f + RandUnit() * 450.0f;
+            Vector2 c = { sp.pos.x + cosf(a) * r, sp.pos.y + sinf(a) * r };
+            if (c.x < 150.0f || c.y < 150.0f || c.x > kWildernessWorldSize - 150.0f || c.y > kWildernessWorldSize - 150.0f || WildBlocked(c)) continue;
+            g = c; break;
+        }
+        if (g.x < 0.0f) return;
+    }
+    Vector2 d = { g.x - sp.pos.x, g.y - sp.pos.y };
+    float L = std::max(1.0f, sqrtf(d.x * d.x + d.y * d.y)), step = std::min(L, 26.0f * dt);
+    Vector2 np = { sp.pos.x + d.x / L * step, sp.pos.y + d.y / L * step };
+    if (WildBlocked(np)) { g = { -1.0f, -1.0f }; return; }
+    sp.pos = np;
+}
 static void WyrmTick(GameState& s, float dt) {
     // the wake timer (play time) and the death check
     if (s.wyrmRespawnT > 0.0f) {
@@ -21651,7 +21752,7 @@ static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
     if (ExploreMenuPointInUI(m, s)) return true; // MENU toggle + dropdown
     if (CorpseUIPointIn(m)) return true;         // corpse window / Loot button
     if (CheckCollisionPointRec(m, { 452, 120, 68, 30 })) return true; // 3D/2D toggle
-    if (CheckCollisionPointRec(m, { 528, 120, 96, 30 })) return true; // camera mode button
+    if (CheckCollisionPointRec(m, { 452, 120, 78, 30 })) return true; // camera mode button
     if (CheckCollisionPointRec(m, { kViewport.x + kViewport.width - 150.0f,
                                     kViewport.y + kViewport.height - 90.0f, 130.0f, 60.0f })) return true; // tap-to-interact
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return true; // TARGET button
@@ -22411,6 +22512,8 @@ static Color Dungeon3DMonsterColor(int dungeonIdx, bool boss) {
 // with diagonal-pair trot, idle bob and head turns. `tint` is the per-dungeon
 // palette color (boss brightened by the caller).
 static const DungeonMonster& DungeonSlotMonster(const DungeonDef& dungeon, int slotIdx);
+static const DungeonMonster& DungeonBoss(const GameState& s, const DungeonDef& d);
+static std::string DungeonBossTitle(const GameState& s, int di);
 static void Dungeon3DDrawMonster(int dungeonIdx, int monsterIdx, int trackId, float x, float z,
                                  float yawRad, Color tint, float sizeMul,
                                  float attackT = -1.0f, float hurtT = -1.0f, float deathT = -1.0f) {
@@ -22740,7 +22843,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         label3D(kDung3DExitPos.x, 96, kDung3DExitPos.y - 40, "Stairs up - walk up to leave");
         if (s.dungeonXP[di] >= kDungeons[di].bossUnlockXp) {
             Vector2 bp = DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime);
-            label3D(bp.x, 90, bp.y, kDungeons[di].boss.name + " (Boss)");
+            label3D(bp.x, 90, bp.y, DungeonBossTitle(s, di) + (s.dungeonBossRare[di] ? " (Dread Boss)" : " (Boss)"));
         }
         if (inRange && !s.dungeonEngaged.has_value() && !nearestLabel.empty())
             label3D(nearestPos.x, 80, nearestPos.y, nearestLabel);
@@ -25105,7 +25208,7 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
 
     // Title + view/camera buttons (same placement language as the town HUD).
     DrawInfoLine(TileNameFor(s.interiorKey).c_str(), 20, 118, 14);
-    if (s.interior3DView && Button({ 528, 120, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
+    if (s.interior3DView && Button({ 452, 120, 78, 30 }, g_t3dFollowMode ? "Follow" : "Orbit", true))
         g_t3dFollowMode = !g_t3dFollowMode;
 
     // Signature furniture opens the building's detail panel (the same panel the
@@ -25328,6 +25431,35 @@ static float RollDungeonRespawn(bool boss) {
 // Extra dungeon slots (5,6,7) reuse the 5 curated monster types in order.
 static const DungeonMonster& DungeonSlotMonster(const DungeonDef& dungeon, int slotIdx) {
     return dungeon.monsters[slotIdx % 5];
+}
+// Dread bosses (2026-09-29): now and then a lair's boss comes back stronger and richer.
+// Same name (models, corpses and tasks key on it) - "Dread" is only in its title.
+static const DungeonMonster& DungeonBoss(const GameState& s, const DungeonDef& d) {
+    size_t di = (size_t)(&d - kDungeons.data());
+    if (di >= kDungeons.size() || !s.dungeonBossRare[di]) return d.boss;
+    static std::array<DungeonMonster, kDungeons.size()> dread;
+    static bool built = false;
+    if (!built) {
+        built = true;
+        for (size_t i = 0; i < kDungeons.size(); i++) {
+            DungeonMonster m = kDungeons[i].boss;
+            m.level += 10; m.baseGold *= 2; m.baseLeather = m.baseLeather * 3 / 2;
+            dread[i] = m;
+        }
+    }
+    return dread[di];
+}
+static std::string DungeonBossTitle(const GameState& s, int di) {
+    std::string n = kDungeons[(size_t)di].boss.name;
+    if (!s.dungeonBossRare[(size_t)di]) return n;
+    return n.rfind("The ", 0) == 0 ? "The Dread " + n.substr(4) : "Dread " + n;
+}
+// A lair's boss fell: maybe the lair lies quiet a while, maybe something worse moves in.
+static void DungeonBossFell(GameState& s, int di, GameState::DyingMonster& dm) {
+    dm.rare = s.dungeonBossRare[(size_t)di] != 0;
+    if (RandUnit() < 0.35f) s.dungeonSpawnRespawn[(size_t)di][kDungeonBossSlot] = 720.0f + RandUnit() * 780.0f; // 12-25 min
+    s.dungeonBossRare[(size_t)di] = RandUnit() < 0.15f ? 1 : 0;
+    if (s.dungeonBossRare[(size_t)di]) Journal(s, "Something far worse stirs in the depths of " + kDungeons[(size_t)di].name + "...");
 }
 
 // Which town the ghost returns to - the closest gate to where death happened.
@@ -26407,6 +26539,7 @@ static void BeginDungeonMonsterDeath(GameState& s, const GameState::ActiveDungeo
     dm.isBoss = wasBoss;
     dm.name = name; dm.level = level; dm.baseGold = baseGold; dm.baseLeather = baseLeather;
     s.dungeonSpawnRespawn[dungeonIdx][dm.monsterIdx] = RollDungeonRespawn(wasBoss);
+    if (wasBoss) DungeonBossFell(s, dungeonIdx, dm);
     s.dyingMonsters.push_back(dm);
     if (wasBoss) WarAward(s, 3, 50); // War Week: Hunt
     TreasureMaybeDrop(s, level, wasBoss); // treasure maps (2026-09-28)
@@ -26442,7 +26575,7 @@ static void BeginWildExtraDeath(GameState& s, const GameState::ActiveMonster& ex
 static void BeginDungeonExtraDeath(GameState& s, int dungeonIdx, const GameState::ActiveDungeonMonster& ex) {
     PlaySfx(SfxId::MonsterDie);
     const DungeonDef& dungeon = kDungeons[dungeonIdx];
-    const DungeonMonster& m = ex.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, ex.monsterIdx);
+    const DungeonMonster& m = ex.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, ex.monsterIdx);
     GameState::DyingMonster dm;
     dm.zone = 1;
     dm.pos = ex.pos;
@@ -26452,6 +26585,7 @@ static void BeginDungeonExtraDeath(GameState& s, int dungeonIdx, const GameState
     dm.isBoss = ex.isBoss;
     dm.name = m.name; dm.level = m.level; dm.baseGold = m.baseGold; dm.baseLeather = m.baseLeather;
     s.dungeonSpawnRespawn[dungeonIdx][dm.monsterIdx] = RollDungeonRespawn(ex.isBoss);
+    if (ex.isBoss) DungeonBossFell(s, dungeonIdx, dm);
     s.dyingMonsters.push_back(dm);
 }
 
@@ -26481,6 +26615,8 @@ static void MaybeAutoOpenCorpse(GameState& s, const GameState::WorldCorpse& c) {
 }
 
 static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
+    bool breakout = dm.zone == 0 && dm.spotIdx == kBreakoutSpot && s.breakoutBoss >= 0;
+    if (breakout) BreakoutEnd(s);
     if (dm.guildKill) { // the rival's or a blade's kill: just the body, no rewards for you
         GameState::WorldCorpse c{ dm.pos, 60.0f, 60.0f, dm.zone, dm.iconIdx, dm.name };
         c.spotIdx = dm.spotIdx; c.yaw = T3CHash01(dm.pos.x, dm.pos.y) * 6.2832f;
@@ -26514,6 +26650,16 @@ static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
         float chance = dm.isBoss ? 0.3f : (dm.name == "Orc Warlord" ? 0.35f : 0.03f);
         if (!IsWyrmName(dm.name) && RandUnit() < chance)
             c.loot.push_back({ GameState::kClItem, 1, MakeJewel(s, GetRandomValue(0, 2), 1 + dm.baseGold / 12 + (dm.isBoss ? 2 : 0) + GetRandomValue(0, 1)) });
+    }
+    if (dm.rare || breakout) { // (2026-09-29) a Dread boss or a breakout: a proper hoard
+        c.loot.push_back({ GameState::kClGold, dm.baseGold, std::nullopt });
+        c.loot.push_back({ GameState::kClItem, 1, MakeJewel(s, GetRandomValue(0, 2), 4 + dm.baseGold / 20 + GetRandomValue(0, 2)) });
+        std::string extra;
+        if (s.tmaps.size() < 10) { GameState::TreasureMap m; m.tier = breakout ? 4 : 3; s.tmaps.push_back(m); extra += " a treasure map"; }
+        if (RandUnit() < 0.5f) { s.rareDyeCharges++; extra += extra.empty() ? " a rare dye" : " and a rare dye"; }
+        if (breakout) { GuildSendGift(0); WarAward(s, 3, 50); GainFame(s, 10.0f); }
+        Journal(s, std::string(breakout ? "The loose boss is slain!" : "The Dread boss is slain!") + " A rich hoard on its body" +
+                   (extra.empty() ? "." : "; you also take" + extra + "."));
     }
     if (dm.isRival) { // your stolen gear rides on its body
         for (const Item& it : s.rivalStash) c.loot.push_back({ GameState::kClItem, 1, it });
@@ -27180,7 +27326,7 @@ static void TreasureUnearth(GameState& s) {
     int target = 6 + m.tier * 7; // guardian strength by tier: ~13 .. ~41
     std::vector<std::pair<int, int>> cand; // |level - target|, spot
     for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
-        if ((int)i == kWyrmSpot || s.wildSpotRespawn[i] > 0.0f || FindWildExtra(s, (int)i) || SettleIsRaider((int)i)) continue;
+        if ((int)i == kWyrmSpot || (int)i == kBreakoutSpot || s.wildSpotRespawn[i] > 0.0f || FindWildExtra(s, (int)i) || SettleIsRaider((int)i)) continue;
         if (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == (int)i) continue;
         cand.push_back({ std::abs(kWildernessMonsterSpots[i].level - target), (int)i });
     }
@@ -27517,7 +27663,7 @@ static void ResolvePlayerSpellImpact(GameState& s, int spellIdx, const std::stri
         if (!s.dungeonEngaged.has_value() || !s.selectedDungeon.has_value()) return;
         auto& am = *s.dungeonEngaged;
         const DungeonDef& dungeon = kDungeons[*s.selectedDungeon];
-        const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
+        const DungeonMonster& m = am.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, am.monsterIdx);
         std::string mname = m.name;
         int level = m.level;
         if (RandUnit() * 100.0f < SpellSuccessChance(s, spell)) {
@@ -27607,7 +27753,7 @@ static void ResolvePlayerDebuffImpact(GameState& s, int spellIdx, const std::str
         if (!s.dungeonEngaged.has_value() || !s.selectedDungeon.has_value()) return;
         auto& am = *s.dungeonEngaged;
         const DungeonDef& dungeon = kDungeons[*s.selectedDungeon];
-        applyTo(am, (am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx)).name);
+        applyTo(am, (am.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, am.monsterIdx)).name);
     }
 }
 
@@ -27684,7 +27830,7 @@ static void SummonStrikeLive(GameState& s, int zone, float base, const std::stri
         if (!s.dungeonEngaged.has_value() || !s.selectedDungeon.has_value()) return;
         auto& am = *s.dungeonEngaged;
         const DungeonDef& dungeon = kDungeons[*s.selectedDungeon];
-        const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
+        const DungeonMonster& m = am.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, am.monsterIdx);
         if (s.vigorT > 0.0f) base *= 1.25f;
         int dmg = std::max(1, (int)std::round(base * (0.85f + RandUnit() * 0.3f)));
         dmg = NecroOnHit(s, am, dmg);
@@ -27847,9 +27993,9 @@ static std::string FlagTargetName(const GameState& s) {
         const DungeonDef& dungeon = kDungeons[*s.selectedDungeon];
         if (s.dungeonEngaged.has_value()) {
             const auto& am = *s.dungeonEngaged;
-            return (am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx)).name;
+            return (am.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, am.monsterIdx)).name;
         }
-        if (f.monsterIdx == kDungeonBossSlot) return dungeon.boss.name;
+        if (f.monsterIdx == kDungeonBossSlot) return DungeonBoss(s, dungeon).name;
         if (f.monsterIdx >= 0 && f.monsterIdx < kDungeonRegularSlots)
             return DungeonSlotMonster(dungeon, f.monsterIdx).name;
     }
@@ -27940,7 +28086,7 @@ static void BardProvoke(GameState& s) {
     if (other < 0) {
         float best = 480.0f;
         for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
-            if ((int)i == a.spotIdx || (int)i == kWyrmSpot || s.wildSpotRespawn[i] > 0.0f || FindWildExtra(s, (int)i)) continue;
+            if ((int)i == a.spotIdx || (int)i == kWyrmSpot || (int)i == kBreakoutSpot || s.wildSpotRespawn[i] > 0.0f || FindWildExtra(s, (int)i)) continue;
             float d = Dist(WildernessMonsterLivePos((int)i, s.worldTime), a.pos);
             if (d < best) { best = d; other = (int)i; }
         }
@@ -28132,7 +28278,7 @@ static void TransferDungeonPrimary(GameState& s, int dungeonIdx, int newMonsterI
     if (!fromExtra) {
         int slot = newIsBoss ? kDungeonBossSlot : newMonsterIdx;
         if (s.dungeonSpawnRespawn[dungeonIdx][slot] > 0.0f) return; // died mid-cycle
-        const DungeonMonster& m = newIsBoss ? dungeon.boss : DungeonSlotMonster(dungeon, newMonsterIdx);
+        const DungeonMonster& m = newIsBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, newMonsterIdx);
         newPrimary.monsterIdx = newMonsterIdx;
         newPrimary.isBoss = newIsBoss;
         newPrimary.pos = DungeonMonsterLivePos(dungeonIdx, slot, s.worldTime);
@@ -28145,7 +28291,7 @@ static void TransferDungeonPrimary(GameState& s, int dungeonIdx, int newMonsterI
     GameState::FlagTarget f; f.zone = 1; f.monsterIdx = newIsBoss ? kDungeonBossSlot : newMonsterIdx;
     f.isBoss = newIsBoss;
     s.flagTarget = f;
-    const DungeonMonster& m = newIsBoss ? dungeon.boss : DungeonSlotMonster(dungeon, newMonsterIdx);
+    const DungeonMonster& m = newIsBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, newMonsterIdx);
     s.logLine = "You turn on the " + m.name + "!";
 }
 
@@ -28257,7 +28403,7 @@ static void CycleFlagTarget(GameState& s) {
     } else {
         GameState::FlagTarget f; f.zone = 1; f.monsterIdx = cs[next].monsterIdx; f.isBoss = cs[next].isBoss;
         s.flagTarget = f;
-        const DungeonMonster& m = cs[next].isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, cs[next].monsterIdx);
+        const DungeonMonster& m = cs[next].isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, cs[next].monsterIdx);
         s.logLine = "Target: " + m.name + count + " - closing in!";
     }
 }
@@ -28556,7 +28702,7 @@ static FlagTargetInfo GetFlagTargetInfo(const GameState& s, int zone) {
             const auto& f = *s.flagTarget;
             if (!f.isBoss && (f.monsterIdx < 0 || f.monsterIdx >= kDungeonRegularSlots))
                 return { "-", 1.0f, 1.0f, false };
-            const DungeonMonster& m = f.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, f.monsterIdx);
+            const DungeonMonster& m = f.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, f.monsterIdx);
             if (const auto* ex = FindDungeonExtra(s, f.monsterIdx, f.isBoss))
                 return { m.name, ex->hp, ex->maxHp, true };
             float full = std::max(1.0f, m.level * 3.0f);
@@ -29931,7 +30077,7 @@ static void EnforceDuelInvariants(GameState& s) {
         if (am.hp <= 0.0f) {
             int di = *s.selectedDungeon;
             const DungeonDef& dungeon = kDungeons[di];
-            const DungeonMonster& m = dungeon.boss;
+            const DungeonMonster& m = DungeonBoss(s, dungeon);
             BeginDungeonMonsterDeath(s, am, di, true, m.name, m.level, m.baseGold, m.baseLeather);
         }
     }
@@ -31107,7 +31253,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // 3D view toggle (2026-09-24, Phase 1) - same view switch as the V key below.
     // Camera mode button (2026-09-24): Diablo-style follow is the 3D default;
     // C key or this button switches back to the old free-orbit camera.
-    if (s.wild3DView && Button({ 528, 120, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Orbit [C]", true))
+    if (s.wild3DView && Button({ 452, 120, 78, 30 }, g_t3dFollowMode ? "Follow" : "Orbit", true))
         g_t3dFollowMode = !g_t3dFollowMode;
 
     // UO-red banner (2026-09-24): unmissable center-screen hunt/stalk warning. Drawn
@@ -31764,7 +31910,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         SpringFromHiding(s); // (2026-09-28)
         int slot = isBoss ? kDungeonBossSlot : monsterIdx;
         if (s.dungeonSpawnRespawn[*s.selectedDungeon][slot] > 0.0f) return; // empty - waiting to respawn
-        const DungeonMonster& m = isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, monsterIdx);
+        const DungeonMonster& m = isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, monsterIdx);
         GameState::ActiveDungeonMonster am;
         am.monsterIdx = monsterIdx;
         am.isBoss = isBoss;
@@ -31786,7 +31932,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     auto updateEngagedDungeonMonsterAI = [&]() {
         if (!s.dungeonEngaged.has_value()) return;
         GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
-        const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
+        const DungeonMonster& m = am.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, am.monsterIdx);
         float dtF = GameDt();
 
         float distNow = Dist(am.pos, s.dungeonPlayerPos);
@@ -31877,7 +32023,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         float dtF = GameDt();
         for (size_t i = 0; i < s.dungeonExtraAttackers.size(); ) {
             GameState::ActiveDungeonMonster& ex = s.dungeonExtraAttackers[i];
-            const DungeonMonster& exM = ex.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, ex.monsterIdx);
+            const DungeonMonster& exM = ex.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, ex.monsterIdx);
             float distNow = Dist(ex.pos, s.dungeonPlayerPos);
             if (distNow > kWildMeleeRange) {
                 Vector2 dir = { s.dungeonPlayerPos.x - ex.pos.x, s.dungeonPlayerPos.y - ex.pos.y };
@@ -31942,7 +32088,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     auto trySwingAtEngagedDungeonMonster = [&]() {
         if (!s.dungeonEngaged.has_value()) return;
         GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
-        const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
+        const DungeonMonster& m = am.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, am.monsterIdx);
         if (Dist(am.pos, s.dungeonPlayerPos) >= kWildMeleeRange || am.playerAttackCooldown > 0) return;
         am.playerAttackCooldown = PlayerSwingCooldown(s);
         am.swingEffectTimer = kSwingEffectDuration;
@@ -31976,7 +32122,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                 int cleaveCount = 0;
                 for (size_t ei = 0; ei < s.dungeonExtraAttackers.size(); ) {
                     GameState::ActiveDungeonMonster& ex = s.dungeonExtraAttackers[ei];
-                    const DungeonMonster& exM = ex.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, ex.monsterIdx);
+                    const DungeonMonster& exM = ex.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, ex.monsterIdx);
                     bool inArc = Dist(ex.pos, s.dungeonPlayerPos) < kWildMeleeRange &&
                                  InSwingArc(s.dungeonPlayerPos, s.playerFacing, ex.pos);
                     if (!inArc) { ei++; continue; }
@@ -32127,11 +32273,11 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     std::string prompt;
     if (s.dungeonEngaged.has_value()) {
         // Melee is automatic now - just naming who you're fighting, no button needed.
-        const DungeonMonster& m = s.dungeonEngaged->isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, s.dungeonEngaged->monsterIdx);
+        const DungeonMonster& m = s.dungeonEngaged->isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, s.dungeonEngaged->monsterIdx);
         prompt = "Fighting " + m.name;
     } else if (inRange) {
         if (nearestIsExit) prompt = "Walk up the stairs to leave  [E]";
-        else prompt = nearestIsBoss ? "[E] Fight " + dungeon.boss.name
+        else prompt = nearestIsBoss ? "[E] Fight " + DungeonBossTitle(s, *s.selectedDungeon)
                                       : "[E] Fight " + DungeonSlotMonster(dungeon, std::stoi(nearestKey)).name;
     }
     // Ghosts and the dying get no prompts - they can't touch anything.
@@ -32142,7 +32288,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (nearestIsExit) { nearest3DPos = { 900, 1300 }; nearest3DLabel = "Exit"; }
         else if (nearestIsBoss) {
             nearest3DPos = DungeonMonsterLivePos(*s.selectedDungeon, kDungeonBossSlot, s.worldTime);
-            nearest3DLabel = dungeon.boss.name;
+            nearest3DLabel = DungeonBossTitle(s, *s.selectedDungeon);
         } else if (!nearestKey.empty()) {
             int mi = std::stoi(nearestKey);
             nearest3DPos = DungeonMonsterLivePos(*s.selectedDungeon, mi, s.worldTime);
@@ -34859,7 +35005,25 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
         Rectangle b = { x + w - 90, y + 4, 90, 34 };
         if (UOButton(b, v ? "On" : "Off")) { v = !v; PlaySfx(SfxId::Click); }
         if (v) DrawCircleV({ b.x + 14, b.y + 17 }, 5.0f, Color{ 120, 220, 120, 255 });
-        y += 62;
+        y += 56;
+    };
+    auto slider = [&](const char* title, float& v) { // (2026-09-29) drag or tap along the bar
+        DrawUIText(title, (int)x, (int)y + 2, 15, ink);
+        const char* pct = TextFormat("%d%%", (int)std::round(v * 100.0f));
+        DrawUIText(pct, (int)(x + w - MeasureUIText(pct, 15)), (int)y + 2, 15, ink);
+        Rectangle bar = { x + 6, y + 30, w - 12, 8 };
+        DrawRectangleRounded(bar, 1.0f, 6, Fade(BLACK, 0.2f));
+        DrawRectangleRounded({ bar.x, bar.y, bar.width * v, bar.height }, 1.0f, 6, Color{ 150, 100, 20, 255 });
+        DrawCircleV({ bar.x + bar.width * v, bar.y + 4 }, 11.0f, Color{ 70, 44, 24, 255 });
+        DrawCircleLines((int)(bar.x + bar.width * v), (int)bar.y + 4, 11.0f, kUoBronze);
+        Rectangle hit = { x - 6, y + 16, w + 12, 36 };
+        UIRegister(hit);
+        static bool dragging = false; static const float* who = nullptr;
+        Vector2 m = GetMousePosition();
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(m, hit)) { dragging = true; who = &v; }
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { if (dragging && who == &v) PlaySfx(SfxId::Click); dragging = false; who = nullptr; }
+        if (dragging && who == &v) v = std::clamp((m.x - bar.x) / bar.width, 0.0f, 1.0f);
+        y += 54;
     };
     bool showWyrm = !s.optHideWyrm, showBoss = !s.optHideDungeonBoss;
     toggle("World boss alerts", "Vyrathax's wake-up warnings, banner and countdown.", showWyrm);
@@ -34867,7 +35031,10 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     s.optHideWyrm = !showWyrm; s.optHideDungeonBoss = !showBoss;
     toggle("Tap to walk", "Tap the ground to walk there (the stick and WASD always work).", s.optTapWalk);
     toggle("Music", "A tune for the towns, the wilds and the dungeons.", s.optMusic);
+    toggle("Calm music", "Gentle, slow tunes. Off: the livelier originals.", s.optCalmMusic);
+    slider("Music volume", s.optMusicVol);
     toggle("Sound effects", "Footsteps, swords, spells, coins and the rest.", s.optSfx);
+    slider("Sound volume", s.optSfxVol);
     toggle("Always daytime", "Keep the world in daylight instead of following your real clock.", s.optAlwaysDay);
     toggle("Classic body", "Play as the dressable body that shows your armor, clothing and dyes, instead of the sculpted hero.", s.optClassicBody);
     toggle("Auto-restock reagents", "Top up to 30 reagents whenever you enter a town (1 gold each).", s.autoReagents);
@@ -35830,10 +35997,12 @@ static void UpdateDrawFrame() {
             prevScr = state.screen;
         }
         WyrmTick(state, dt);   // the world boss's wake timer and heads (2026-09-27)
+        BreakoutTick(state, dt); // a dungeon boss loose in the wilds, now and then (2026-09-29)
         WarNetTick(state, dt); // War Week: Muster minutes, online guild sync (2026-09-27)
         g_tapWalkOn = state.optTapWalk;
         g_alwaysDay = state.optAlwaysDay;
         g_sfxOn = state.optSfx; g_musicOn = state.optMusic;
+        g_calmMusic = state.optCalmMusic; g_musicVol = state.optMusicVol; g_sfxVol = state.optSfxVol;
         state.town3DView = state.wild3DView = state.interior3DView = state.hunt3DView = true; // 3D only (the classic 2D view was retired 2026-09-28)
         { // stat buffs run out; HP and mana follow the effective stats (2026-09-27)
             for (float* t : { &state.blessT, &state.strPotT, &state.agiPotT }) if (*t > 0.0f && (*t -= dt) <= 0.0f) {

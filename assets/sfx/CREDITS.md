@@ -11,4 +11,5 @@ All CC0 (public domain). No attribution is required, but credit where it's due:
 - **Paul Wortmann** (OpenGameArt): "Dark Cavern Ambient" - the dungeon music.
 
 `drum.wav`, `lute.wav`, `harp.wav` (gen_music.py) and the remaining `.wav` files
-(gen_sfx.py) are synthesized in-house. The music was re-encoded to mono 56 kbps Ogg.
+(gen_sfx.py) are synthesized in-house, as are the calm music tracks
+`assets/music/*_calm.ogg` (tools/gen_calm_music.py, the default soundtrack). The music was re-encoded to mono 56 kbps Ogg.
