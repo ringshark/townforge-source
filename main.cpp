@@ -4209,7 +4209,7 @@ static bool SetSkillActive(GameState& s, int idx, bool active) {
     if (idx < 0 || idx >= (int)kCappedSkills.size()) return false;
     if (active) {
         float val = s.*(kCappedSkills[idx].field);
-        if (val > 0.0f && ActiveSkillTotal(s) + val > kTotalSkillCap) { // a 0-point skill costs nothing
+        if (false && val > 0.0f && ActiveSkillTotal(s) + val > kTotalSkillCap) { // (2026-09-29) no cap any more
             s.logLine = std::string("No room to equip ") + kCappedSkills[idx].label + " (" + std::to_string((int)ActiveSkillTotal(s)) +
                          "/" + std::to_string((int)kTotalSkillCap) + " equipped) - unequip another skill first.";
             return false;
@@ -4257,8 +4257,8 @@ static std::string TitleFor(float skill) {
     if (skill < 70.0f) return "Journeyman";
     if (skill < 80.0f) return "Expert";
     if (skill < 90.0f) return "Adept";
-    if (skill < 100.0f) return "Master";
-    return "Grandmaster"; // all skill caps are 100 (Mark's call)
+    if (skill < 99.0f) return "Master";
+    return "Grandmaster"; // level 99 (2026-09-29: the RuneScape levels - was skill 100)
 }
 // JS overallSkill(): highest of every trade + capped skill EXCEPT the 3 rogue skills.
 static float OverallSkill(const GameState& s) {
@@ -4336,29 +4336,81 @@ static float RandUnit() { return (float)std::rand() / (float)RAND_MAX; } // [0,1
 // equipped skill stops improving once the loadout is full. Unequipped ones still
 // learn (they keep every point for when you equip them again).
 static GameState* g_skillOwner = nullptr; // the player's state (set in main)
-static bool g_loadoutFullNoted = false;
+
+// ---- RuneScape-style levels (2026-09-29) ------------------------------------------
+// Skills still live as 0-100 underneath (every formula reads them), but you see them
+// as levels 1-99 with an XP bar: the level is the whole number (37.4 = level 37, 40%
+// of the way to 38), so every existing "needs 40" gate is simply level 40. 99 is
+// mastery; the last point to 100 fills out level 99's bar. XP follows RuneScape's own
+// table (83 XP for level 2 ... 13,034,431 for 99), so early levels fly by and the
+// numbers climb the way RS players expect. No total cap: every skill can reach 99.
+static const int kSkillKeyCount = 37; // 0-28 kCappedSkills, 29-32 gathering, 33-36 crafting
+static const char* kExtraSkillLabels[8] = { "Lumberjacking", "Mining", "Fishing", "Skinning",
+                                            "Blacksmithing", "Carpentry", "Tailoring", "Alchemy" };
+static const char* SkillKeyLabel(int key) {
+    if (key >= 0 && key < (int)kCappedSkills.size()) return kCappedSkills[(size_t)key].label;
+    if (key >= 29 && key < kSkillKeyCount) return kExtraSkillLabels[key - 29];
+    return "";
+}
+static float* SkillKeyPtr(GameState& s, int key) {
+    if (key >= 0 && key < (int)kCappedSkills.size()) return &(s.*(kCappedSkills[(size_t)key].field));
+    switch (key) {
+        case 29: return &s.lumberjacking; case 30: return &s.mining; case 31: return &s.fishing; case 32: return &s.skinning;
+        case 33: case 34: case 35: case 36: return &s.buildingSkill[(size_t)(key - 33)];
+    }
+    return nullptr;
+}
+static float SkillKeyValue(const GameState& s, int key) { return *SkillKeyPtr(const_cast<GameState&>(s), key); }
+static int SkillKeyOf(GameState& s, const float* p) {
+    for (int k = 0; k < kSkillKeyCount; k++) if (SkillKeyPtr(s, k) == p) return k;
+    return -1;
+}
+static int SkillLevel(float v) { return std::clamp((int)floorf(v + 0.0001f), 1, 99); }
+static long long RsXpForLevel(int L) { // RuneScape's experience table
+    static long long t[101] = { 0 };
+    if (t[2] == 0) {
+        double pts = 0.0;
+        for (int l = 1; l <= 100; l++) { t[l] = (long long)floor(pts / 4.0); pts += floor(l + 300.0 * pow(2.0, l / 7.0)); }
+    }
+    return t[std::clamp(L, 1, 100)];
+}
+// Progress through the current level, 0..1 (level 1 spans 0-2; level 99 spans 99-100).
+static float SkillLevelFrac(float v) {
+    if (v < 2.0f) return std::clamp(v / 2.0f, 0.0f, 1.0f);
+    if (v >= 99.0f) return std::clamp(v - 99.0f, 0.0f, 1.0f);
+    return v - floorf(v + 0.0001f);
+}
+static long long SkillXp(float v) {
+    int L = SkillLevel(v);
+    long long a = RsXpForLevel(L), b = RsXpForLevel(L + 1);
+    return a + (long long)((double)(b - a) * SkillLevelFrac(v));
+}
+static int TotalLevel(const GameState& s) {
+    int t = 0;
+    for (int k = 0; k < kSkillKeyCount; k++) t += SkillLevel(SkillKeyValue(s, k));
+    return t;
+}
+struct SkillLevelUp { int key; int level; };
+static std::vector<SkillLevelUp> g_levelUps;          // waiting for their banner
+struct XpDrop { int key; long long xp; float t; };
+static std::vector<XpDrop> g_xpDrops;                 // "+1,250 Fencing XP" floating up
+static void NoteSkillGain(float* skill, float before) {
+    if (!g_skillOwner || !skill) return;
+    int key = SkillKeyOf(*g_skillOwner, skill);
+    if (key < 0) return; // a pet's skill, or a scratch value
+    long long dxp = SkillXp(*skill) - SkillXp(before);
+    if (dxp > 0) {
+        if (!g_xpDrops.empty() && g_xpDrops.back().key == key && g_xpDrops.back().t < 0.4f) g_xpDrops.back().xp += dxp;
+        else { g_xpDrops.push_back({ key, dxp, 0.0f }); if (g_xpDrops.size() > 5) g_xpDrops.erase(g_xpDrops.begin()); }
+    }
+    for (int L = SkillLevel(before) + 1; L <= SkillLevel(*skill); L++) g_levelUps.push_back({ key, L });
+}
 static float GainSkillCapped(float& skill, float amount, float cap = 100.0f) {
     if (amount <= 0.0f) return 0.0f;
     float actual = std::min(amount, std::max(0.0f, cap - skill));
-    if (g_skillOwner && actual > 0.0f) {
-        GameState& o = *g_skillOwner;
-        for (size_t i = 0; i < kCappedSkills.size(); i++) {
-            if (&(o.*(kCappedSkills[i].field)) != &skill) continue;
-            if (!o.skillActive[i]) break;
-            float room = kTotalSkillCap - ActiveSkillTotal(o);
-            if (room >= actual) g_loadoutFullNoted = false;
-            else {
-                actual = std::max(0.0f, std::floor(room * 10.0f + 0.001f) / 10.0f);
-                if (actual <= 0.0f && !g_loadoutFullNoted) {
-                    g_loadoutFullNoted = true;
-                    o.logLine = std::string("Your skill loadout is full (700) - ") + kCappedSkills[i].label +
-                                " can't improve. Unequip a skill on the Skills page to keep learning.";
-                }
-            }
-            break;
-        }
-    }
+    float before = skill;
     skill += actual;
+    if (actual > 0.0f) NoteSkillGain(&skill, before);
     return actual;
 }
 
@@ -7518,7 +7570,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "necromancy") s.necromancy = std::min(100.0f, (float)std::atof(val.c_str()));
         else if (key == "magicResist") s.magicResist = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
         else if (key == "healing") s.healing = std::min(100.0f, (float)std::atof(val.c_str())); // clamp pre-100-cap saves
-        else if (key == "skillActive") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < s.skillActive.size(); i++) s.skillActive[i] = std::atoi(p[i].c_str()) != 0; }
+        else if (key == "skillActive") { s.skillActive.fill(true); } // (2026-09-29) no loadout any more: every skill always counts
         else if (key == "bloodstainedProgress") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 3; i++) s.bloodstainedProgress[i] = std::atoi(p[i].c_str()); }
         else if (key == "bloodstainedLoop") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 3; i++) s.bloodstainedLoop[i] = std::atoi(p[i].c_str()); }
         else if (key == "bloodstainedBossDefeated") { auto p = SplitStr(val, ','); for (size_t i = 0; i < p.size() && i < 3; i++) s.bloodstainedBossDefeated[i] = std::atoi(p[i].c_str()) != 0; }
@@ -25840,7 +25892,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     // tiled ground with nothing else guaranteeing contrast (same class of bug already
     // fixed on the vendor screens' backdrops), and the combined skills+gathering string
     // could run long enough to overflow the safe margin on some viewports.
-    DrawHudLine(TextFormat("Lumberjacking %.1f   Mining %.1f   Fishing %.1f", s.lumberjacking, s.mining, s.fishing), 20, 158);
+    DrawHudLine(TextFormat("Lumberjacking %d   Mining %d   Fishing %d", SkillLevel(s.lumberjacking), SkillLevel(s.mining), SkillLevel(s.fishing)), 20, 158);
     if (s.gatheringResource.has_value())
         DrawHudLine(TextFormat("Gathering %s... %.1fs", s.gatheringResource->c_str(), s.gatherSecondsRemaining),
                     20, 182, 13, Color{ 255, 226, 150, 255 });
@@ -31929,8 +31981,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // short lines rather than one long concatenated string (2026-09-22 fix, same reason
     // as Town's: no contrast guarantee against the tiled ground, and the combined
     // skills+gathering+taming text could run past a safe margin on some viewports).
-    DrawHudLine(TextFormat("Lumber %.1f  Mining %.1f  Fishing %.1f  Taming %.1f",
-                           s.lumberjacking, s.mining, s.fishing, s.animalTaming), 20, 158);
+    DrawHudLine(TextFormat("Lumber %d  Mining %d  Fishing %d  Taming %d",
+                           SkillLevel(s.lumberjacking), SkillLevel(s.mining), SkillLevel(s.fishing), SkillLevel(s.animalTaming)), 20, 158);
     int statusY = 182;
     if (s.gatheringResource.has_value()) {
         DrawHudLine(TextFormat("Gathering %s... %.1fs", s.gatheringResource->c_str(), s.gatherSecondsRemaining),
@@ -35886,7 +35938,7 @@ static const float kTrainGroundsStep = 2.5f;
 static void TrainGroundsDrill(GameState& s) {
     float& sk = s.*(kCappedSkills[(size_t)g_trainSkill].field);
     if (sk >= kTrainGroundsCap) { g_trainAuto = false; return; }
-    float g = GainSkillCapped(sk, std::min(kTrainGroundsStep, kTrainGroundsCap - sk), kTrainGroundsCap); // the 700 loadout cap still applies
+    float g = GainSkillCapped(sk, std::min(kTrainGroundsStep, kTrainGroundsCap - sk), kTrainGroundsCap);
     if (g > 0.0f) s.logLine = TextFormat("%s %.1f (+%.1f)", kCappedSkills[(size_t)g_trainSkill].label, sk, g);
     if (sk >= kTrainGroundsCap) {
         g_trainAuto = false;
@@ -35913,7 +35965,7 @@ static void DrawTrainingGrounds(GameState& s, int screenW, int screenH) {
     if (!here) { DrawUIText("The Training Grounds are in town - head back to use them.", (int)x, (int)y, 13, Color{ 170, 60, 40, 255 }); y += 20; }
     // the chosen skill
     float cur = s.*(kCappedSkills[(size_t)g_trainSkill].field);
-    DrawUIText(TextFormat("%s  %.1f / 50", kCappedSkills[(size_t)g_trainSkill].label, cur), (int)x, (int)y, 17, ink);
+    DrawUIText(TextFormat("%s  level %d / 50", kCappedSkills[(size_t)g_trainSkill].label, SkillLevel(cur)), (int)x, (int)y, 17, ink);
     y += 24;
     Rectangle bar = { x, y, w, 12 };
     DrawRectangleRounded(bar, 0.5f, 6, Fade(BLACK, 0.18f));
@@ -35957,137 +36009,190 @@ static void DrawTrainingGrounds(GameState& s, int screenW, int screenH) {
     }
     EndScissorMode();
 }
+// ---- What each level opens up (2026-09-29): read straight from the game's real gates ----
+struct SkillUnlock { int level; std::string what; };
+static std::vector<SkillUnlock> SkillUnlocks(int key) {
+    std::vector<SkillUnlock> u;
+    auto add = [&](int lv, const std::string& w) { if (lv >= 2 && lv <= 99) u.push_back({ lv, w }); };
+    if (key == 9 || key == 20 || key == 23) // Magery, Necromancy, Chivalry: their spells
+        for (const auto& sp : kSpells) {
+            bool mine = key == 9 ? (!sp.necro && !sp.chiv) : key == 20 ? sp.necro : sp.chiv;
+            if (mine) add(sp.minSkill, "cast " + sp.name);
+        }
+    if (key == 12) // Animal Taming: who you can tame
+        for (const auto& c : kWildCreatures)
+            add((int)(c.isApex ? (float)c.difficulty : std::max(0.0f, c.difficulty - kTameSkillCushion)), "tame a " + c.name);
+    if (key >= 33 && key <= 35) // Blacksmithing, Carpentry, Tailoring: recipes
+        for (const auto& r : kCraftBuildings[(size_t)(key - 33)].recipes) add(r.reqSkill, "craft a " + r.name);
+    static const std::pair<int, const char*> kTitles[] = { { 50, "Apprentice" }, { 60, "Journeyman" }, { 70, "Expert" },
+                                                            { 80, "Adept" }, { 90, "Master" }, { 99, "Grandmaster" } };
+    for (const auto& t : kTitles) add(t.first, std::string("the title ") + t.second);
+    std::stable_sort(u.begin(), u.end(), [](const SkillUnlock& a, const SkillUnlock& b) { return a.level < b.level; });
+    return u;
+}
+// Everything a level opens, joined ("cast Lightning, cast Recall"), or "" for none.
+static std::string SkillUnlocksAt(int key, int level) {
+    std::string out; int n = 0;
+    for (const auto& x : SkillUnlocks(key)) if (x.level == level) { if (n < 2) out += (out.empty() ? "" : ", ") + x.what; n++; }
+    if (n > 2) out += TextFormat(" and %d more", n - 2);
+    return out;
+}
+static int SkillNextUnlockLevel(int key, int level) {
+    for (const auto& x : SkillUnlocks(key)) if (x.level > level) return x.level;
+    return -1;
+}
+static std::string FmtNum(long long v) {
+    std::string d = std::to_string(v), o;
+    for (size_t i = 0; i < d.size(); i++) { if (i && (d.size() - i) % 3 == 0) o += ','; o += d[i]; }
+    return o;
+}
+
 static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
     if (g_trainOpen) { DrawTrainingGrounds(s, screenW, screenH); return; }
-    static const SkillGroup kGroups[] = {
+    // (2026-09-29) RuneScape-style: levels 1-99 with XP bars, no cap - every skill can reach 99.
+    struct SkillGroup2 { const char* name; std::vector<int> keys; };
+    static const SkillGroup2 kGroups[] = {
         { "Combat", { 0, 1, 2, 3, 4, 5, 6, 18, 8, 7 } },
         { "Magic", { 9, 10, 11, 20, 23 } },
         { "Animals", { 12, 13, 14 } },
         { "Scouting & thievery", { 19, 21, 22, 15, 16, 17 } },
         { "Treasure hunting", { 24, 25 } },
         { "Bard", { 26, 27, 28 } },
+        { "Gathering", { 29, 30, 31, 32 } },
+        { "Crafting", { 33, 34, 35, 36 } },
     };
-    const Color ink = kColorText, soft = Fade(kColorText, 0.72f), good = { 46, 120, 60, 255 }, warn = { 170, 90, 20, 255 };
-    float total = ActiveSkillTotal(s);
-    bool full = total >= kTotalSkillCap - 0.05f;
+    const Color ink = kColorText, soft = Fade(kColorText, 0.72f), good = { 46, 120, 60, 255 };
     int y = 114;
-    // --- the loadout header ---
-    DrawUIText("Skill loadout", 20, y, 18, kColorHeading);
-    const char* tot = TextFormat("%.1f / %.0f equipped", total, kTotalSkillCap);
-    DrawUIText(tot, screenW - 20 - MeasureUIText(tot, 15), y + 2, 15, full ? warn : ink);
+    int total = TotalLevel(s), maxTotal = 99 * kSkillKeyCount;
+    DrawUIText("Skills", 20, y, 18, kColorHeading);
+    const char* tot = TextFormat("Total level %d / %d", total, maxTotal);
+    DrawUIText(tot, screenW - 20 - MeasureUIText(tot, 15), y + 2, 15, ink);
     y += 24;
-    Rectangle bar = { 20, (float)y, (float)(screenW - 40), 12 };
+    Rectangle bar = { 20, (float)y, (float)(screenW - 40), 10 };
     DrawRectangleRounded(bar, 0.5f, 6, Fade(BLACK, 0.18f));
-    float pct = std::clamp(total / kTotalSkillCap, 0.0f, 1.0f);
-    if (pct > 0.0f) DrawRectangleRounded({ bar.x, bar.y, bar.width * pct, bar.height }, 0.5f, 6, full ? Color{ 214, 140, 40, 255 } : good);
-    y += 18;
-    if (full) {
-        DrawUIText("Your loadout is full: equipped skills stop improving.", 20, y, 13, warn); y += 16;
-        DrawUIText("Unequip one you're not using to make room.", 20, y, 13, warn); y += 18;
-    } else {
-        DrawUIText("Equipped skills work (up to 700 points in total).", 20, y, 13, soft); y += 16;
-        DrawUIText("Unequipped skills keep every point, but do nothing until you equip them.", 20, y, 13, soft); y += 18;
-    }
-    y += 4;
-    if (Button({ 20, (float)y, (float)screenW - 40, 30 }, "Training Grounds - drill any skill to 50, free", true)) { g_trainOpen = true; g_trainScroll = 0.0f; }
+    DrawRectangleRounded({ bar.x, bar.y, bar.width * std::clamp((float)total / maxTotal, 0.02f, 1.0f), bar.height }, 0.5f, 6, good);
+    y += 16;
+    std::string voc = TopVocationTitle(s);
+    DrawUIText("Use a skill to level it. Every skill can reach 99 - master them all.", 20, y, 13, soft); y += 16;
+    if (!voc.empty()) { DrawUIText(TextFormat("Known as: %s", voc.c_str()), 20, y, 13, good); }
+    y += 20;
+    if (Button({ 20, (float)y, (float)screenW - 40, 30 }, "Training Grounds - drill any skill to level 50, free", true)) { g_trainOpen = true; g_trainScroll = 0.0f; }
     y += 36;
-    // --- the list ---
     int listTop = y, listH = screenH - listTop - 10;
     Rectangle listArea = { 0, (float)listTop, (float)screenW, (float)listH };
     g_skillsScroll -= ScrollDelta(listArea);
     BeginScissorMode(0, listTop, screenW, listH);
     float yy = listTop - g_skillsScroll;
-    auto visible = [&](Rectangle r) { return r.y >= listTop && r.y + r.height <= listTop + listH; };
-    { // (2026-09-28) your build at a glance: what's equipped, strongest first, and where the points sit
-        std::vector<std::pair<float, int>> eq;
-        for (size_t i = 0; i < kCappedSkills.size(); i++)
-            if (s.skillActive[i] && s.*(kCappedSkills[i].field) >= 0.05f) eq.push_back({ s.*(kCappedSkills[i].field), (int)i });
-        std::sort(eq.begin(), eq.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-        float x0 = 22, w = (float)screenW - 44, top = yy;
-        // chips first (to measure the card), drawn after the card background
-        struct Chip { Rectangle r; std::string t; bool gm; };
-        std::vector<Chip> chips;
-        float cx = x0 + 10, cy = top + 50;
-        for (const auto& e : eq) {
-            std::string t = std::string(kCappedSkills[(size_t)e.second].label) + TextFormat(" %.1f", e.first);
-            float cw = (float)MeasureUIText(t.c_str(), 12) + 16;
-            if (cx + cw > x0 + w - 10) { cx = x0 + 10; cy += 26; }
-            chips.push_back({ { cx, cy, cw, 21 }, t, e.first >= 99.95f });
-            cx += cw + 6;
-        }
-        std::string groupsLine;
-        for (const auto& g : kGroups) {
-            float sum = 0; for (int i : g.idx) if (s.skillActive[(size_t)i]) sum += s.*(kCappedSkills[(size_t)i].field);
-            if (sum >= 0.5f) groupsLine += (groupsLine.empty() ? "" : "   ") + std::string(g.name) + " " + std::to_string((int)(sum + 0.5f));
-        }
-        float cardH = (eq.empty() ? 50.0f : cy + 21 - top + 12) + (groupsLine.empty() ? 0.0f : 20.0f);
-        DrawRectangleRounded({ x0 - 6, top, w + 12, cardH }, 0.08f, 6, Fade(Color{ 255, 250, 235, 255 }, 0.7f));
-        DrawRectangleRoundedLines({ x0 - 6, top, w + 12, cardH }, 0.08f, 6, Fade(kColorHeading, 0.35f));
-        DrawUIText("Your build", (int)x0 + 4, (int)top + 8, 15, kColorHeading);
-        std::string title = TopVocationTitle(s);
-        DrawUIText(title.c_str(), (int)(x0 + w - 6 - MeasureUIText(title.c_str(), 13)), (int)top + 10, 13, good);
-        DrawUIText(TextFormat("%d skills equipped", (int)eq.size()), (int)x0 + 4, (int)top + 28, 12, soft);
-        if (eq.empty()) DrawUIText("Nothing trained yet - skills rise as you use them.", (int)x0 + 130, (int)top + 28, 12, soft);
-        for (const auto& c : chips) {
-            DrawRectangleRounded(c.r, 0.5f, 6, c.gm ? Color{ 214, 170, 70, 255 } : Color{ 92, 70, 48, 255 });
-            DrawUIText(c.t.c_str(), (int)c.r.x + 8, (int)c.r.y + 4, 12, Color{ 250, 240, 220, 255 });
-        }
-        if (!groupsLine.empty()) DrawUIText(groupsLine.c_str(), (int)x0 + 4, (int)(top + cardH - 22), 12, soft);
-        yy += cardH + 12;
-    }
     for (const auto& g : kGroups) {
+        int gsum = 0; for (int k : g.keys) gsum += SkillLevel(SkillKeyValue(s, k));
         DrawUIText(g.name, 20, (int)yy + 6, 15, kColorHeading);
+        const char* gs = TextFormat("%d / %d", gsum, 99 * (int)g.keys.size());
+        DrawUIText(gs, screenW - 22 - MeasureUIText(gs, 12), (int)yy + 9, 12, soft);
         yy += 28;
-        for (int i : g.idx) {
-            float val = s.*(kCappedSkills[(size_t)i].field);
-            bool on = s.skillActive[(size_t)i];
-            bool canOn = on || val <= 0.0f || total + val <= kTotalSkillCap + 0.05f;
-            Rectangle row = { 14, yy, (float)screenW - 28, 50 };
-            DrawRectangleRounded(row, 0.15f, 6, on ? Fade(Color{ 255, 250, 235, 255 }, 0.55f) : Fade(BLACK, 0.06f));
-            if (on) DrawRectangleRec({ row.x, row.y + 6, 4, row.height - 12 }, good);
-            Color nameCol = on ? ink : Fade(ink, 0.55f);
-            DrawUIText(kCappedSkills[(size_t)i].label, (int)row.x + 12, (int)yy + 6, 15, nameCol);
-            const char* vs = TextFormat("%.1f", val);
-            // value bar to 100
-            float bx = row.x + 12 + 150, bw = row.width - 150 - 12 - 160;
-            DrawRectangleRounded({ bx, yy + 11, bw, 8 }, 0.5f, 4, Fade(BLACK, 0.15f));
-            if (val > 0.0f) DrawRectangleRounded({ bx, yy + 11, bw * std::clamp(val / 100.0f, 0.0f, 1.0f), 8 }, 0.5f, 4, on ? Color{ 196, 150, 60, 255 } : Fade(Color{ 196, 150, 60, 255 }, 0.4f));
-            DrawUIText(vs, (int)(bx + bw + 6), (int)yy + 7, 13, nameCol);
-            DrawUIText(kCappedSkillWhat[i], (int)row.x + 12, (int)yy + 29, 11, on ? soft : Fade(soft, 0.6f));
-            Rectangle b = { row.x + row.width - 104, yy + 9, 96, 30 };
-            const char* lbl = on ? "Equipped" : (canOn ? "Equip" : "No room");
-            if (Button(b, lbl, canOn) && visible(b)) {
-                if (SetSkillActive(s, i, !on)) {
-                    PlaySfx(SfxId::Click);
-                    s.logLine = std::string(kCappedSkills[(size_t)i].label) + (on ? " unequipped - its points are kept." : " equipped.");
-                }
+        for (int k : g.keys) {
+            float val = SkillKeyValue(s, k);
+            int lv = SkillLevel(val);
+            bool gm = val >= 99.0f;
+            Rectangle row = { 14, yy, (float)screenW - 28, 62 };
+            if (row.y + row.height >= listTop && row.y <= listTop + listH) {
+                DrawRectangleRounded(row, 0.15f, 6, Fade(Color{ 255, 250, 235, 255 }, 0.55f));
+                DrawRectangleRec({ row.x, row.y + 6, 4, row.height - 12 }, gm ? Color{ 214, 170, 70, 255 } : good);
+                DrawUIText(SkillKeyLabel(k), (int)row.x + 12, (int)yy + 6, 15, ink);
+                // the level badge
+                Rectangle badge = { row.x + row.width - 58, yy + 6, 48, 24 };
+                DrawRectangleRounded(badge, 0.4f, 6, gm ? Color{ 214, 170, 70, 255 } : Color{ 92, 70, 48, 255 });
+                const char* ls = TextFormat("%d", lv);
+                DrawUIText(ls, (int)(badge.x + badge.width / 2 - MeasureUIText(ls, 16) / 2), (int)badge.y + 3, 16, Color{ 250, 240, 220, 255 });
+                // XP toward the next level
+                float bx = row.x + 12, bw = row.width - 12 - 70;
+                float frac = gm ? 1.0f : SkillLevelFrac(val);
+                DrawRectangleRounded({ bx, yy + 27, bw, 7 }, 0.5f, 4, Fade(BLACK, 0.15f));
+                if (frac > 0.0f) DrawRectangleRounded({ bx, yy + 27, bw * frac, 7 }, 0.5f, 4, gm ? Color{ 214, 170, 70, 255 } : Color{ 196, 150, 60, 255 });
+                long long xp = SkillXp(val);
+                std::string info = gm ? FmtNum(xp) + " XP  -  mastered!"
+                                      : FmtNum(xp) + " XP  -  " + FmtNum(std::max(0LL, RsXpForLevel(lv + 1) - xp)) + " to level " + std::to_string(lv + 1);
+                int nl = SkillNextUnlockLevel(k, lv);
+                std::string next = nl > 0 ? TextFormat("Next: level %d - %s", nl, SkillUnlocksAt(k, nl).c_str())
+                                          : (k < 29 ? std::string(kCappedSkillWhat[k]) : std::string("Keep going - every level makes you better at it."));
+                DrawUIText(info.c_str(), (int)bx, (int)yy + 37, 11, soft);
+                DrawUIText(next.c_str(), (int)bx, (int)yy + 49, 11, nl > 0 ? good : soft);
             }
-            if (on) { // a check mark
-                DrawLineEx({ b.x + 8, b.y + 15 }, { b.x + 12, b.y + 20 }, 2.5f, Color{ 150, 230, 150, 255 });
-                DrawLineEx({ b.x + 12, b.y + 20 }, { b.x + 19, b.y + 9 }, 2.5f, Color{ 150, 230, 150, 255 });
-            }
-            yy += 56;
+            yy += 68;
         }
         yy += 6;
-    }
-    // trade skills: always on, outside the loadout
-    DrawUIText("Trade skills", 20, (int)yy + 6, 15, kColorHeading);
-    yy += 24;
-    DrawUIText("Always on, and they don't count toward the 700.", 20, (int)yy, 12, soft);
-    yy += 20;
-    struct TradeRow { const char* name; float v; };
-    const TradeRow trades[] = { { "Lumberjacking", s.lumberjacking }, { "Mining", s.mining }, { "Fishing", s.fishing }, { "Skinning", s.skinning } };
-    for (const auto& t : trades) {
-        DrawUIText(t.name, 32, (int)yy, 14, ink);
-        float bx = 180, bw = (float)screenW - 180 - 90;
-        DrawRectangleRounded({ bx, yy + 4, bw, 8 }, 0.5f, 4, Fade(BLACK, 0.15f));
-        if (t.v > 0.0f) DrawRectangleRounded({ bx, yy + 4, bw * std::clamp(t.v / 100.0f, 0.0f, 1.0f), 8 }, 0.5f, 4, Color{ 120, 150, 90, 255 });
-        DrawUIText(TextFormat("%.1f", t.v), (int)(bx + bw + 8), (int)yy, 13, ink);
-        yy += 24;
     }
     float contentH = yy + g_skillsScroll - listTop + 20;
     EndScissorMode();
     g_skillsScroll = std::clamp(g_skillsScroll, 0.0f, std::max(0.0f, contentH - listH));
+}
+
+// ---- Level-up moments and XP drops (2026-09-29) -------------------------------------
+static void UpdateDrawLevelUps(GameState& s, int screenW, int screenH, bool play) {
+    (void)screenH;
+    float dt = std::min(GetFrameTime(), 0.1f); // a hitch (loading a model) mustn't swallow the whole banner
+    auto note =[&](const std::string& t) { // into the journal only: the banner is the announcement, not a toast too
+        s.journal.push_back({ t, s.worldTime });
+        while (s.journal.size() > 100) s.journal.pop_front();
+    };
+    // XP drops: small "+1,250 Fencing" lines drifting up the right side
+    for (size_t i = 0; i < g_xpDrops.size(); i++) {
+        XpDrop& d = g_xpDrops[i];
+        d.t += dt;
+        if (!play) continue;
+        float a = std::clamp(1.6f - d.t, 0.0f, 1.0f);
+        const char* tx = TextFormat("+%s %s XP", FmtNum(d.xp).c_str(), SkillKeyLabel(d.key));
+        int w = MeasureUIText(tx, 13);
+        float yb = 330.0f + (float)(g_xpDrops.size() - 1 - i) * -18.0f - d.t * 22.0f;
+        DrawUIText(tx, screenW - 14 - w + 1, (int)yb + 1, 13, Fade(BLACK, 0.7f * a));
+        DrawUIText(tx, screenW - 14 - w, (int)yb, 13, Fade(Color{ 255, 236, 150, 255 }, a));
+    }
+    g_xpDrops.erase(std::remove_if(g_xpDrops.begin(), g_xpDrops.end(), [](const XpDrop& d) { return d.t > 1.8f; }), g_xpDrops.end());
+    // the level-up banner, one at a time (several levels of one skill at once show only the last)
+    static float bannerT = -1.0f; static SkillLevelUp cur{ -1, 0 };
+    if (bannerT < 0.0f && !g_levelUps.empty()) {
+        while (g_levelUps.size() > 1 && g_levelUps[1].key == g_levelUps[0].key) {
+            std::string un = SkillUnlocksAt(g_levelUps[0].key, g_levelUps[0].level);
+            note(std::string("Your ") + SkillKeyLabel(g_levelUps[0].key) + " level is now " + std::to_string(g_levelUps[0].level) + "." + (un.empty() ? "" : " Unlocked: " + un + "."));
+            g_levelUps.erase(g_levelUps.begin());
+        }
+        cur = g_levelUps.front(); g_levelUps.erase(g_levelUps.begin());
+        bannerT = 0.0f;
+        std::string un = SkillUnlocksAt(cur.key, cur.level);
+        note(std::string("Congratulations! Your ") + SkillKeyLabel(cur.key) + " level is now " + std::to_string(cur.level) + "." + (un.empty() ? "" : " Unlocked: " + un + "."));
+        PlaySfx(cur.level >= 99 ? SfxId::Victory : SfxId::Quest);
+    }
+    if (bannerT < 0.0f) return;
+    bannerT += dt;
+    const float dur = cur.level >= 99 ? 5.0f : 3.4f;
+    if (bannerT > dur) { bannerT = -1.0f; return; }
+    float a = std::min(1.0f, bannerT / 0.2f) * std::clamp((dur - bannerT) / 0.5f, 0.0f, 1.0f);
+    // fireworks over the hero (the follow camera keeps them near the middle of the view)
+    if (play) {
+        Vector2 c = { screenW * 0.5f, 430.0f };
+        for (int i = 0; i < 26; i++) {
+            float ang = i * 0.2417f * 6.2832f / 1.519f, sp = 60.0f + 50.0f * (i % 3);
+            float tt = std::min(bannerT, 1.2f);
+            Vector2 p = { c.x + cosf(ang) * sp * tt, c.y - 30.0f + sinf(ang) * sp * tt - 40.0f * tt + 30.0f * tt * tt };
+            Color pc = (i % 3 == 0) ? Color{ 255, 220, 90, 255 } : (i % 3 == 1) ? Color{ 255, 140, 60, 255 } : Color{ 250, 250, 220, 255 };
+            DrawCircleV(p, 3.0f - std::min(2.0f, bannerT * 1.5f), Fade(pc, std::clamp(1.4f - bannerT, 0.0f, 1.0f)));
+        }
+    }
+    std::string l1 = cur.level >= 99 ? "MASTERED!" : "LEVEL UP!";
+    std::string l2 = std::string(SkillKeyLabel(cur.key)) + " level " + std::to_string(cur.level);
+    std::string un = SkillUnlocksAt(cur.key, cur.level);
+    std::string l3 = cur.level >= 99 ? "Grandmaster - the highest level there is." : (un.empty() ? "" : "Unlocked: " + un);
+    int w = std::max({ MeasureUIText(l1.c_str(), 28), MeasureUIText(l2.c_str(), 18), MeasureUIText(l3.c_str(), 14) }) + 44;
+    float pop = 1.0f + 0.12f * std::max(0.0f, 1.0f - bannerT * 5.0f);
+    Rectangle r = { (screenW - w * pop) / 2.0f, 214.0f, w * pop, (l3.empty() ? 76.0f : 96.0f) };
+    DrawRectangleRounded(r, 0.2f, 8, Fade(Color{ 24, 16, 8, 255 }, 0.88f * a));
+    DrawRectangleRoundedLines(r, 0.2f, 8, Fade(Color{ 230, 180, 70, 255 }, a));
+    auto ctr = [&](const std::string& t, int fs, float yy, Color col) {
+        int tw = MeasureUIText(t.c_str(), fs);
+        DrawUIText(t.c_str(), (int)((screenW - tw) / 2), (int)yy, fs, Fade(col, a));
+    };
+    ctr(l1, 28, r.y + 8, Color{ 255, 214, 90, 255 });
+    ctr(l2, 18, r.y + 44, Color{ 250, 240, 220, 255 });
+    if (!l3.empty()) ctr(l3, 14, r.y + 70, Color{ 170, 235, 140, 255 });
 }
 
 // ---------------------------------------------------------------------
@@ -36318,7 +36423,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     if (nw > rib.width - 12) { nameLine = s.characterName; nw = MeasureUIText(nameLine.c_str(), 15); }
     DrawUIText(nameLine.c_str(), (int)(rib.x + rib.width / 2 - nw / 2), (int)rib.y + 6, 15,
                s.characterName.empty() ? Fade(Color{ 90, 60, 34, 255 }, 0.6f) : Color{ 70, 40, 20, 255 });
-    std::string title = TitleFor(OverallSkill(s));
+    std::string title = TitleFor(OverallSkill(s)) + TextFormat("  -  Total level %d", TotalLevel(s));
     NotorietyTier tier = GetNotorietyTier(s);
     if (tier != NotorietyTier::Innocent) title += "  -  " + NotorietyTierLabel(tier);
     if (s.shaken > 0) title += TextFormat("  -  Shaken (%d)", s.shaken);
@@ -37068,6 +37173,7 @@ static void UpdateDrawFrame() {
         // screens above the belt and spell bar, on menus at the bottom - colored by
         // what it means. The old faint line at the very bottom hid under the spell bar.
         UpdateDrawToasts(state, screenW, screenH, IsPlayScreen(state.screen));
+        UpdateDrawLevelUps(state, screenW, screenH, IsPlayScreen(state.screen)); // (2026-09-29) RuneScape-style level-ups
         DrawNotorietyFooter(state, screenW, screenH);
 
 #ifndef __EMSCRIPTEN__
