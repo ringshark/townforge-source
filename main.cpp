@@ -1619,6 +1619,7 @@ struct GameState {
     bool optTapWalk = true;        // tap the ground to walk there
     bool optAlwaysDay = false;
     bool optClassicBody = false; // (2026-09-28) the dressable body kit instead of the sculpted hero
+    bool optOnline = true;       // (2026-09-29) multiplayer: see other players and chat (when a server is set up)
     bool optSfx = true, optMusic = true; // (2026-09-28) the audio pass
     bool optCalmMusic = true; float optMusicVol = 0.7f, optSfxVol = 1.0f; // (2026-09-29)     // (2026-09-28) keep the world in daylight - no real-clock night
     // Stat buffs (2026-09-27) - transient: Bless, Strength and Agility potions.
@@ -7310,6 +7311,7 @@ static void SaveGame(const GameState& s) {
         << "\noptTapWalk=" << (s.optTapWalk ? 1 : 0) << "\noptAlwaysDay=" << (s.optAlwaysDay ? 1 : 0) << "\noptClassicBody=" << (s.optClassicBody ? 1 : 0)
         << "\noptSfx=" << (s.optSfx ? 1 : 0) << "\noptMusic=" << (s.optMusic ? 1 : 0) << "\n";
     out << "optCalmMusic=" << (s.optCalmMusic ? 1 : 0) << "\noptMusicVol=" << s.optMusicVol << "\noptSfxVol=" << s.optSfxVol << "\n";
+    out << "optOnline=" << (s.optOnline ? 1 : 0) << "\n"; // (2026-09-29) multiplayer
     { // random bosses (2026-09-29)
         out << "dungeonBossRare=";
         for (size_t i = 0; i < s.dungeonBossRare.size(); i++) out << (i ? "," : "") << s.dungeonBossRare[i];
@@ -7632,6 +7634,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "optTapWalk") s.optTapWalk = std::atoi(val.c_str()) != 0;
         else if (key == "optAlwaysDay") s.optAlwaysDay = std::atoi(val.c_str()) != 0;
         else if (key == "optClassicBody") s.optClassicBody = std::atoi(val.c_str()) != 0;
+        else if (key == "optOnline") s.optOnline = std::atoi(val.c_str()) != 0;
         else if (key == "optSfx") s.optSfx = std::atoi(val.c_str()) != 0;
         else if (key == "optMusic") s.optMusic = std::atoi(val.c_str()) != 0;
         else if (key == "optCalmMusic") s.optCalmMusic = std::atoi(val.c_str()) != 0;
@@ -14582,6 +14585,133 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
     return DrawHuman(trackId, x, z, yawRad, 1.0f, tint, outfit, hp, shadowPass);
 }
 
+// ---- Multiplayer, phase 1 (2026-09-29): presence + chat ------------------------------
+// Other players in your zone (the wilds, or one town) walk around on the same
+// sculpted hero body you do, wearing their own look, with a name over their head
+// and chat bubbles. web/mpnet.js holds the socket; this side sends where you are
+// and draws everyone else. Off until web/mp-config.js names a server.
+#ifdef __EMSCRIPTEN__
+EM_JS(int, JS_MpConfigured, (), { return (window.TFMp && TFMp.configured()) ? 1 : 0; });
+EM_JS(void, JS_MpZone, (const char* z, const char* name, const char* look), {
+    if (window.TFMp) TFMp.zone(UTF8ToString(z), UTF8ToString(name), UTF8ToString(look));
+});
+EM_JS(void, JS_MpPos, (float x, float z, float yaw, int mv), { if (window.TFMp) TFMp.pos(x, z, yaw, mv); });
+EM_JS(void, JS_MpChat, (const char* t), { if (window.TFMp) TFMp.chat(UTF8ToString(t)); });
+EM_JS(int, JS_MpState, (char* out, int len), {
+    if (!window.TFMp) return 0;
+    var s = TFMp.state();
+    stringToUTF8(s, out, len);
+    return lengthBytesUTF8(s);
+});
+#else
+static int JS_MpConfigured() { return 0; }
+static void JS_MpZone(const char*, const char*, const char*) {}
+static void JS_MpPos(float, float, float, int) {}
+static void JS_MpChat(const char*) {}
+static int JS_MpState(char*, int) { return 0; }
+#endif
+struct MpPlayer {
+    std::string id, name, look;
+    Vector2 pos{}, target{};
+    float yaw = 0.0f, yawT = 0.0f;
+    bool moving = false, seen = false;
+    std::string say; float sayT = 0.0f;
+    int slot = 0;
+};
+static std::vector<MpPlayer> g_mp;             // everyone else in your zone
+static int g_mpStatus = 0, g_mpCount = 0;      // 0 off, 1 connecting, 2 online; players here incl. you
+static std::string g_mpZone, g_mpMyId, g_mpMySay;
+static float g_mpMySayT = 0.0f;
+static const int kMpSlots = 20, kT3CTrackMp = 210; // animation tracks 210..229
+static bool MpOn(const GameState& s) { return s.optOnline && JS_MpConfigured(); }
+static std::string MpZoneFor(const GameState& s) {
+    if (!MpOn(s)) return "";
+    if (s.screen == Screen::Wilderness) return "wild";
+    if (s.screen == Screen::Town) return "town" + std::to_string(s.selectedTown);
+    if (s.screen == Screen::Hunt) return ""; // a dungeon: nobody else is in yours (yet)
+    return g_mpZone; // a menu over the world: stay where you were
+}
+// What others need to draw you: hero look | fighting style | weapon | sculpted weapon | shield | sculpted shield | 3 dyes.
+static std::string MpLookFor(const GameState& s) {
+    HumanOutfit o = HumanOutfitFor(s.equipped);
+    const char* look = HeroLookFor(s);
+    auto hex = [](const std::optional<Item>& it) {
+        if (!it) return std::string("-");
+        Color c = ColorBrightness(ClothColor(*it), 0.12f);
+        return std::string(TextFormat("%02x%02x%02x", c.r, c.g, c.b));
+    };
+    const Equipment& e = s.equipped;
+    std::string cloak = hex(e.robe ? e.robe : e.cloak), shirt = hex(e.robe ? e.robe : e.shirt), pants = hex(e.robe ? e.robe : e.pants);
+    return std::string(look ? look : "hero") + TextFormat(",%d,%d,%d,%d,%d,", o.style, o.weapon, o.meshWeapon, o.shield ? 1 : 0, o.meshShield ? 1 : 0) +
+           cloak + "," + shirt + "," + pants;
+}
+static void MpSplit(const std::string& s, char sep, std::vector<std::string>& out) {
+    out.clear(); std::string cur;
+    for (char ch : s) { if (ch == sep) { out.push_back(cur); cur.clear(); } else cur += ch; }
+    out.push_back(cur);
+}
+static void MpSay(GameState& s, const std::string& name, const std::string& text); // toast + journal (with the HUD)
+static void MpTick(GameState& s) {
+    float dt = std::min(GetFrameTime(), 0.1f);
+    std::string zone = MpZoneFor(s);
+    std::string name = s.characterName.empty() ? "Adventurer" : s.characterName;
+    JS_MpZone(zone.c_str(), name.c_str(), zone.empty() ? "" : MpLookFor(s).c_str());
+    if (zone != g_mpZone) { g_mp.clear(); g_mpZone = zone; }
+    if (zone.empty()) { g_mpStatus = 0; g_mpCount = 0; return; }
+    // where you are
+    bool wild = zone == "wild";
+    Vector2 me = wild ? s.wildernessPlayerPos : s.townPlayerPos;
+    static Vector2 lastMe{ -1e9f, -1e9f };
+    bool moving = hypotf(me.x - lastMe.x, me.y - lastMe.y) > 0.5f && hypotf(me.x - lastMe.x, me.y - lastMe.y) < 300.0f;
+    lastMe = me;
+    if (s.screen == Screen::Wilderness || s.screen == Screen::Town)
+        JS_MpPos(me.x, me.y, atan2f(s.playerFacing.y, s.playerFacing.x), moving ? 1 : 0);
+    // everyone else
+    static char buf[16384];
+    int n = JS_MpState(buf, (int)sizeof(buf));
+    if (n <= 0) return;
+    std::vector<std::string> lines, f;
+    MpSplit(std::string(buf, (size_t)std::min(n, (int)sizeof(buf) - 1)), '\n', lines);
+    for (auto& p : g_mp) p.seen = false;
+    for (const std::string& ln : lines) {
+        if (ln.rfind("st=", 0) == 0) {
+            MpSplit(ln.substr(3), '|', f);
+            if (f.size() >= 3) { g_mpStatus = std::atoi(f[0].c_str()); g_mpCount = std::atoi(f[1].c_str()); g_mpMyId = f[2]; }
+        } else if (ln.rfind("p=", 0) == 0) {
+            MpSplit(ln.substr(2), '|', f);
+            if (f.size() < 7) continue;
+            MpPlayer* p = nullptr;
+            for (auto& q : g_mp) if (q.id == f[0]) { p = &q; break; }
+            Vector2 at = { (float)std::atof(f[3].c_str()), (float)std::atof(f[4].c_str()) };
+            if (!p) {
+                if ((int)g_mp.size() >= kMpSlots) continue;
+                MpPlayer np; np.id = f[0]; np.pos = at;
+                bool used[kMpSlots] = {};
+                for (auto& q : g_mp) used[q.slot] = true;
+                while (np.slot < kMpSlots - 1 && used[np.slot]) np.slot++;
+                g_mp.push_back(np); p = &g_mp.back();
+            }
+            p->name = f[1]; p->look = f[2]; p->target = at;
+            p->yawT = (float)std::atof(f[5].c_str()); p->moving = f[6] == "1"; p->seen = true;
+        } else if (ln.rfind("c=", 0) == 0) {
+            MpSplit(ln.substr(2), '|', f);
+            if (f.size() < 3) continue;
+            if (f[0] == g_mpMyId) { g_mpMySay = f[2]; g_mpMySayT = 7.0f; }
+            for (auto& q : g_mp) if (q.id == f[0]) { q.say = f[2]; q.sayT = 7.0f; }
+            MpSay(s, f[1], f[2]);
+        }
+    }
+    g_mp.erase(std::remove_if(g_mp.begin(), g_mp.end(), [](const MpPlayer& p) { return !p.seen; }), g_mp.end());
+    for (auto& p : g_mp) { // glide toward the last reported spot; jump if they teleported
+        float d = hypotf(p.target.x - p.pos.x, p.target.y - p.pos.y);
+        if (d > 600.0f) p.pos = p.target;
+        else { float k = std::min(1.0f, dt * 8.0f); p.pos.x += (p.target.x - p.pos.x) * k; p.pos.y += (p.target.y - p.pos.y) * k; }
+        float dy = atan2f(sinf(p.yawT - p.yaw), cosf(p.yawT - p.yaw));
+        p.yaw += dy * std::min(1.0f, dt * 10.0f);
+        if (p.sayT > 0.0f) p.sayT -= dt;
+    }
+    if (g_mpMySayT > 0.0f) g_mpMySayT -= dt;
+}
 // Orbit-camera state for the 3D town view. File-statics (like g_scrollDragging),
 // not GameState - purely transient view state, never saved.
 // g_t3dYaw/Pitch/Dist are the *targets* written by input; the smoothed copies
@@ -14777,6 +14907,66 @@ static bool Town3DProject(const Town3DCam& c, Vector3 p, Vector2* out) {
     out->y = c.vh * 0.5f - (yc / (zc * tanF)) * c.vh * 0.5f;
     return true;
 }
+
+// (multiplayer, with the rest of it above DrawPlayerHuman's neighbours)
+static Color MpHex(const std::string& h, bool* ok) {
+    *ok = h.size() == 6;
+    if (!*ok) return WHITE;
+    unsigned v = (unsigned)strtoul(h.c_str(), nullptr, 16);
+    return Color{ (unsigned char)(v >> 16), (unsigned char)(v >> 8), (unsigned char)v, 255 };
+}
+// Everyone else in this zone, on the hero body. zoneKey: "wild" or "town<n>".
+static void MpDraw3D(const std::string& zoneKey, bool shadowPass, const Town3DCam* cull) {
+    if (g_mpZone != zoneKey || g_mp.empty()) return;
+    HumanEnsure();
+    std::vector<std::string> f;
+    for (const MpPlayer& p : g_mp) {
+        if (cull && hypotf(cull->pos.x - p.pos.x, cull->pos.z - p.pos.y) > 3000.0f) continue;
+        MpSplit(p.look, ',', f);
+        while (f.size() < 9) f.push_back("");
+        int track = kT3CTrackMp + p.slot;
+        SkinPose sp;
+        sp.speed = T3CSpeedTrack(track, p.pos.x, p.pos.y, !shadowPass);
+        sp.move = p.moving || sp.speed > 20.0f ? std::min(1.0f, sp.speed / 140.0f + 0.3f) : 0.0f;
+        HumanOutfit held;
+        held.style = std::atoi(f[1].c_str()); held.weapon = std::atoi(f[2].c_str());
+        held.meshWeapon = f[3].empty() ? -1 : std::atoi(f[3].c_str());
+        held.shield = f[4] == "1"; held.meshShield = f[5] == "1";
+        sp.style = held.style;
+        SkinDye dye; bool ok;
+        for (int k = 0; k < 3; k++) { Color c = MpHex(f[6 + k], &ok); if (ok) dye.c[1 + k] = c; }
+        int heroId = kScHero;
+        if (f[0] != "hero" && !f[0].empty()) { int id = SkinCharFor(f[0].c_str()); if (SkinCharGet(id)) heroId = id; }
+        DrawSkinChar(heroId, track, p.pos.x, p.pos.y, p.yaw, 66.0f, WHITE, sp, shadowPass, &held, 0.0f, heroId == kScHero ? &dye : nullptr);
+    }
+}
+// Names over heads (UO's blue for fellow players) and chat bubbles.
+static void MpDrawLabels(const GameState& s, const Town3DCam& c, bool wild, int screenW, int screenH) {
+    if (g_mpZone.empty()) return;
+    auto bubble = [&](Vector2 w, const std::string& text, float t) {
+        Vector2 sp;
+        if (!Town3DProject(c, { w.x, (wild ? GroundY(w.x, w.y) : 0.0f) + 104.0f, w.y }, &sp)) return;
+        if (sp.x < -80 || sp.x > screenW + 80 || sp.y < 90 || sp.y > screenH) return;
+        float a = std::clamp(t, 0.0f, 1.0f);
+        std::string tx = text.size() > 60 ? text.substr(0, 57) + "..." : text;
+        int tw = MeasureUIText(tx.c_str(), 12);
+        Rectangle r = { sp.x - tw / 2.0f - 7, sp.y - 26, tw + 14.0f, 20 };
+        DrawRectangleRounded(r, 0.4f, 6, Fade(Color{ 250, 246, 232, 255 }, 0.92f * a));
+        DrawTriangle({ sp.x - 5, r.y + r.height }, { sp.x, r.y + r.height + 6 }, { sp.x + 5, r.y + r.height }, Fade(Color{ 250, 246, 232, 255 }, 0.92f * a));
+        DrawUIText(tx.c_str(), (int)(r.x + 7), (int)r.y + 4, 12, Fade(Color{ 40, 30, 20, 255 }, a));
+    };
+    for (const MpPlayer& p : g_mp) {
+        Vector2 sp;
+        if (!Town3DProject(c, { p.pos.x, (wild ? GroundY(p.pos.x, p.pos.y) : 0.0f) + 84.0f, p.pos.y }, &sp)) continue;
+        if (sp.x < -60 || sp.x > screenW + 60 || sp.y < 90 || sp.y > screenH) continue;
+        int tw = MeasureUIText(p.name.c_str(), 12);
+        DrawRectangle((int)sp.x - tw / 2 - 4, (int)sp.y - 14, tw + 8, 16, Fade(BLACK, 0.45f));
+        DrawUIText(p.name.c_str(), (int)sp.x - tw / 2, (int)sp.y - 13, 12, Color{ 110, 170, 255, 255 });
+        if (p.sayT > 0.0f && !p.say.empty()) bubble(p.pos, p.say, p.sayT);
+    }
+    if (g_mpMySayT > 0.0f && !g_mpMySay.empty()) bubble(wild ? s.wildernessPlayerPos : s.townPlayerPos, g_mpMySay, g_mpMySayT);
+}
+
 
 static float Town3DBuildingHeight(const std::string& key) {
     // Model-based heights (Quaternius Medieval Village MegaKit assemblies, 2026-09-24):
@@ -17091,6 +17281,7 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
                         Color{ 70, 130, 220, 255 }, Color{ 50, 55, 70, 255 },
                         Color{ 240, 210, 180, 255 }, pa, shadowPass);
     }
+    MpDraw3D("town" + std::to_string(s.selectedTown), shadowPass, nullptr); // other players here (2026-09-29)
     const auto& activeNPCs = ActiveTownNPCs(s.selectedTown);
     for (int i = 0; i < (int)activeNPCs.size(); i++) {
         Vector2 np = TownNPCLivePos(i, s.worldTime, s.selectedTown);
@@ -17381,6 +17572,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     }
     EndMode3D();
     T3DDrawVignette();
+    MpDrawLabels(s, c, false, screenW, screenH); // other players' names and chat (2026-09-29)
 
     // --- 2D overlay: building labels projected from 3D, interaction prompt, hints ---
     // Labels fade and shrink as the camera pulls back (tuning constants below),
@@ -21946,6 +22138,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
         }
     }
     DrawGuildRecruits(s, shadowPass); // guildmates (2026-09-27)
+    MpDraw3D("wild", shadowPass, cull); // other players out here (2026-09-29)
     // Player, same humanoid kit as the town 3D view - shrinks during the death
     // animation, ghostly-translucent while a ghost.
     {
@@ -22340,6 +22533,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
                 tagAt(s.guildLive[i].pos, 70.0f, "[" + s.guildTag + "] " + s.guildRecruits[i].name);
     }
 
+    MpDrawLabels(s, c, true, screenW, screenH); // other players' names and chat (2026-09-29)
     // --- 2D overlay: gate/entrance labels (distance-faded like the town's) ---
     {
         const float fadeNear = 1200.0f, fadeFar = 2400.0f;
@@ -35781,6 +35975,7 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     slider("Sound volume", s.optSfxVol);
     toggle("Always daytime", "Keep the world in daylight instead of following your real clock.", s.optAlwaysDay);
     toggle("Classic body", "Play as the dressable body that shows your armor, clothing and dyes, instead of the sculpted hero.", s.optClassicBody);
+    toggle("Play online", "See other players in town and the wilds, and chat with them.", s.optOnline);
     toggle("Auto-restock reagents", "Top up to 30 reagents whenever you enter a town (1 gold each).", s.autoReagents);
     y += 6;
     DrawUIText("Alerts you turn off still go in your journal (LOG).", (int)x, (int)y, 12, soft);
@@ -36627,6 +36822,27 @@ static void DrawDirectionsHud(GameState& s, int screenW) {
     if (UOTapped(xb)) { dismissedStage = stage; PlaySfx(SfxId::Click); }
 }
 
+// ---- Multiplayer chat (2026-09-29) ----
+static void MpSay(GameState& s, const std::string& name, const std::string& text) {
+    Journal(s, name + ": " + text); // the journal keeps it, and it pops up as a toast
+}
+// A Chat button beside MENU on the world screens while you're online, with how many are here.
+static void MpDrawChatButton(GameState& s) {
+    if (g_mpZone.empty() || !(s.screen == Screen::Wilderness || s.screen == Screen::Town)) return;
+    const char* lbl = g_mpStatus == 2 ? TextFormat("Chat (%d here)", g_mpCount) : "Connecting...";
+    if (Button({ 134, 58, 132, 36 }, lbl, g_mpStatus == 2)) {
+        PlaySfx(SfxId::Click);
+#ifdef __EMSCRIPTEN__
+        static char buf[512];
+        if (TF_PromptText("Say something (everyone nearby hears it):", "", buf, (int)sizeof(buf))) {
+            std::string t;
+            for (const char* p = buf; *p && t.size() < 140; p++) if ((unsigned char)*p >= 32) t += *p;
+            if (!t.empty()) JS_MpChat(t.c_str());
+        }
+#endif
+    }
+}
+
 // ---- Toasts (2026-09-27) ----
 struct Toast { std::string text; float t = 0.0f, dur = 4.5f; Color col{}; };
 static std::vector<Toast> g_toasts;
@@ -37172,6 +37388,8 @@ static void UpdateDrawFrame() {
         // Messages (2026-09-27): every new log line pops up as a toast - on the world
         // screens above the belt and spell bar, on menus at the bottom - colored by
         // what it means. The old faint line at the very bottom hid under the spell bar.
+        MpTick(state);           // (2026-09-29) multiplayer: send where you are, hear everyone else
+        MpDrawChatButton(state); // and the Chat button, when you're online
         UpdateDrawToasts(state, screenW, screenH, IsPlayScreen(state.screen));
         UpdateDrawLevelUps(state, screenW, screenH, IsPlayScreen(state.screen)); // (2026-09-29) RuneScape-style level-ups
         DrawNotorietyFooter(state, screenW, screenH);

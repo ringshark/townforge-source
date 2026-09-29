@@ -1,0 +1,16 @@
+name = "townforge-mp"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Only the game's own site may open a connection (plus local testing).
+[vars]
+ALLOWED_ORIGINS = "https://ringshark.github.io,http://localhost:8080,http://127.0.0.1:8080"
+
+[[durable_objects.bindings]]
+name = "ZONES"
+class_name = "Zone"
+
+# SQLite-backed classes are the ones the free Workers plan allows.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Zone"]
