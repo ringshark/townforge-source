@@ -8134,6 +8134,38 @@ static void SellFromBackpack(GameState& s, int backpackIdx) {
     s.logLine = "Sold " + item.name + " for " + std::to_string(value) + " gold.";
 }
 
+// Recycling returns half the original recipe materials; quality and enchantments
+// never increase recovery. Only backpack gear can be consumed.
+struct GearRecovery { Resource resource = Resource::None; int amount = 0; };
+static GearRecovery RecoveryFor(const Item& item) {
+    GearRecovery result;
+    if (item.type != ItemType::Weapon && item.type != ItemType::Armor) return result;
+    size_t longest = 0;
+    for (const BuildingDef& b : kCraftBuildings) for (const Recipe& r : b.recipes) {
+        if (r.type != item.type || r.category != item.category || r.slot != item.slot) continue;
+        size_t n = r.name.size();
+        if (n <= longest || item.name.size() < n) continue;
+        size_t start = item.name.size() - n;
+        if (item.name.compare(start, n, r.name) != 0 || (start && item.name[start - 1] != ' ')) continue;
+        longest = n;
+        result = { b.resource, r.cost / 2 };
+    }
+    return result;
+}
+static const char* RecoveryMaterial(Resource r) {
+    return r == Resource::Ore ? "ore" : r == Resource::Wood ? "wood" : "leather";
+}
+static void RecycleFromBackpack(GameState& s, int index) {
+    if (index < 0 || index >= (int)s.backpack.size()) return;
+    const Item item = s.backpack[index];
+    GearRecovery recovery = RecoveryFor(item);
+    if (recovery.amount <= 0 || recovery.resource == Resource::None) return;
+    int* pool = recovery.resource == Resource::Ore ? &s.ore : recovery.resource == Resource::Wood ? &s.wood : &s.leather;
+    *pool += recovery.amount;
+    s.backpack.erase(s.backpack.begin() + index);
+    s.logLine = "Recycled " + item.name + " into " + std::to_string(recovery.amount) + " " + RecoveryMaterial(recovery.resource) + ".";
+}
+
 // JS skinCorpse(): yield scales from 50% to 200% of the corpse's base leather as
 // Skinning goes from 0 to 100 (live UO's Forensic Evaluation formula). Gold sat on
 // the corpse since the kill (see the combat-win code above) and is only collected now.
@@ -13199,7 +13231,7 @@ static HumanOutfit HumanOutfitFor(const Equipment& e) {
                 bool ranger = e.shirt->name.find("Tunic") != std::string::npos;
                 use(ranger ? kOpRangerBody : kOpPeasantBody, tintOf(*e.shirt));
                 o.hideRegions |= (1u << kHrChest) | (1u << kHrBelt) | (1u << kHrSkirt);
-                if (!e.arms) { use(ranger ? kOpRangerArms : kOpPeasantArms, tintOf(*e.shirt)); o.hideRegions |= (1u << kHrSleeve) | (1u << kHrForearm); }
+                // Keep sleeves on the native rig; imported arm pieces contain incompatible hands.
             }
             const ClothDef* pd = e.pants ? ClothDefFor(*e.pants) : nullptr;
             if (e.pants && !e.legs && !(pd && pd->style == kClKilt)) { use(kOpPeasantLegs, tintOf(*e.pants)); o.hideRegions |= 1u << kHrLegs; }
@@ -33633,11 +33665,40 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
     // TryBuyPremadeItem/TryBuyPremadePotion. Reuses `b`/`isAlchemy` just resolved above.
     {
         int mode = s.craftModeTab;
-        if (s.craftBuildingTab == 2) DrawPillTabs({ "Craft", "Buy", "Commissions", "Dye" }, &mode, 20, (float)y, 26); // the Tailor dyes (2026-09-27)
-        else { DrawPillTabs({ "Craft", "Buy", "Commissions" }, &mode, 20, (float)y, 26); if (mode > 2) mode = 0; }
+        if (s.craftBuildingTab == 2) DrawPillTabs({ "Craft", "Buy", "Commissions", "Dye", "Sell / Recycle" }, &mode, 20, (float)y, 26); // the Tailor dyes (2026-09-27)
+        else { int shown = mode == 4 ? 3 : mode; if (shown > 3) shown = 0; DrawPillTabs({ "Craft", "Buy", "Commissions", "Sell / Recycle" }, &shown, 20, (float)y, 26); mode = shown == 3 ? 4 : shown; }
         s.craftModeTab = mode;
     }
     y += 34;
+    if (s.craftModeTab == 4) {
+        DrawInfoLine(TextFormat("Gold: %d   Ore: %d   Wood: %d   Leather: %d", s.gold, s.ore, s.wood, s.leather), 20, y, 13, kColorAccent);
+        y += 22;
+        DrawUIText("Backpack gear only. Recycling consumes the item and returns 50% of its recipe materials.", 20, y, 12, kColorText);
+        y += 24;
+        const int top = y, height = std::max(0, screenH - top - 40);
+        int count = 0;
+        for (const Item& it : s.backpack) if (it.type == ItemType::Weapon || it.type == ItemType::Armor) ++count;
+        s.backpackScroll -= ScrollDelta({ 0, (float)top, (float)screenW, (float)height });
+        s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, std::max(0.0f, count * 52.0f - height));
+        BeginScissorMode(0, top, screenW, height);
+        if (!count) DrawUIText("No armor or weapons in your backpack. Unequip worn gear in Me first.", 20, top + 4, 12, DARKGRAY);
+        int row = 0;
+        for (size_t i = 0; i < s.backpack.size(); ++i) {
+            const Item item = s.backpack[i];
+            if (item.type != ItemType::Weapon && item.type != ItemType::Armor) continue;
+            float rowY = top + row++ * 52.0f - s.backpackScroll;
+            if (rowY < top - 52 || rowY > top + height) continue;
+            DrawItemIcon(item, 20, rowY + 1, 20);
+            DrawUIText(item.name.c_str(), 44, (int)rowY + 4, 12, kColorText);
+            int value = std::max(1, (int)std::round(item.power * 2.0f)) + 80 * (item.bStr + item.bDex + item.bInt);
+            GearRecovery recovery = RecoveryFor(item);
+            if (Button({ 44, rowY + 24, 110, 22 }, TextFormat("Sell (%dg)", value), true)) { SellFromBackpack(s, (int)i); break; }
+            std::string label = recovery.amount > 0 ? "Recycle (+" + std::to_string(recovery.amount) + " " + RecoveryMaterial(recovery.resource) + ")" : "Cannot recycle";
+            if (Button({ 164, rowY + 24, 170, 22 }, label, recovery.amount > 0)) { RecycleFromBackpack(s, (int)i); break; }
+        }
+        EndScissorMode();
+        return;
+    }
     if (s.craftModeTab == 3 && s.craftBuildingTab == 2) { DrawDyeTub(s, y, screenW, screenH); return; }
     if (s.craftModeTab == 2) { DrawCommissions(s, y, screenW, screenH); return; }
     if (s.craftModeTab == 1) {
@@ -33796,7 +33857,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
         if (rowY < backpackTop - 28 || rowY > backpackTop + backpackHeight) continue;
         DrawItemIcon(item, 20, rowY + 1, 20);
         DrawUIText(item.name.c_str(), 44, (int)rowY + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 180), rowY, 80, 22 }, "Equip", true)) EquipFromBackpack(s, (int)i);
+        if (Button({ (float)(screenW - 180), rowY, 80, 22 }, "Equip", true)) { EquipFromBackpack(s, (int)i); break; }
         if (Button({ (float)(screenW - 90), rowY, 70, 22 }, "Sell", true)) SellFromBackpack(s, (int)i);
     }
     EndScissorMode();
@@ -33987,7 +34048,7 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
         if (rowY < backpackTop - 28 || rowY > backpackTop + backpackHeight) continue;
         DrawItemIcon(item, 20, rowY + 1, 20);
         DrawUIText(item.name.c_str(), 44, (int)rowY + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 180), rowY, 80, 22 }, "Equip", true)) EquipFromBackpack(s, (int)i);
+        if (Button({ (float)(screenW - 180), rowY, 80, 22 }, "Equip", true)) { EquipFromBackpack(s, (int)i); break; }
         if (Button({ (float)(screenW - 90), rowY, 70, 22 }, "Sell", true)) SellFromBackpack(s, (int)i);
     }
     EndScissorMode();
@@ -34049,7 +34110,7 @@ static void DrawFurTraderScreen(GameState& s, int screenW, int screenH) {
         if (rowY < backpackTop - 28 || rowY > backpackTop + backpackHeight) continue;
         DrawItemIcon(item, 20, rowY + 1, 20);
         DrawUIText(item.name.c_str(), 44, (int)rowY + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 180), rowY, 80, 22 }, "Equip", true)) EquipFromBackpack(s, (int)i);
+        if (Button({ (float)(screenW - 180), rowY, 80, 22 }, "Equip", true)) { EquipFromBackpack(s, (int)i); break; }
         if (Button({ (float)(screenW - 90), rowY, 70, 22 }, "Sell", true)) SellFromBackpack(s, (int)i);
     }
     EndScissorMode();
