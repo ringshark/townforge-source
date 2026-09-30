@@ -26,7 +26,8 @@ void main()
     vec3 p = vertexPosition;
     vec4 w = matModel * vec4(p, 1.0);
     float scale = max(length(vec3(matModel[0])), 0.0001);
-    float h = max(w.y - 10.0, 0.0);
+    // Height relative to the instance base keeps hillside trunks planted.
+    float h = max(w.y - matModel[3].y - 10.0, 0.0);
     float ph = matModel[3].x * 0.031 + matModel[3].z * 0.047; // per-instance phase from its position
     float gust = 0.6 + 0.4 * sin(time * 0.35 + ph * 0.2);
     float amt = h * h * 0.00032 * gust * (sin(time * 1.3 + ph) + 0.35 * sin(time * 2.9 + ph * 1.7 + w.y * 0.05));
