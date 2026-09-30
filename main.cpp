@@ -593,7 +593,7 @@ static Vector2 FortP(float dx, float dz) { return { kOrcFortPos.x + dx, kOrcFort
 static const Vector2 kWyrmLair = WP(2720, 2860);
 static const float kWyrmLairR = 420.0f; // (2026-09-29) was 270 - a cramped pit for a 150-unit wyrm
 static const int kWyrmIcon = 11;
-static const float kWyrmMaxHp = 3000.0f;
+static const float kWyrmMaxHp = 5000.0f; // (2026-09-30) was 3000
 static const float kOrcFortGateYaw = -2.8253f; // toward (1250, 2700)
 
 struct HousePlot { Vector2 pos; int cells; int price; const char* name; RegionId region; };
@@ -4812,10 +4812,24 @@ static int PetFollowerCost(const Pet& p) {
     for (const auto& c : kWildCreatures) if (c.name == p.name) { d = c.isApex ? 999 : c.difficulty; break; }
     return d >= 999 ? 5 : d >= 90 ? 4 : d >= 70 ? 3 : d >= 40 ? 2 : 1;
 }
+// (2026-09-30) Everyone who fights beside you shares the same five slots, as in UO:
+// pets by their size, warband guildmates 2 each (UO's hirelings), a raised
+// bonewalker 1 and a glacier wight 2, the summoned fiend 3.
+static const int kRecruitFollowerCost = 2, kFiendFollowerCost = 3;
+static int MinionFollowerCost(int kind) { return kind == 0 ? 1 : 2; }
 static int FollowersUsed(const GameState& s) {
     int n = 0;
     for (const auto& p : s.pets) if (p.active) n += PetFollowerCost(p);
+    for (const auto& r : s.guildRecruits) if (r.along) n += kRecruitFollowerCost;
+    for (const auto& m : s.minions) n += MinionFollowerCost(m.kind);
+    if (s.fiendT > 0.0f) n += kFiendFollowerCost;
     return n;
+}
+// A save from before the shared slots may carry more than five: the warband goes
+// home first, then pets stay behind, until everyone left fits.
+static void FitFollowers(GameState& s) {
+    for (int i = (int)s.guildRecruits.size() - 1; i >= 0 && FollowersUsed(s) > kFollowerSlots; i--) s.guildRecruits[(size_t)i].along = false;
+    for (int i = (int)s.pets.size() - 1; i >= 0 && FollowersUsed(s) > kFollowerSlots; i--) s.pets[(size_t)i].active = false;
 }
 static std::vector<Pet*> ActivePets(GameState& s) {
     std::vector<Pet*> v;
@@ -5970,7 +5984,7 @@ static void StartCombat(GameState& s, int dungeonIdx, const DungeonMonster& mons
     CombatState c;
     c.dungeonIdx = dungeonIdx;
     c.monster = monster;
-    c.monsterMaxHP = std::max(1, (int)std::round(monster.level * 3.0f)); // JS: monsterMaxHP()
+    c.monsterMaxHP = std::max(1, (int)std::round(monster.level * 6.0f)); // JS: monsterMaxHP() (2026-09-30: x2, as in the live fights)
     if (monster.isMurderer) c.monsterMaxHP = std::max(c.monsterMaxHP, (int)std::round(MurderIncMaxHp(s, (float)monster.level, 0))); // (2026-09-29) road ambushers
     c.monsterHP = c.monsterMaxHP;
     c.Log("You engage the " + monster.name + "!");
@@ -7817,6 +7831,7 @@ static bool LoadGame(GameState& s) {
         s.logLine = "You wake in Emberhold, whole once more.";
     }
     if (!clothesInit) DressStarterClothes(s.equipped);
+    FitFollowers(s); // (2026-09-30) everyone who follows you shares five slots now
     if (fabsf(wildSavedScale - kWS) > 0.01f) { // saved on a smaller map: scale the persisted positions out
         const float f = kWS / wildSavedScale;
         if (!GuildAbsent(s.rivalPos)) s.rivalPos = { s.rivalPos.x * f, s.rivalPos.y * f };
@@ -8539,9 +8554,21 @@ static const int kWyrmSpot = 29;
 static const int kBreakoutSpot = 30;
 static bool IsWyrmName(const std::string& n) { return n == "Tri-Wyrm"; }
 // Health for a spot's monster: level*3, except the world boss.
-static float WildSpotMaxHp(int idx) {
+// Monster health (2026-09-30: was 3 per level everywhere - a level 22 orc had 66 and
+// a dungeon boss ~120, so a party melted them). Regular monsters now carry 6 per
+// level; bosses 20 per level, and 20% more for every follower slot you bring
+// (a full five-slot party doubles it), so a warband can't steamroll a lair.
+static float MonsterMaxHp(const GameState& s, float level, bool boss) {
+    if (!boss) return std::max(1.0f, level * 6.0f);
+    return std::max(1.0f, level * 20.0f * (1.0f + 0.2f * (float)std::min(FollowersUsed(s), kFollowerSlots)));
+}
+static bool WildSpotIsBoss(int idx) {
     const WildernessMonsterSpot& sp = kWildernessMonsterSpots[(size_t)idx];
-    return sp.iconIdx == kWyrmIcon ? kWyrmMaxHp : std::max(1.0f, sp.level * 3.0f);
+    return sp.name == "Orc Warlord" || idx == kBreakoutSpot;
+}
+static float WildSpotMaxHp(const GameState& s, int idx) {
+    const WildernessMonsterSpot& sp = kWildernessMonsterSpots[(size_t)idx];
+    return sp.iconIdx == kWyrmIcon ? kWyrmMaxHp : MonsterMaxHp(s, (float)sp.level, WildSpotIsBoss(idx));
 }
 static const int kWildMonsterIconCount = 9; // iconIdx 0-4 classic, 5 Ice Wolf, 6 Frostbitten Husk, 7 Rock Golem, 8 Mountain Cat
 static_assert(kWildernessMonsterSpots.size() == kWildMonsterSpotCount,
@@ -26380,7 +26407,7 @@ static void OrcRaidStrike(GameState& s) {
         am.pos = { origin.x + n.x * side, origin.y + n.y * side };
         if (WildBlocked(am.pos)) am.pos = origin;
         am.spawnPos = am.pos;
-        am.maxHp = std::max(1.0f, kWildernessMonsterSpots[(size_t)band[k]].level * 3.0f);
+        am.maxHp = WildSpotMaxHp(s, band[k]);
         am.hp = am.maxHp;
         if (k == 0) s.wildEngaged = am; else s.wildExtraAttackers.push_back(am);
     }
@@ -26407,7 +26434,7 @@ static void WildPackAggro(GameState& s, int damagedSpotIdx, Vector2 center) {
         ex.bladeIdx = -1;
         ex.pos = WildernessMonsterLivePos((int)i, s.worldTime);
         ex.spawnPos = kWildernessMonsterSpots[i].pos;
-        ex.maxHp = std::max(1.0f, kWildernessMonsterSpots[i].level * 3.0f);
+        ex.maxHp = WildSpotMaxHp(s, (int)i);
         ex.hp = ex.maxHp;
         s.wildExtraAttackers.push_back(ex);
         joined++;
@@ -26434,7 +26461,7 @@ static void DungeonPackAggro(GameState& s, int dungeonIdx, int damagedMonsterIdx
         ex.isBoss = false;
         ex.pos = DungeonMonsterLivePos(dungeonIdx, i, s.worldTime);
         ex.spawnPos = DungeonMonsterNodePos(dungeonIdx, i);
-        ex.maxHp = std::max(1.0f, DungeonSlotMonster(dungeon, i).level * 3.0f);
+        ex.maxHp = MonsterMaxHp(s, (float)DungeonSlotMonster(dungeon, i).level, false);
         ex.hp = ex.maxHp;
         s.dungeonExtraAttackers.push_back(ex);
         joined++;
@@ -26675,7 +26702,7 @@ static void SettleStartRaid(GameState& s) {
                 am.pos = { origin.x + dir.x * back + n.x * side, origin.y + dir.y * back + n.y * side };
                 if (WildBlocked(am.pos)) am.pos = WildNearestFree(am.pos);
                 am.spawnPos = am.pos;
-                am.maxHp = std::max(1.0f, kWildernessMonsterSpots[(size_t)band[k]].level * 3.0f);
+                am.maxHp = WildSpotMaxHp(s, band[k]);
                 if (faction == 1) am.maxHp = std::max(am.maxHp, MurderIncMaxHp(s, (float)kWildernessMonsterSpots[(size_t)band[k]].level, 0)); // (2026-09-29) Murder Inc.'s cutthroats
                 am.hp = am.maxHp;
                 if (k == 0) s.wildEngaged = am; else s.wildExtraAttackers.push_back(am);
@@ -28006,7 +28033,7 @@ static void TreasureUnearth(GameState& s) {
                                  : Vector2{ m.spot.x + cosf(a) * 60.0f, m.spot.y + sinf(a) * 60.0f };
                 if (WildBlocked(am.pos)) am.pos = WildNearestFree(am.pos);
                 am.spawnPos = am.pos;
-                am.maxHp = WildSpotMaxHp(band[k]);
+                am.maxHp = WildSpotMaxHp(s, band[k]);
                 if (faction == 1) am.maxHp = std::max(am.maxHp, MurderIncMaxHp(s, (float)kWildernessMonsterSpots[(size_t)band[k]].level, 0)); // (2026-09-29) Murder Inc.'s cutthroats
                 am.hp = am.maxHp;
                 if (!s.wildEngaged.has_value()) s.wildEngaged = am; else s.wildExtraAttackers.push_back(am);
@@ -28041,7 +28068,7 @@ static void TreasureUnearth(GameState& s) {
         am.pos = { m.spot.x + cosf(a) * 120.0f, m.spot.y + sinf(a) * 120.0f };
         if (WildBlocked(am.pos)) am.pos = WildNearestFree(am.pos);
         am.spawnPos = am.pos;
-        am.maxHp = WildSpotMaxHp(g_tguards[k]);
+        am.maxHp = WildSpotMaxHp(s, g_tguards[k]);
         am.hp = am.maxHp;
         if (!s.wildEngaged.has_value()) s.wildEngaged = am; else s.wildExtraAttackers.push_back(am);
     }
@@ -28167,7 +28194,11 @@ static void NecroRaise(GameState& s, int zone, int kind, const std::string& note
             have++;
             if (oldest < 0 || s.minions[i].ttl < s.minions[(size_t)oldest].ttl) oldest = (int)i;
         }
-    if (have >= NecroMaxMinions(s, kind) && oldest >= 0) s.minions.erase(s.minions.begin() + oldest); // the oldest crumbles
+    int freed = (have >= NecroMaxMinions(s, kind) && oldest >= 0) ? MinionFollowerCost(kind) : 0;
+    if (FollowersUsed(s) - freed + MinionFollowerCost(kind) > kFollowerSlots) { // (2026-09-30) the shared follower slots
+        s.logLine = "You have too many followers to raise another." + note; return;
+    }
+    if (freed > 0) s.minions.erase(s.minions.begin() + oldest); // the oldest crumbles
     float n = EffectiveSkill(s, &GameState::necromancy);
     GameState::NecroMinion m;
     m.kind = kind; m.zone = zone; m.pos = c->pos;
@@ -28956,7 +28987,7 @@ static void BardProvoke(GameState& s) {
         am.spotIdx = other;
         am.pos = WildernessMonsterLivePos(other, s.worldTime);
         am.spawnPos = am.pos;
-        am.maxHp = WildSpotMaxHp(other); am.hp = am.maxHp;
+        am.maxHp = WildSpotMaxHp(s, other); am.hp = am.maxHp;
         s.wildExtraAttackers.push_back(am);
     }
     if (!BardPlay(s)) return;
@@ -29100,7 +29131,7 @@ static void TransferWildPrimary(GameState& s, int newSpotIdx) {
         newPrimary.bladeIdx = -1;
         newPrimary.pos = WildernessMonsterLivePos(newSpotIdx, s.worldTime);
         newPrimary.spawnPos = spot.pos;
-        newPrimary.maxHp = WildSpotMaxHp(newSpotIdx);
+        newPrimary.maxHp = WildSpotMaxHp(s, newSpotIdx);
         newPrimary.hp = (newSpotIdx == kWyrmSpot && s.wyrmHp > 0.0f) ? std::min(newPrimary.maxHp, s.wyrmHp) : newPrimary.maxHp;
     }
     if (hadPrimary) s.wildExtraAttackers.push_back(oldPrimary); // the old target keeps fighting
@@ -29144,7 +29175,7 @@ static void TransferDungeonPrimary(GameState& s, int dungeonIdx, int newMonsterI
         newPrimary.isBoss = newIsBoss;
         newPrimary.pos = DungeonMonsterLivePos(dungeonIdx, slot, s.worldTime);
         newPrimary.spawnPos = DungeonMonsterNodePos(dungeonIdx, slot);
-        newPrimary.maxHp = std::max(1.0f, m.level * 3.0f);
+        newPrimary.maxHp = MonsterMaxHp(s, (float)m.level, newIsBoss);
         newPrimary.hp = newPrimary.maxHp;
     }
     if (hadPrimary) s.dungeonExtraAttackers.push_back(oldPrimary);
@@ -29541,7 +29572,7 @@ static FlagTargetInfo GetFlagTargetInfo(const GameState& s, int zone) {
                 const auto& spot = kWildernessMonsterSpots[f.spotIdx];
                 if (const auto* ex = FindWildExtra(s, f.spotIdx))
                     return { spot.name, ex->hp, ex->maxHp, true };
-                float full = WildSpotMaxHp(f.spotIdx);
+                float full = WildSpotMaxHp(s, f.spotIdx);
                 return { spot.name, (f.spotIdx == kWyrmSpot && s.wyrmHp > 0.0f) ? s.wyrmHp : full, full, true };
             }
             if (f.isRival || (f.bladeIdx >= 0 && f.bladeIdx < kBladeCount)) { // its wounds carry over - show them
@@ -29566,7 +29597,7 @@ static FlagTargetInfo GetFlagTargetInfo(const GameState& s, int zone) {
             const DungeonMonster& m = f.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, f.monsterIdx);
             if (const auto* ex = FindDungeonExtra(s, f.monsterIdx, f.isBoss))
                 return { m.name, ex->hp, ex->maxHp, true };
-            float full = std::max(1.0f, m.level * 3.0f);
+            float full = MonsterMaxHp(s, (float)m.level, f.isBoss);
             return { m.name, full, full, true };
         }
     }
@@ -30166,6 +30197,8 @@ static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
     }
     if (spell.type == SpellType::Debuff) { CastLiveDebuffSpell(s, spellIdx, zone); return; }
     if (spellIdx == kSpCure && s.poisonT <= 0.0f) { s.logLine = "You aren't poisoned."; return; } // (2026-09-30) no mana wasted
+    if (spell.type == SpellType::Summon && spellIdx != kSpRaiseSkeleton && spellIdx != kSpSkeletalMage && s.fiendT <= 0.0f &&
+        FollowersUsed(s) + kFiendFollowerCost > kFollowerSlots) { s.logLine = "You have too many followers to summon a fiend."; return; }
     s.mana -= spell.manaCost;
     s.reagents -= LiveReagentCost(spellIdx);
     std::string note;
@@ -31199,7 +31232,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         am.spotIdx = idx;
         am.pos = WildernessMonsterLivePos(idx, s.worldTime); // wherever it currently wandered to, not a snap back to spawn
         am.spawnPos = spot.pos;
-        am.maxHp = WildSpotMaxHp(idx);
+        am.maxHp = WildSpotMaxHp(s, idx);
         am.hp = (idx == kWyrmSpot && s.wyrmHp > 0.0f) ? std::min(am.maxHp, s.wyrmHp) : am.maxHp; // the wyrm's wounds carry over
         s.wildEngaged = am;
         s.logLine = "You engage the " + spot.name + "!";
@@ -31438,7 +31471,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             // "Could your next hit finish me?" - a player-like read of the fight.
             bool nextHitKills = am.hp <= (float)CombatPower(s) * 1.15f * (s.vigorT > 0.0f ? 1.25f : 1.0f); // your best swing
             float frac = am.hp / am.maxHp;
-            if (!gm.cornered && (frac < 0.25f || (frac < 0.6f && nextHitKills))) {
+            if (!gm.cornered && (frac < 0.12f || (frac < 0.25f && nextHitKills))) { // (2026-09-30) was 25% / 60%: they ran almost at once
                 gm.cornered = true;
                 if (am.isRival) RivalFightEnded(s, am); else BladeFightEnded(s, am.bladeIdx, am);
                 gm.task = kGtFlee; gm.taskT = 10.0f; gm.working = false;
@@ -32853,7 +32886,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         am.isBoss = isBoss;
         am.pos = DungeonMonsterLivePos(*s.selectedDungeon, slot, s.worldTime); // wherever it wandered to, no snap
         am.spawnPos = DungeonMonsterNodePos(*s.selectedDungeon, slot);
-        am.maxHp = std::max(1.0f, m.level * 3.0f);
+        am.maxHp = MonsterMaxHp(s, (float)m.level, isBoss);
         am.hp = am.maxHp;
         s.dungeonEngaged = am;
         s.logLine = "You engage the " + m.name + "!";
@@ -35686,7 +35719,11 @@ static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int sec
         DrawRectangleRec({ x + 4, y + 8, 10, 28 }, kDyeHues[std::clamp(s.guildHue, 0, kDyeHueCount - 1)].c);
         DrawUIText(TextFormat("%s the %s", r.name.c_str(), GuildRecruitKindName(r.kind)), (int)x + 22, (int)y + 5, 14, ink);
         DrawUIText(TextFormat("Level %.1f  -  %s", r.level, r.along ? "travelling with you" : "minding the house"), (int)x + 22, (int)y + 24, 11, soft);
-        if (UOButton({ x + w - 186, y + 7, 100, 30 }, r.along ? "Stay home" : "Come along")) { r.along = !r.along; s.guildLive[i].init = false; }
+        if (UOButton({ x + w - 186, y + 7, 100, 30 }, r.along ? "Stay home" : "Come along")) {
+            if (!r.along && FollowersUsed(s) + kRecruitFollowerCost > kFollowerSlots) // (2026-09-30) the shared follower slots
+                s.logLine = TextFormat("No room: %s needs %d follower slots (%d of %d used).", r.name.c_str(), kRecruitFollowerCost, FollowersUsed(s), kFollowerSlots);
+            else { r.along = !r.along; s.guildLive[i].init = false; }
+        }
         if (UOButton({ x + w - 80, y + 7, 78, 30 }, "Dismiss")) dismiss = (int)i;
         y += 48;
     }
@@ -35708,7 +35745,7 @@ static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int sec
                     bool dup = false; for (auto& r : s.guildRecruits) if (r.name == nm) dup = true;
                     if (!dup) break;
                 }
-                s.guildRecruits.push_back({ nm, k, 10.0f, true });
+                s.guildRecruits.push_back({ nm, k, 10.0f, FollowersUsed(s) + kRecruitFollowerCost <= kFollowerSlots }); // home if there's no room
                 WarAward(s, 0, 10); // War Week: Muster
                 s.logLine = nm + " the " + GuildRecruitKindName(k) + " joins " + s.guildName + "!";
                 PlaySfx(SfxId::Buy);
