@@ -6,7 +6,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
  args:['--no-sandbox','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader']});
  try {
  const page=await browser.newPage();
- const pairs=[['lit.vs','lit.fs'],['foliage.vs','lit.fs'],['grass.vs','lit.fs'],['lit.vs','ground.fs'],['torchlight.vs','torchlight.fs']];
+ const pairs=[['lit.vs','lit.fs'],['foliage.vs','lit.fs'],['grass.vs','lit.fs'],['lit.vs','ground.fs'],['lit.vs','fountain.fs'],['torchlight.vs','torchlight.fs']];
  for(const [v,f] of pairs){
  const sources=[v,f].map(n=>fs.readFileSync(path.join(__dirname,'../assets/shaders',n),'utf8'));
  const result=await page.evaluate(([vs,fs])=>{

@@ -15453,7 +15453,11 @@ static void T3DApplyFoliageShader(Model& m) {
     if (!g_t3dFoliageSh.ready || m.meshCount <= 0) { Town3DApplyLitShader(m); return; }
     for (int i = 0; i < m.materialCount; i++) m.materials[i].shader = g_t3dFoliageSh.shader;
 }
+static Vector3 g_t3dWaterViewPos{};
+static float g_t3dWaterFogRange[2] = { 900, 2600 };
 static void T3DGroundShaderSync(const Vector3* camPos, const float* fogRange) {
+    if (camPos) g_t3dWaterViewPos = *camPos;
+    if (fogRange) { g_t3dWaterFogRange[0] = fogRange[0]; g_t3dWaterFogRange[1] = fogRange[1]; }
     float t = (float)fmod(GetTime(), 3600.0);
     if (g_t3dFoliageSh.ready) {
         if (camPos) SetShaderValue(g_t3dFoliageSh.shader, g_t3dFoliageSh.viewPosLoc, camPos, SHADER_UNIFORM_VEC3);
@@ -15837,6 +15841,8 @@ static void Town3DGlassTick() {
     for (Material* m : g_t3dGlass) m->maps[MATERIAL_MAP_ALBEDO].color = c;
 }
 
+#include "tools/town_tree_mesh.inc"
+
 static void Town3DLoadModels() {
     Town3DModels& M = g_t3dModels;
     if (M.loaded) return;
@@ -15856,11 +15862,11 @@ static void Town3DLoadModels() {
     M.vine            = T3DLoadKit("assets/models/Prop_Vine1.gltf");
     // Props pass: Kenney Nature Kit trees/bush (CC0), KayKit Dungeon barrel/chest
     // (CC0), Quaternius wooden fences (CC0, same kit as the buildings).
-    M.treeOak         = LoadModel("assets/models/tree_oak.glb");
-    M.treePine        = LoadModel("assets/models/tree_pineDefaultA.glb");
-    M.treeDetailed    = LoadModel("assets/models/tree_detailed.glb");
-    M.treeDefault     = LoadModel("assets/models/tree_default.glb");
-    M.treeFat         = LoadModel("assets/models/tree_fat.glb");
+    M.treeOak         = Town3DBuildTree(0);
+    M.treePine        = Town3DBuildTree(1);
+    M.treeDetailed    = Town3DBuildTree(2);
+    M.treeDefault     = Town3DBuildTree(3);
+    M.treeFat         = Town3DBuildTree(4);
     M.bush            = LoadModel("assets/models/plant_bush.glb");
     M.barrel          = LoadModel("assets/models/barrel_small.glb");
     M.chest           = LoadModel("assets/models/chest.glb");
@@ -19170,6 +19176,7 @@ enum TownPropModel {
 };
 static Model g_townPropModels[kTPCount];
 static Model g_townFountainRipple{};
+#include "tools/town_fountain_water.inc"
 static bool g_townPropModelsBuilt = false;
 
 static Model TPBuildRipple() {
@@ -19214,13 +19221,13 @@ static Model TPBuildStall(Color c1) {
 static void TownPropModelsEnsure() {
     if (g_townPropModelsBuilt) return;
     g_townPropModelsBuilt = true;
-    Color stone = { 168, 164, 156, 255 }, stoneDk = { 132, 128, 122, 255 }, water = { 70, 140, 175, 255 };
+    Color stone = { 168, 164, 156, 255 }, stoneDk = { 132, 128, 122, 255 };
     Color wood = { 118, 84, 52, 255 }, woodDk = { 88, 62, 40, 255 }, iron = { 70, 72, 78, 255 };
     { // fountain: carved basin, layered water, pillar and a small top bowl
         T3CMeshBuilder b;
         T3CCylinder(b, 0, 0, 0, 3, 54, 54, 16, stoneDk);             // footing
         T3CCylinder(b, 0, 3, 0, 15, 50, 50, 16, stone);              // basin wall
-        T3CCylinder(b, 0, 15, 0, 15.3f, 44, 44, 24, water, true, false);
+        TPWaterRing(b, 0, 18, 0, 44, 51, stone); // solid carved rim around the recessed water
         // Raised stone lip and carved ribs make the basin read from the orbit camera.
         T3CCylinder(b, 0, 14.5f, 0, 18, 51, 51, 16, stoneDk, false, false);
         for (int i = 0; i < 16; ++i) {
@@ -19229,10 +19236,13 @@ static void TownPropModelsEnsure() {
                        3.8f, 2.3f, 3.8f, 3, 5, stone);
         }
         T3CCylinder(b, 0, 0, 0, 30, 7, 6, 8, stone);
-        T3CCylinder(b, 0, 30, 0, 36, 16, 20, 10, stone);
-        T3CCylinder(b, 0, 34, 0, 36.5f, 16, 16, 10, water, true, false);
+        T3CCylinder(b, 0, 30, 0, 36, 16, 20, 10, stone, false, false);
+        TPWaterRing(b, 0, 36, 0, 16, 20, stone);
+
         T3CSphere(b, 0, 42, 0, 5, 7, 5, 4, 6, stone);
         g_townPropModels[kTPFountain] = T3CFinish(b);
+        g_townFountainWater = TPBuildWater();
+        TPWaterShaderEnsure();
         g_townFountainRipple = TPBuildRipple();
         Town3DApplyLitShader(g_townFountainRipple);
     }
@@ -19441,6 +19451,15 @@ static void Town3DDrawProps(int town, float t) {
     TownPropModelsEnsure();
     TownDressEnsure(town);
     const Wild3DDressing& D = g_wild3dDress;
+    if (g_townWaterShader.id != 0) {
+        T3DPushLight(g_townWaterShader);
+        Vector3 sky = { g_t3dSkyZenith.r / 255.0f, g_t3dSkyZenith.g / 255.0f, g_t3dSkyZenith.b / 255.0f };
+        float waterTime = fmodf(t, 3600.0f);
+        SetShaderValue(g_townWaterShader, g_townWaterTimeLoc, &waterTime, SHADER_UNIFORM_FLOAT);
+        SetShaderValue(g_townWaterShader, GetShaderLocation(g_townWaterShader, "viewPos"), &g_t3dWaterViewPos, SHADER_UNIFORM_VEC3);
+        SetShaderValue(g_townWaterShader, GetShaderLocation(g_townWaterShader, "fogRange"), g_t3dWaterFogRange, SHADER_UNIFORM_VEC2);
+        SetShaderValue(g_townWaterShader, GetShaderLocation(g_townWaterShader, "skyColor"), &sky, SHADER_UNIFORM_VEC3);
+    }
     for (const TownDressItem& it : g_townDress) {
         if (it.kind < kTPCount) {
             if (it.kind != kTPSheep && it.kind != kTPChicken)
@@ -19449,13 +19468,20 @@ static void Town3DDrawProps(int town, float t) {
                     (it.kind == kTPFountain ? 112.0f : 30.0f) * it.scale, 0.32f);
             DrawModelEx(g_townPropModels[it.kind], { it.x, 0, it.z }, { 0, 1, 0 }, it.rot, { it.scale, it.scale, it.scale }, WHITE);
             if (it.kind == kTPFountain && g_townFountainRipple.meshCount > 0) {
-                // Two slow ripples remain inside the basin, with no extra texture or shader.
+                DrawModelEx(g_townFountainWater, { it.x, 0, it.z }, { 0, 1, 0 }, it.rot,
+                            { it.scale, it.scale, it.scale }, WHITE);
+                // Fading overlays must not occlude one another or the opaque water.
+                rlDrawRenderBatchActive();
+                rlDisableDepthMask();
+                // Two slow ripples remain inside the basin.
                 for (int k = 0; k < 2; ++k) {
                     float phase = fmodf(t * 0.28f + k * 0.5f, 1.0f);
                     float size = it.scale * (0.55f + 1.65f * phase);
                     DrawModelEx(g_townFountainRipple, { it.x, 0, it.z }, { 0, 1, 0 }, 0,
-                                { size, it.scale, size }, Fade(WHITE, 0.45f * (1.0f - phase)));
+                                { size, it.scale, size }, Fade(WHITE, 0.45f * sinf(phase * 3.14159265f)));
                 }
+                rlDrawRenderBatchActive();
+                rlEnableDepthMask();
             }
         } else if (it.kind >= kTDKayKit && it.kind < kTDKayKit + kWPCount) {
             int id = it.kind - kTDKayKit;
