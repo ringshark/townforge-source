@@ -1,0 +1,36 @@
+name: Rig uploaded hero
+on:
+  push:
+    branches: [ringshark-patch-1]
+    paths: ['.github/workflows/meshy-rig-hero.yml']
+permissions:
+  contents: read
+concurrency:
+  group: meshy-rig-hero
+  cancel-in-progress: false
+jobs:
+  rig:
+    # One explicitly authorized upload; later pushes and reruns cannot spend again.
+    if: github.event.head_commit.message == 'Rig uploaded hero request 20260930-1550' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test asset tooling without spending credits
+        run: python tests/meshy-assets.py
+      - name: Rig one optimized uploaded character
+        env:
+          MESHY_API_KEY: ${{ secrets.MESHY_API_KEY }}
+          MESHY_OPERATION: rig
+          MESHY_MODEL_PATH: tools/characters3d/staging/hero-neutral-input.glb
+        run: python tools/characters3d/meshy.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hero-rig-${{ github.run_id }}
+          path: meshy-output/
+          if-no-files-found: ignore
+          retention-days: 30

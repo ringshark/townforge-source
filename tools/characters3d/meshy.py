@@ -1,4 +1,5 @@
 """Meshy asset staging. Credentials stay in the runner; assets are reviewed separately."""
+import base64
 import json
 import os
 from pathlib import Path
@@ -102,6 +103,23 @@ def main():
         return
     if operation == "download":
         ident = task_id(os.environ.get("MESHY_TASK_ID", ""))
+    elif operation == "rig":
+        if os.environ.get("GITHUB_RUN_ATTEMPT", "1") != "1":
+            raise ValueError("Do not rerun paid rigging. Resume with download and its task ID.")
+        source = Path(os.environ.get("MESHY_MODEL_PATH", ""))
+        if not source.is_file() or source.suffix.lower() != ".glb":
+            raise ValueError("Rigging requires a local GLB model.")
+        data = source.read_bytes()
+        validate_glb(data)
+        if len(data) > 10 * 1024 * 1024:
+            raise ValueError("Optimize the rigging input below 10 MB first.")
+        endpoint = ENDPOINTS["rigging"]
+        payload = {"model_url": "data:model/gltf-binary;base64," + base64.b64encode(data).decode(),
+                   "height_meters": 1.8}
+        ident = task_id(api(endpoint, payload)["result"])
+        directory.mkdir(exist_ok=True)
+        (directory / "task-id.txt").write_text(ident + "\n")
+        print("Created Meshy rigging task: " + ident + ". Resume with download; do not resubmit.")
     elif operation in ("preview", "refine"):
         endpoint = ENDPOINTS["text-to-3d"]
         payload = {"mode": operation, "target_formats": ["glb"]}

@@ -66,6 +66,24 @@ class Assets(unittest.TestCase):
             self.assertEqual(api.call_count, 1)
             self.assertEqual(api.call_args.args[1]["mode"], "preview")
 
+    def test_rig_rerun_never_spends(self):
+        with patch.dict(os.environ, {"MESHY_OPERATION": "rig", "GITHUB_RUN_ATTEMPT": "2"}), patch.object(m, "api") as api:
+            with self.assertRaises(ValueError):
+                m.main()
+            api.assert_not_called()
+
+    def test_rig_post_is_not_retried(self):
+        glb = struct.pack("<4sII", b"glTF", 2, 20) + b"12345678"
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "hero.glb"
+            source.write_bytes(glb)
+            with patch.dict(os.environ, {"MESHY_OPERATION": "rig", "GITHUB_RUN_ATTEMPT": "1", "MESHY_MODEL_PATH": str(source)}), patch.object(m, "api", side_effect=ValueError("ambiguous connection")) as api:
+                with self.assertRaises(ValueError):
+                    m.main()
+                self.assertEqual(api.call_count, 1)
+                self.assertEqual(api.call_args.args[0], m.ENDPOINTS["rigging"])
+                self.assertTrue(api.call_args.args[1]["model_url"].startswith("data:model/gltf-binary;base64,"))
+
 
 if __name__ == "__main__":
     unittest.main()
