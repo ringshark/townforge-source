@@ -35307,49 +35307,151 @@ static void OpenWarWeek(GameState& s) {
 }
 static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int section);
 // The Guild Hall tabs (2026-09-29): 1 Hall, 2 Research, 3 Help, 4 Shop - the alliance loop, after Whiteout Survival.
-// Clickable guild settlement, driven by the same server state as the Hall panels.
+// A shared guild city: one landmark, residential streets and functional districts.
+// Render into a dedicated viewport so picking and labels use the same camera.
 static float DrawGuildSettlement(float x, float y, float w, Rectangle area) {
-    const float height = 260;
-    Rectangle ground = { x, y, w, height };
-    DrawRectangleRounded(ground, 0.05f, 8, Color{ 77, 104, 69, 255 });
-    DrawRectangleLinesEx(ground, 2, Color{ 60, 74, 45, 255 });
-    DrawUIText("GUILD SETTLEMENT - click a building", (int)x + 14, (int)y + 12, 13, Color{ 245, 235, 202, 255 });
-    // Paths connect the physical buildings to a shared courtyard.
-    DrawLineEx({x+w*.2f,y+140}, {x+w*.8f,y+140}, 18, Color{154,139,106,255});
-    DrawLineEx({x+w*.5f,y+90}, {x+w*.5f,y+220}, 18, Color{154,139,106,255});
-    const char* names[] = { "Guild Hall", "Workshop", "Storehouse", "Aid Lodge" };
-    const int tabs[] = { 1, 2, 4, 3 };
-    for (int i=0; i<4; ++i) {
-        float cx = x + w * (i == 0 ? .5f : i == 1 ? .2f : i == 2 ? .8f : .5f);
-        float cy = y + (i == 0 ? 84 : i == 3 ? 198 : 146);
-        bool locked = (i == 1 || i == 2) && g_gnet.hall < 2;
-        bool building = i == 0 && g_gnet.buildLeft >= 0;
-        float bw = std::min(96.0f,w*.18f), bh = i == 0 ? 48 : 38;
-        Rectangle hit = {cx-bw*.6f,cy-bh-24,bw*1.2f,bh+49};
-        bool hover = CheckCollisionPointRec(GetMousePosition(),hit);
-        DrawEllipse((int)cx+5,(int)cy+6,bw*.65f,12,Fade(BLACK,.22f));
-        Color wall = locked ? Color{109,109,93,255} : Color{205,185,144,255};
-        DrawRectangleRec({cx-bw*.5f,cy-bh,bw,bh},wall);
-        DrawTriangle({cx+bw*.5f,cy-bh},{cx+bw*.5f,cy},{cx+bw*.65f,cy-9},Color{128,112,81,255});
-        DrawTriangle({cx-bw*.6f,cy-bh},{cx+bw*.6f,cy-bh},{cx,cy-bh-24},locked ? Color{88,91,77,255} : Color{108,65,44,255});
-        DrawRectangleRec({cx-8,cy-22,16,22},Color{65,47,32,255});
-        DrawRectangleRec({cx-bw*.35f,cy-bh+10,10,12},Color{82,110,114,255});
-        DrawRectangleRec({cx+bw*.24f,cy-bh+10,10,12},Color{82,110,114,255});
-        if (building) {
-            DrawLineEx({cx-bw*.55f,cy+1},{cx-bw*.55f,cy-bh-15},3,Color{176,142,83,255});
-            DrawLineEx({cx+bw*.55f,cy+1},{cx+bw*.55f,cy-bh-15},3,Color{176,142,83,255});
-            DrawLineEx({cx-bw*.55f,cy-12},{cx+bw*.55f,cy-12},3,Color{176,142,83,255});
-        }
-        if (hover) DrawRectangleRoundedLines(hit,.1f,4,Color{245,212,109,255});
-        const char* label = TextFormat("%s%s",names[i],locked ? " (locked)" : "");
-        DrawUIText(label,(int)(cx-MeasureUIText(label,11)*.5f),(int)cy+7,11,Color{255,243,209,255});
-        if (i == 0) {
-            const char* status = building ? "Under construction" : TextFormat("Level %d",g_gnet.hall);
-            DrawUIText(status,(int)(cx-MeasureUIText(status,10)*.5f),(int)cy+22,10,Color{245,212,109,255});
-        }
-        if (hover && hit.y >= area.y && hit.y+hit.height <= area.y+area.height && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) g_guildTab=tabs[i];
+    static RenderTexture2D scene = {};
+    static float zoom = 1450.0f;
+    static Vector3 focus = {0,0,0};
+    static bool dragging = false;
+    static float dragDistance = 0;
+    float height = std::max(240.0f, area.height - 64);
+    Rectangle view = {x,y+42,w,height};
+    const int rw = std::max(1,(int)w), rh = std::max(1,(int)height);
+    if (!scene.id || scene.texture.width != rw || scene.texture.height != rh) {
+        if (scene.id) UnloadRenderTexture(scene);
+        scene=LoadRenderTexture(rw,rh); SetTextureFilter(scene.texture,TEXTURE_FILTER_BILINEAR);
     }
-    return y + height + 18;
+    DrawUIText(TextFormat("[%s] %s",g_gnet.myTag.c_str(),g_gnet.myName.c_str()),(int)x,(int)y,16,Color{68,42,22,255});
+    DrawUIText(TextFormat("Hall %d   Members %d/%d   Funds %lld",g_gnet.hall,(int)g_gnet.roster.size(),g_gnet.cap,g_gnet.funds),(int)x,(int)y+23,12,Color{88,65,40,255});
+    struct Site { const char* name; const char* model; float x,z; int tab; int tier; };
+    static const Site sites[] = {
+        {"Guild Hall","townhall",0,-60,9,1},
+        {"Workshop","smith",-235,-60,2,2},
+        {"Storehouse","bank",-235,175,4,2},
+        {"Aid Lodge","healer",235,-60,3,1},
+        {"Command Post","minersguild",235,175,5,1},
+        {"Warband Lodge","stable",0,285,7,1},
+        {"Guild Homes","house",-235,-310,6,1},
+        {"Council House","tailor",0,-310,0,1},
+        {"Guild Homes","house",235,-310,6,1},
+    };
+    Vector2 mouse=GetMousePosition();
+    bool inside=CheckCollisionPointRec(mouse,view) && CheckCollisionPointRec(mouse,area);
+    if (inside && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { dragging=true; dragDistance=0; }
+    if (dragging && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        Vector2 delta=GetMouseDelta(); dragDistance+=Vector2Length(delta);
+        if (dragDistance > 7) {
+            float factor=zoom/height*.7f;
+            focus.x-= (delta.x+delta.y)*factor;
+            focus.z+= (delta.x-delta.y)*factor;
+            focus.x=std::clamp(focus.x,-220.0f,220.0f); focus.z=std::clamp(focus.z,-220.0f,220.0f);
+        }
+    }
+    if (inside) zoom=std::clamp(zoom*(1-GetMouseWheelMove()*.1f),650.0f,1900.0f);
+    Camera3D cam = {{focus.x+900,1200,focus.z+900},focus,{0,1,0},zoom,CAMERA_ORTHOGRAPHIC};
+    int hovered=-1; float closest=1e9f;
+    if (inside) {
+        Ray ray=GetScreenToWorldRayEx({mouse.x-view.x,mouse.y-view.y},cam,rw,rh);
+        for (int i=0;i<9;++i) {
+            const Site& b=sites[i]; float half=b.tab==9 ? 80 : 65;
+            RayCollision hit=GetRayCollisionBox(ray,{{b.x-half,0,b.z-60},{b.x+half,b.tab==9 ? 145.0f : 105.0f,b.z+60}});
+            if(hit.hit && hit.distance<closest) { hovered=i; closest=hit.distance; }
+        }
+    }
+    bool tapped=dragging && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && dragDistance<7 && inside;
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) dragging=false;
+    Town3DLoadModels(); Town3DEnsureLit();
+    T3DUpdateDayNight(0,true);
+    if(g_t3dLit.ready) {
+        SetShaderValue(g_t3dLit.shader,g_t3dLit.viewPosLoc,&cam.position,SHADER_UNIFORM_VEC3);
+        float fog[2]={3000,5000}; SetShaderValue(g_t3dLit.shader,g_t3dLit.fogRangeLoc,fog,SHADER_UNIFORM_VEC2);
+        T3DGroundShaderSync(&cam.position,fog);
+    }
+    EndScissorMode();
+    BeginTextureMode(scene); ClearBackground(Color{120,143,108,255}); BeginMode3D(cam);
+    DrawPlane({0,-2,0},{2400,2400},Color{113,137,91,255});
+    DrawCube({0,-4,0},950,6,1000,Color{132,149,102,255});
+    // Broad cobbled avenues link the central plaza to three surrounding districts.
+    Color paving={164,158,136,255};
+    DrawCube({0,0,40},90,2,840,paving);
+    DrawCube({0,0,-195},710,2,54,paving);
+    DrawCube({0,0,75},710,2,64,paving);
+    DrawCube({-350,0,0},48,2,750,paving); DrawCube({350,0,0},48,2,750,paving);
+    DrawCylinder({0,1,-60},140,140,2,32,Color{183,177,151,255});
+    // Small paving stones make the streets read as a built environment.
+    for(int z=-380;z<450;z+=24) for(int xx=-24;xx<=24;xx+=24)
+        DrawCube({(float)xx,1.2f,(float)z},22,.4f,22,Color{179,173,148,255});
+    // City walls, a south gate and corner watchtowers frame the settlement.
+    Color stone={140,143,127,255};
+    DrawCube({0,20,-470},920,40,15,stone);
+    DrawCube({-455,20,0},15,40,940,stone); DrawCube({455,20,0},15,40,940,stone);
+    DrawCube({-265,20,470},380,40,15,stone); DrawCube({265,20,470},380,40,15,stone);
+    for(int sx:{-1,1}) for(int sz:{-1,1}) {
+        DrawCylinder({sx*455.0f,0,sz*470.0f},24,29,65,8,stone);
+        DrawCylinder({sx*455.0f,65,sz*470.0f},30,0,25,8,Color{72,79,85,255});
+    }
+    for(int i=0;i<9;++i) {
+        const Site& b=sites[i]; bool locked=g_gnet.hall<b.tier;
+        DrawCube({b.x,1,b.z},b.tab==9 ? 164 : 140,3,132,locked ? Color{126,130,111,255} : Color{165,160,140,255});
+        // A soft footprint shadow anchors the modular building to its plot.
+        DrawCube({b.x+9,2,b.z+10},134,1,119,Color{95,111,80,255});
+        Town3DDrawBuilding(b.model,b.x,b.z);
+        if(locked || (b.tab==9 && g_gnet.buildLeft>=0)) {
+            for(int side:{-1,1}) {
+                DrawCube({b.x+side*75,50,b.z},3,100,3,Color{157,112,62,255});
+                DrawCube({b.x+side*75,50,b.z+50},3,100,3,Color{157,112,62,255});
+                for(int level=20;level<=80;level+=30) DrawCube({b.x,(float)level,b.z+58},155,3,3,Color{179,134,78,255});
+            }
+        }
+        if(hovered==i) Town3DDrawGroundRing(b.x,b.z,4,78,85,40,Color{255,216,128,255});
+    }
+    // Trees, garden beds, banners and street lights soften the city grid.
+    for(int side:{-1,1}) for(int z=-380;z<=350;z+=145) {
+        float tx=side*400.0f;
+        Town3DDrawPiece(g_t3dModels.treeOak,{tx,0,(float)z},z*.4f,2.6f);
+        DrawCube({side*310.0f,1,(float)z},34,3,48,Color{89,115,62,255});
+        DrawCylinder({side*60.0f,0,(float)z},2,2,32,6,Color{77,72,60,255});
+        DrawSphere({side*60.0f,34,(float)z},4,Color{250,214,143,255});
+    }
+    // Residents travel along the avenues; this is ambience, not simulated output.
+    for(int i=0;i<12;++i) {
+        float z=fmodf((float)GetTime()*12+i*65,760)-380;
+        Vector3 p={i%2 ? -28.0f : 28.0f,5,z};
+        DrawCylinder(p,3,4,12,6,i%3 ? Color{111,86,59,255} : Color{63,92,121,255});
+        DrawSphere({p.x,20,p.z},3.8f,Color{208,167,122,255});
+    }
+    EndMode3D(); EndTextureMode();
+#ifndef __EMSCRIPTEN__
+    BeginTextureMode(g_zoomTarget);
+#endif
+    BeginScissorMode((int)area.x,(int)area.y,(int)area.width,(int)area.height);
+    DrawTexturePro(scene.texture,{0,0,(float)rw,-(float)rh},view,{0,0},0,WHITE);
+    DrawRectangleLinesEx(view,2,Color{73,80,57,255});
+    for(int i=0;i<9;++i) {
+        const Site& b=sites[i];
+        Vector2 pt=GetWorldToScreenEx({b.x,110,b.z},cam,rw,rh); pt.x+=view.x; pt.y+=view.y;
+        bool locked=g_gnet.hall<b.tier;
+        std::string label=b.name;
+        if(b.tab==9) label += "  Lv "+std::to_string(g_gnet.hall);
+        float lw=MeasureUIText(label.c_str(),11)+14;
+        Rectangle badge={pt.x-lw*.5f,pt.y-13,lw,22};
+        if(badge.x<view.x || badge.x+badge.width>view.x+view.width || badge.y<view.y || badge.y+badge.height>view.y+view.height) continue;
+        DrawRectangleRounded(badge,.25f,4,hovered==i ? Color{135,92,40,245} : Color{43,49,38,220});
+        DrawUIText(label.c_str(),(int)badge.x+7,(int)badge.y+5,11,Color{250,234,193,255});
+        if(locked) DrawUIText("Hall level 2",(int)badge.x+5,(int)badge.y+24,10,Color{255,223,137,255});
+        if(b.tab==9 && g_gnet.buildLeft>=0) {
+            float left=std::max(0.0f,g_gnet.buildLeft-(float)(GetTime()-g_gnet.hubAt));
+            DrawUIText(SettleClock(left).c_str(),(int)badge.x+5,(int)badge.y+24,11,Color{255,223,137,255});
+        }
+        if(inside && CheckCollisionPointRec(mouse,badge)) hovered=i;
+    }
+    if(tapped && hovered>=0) { g_guildTab=sites[hovered].tab; g_warScroll=0; PlaySfx(SfxId::Click); }
+    DrawUIText("Drag to explore  |  Scroll to zoom  |  Click a building",(int)x,(int)(view.y+height+8),11,Color{78,52,30,255});
+    if(UOButton({x+w-150,y+8,32,28},"+",true)) zoom=std::max(650.0f,zoom*.85f);
+    if(UOButton({x+w-112,y+8,32,28},"-",true)) zoom=std::min(1900.0f,zoom/ .85f);
+    if(UOButton({x+w-70,y+8,66,28},"Reset",true)) { focus={0,0,0}; zoom=1450; }
+    return view.y+height+28;
 }
 static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangle area) {
     const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 }, gold = { 150, 100, 20, 255 }, good = { 40, 110, 40, 255 }, bad = { 150, 40, 30, 255 };
@@ -35371,8 +35473,11 @@ static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangl
     if (!g_gnet.msg.empty()) { DrawUIText(g_gnet.msg.c_str(), (int)x, (int)y, 12, bad); y += 20; }
     bool officer = g_gnet.myRank >= 1;
     float since = (float)(GetTime() - g_gnet.hubAt);
-    if (g_guildTab == 1) y = DrawGuildSettlement(x, y, w, area);
-    if (g_guildTab == 1) { // ---- Hall ----
+    if (g_guildTab == 1) return DrawGuildSettlement(x, y, w, area);
+    if (g_guildTab == 9) { // ---- Hall ----
+        Rectangle back = {x,y,160,28};
+        if (UOButton(back,"Back to city",true) && vis(back)) { g_guildTab=1; g_warScroll=0; }
+        y += 38;
         if (g_gnet.hall == 1) {
             DrawUIText("Stage One: Guild Hall foundation", (int)x, (int)y, 17, gold); y += 26;
             DrawUIText("Daily construction orders supply the shared project. One order per member per day.", (int)x, (int)y, 11, soft); y += 18;
@@ -35532,24 +35637,25 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
     WarCheckWeek(s);
     int today = WarDayNow();
     { // the tabs (2026-09-28: one Guild screen for everything guild)
-        static const char* kTabs[8] = { "Overview", "Hall", "Research", "Help", "Shop", "Wars", "Members", "Warband" };
+        static const char* kTabs[8] = { "Overview", "City", "Research", "Help", "Shop", "Wars", "Members", "Warband" };
         float tw = (G.width - 36) / 4.0f;
         bool hub = g_gnet.hub;
         bool helpDot = false; for (const auto& h : g_gnet.helps) if (!h.mine && !h.done) helpDot = true;
         bool hallDot = !g_gnet.gifts.empty() || (g_gnet.buildLeft >= 0 && !g_gnet.lent);
         for (int t = 0; t < 8; t++) {
             Rectangle tb = { G.x + 18 + (t % 4) * tw, G.y + 34 + (t / 4) * 36, tw - 6, 32 };
-            bool on = g_guildTab == t;
+            bool on = g_guildTab == t || (t == 1 && g_guildTab == 9);
             DrawRectangleRounded(tb, 0.3f, 6, on ? Color{ 110, 70, 36, 255 } : Color{ 70, 50, 34, 200 });
             DrawRectangleRoundedLines(tb, 0.3f, 6, on ? kUoBronzeHi : kUoBronze);
             int lw = MeasureUIText(kTabs[t], 14);
             DrawUIText(kTabs[t], (int)(tb.x + (tb.width - lw) / 2), (int)tb.y + 8, 14, on ? kUoGoldText : Color{ 236, 220, 190, 255 });
             if (hub && ((t == 3 && helpDot) || (t == 1 && hallDot))) DrawCircle((int)(tb.x + tb.width - 8), (int)tb.y + 8, 5, Color{ 210, 40, 30, 255 });
-            if (!on && UOTapped(tb)) { g_guildTab = t; g_warScroll = 0.0f; PlaySfx(SfxId::Click); }
+            if (g_guildTab != t && UOTapped(tb)) { g_guildTab = t; g_warScroll = 0.0f; PlaySfx(SfxId::Click); }
         }
     }
     Rectangle area = { G.x + 8, G.y + 110, G.width - 16, G.height - 120 };
-    g_warScroll -= ScrollDelta(area);
+    if (g_guildTab == 1) g_warScroll = 0;
+    else g_warScroll -= ScrollDelta(area);
     float x = G.x + 18, w = G.width - 36, y = area.y + 4 - g_warScroll;
     auto vis = [&](Rectangle r) { return r.y >= area.y && r.y + r.height <= area.y + area.height; };
     BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
@@ -35661,7 +35767,7 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
         DrawUIText("Ranks, removing members and leaving are on the Members tab.", (int)x, (int)y, 11, soft);
         y += 18;
     }
-    } else if (g_guildTab >= 1 && g_guildTab <= 4) { // ---- Hall, Research, Help, Shop ----
+    } else if ((g_guildTab >= 1 && g_guildTab <= 4) || g_guildTab == 9) { // ---- Hall, Research, Help, Shop ----
         y = DrawGuildHallTabs(s, x, y, w, area);
     } else if (g_guildTab == 5) { // ---- Wars ----
         const Color war = { 150, 30, 30, 255 };
