@@ -33833,17 +33833,17 @@ static void TryBuyHealPotion(GameState& s) {
 }
 
 // ---- The Thieves' Guild (2026-09-28, #69) --------------------------------------
-// A back room behind every Provisioner. Members practise on the guild's lockboxes,
-// its pouch-dummy and with its hedge-wizard - up to 70; past that, the skill is
-// learned on real locks, real pockets and real spells.
-static const float kThiefPracticeCap = 70.0f;
+// A back room behind every Provisioner. Members practise on the guild's lockboxes
+// and its pouch-dummy - up to 30; past that, the skill is learned on real locks
+// and real pockets. (2026-09-30: the paid Magery lessons and the cap of 70 are gone.)
+static const float kThiefPracticeCap = 30.0f; // (2026-09-30) was 70: practice teaches the basics, real use the rest
 static float g_thiefCd = 0.0f;
 static void DrawThievesGuild(GameState& s, int screenW, int y) {
     g_thiefCd = std::max(0.0f, g_thiefCd - GetFrameTime());
     DrawInfoLine("The back room - the Thieves' Guild. Mind the loose board.", 20, y, 13, kColorAccent);
     y += 28;
     if (!s.thievesGuild) {
-        DrawInfoLine("\"Join us and our locks, pouches and our old hedge-wizard are yours to practise on.\"", 20, y, 12, kColorText);
+        DrawInfoLine("\"Join us and our locks and pouches are yours to practise on.\"", 20, y, 12, kColorText);
         y += 30;
         if (Button({ 20, (float)y, 220, 34 }, "Join the Guild (250g)", CanAfford(s, 250))) {
             PayGold(s, 250); s.thievesGuild = true;
@@ -33888,18 +33888,7 @@ static void DrawThievesGuild(GameState& s, int screenW, int y) {
         }
     }
     y += 44;
-    // Magery: lessons from the hedge-wizard in the corner
-    skillRow("Magery", s.magery);
-    if (Button({ 20, (float)y, (float)screenW - 40, 32 }, "A lesson from the hedge-wizard (40g)",
-               g_thiefCd <= 0.0f && s.magery < kThiefPracticeCap && CanAfford(s, 40))) {
-        g_thiefCd = 1.0f;
-        PayGold(s, 40);
-        float g = SkillUseGain(s.magery, 0.5f, 4.0f, kThiefPracticeCap);
-        PlaySfx(SfxId::Cast);
-        s.logLine = std::string("\"No, no - wrist first, then the words.\"") + (g > 0 ? TextFormat(" (Magery +%.1f)", g) : " You learn nothing new today.");
-    }
-    y += 44;
-    DrawInfoLine("Practice teaches up to 70. Past that, only real locks, pockets and spells will do.", 20, y, 12, Fade(kColorText, 0.8f));
+    DrawInfoLine("Practice teaches up to 30. Past that, only real locks and pockets will do.", 20, y, 12, Fade(kColorText, 0.8f));
 }
 static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
     DrawInteriorBackdrop(g_assets.provisionerWallOk ? &g_assets.provisionerWall : nullptr,
@@ -36180,95 +36169,8 @@ static const char* kCappedSkillWhat[29] = {
 };
 struct SkillGroup { const char* name; std::vector<int> idx; };
 static float g_skillsScroll = 0.0f;
-// ---- The Training Grounds (2026-09-28, #71) ----------------------------------
-// A new player's sparring yard: pick any skill and drill it, free, up to 50 -
-// tap Train, or switch on AUTO and leave it running (it works while this page
-// is open, in a town). Past 50 a skill is only earned by using it for real, and
-// the other unattended trainers (auto-gather, paid guild lessons) stop at 50 too.
-static const float kTrainGroundsCap = 50.0f;
-static bool g_trainOpen = false, g_trainAuto = false;
-static int g_trainSkill = 0;
-static float g_trainTick = 0.0f, g_trainTapCd = 0.0f, g_trainScroll = 0.0f;
-static bool TrainGroundsHere(const GameState& s) {
-    return (g_playScreen == Screen::Town || g_playScreen == Screen::Interior) && !s.combat.has_value() && !s.playerIsGhost;
-}
-// Every drill lands: a flat +2.5 (2026-09-29), topping out at exactly 50.0 -
-// 20 drills from 0 to 50 (seconds of tapping, ~40s on AUTO).
-static const float kTrainGroundsStep = 2.5f;
-static void TrainGroundsDrill(GameState& s) {
-    float& sk = s.*(kCappedSkills[(size_t)g_trainSkill].field);
-    if (sk >= kTrainGroundsCap) { g_trainAuto = false; return; }
-    float g = GainSkillCapped(sk, std::min(kTrainGroundsStep, kTrainGroundsCap - sk), kTrainGroundsCap);
-    if (g > 0.0f) s.logLine = TextFormat("%s %.1f (+%.1f)", kCappedSkills[(size_t)g_trainSkill].label, sk, g);
-    if (sk >= kTrainGroundsCap) {
-        g_trainAuto = false;
-        s.logLine = std::string(kCappedSkills[(size_t)g_trainSkill].label) + " reaches 50 - the yard has taught you all it can. The rest is earned out there.";
-        PlaySfx(SfxId::Quest);
-    }
-}
-static void TrainGroundsTick(GameState& s, float dt) {
-    g_trainTapCd = std::max(0.0f, g_trainTapCd - dt);
-    if (!g_trainAuto) return;
-    if (!g_trainOpen || s.screen != Screen::Skills || !TrainGroundsHere(s)) { g_trainAuto = false; return; }
-    if ((g_trainTick += dt) >= 2.0f) { g_trainTick = 0.0f; TrainGroundsDrill(s); }
-}
-static void DrawTrainingGrounds(GameState& s, int screenW, int screenH) {
-    Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
-    UODrawGump(G, kUoParchment);
-    UODrawTitle(G, "Training Grounds", 15);
-    const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 };
-    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_trainOpen = false; g_trainAuto = false; return; }
-    float x = G.x + 20, y = G.y + 38, w = G.width - 40;
-    DrawUIText("Drill any skill here for free: +2.5 a drill, up to 50. Tap Train, or turn on AUTO", (int)x, (int)y, 12, soft); y += 16;
-    DrawUIText("and leave it running. Past 50, skills grow only by using them for real.", (int)x, (int)y, 12, soft); y += 22;
-    bool here = TrainGroundsHere(s);
-    if (!here) { DrawUIText("The Training Grounds are in town - head back to use them.", (int)x, (int)y, 13, Color{ 170, 60, 40, 255 }); y += 20; }
-    // the chosen skill
-    float cur = s.*(kCappedSkills[(size_t)g_trainSkill].field);
-    DrawUIText(TextFormat("%s  level %d / 50", kCappedSkills[(size_t)g_trainSkill].label, SkillLevel(cur)), (int)x, (int)y, 17, ink);
-    y += 24;
-    Rectangle bar = { x, y, w, 12 };
-    DrawRectangleRounded(bar, 0.5f, 6, Fade(BLACK, 0.18f));
-    DrawRectangleRounded({ bar.x, bar.y, bar.width * std::clamp(cur / kTrainGroundsCap, 0.0f, 1.0f), bar.height }, 0.5f, 6, Color{ 70, 140, 70, 255 });
-    y += 22;
-    bool can = here && cur < kTrainGroundsCap;
-    if (UOButton({ x, y, w * 0.55f, 44 }, cur >= kTrainGroundsCap ? "Mastered here (50)" : "Train", can && g_trainTapCd <= 0.0f)) {
-        g_trainTapCd = 0.35f; TrainGroundsDrill(s); PlaySfx(SfxId::Swing);
-    }
-    if (UOButton({ x + w * 0.58f, y, w * 0.42f, 44 }, g_trainAuto ? "AUTO: on" : "AUTO: off", can)) { g_trainAuto = !g_trainAuto; g_trainTick = 0.0f; PlaySfx(SfxId::Click); }
-    if (g_trainAuto) DrawCircleV({ x + w * 0.58f + 16, y + 22 }, 5.0f + sinf((float)GetTime() * 5.0f), Color{ 120, 220, 120, 255 });
-    y += 52;
-    { // every other way to practise, in one place (2026-09-28 cleanup)
-        DrawUIText("Free here to 50  -  guild practice to 70  -  past that, only real use.", (int)x, (int)y, 12, soft); y += 18;
-        float bw = (w - 12) / 3.0f;
-        if (UOButton({ x, y, bw, 32 }, "Thieves' Guild", here)) { // Lockpicking, Snooping, Magery to 70
-            g_trainOpen = false; g_trainAuto = false; s.screen = Screen::Provisioner; s.provisionerTab = 2;
-        }
-        if (UOButton({ x + bw + 6, y, bw, 32 }, "Spell practice", true)) { g_trainOpen = false; g_trainAuto = false; s.screen = Screen::Magic; }
-        if (UOButton({ x + 2 * (bw + 6), y, bw, 32 }, "Pet training", true)) { g_trainOpen = false; g_trainAuto = false; s.screen = Screen::Pets; }
-        y += 40;
-    }
-    DrawUIText("Choose a skill:", (int)x, (int)y, 13, ink); y += 20;
-    // the list
-    int top = (int)y, h = (int)(G.y + G.height - 14 - y);
-    Rectangle area = { G.x, (float)top, G.width, (float)h };
-    g_trainScroll -= ScrollDelta(area);
-    const float rowH = 34.0f;
-    g_trainScroll = std::clamp(g_trainScroll, 0.0f, std::max(0.0f, kCappedSkills.size() * rowH - h));
-    BeginScissorMode((int)G.x, top, (int)G.width, h);
-    for (size_t i = 0; i < kCappedSkills.size(); i++) {
-        float ry = top + i * rowH - g_trainScroll;
-        if (ry < top - rowH || ry > top + h) continue;
-        Rectangle row = { x, ry, w, rowH - 4 };
-        float v = s.*(kCappedSkills[i].field);
-        bool sel = (int)i == g_trainSkill;
-        DrawRectangleRounded(row, 0.2f, 4, sel ? Fade(Color{ 214, 170, 90, 255 }, 0.45f) : Fade(BLACK, i % 2 ? 0.05f : 0.09f));
-        DrawUIText(kCappedSkills[i].label, (int)row.x + 10, (int)row.y + 8, 14, ink);
-        DrawUIText(v >= kTrainGroundsCap ? TextFormat("%.1f (done)", v) : TextFormat("%.1f", v), (int)(row.x + row.width - 110), (int)row.y + 8, 13, v >= kTrainGroundsCap ? Color{ 46, 120, 60, 255 } : soft);
-        if (ry >= top && ry + rowH <= top + h && UOTapped(row) && !sel) { g_trainSkill = (int)i; g_trainAuto = false; PlaySfx(SfxId::Click); }
-    }
-    EndScissorMode();
-}
+// (2026-09-30) The Training Grounds are gone: with RuneScape-style levels and no cap,
+// free drills to 50 in every skill skipped the whole early game. Skills grow by use.
 // ---- What each level opens up (2026-09-29): read straight from the game's real gates ----
 struct SkillUnlock { int level; std::string what; };
 static std::vector<SkillUnlock> SkillUnlocks(int key) {
@@ -36308,7 +36210,6 @@ static std::string FmtNum(long long v) {
 }
 
 static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
-    if (g_trainOpen) { DrawTrainingGrounds(s, screenW, screenH); return; }
     // (2026-09-29) RuneScape-style: levels 1-99 with XP bars, no cap - every skill can reach 99.
     struct SkillGroup2 { const char* name; std::vector<int> keys; };
     static const SkillGroup2 kGroups[] = {
@@ -36336,8 +36237,6 @@ static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
     DrawUIText("Use a skill to level it. Every skill can reach 99 - master them all.", 20, y, 13, soft); y += 16;
     if (!voc.empty()) { DrawUIText(TextFormat("Known as: %s", voc.c_str()), 20, y, 13, good); }
     y += 20;
-    if (Button({ 20, (float)y, (float)screenW - 40, 30 }, "Training Grounds - drill any skill to level 50, free", true)) { g_trainOpen = true; g_trainScroll = 0.0f; }
-    y += 36;
     int listTop = y, listH = screenH - listTop - 10;
     Rectangle listArea = { 0, (float)listTop, (float)screenW, (float)listH };
     g_skillsScroll -= ScrollDelta(listArea);
@@ -37055,7 +36954,6 @@ static void UpdateDrawFrame() {
         UpdateGathering(state, dt);
         UpdateUpgrade(state, dt);
         RegenMana(state, dt);
-        TrainGroundsTick(state, GetFrameTime()); // (2026-09-28, #71)
         MountTick(state); // (2026-09-28, #74)
         { // the audio pass (2026-09-28): music for where you are, footsteps underfoot
             Screen sc = state.screen, where = IsPlayScreen(sc) ? sc : g_playScreen;
