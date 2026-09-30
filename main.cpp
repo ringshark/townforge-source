@@ -13169,7 +13169,7 @@ static HumanOutfit HumanOutfitFor(const Equipment& e) {
                : (n.find("Chain") != std::string::npos || n.find("Coif") != std::string::npos) ? kHhChain
                : kHhLeather;
         HumanArmorColor(e.helmet, &o.helmCol);
-        if (o.helm == kHhPlate) o.helmCol = Color{ 190, 194, 202, 255 };
+        // Preserve the equipped material color on plate helmets too.
     }
     { // shaped armor pieces (2026-09-28, #64)
         auto tier = [](const std::optional<Item>& it) {
@@ -14586,38 +14586,8 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
     }
     if (s.hidden) tint = Color{ (unsigned char)(tint.r * 0.35f), (unsigned char)(tint.g * 0.35f), (unsigned char)(tint.b * 0.45f), tint.a }; // in the shadows (2026-09-28)
     HumanOutfit outfit = HumanOutfitFor(s.equipped);
-    if (!s.optClassicBody) { // the sculpted hero (2026-09-28); Options can switch back to the dressable body
-        HumanEnsure(); // the weapon models live with the body kit
-        SkinPose sp;
-        sp.move = hp.move; sp.speed = move > 0.001f ? T3CSpeedTrack(trackId, x, z, false) : 0.0f; sp.attackT = hp.attackT; sp.castT = hp.castT; sp.hurtT = hp.hurtT; sp.deathT = hp.deathT;
-        sp.engaged = hp.engaged; sp.gather = hp.gather; sp.style = outfit.style;
-        sp.blocking = s.playerBlockT >= 0.0f && s.playerBlockT < 0.35f && s.playerDeathAnimT <= 0.0f;
-        sp.sneaking = s.hidden;
-        sp.kneeling = g_meditating;
-        if (g_mountPetId >= 0 && trackId == kT3CTrackPlayerWild)
-            if (Pet* mnt = MountedPet(const_cast<GameState&>(s))) {
-                sp.saddle = MountSaddleY(mnt->name) - MountSeatLift(mnt->name);
-                x -= cosf(yawRad) * 16.0f; z -= sinf(yawRad) * 16.0f; // back from the withers into the saddle
-            }
-        SkinDye dye; // clothing dyes on his cloak, shirt and trousers; a robe dyes the lot
-        const Equipment& e = s.equipped;
-        auto dyed = [](const Item& it) { return ColorBrightness(ClothColor(it), 0.12f); };
-        if (e.cloak) dye.c[1] = dyed(*e.cloak);
-        if (e.shirt) dye.c[2] = dyed(*e.shirt);
-        if (e.pants) dye.c[3] = dyed(*e.pants);
-        if (e.robe) dye.c[1] = dye.c[2] = dye.c[3] = dyed(*e.robe);
-        int heroId = kScHero;
-        HumanOutfit held = outfit;
-        if (const char* look = HeroLookFor(s)) {
-            int id = SkinCharFor(look);
-            if (SkinCharGet(id)) { // its armor is its own: keep the weapon and shield, drop the kit's pieces
-                heroId = id;
-                held.armChest = held.armArms = held.armLegs = held.armGorget = 0;
-                held.helm = kHhNone;
-            }
-        }
-        if (DrawSkinChar(heroId, trackId, x, z, yawRad, 66.0f, tint, sp, shadowPass, &held, 0.0f, heroId == kScHero ? &dye : nullptr)) return true;
-    }
+    // The world and Me preview use the same modular rig and equipped layers.
+    // Fixed archetype meshes bake in armor and cannot accurately unequip it.
     return DrawHuman(trackId, x, z, yawRad, 1.0f, tint, outfit, hp, shadowPass);
 }
 
@@ -35122,13 +35092,13 @@ static void GuildNetPoll() {
         else if (k == "me" && p.size() >= 2) { g_gnet.myUid = p[0]; g_gnet.myRank = std::atoi(p[1].c_str()); }
         else if (k == "motd") g_gnet.motd = v;
         else if (k == "war" && p.size() >= 4) g_gnet.wars.push_back({ p[0], p[1], p[2], p[3] });
-        else if (k == "hall" && p.size() >= 8) {
+        else if (k == "hall" && p.size() >= 7) {
             hadHub = true;
             int bl = std::atoi(p[3].c_str());
             if (!g_gnet.hub || bl != g_gnet.buildLeft || std::atoi(p[0].c_str()) != g_gnet.hall) g_gnet.hubAt = GetTime();
             g_gnet.hall = std::atoi(p[0].c_str()); g_gnet.funds = std::atoll(p[1].c_str()); g_gnet.cap = std::atoi(p[2].c_str());
             g_gnet.buildLeft = bl; g_gnet.buildSecs = std::atoi(p[4].c_str()); g_gnet.hands = std::atoi(p[5].c_str());
-            g_gnet.lent = p[6] == "1"; g_gnet.rec = p[7];
+            g_gnet.lent = p[6] == "1"; g_gnet.rec = p.size() >= 8 ? p[7] : "";
         }
         else if (k == "mine" && p.size() >= 5) {
             g_gnet.merit = std::atoi(p[0].c_str()); g_gnet.charges = std::atoi(p[1].c_str()); g_gnet.nextCharge = std::atoi(p[2].c_str());
@@ -36078,7 +36048,7 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     toggle("Sound effects", "Footsteps, swords, spells, coins and the rest.", s.optSfx);
     slider("Sound volume", s.optSfxVol);
     toggle("Always daytime", "Keep the world in daylight instead of following your real clock.", s.optAlwaysDay);
-    toggle("Classic body", "Play as the dressable body that shows your armor, clothing and dyes, instead of the sculpted hero.", s.optClassicBody);
+    // Character appearance follows equipment in both the world and Me screen.
     toggle("Play online", "See other players in town and the wilds, and chat with them.", s.optOnline);
     toggle("Auto-restock reagents", "Top up to 30 reagents whenever you enter a town (1 gold each).", s.autoReagents);
     y += 6;
@@ -36442,7 +36412,7 @@ static void PaperdollRenderPass(const GameState& s) {
     T3CKitUseSunShader();
     T3DUpdateDayNight(0.0f, true); // the noon palette, like interiors
     // A low camera looking up a little (2026-09-27): the hero-shot angle.
-    Camera3D cam = { { 0.0f, 24.0f, 150.0f }, { 0.0f, 35.0f, 0.0f }, { 0, 1, 0 }, 30.0f, CAMERA_PERSPECTIVE };
+    Camera3D cam = { { 0.0f, 44.0f, 165.0f }, { 0.0f, 32.0f, 0.0f }, { 0, 1, 0 }, 30.0f, CAMERA_PERSPECTIVE };
     if (g_t3dLit.ready) {
         SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &cam.position, SHADER_UNIFORM_VEC3);
         float fr[2] = { 5000.0f, 9000.0f }; // no fog on the paperdoll
