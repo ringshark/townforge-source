@@ -30,6 +30,7 @@ jobs:
           /tmp/tf-combat-test
           python tests/player-movement.py
           python tests/ui-input.py
+          python tests/mobile-combat.py
           python tests/menu-status.py
           python tests/equipment-preview.py
           node server/mp/test/den.mjs

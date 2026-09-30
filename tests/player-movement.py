@@ -39,6 +39,13 @@ keys[KEY_D]=false;tick(.016f);
 pos={500,500};keys[KEY_D]=true;for(int i=0;i<10;i++)tick(.1f);
 assert(pos.x-500>219 && pos.x-500<=220.01f);
 keys[KEY_D]=false;tick(.016f);
+// Camera-relative Den direction never rotates world-space tap destinations.
+pos={500,500};keys[KEY_D]=true;UpdatePlayerMovement(pos,face,.1f,2000,-.694738f);
+assert(pos.x>500 && pos.y<500);
+keys[KEY_D]=false;tick(.016f);
+g_walkOn=true;g_walkFor=&pos;g_walkTarget={pos.x+100,pos.y};g_walkLastPos=pos;
+float tapY=pos.y;UpdatePlayerMovement(pos,face,.1f,2000,-.694738f);
+assert(pos.y==tapY);WalkTargetClear();tick(.016f);
 // Switching zones starts fresh, so velocity cannot carry between position owners.
 Vector2 town{600,600};keys[KEY_D]=true;
 UpdatePlayerMovement(town,face,.016f);assert(town.x-600<1.0f);

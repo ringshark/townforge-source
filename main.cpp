@@ -2383,7 +2383,7 @@ static void WalkTargetSet(const Vector2& who, Vector2 target, float groundY) {
 static Vector2 g_moveVelocity = {};
 static const Vector2* g_moveOwner = nullptr;
 static double g_moveLastInputT = -99.0;
-static bool UpdatePlayerMovement(Vector2& pos, Vector2& facing, float dt, float worldSize = kWorldSize) {
+static bool UpdatePlayerMovement(Vector2& pos, Vector2& facing, float dt, float worldSize = kWorldSize,float viewYaw=0.0f) {
     dt = std::clamp(dt, 0.0f, 0.10f); // preserve walking pace down to 10 fps; bound stalled-frame jumps
     double now = GetTime();
     if (g_moveOwner != &pos || now - g_moveLastInputT > 0.25) g_moveVelocity = {};
@@ -2421,6 +2421,10 @@ static bool UpdatePlayerMovement(Vector2& pos, Vector2& facing, float dt, float 
         WalkTargetClear();
     }
     if (dt <= 0.0f) return stop();
+    if(!g_walkOn && viewYaw!=0.0f) {
+        const float cs=cosf(viewYaw),sn=sinf(viewYaw);
+        dir={dir.x*cs-dir.y*sn,dir.x*sn+dir.y*cs};
+    }
     Vector2 targetVelocity = { dir.x * step / dt, dir.y * step / dt };
     tfmotion::DriveVelocity(g_moveVelocity, targetVelocity, kPlayerSpeed * g_moveSpeedMul, dt);
     Vector2 delta = { g_moveVelocity.x * dt, g_moveVelocity.y * dt };
@@ -4479,10 +4483,16 @@ static float SkillUseGain(float& skill, float successChance, float weight, float
 // Moving without Stealth steps you out; with it, each second of movement is a
 // Stealth check. Attacking springs a surprise: the next landed swing hits hard.
 // Casting, gathering and fighting all reveal you.
+static bool HidingCoverFor(const GameState& s);
+static float HidingSuccessChance(float skill, bool cover, bool foesNear) {
+    skill=std::clamp(skill,0.0f,100.0f);
+    // Beginners need cover; experienced hiders can risk open ground.
+    float chance=cover ? 20.0f + skill*.77f : std::max(0.0f,(skill-30.0f)*1.3f);
+    if(foesNear) chance-=30.0f;
+    return std::clamp(chance,0.0f,97.0f);
+}
 static float HideChance(const GameState& s, bool foesNear) {
-    float c = 25.0f + EffectiveSkill(s, &GameState::hiding) * 0.72f; // 25% untrained .. 97% at GM
-    if (foesNear) c -= 30.0f; // hard to vanish with eyes on you
-    return std::clamp(c, 5.0f, 97.0f);
+    return HidingSuccessChance(EffectiveSkill(s, &GameState::hiding), HidingCoverFor(s), foesNear);
 }
 static float StealthChance(const GameState& s) {
     return std::clamp(40.0f + EffectiveSkill(s, &GameState::stealth) * 0.6f, 40.0f, 99.0f); // 94% a second at 90
@@ -4498,7 +4508,8 @@ static void TryHide(GameState& s, bool inFight, bool foesNear) {
     if (inFight) { s.logLine = "You can't hide in the middle of a fight!"; return; }
     if (s.hideCd > 0.0f) return;
     s.hideCd = 2.0f;
-    float c = HideChance(s, foesNear);
+    const bool cover=HidingCoverFor(s);
+    float c = HidingSuccessChance(EffectiveSkill(s, &GameState::hiding),cover,foesNear);
     bool ok = RandUnit() * 100.0f < c;
     float gain = SkillUseGain(s.hiding, c / 100.0f, 3.0f);
     std::string note = gain > 0 ? " (Hiding +" + std::to_string(gain).substr(0, 3) + ")" : "";
@@ -4506,7 +4517,7 @@ static void TryHide(GameState& s, bool inFight, bool foesNear) {
         s.hidden = true; s.stealthMoveT = 0.0f;
         s.logLine = std::string("You blend into the shadows") +
                     (EffectiveSkill(s, &GameState::stealth) > 0.0f ? " - move carefully to stay unseen." : ". Moving will give you away.") + note;
-    } else s.logLine = (foesNear ? "You can't hide with enemies watching you." : "You fail to hide.") + note;
+    } else s.logLine = (foesNear ? "You can't hide with enemies watching you." : !cover ? "You are too exposed. Try hiding beside a tree or wall." : "You fail to hide.") + note;
 }
 // Each frame while hidden: moving needs Stealth. Returns false if you were revealed.
 static void StealthTick(GameState& s, float dt, bool moved) {
@@ -10424,8 +10435,11 @@ static float ScrollDelta(Rectangle area) {
 // flashes the slot (hotbarDenyT) and explains via floater, so every tap answers.
 // Empty slots stay silent: "+" already says there's nothing there.
 static const float kHotbarDenyTime = 0.45f;
+static Rectangle CombatHotbarSlotRect(int i,float x,float y) {
+    return {x+(i%4)*84.0f,y+(i/4)*98.0f,72.0f,72.0f};
+}
 static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* spellCds, float castLockT,
-                               float x = 170.0f, float y = kViewport.y + kViewport.height - 90.0f) {
+                               float x = 190.0f, float y = kViewport.y + kViewport.height - 200.0f) {
     // Spell bar look (2026-09-26): a bronze-framed dark-wood bar of recessed
     // slots showing each spell's icon, its key number and mana cost, a radial
     // cooldown sweep with the seconds left, a gold rim when it's ready to fire,
@@ -10433,12 +10447,14 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
     int tapped = -1;
     Vector2 mouse = GetMousePosition();
     const int n = (int)s.combatHotbar.size();
-    const float slotW = n > 5 ? 41.0f : 60.0f, gap = n > 5 ? 4.0f : 8.0f; // (2026-09-28) eight slots fit one row
-    Rectangle bar = { x - 9.0f, y - 8.0f, n * slotW + (n - 1) * gap + 18.0f, slotW + 30.0f };
+    const float slotW = 72.0f;
+    const int cols=std::min(n,4), rows=(n+3)/4;
+    Rectangle bar={x-9,y-8,cols*84.0f+6,rows*98.0f-2};
+    UIRegister(bar);
     UODrawGump(bar, kUoDarkWood);
     float t = (float)GetTime();
     for (int i = 0; i < n; i++) {
-        Rectangle r = { x + (float)i * (slotW + gap), y, slotW, slotW };
+        Rectangle r=CombatHotbarSlotRect(i,x,y);
         Rectangle big = { r.x - 3.0f, r.y - 3.0f, r.width + 6.0f, r.height + 6.0f };
         int spellIdx = s.combatHotbar[i];
         bool has = spellIdx >= 0 && spellIdx < (int)kSpells.size();
@@ -10827,7 +10843,7 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     // Belt pouch (2026-09-26): bandages and heal potions as framed slots in the
     // spell bar's style, stack counts in the corner. Out of combat (oocZone >= 0,
     // 2026-09-27) it also carries your heal spell, and only shows while you're hurt.
-    float y = kViewport.y + kViewport.height - 146.0f;
+    float y = kViewport.y + kViewport.height - (oocZone<0 ? 294.0f:146.0f);
     std::vector<int> potions;
     if (s.poisonT > 0.0f) // (2026-09-29) poisoned: your best cure comes first
         for (size_t i = 0; i < s.potions.size() && potions.empty(); i++)
@@ -10866,7 +10882,7 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     if (ooc && ((s.hp >= s.maxHp && s.poisonT <= 0.0f && s.bandageT < 0.0f && raiseIdx < 0 && !blessUp && !teleUp && !hideUp && !peaceUp && !medUp && !fishUp && !rideUp && !trackUp) || s.playerIsGhost || s.playerDeathAnimT > 0.0f)) return;
     int n = 1 + (int)potions.size() + (ooc ? 1 : 0) + (raiseIdx >= 0 ? 1 : 0) + (blessUp ? 1 : 0) + (teleUp ? 1 : 0) + (hideUp ? 1 : 0) +
             (peaceUp ? 1 : 0) + (provoUp ? 1 : 0) + (medUp ? 1 : 0) + (fishUp ? 1 : 0) + (rideUp ? 1 : 0) + (trackUp ? 1 : 0);
-    const float sz = 42.0f, gap = 8.0f;
+    const float sz=ooc ? 42.0f:64.0f, gap=12.0f;
     Rectangle bar = { 166.0f, y - 6.0f, n * sz + (n - 1) * gap + 18.0f, sz + 12.0f };
     g_beltRect = bar; g_beltDrawnAt = GetTime(); UIRegister(bar);
     UODrawGump(bar, kUoDarkWood);
@@ -16429,7 +16445,7 @@ static const float kTown3DBuildingHalf = 55.0f; // 110-unit footprint, ~kNodeRad
 static bool g_touchSeen = false; // latched on first touch input - desktop never sees the TARGET button
 static Rectangle TargetFrameRect() { return { 20.0f, 208.0f, 230.0f, 58.0f }; }
 static Rectangle TargetButtonRect() {
-    return { kViewport.x + kViewport.width - 130.0f, kViewport.y + kViewport.height - 218.0f, 110.0f, 52.0f };
+    return { kViewport.x+20.0f,kViewport.y+kViewport.height-280.0f,140.0f,64.0f };
 }
 
 // ---------------------------------------------------------------------
@@ -19824,6 +19840,34 @@ static void WildSolidsBuild() {
 // put as you walk past) and drawn unlit in one immediate-mode batch. Birds sit
 // pecking in small flocks and burst into the air when you come close.
 // night: 0 day .. 1 full night (fireflies replace butterflies after dusk).
+static bool HidingCoverFor(const GameState& s) {
+    if(s.screen==Screen::Dungeon && s.selectedDungeon.has_value()) {
+        const Vector2 p=s.dungeonPlayerPos;
+        for(int i=0;i<16;++i) {
+            const float angle=i*6.2831853f/16.0f;
+            if(!DungeonIsFloor(*s.selectedDungeon,{p.x+cosf(angle)*60.0f,p.y+sinf(angle)*60.0f})) return true;
+        }
+        return false;
+    }
+    if(s.screen==Screen::Wilderness) {
+        const Vector2 p=s.wildernessPlayerPos;
+        for(const WildDressItem& tree:g_wild3dDress.items) {
+            if(tree.id>kWPTreeB) continue;
+            const float canopy=(tree.id<=kWPTreesBLarge ? 55.0f:28.0f)*tree.scale/kWPScaleTrees;
+            if(hypotf(p.x-tree.x,p.y-tree.z)<=canopy+35.0f) return true;
+        }
+        for(const auto& node:kWildernessGatherNodes)
+            if(node.resource=="wood" && Dist(p,node.pos)<=70.0f) return true;
+        return false;
+    }
+    if(s.screen==Screen::Town) {
+        for(const TownGreen& tree:g_townEnv.trees)
+            if(hypotf(s.townPlayerPos.x-tree.x,s.townPlayerPos.y-tree.z)<70.0f) return true;
+    }
+    return false;
+}
+
+
 static float LifeHash(float x, float z) { return Town3DHash01(x * 0.917f + 3.1f, z * 1.131f + 7.7f); }
 static void LifeTri(Vector3 a, Vector3 b, Vector3 c) {
     rlVertex3f(a.x, a.y, a.z); rlVertex3f(b.x, b.y, b.z); rlVertex3f(c.x, c.y, c.z);
@@ -22578,8 +22622,8 @@ static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
     if (s.recallPickerOpen && CheckCollisionPointRec(m, RecallPickerRect())) return true; // recall modal
     if (s.wildEngaged.has_value()) {
         if (CheckCollisionPointRec(m, { 20, 110, 330, 60 })) return true; // HP/mana strip
-        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return true; // quick items
-        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 100 })) return true; // spell hotbar
+        if (CheckCollisionPointRec(m, { 166, kViewport.y + kViewport.height - 300.0f, 342, 76 })) return true; // quick items
+        if (CheckCollisionPointRec(m, { 181, kViewport.y + kViewport.height - 208.0f, 342, 194 })) return true; // spell hotbar
     }
     return false;
 }
@@ -23501,8 +23545,8 @@ static bool Dung3DPointInUI(Vector2 m, const GameState& s) {
     if (CheckCollisionPointRec(m, { 528, 116, 96, 30 })) return true; // the camera mode button
     if (CheckCollisionPointRec(m, { 20, 110, 330, 60 })) return true; // HP strip
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return true; // TARGET button
-    if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return true; // quick items
-    if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 100 })) return true; // spell hotbar
+    if (CheckCollisionPointRec(m, { 166, kViewport.y + kViewport.height - 300.0f, 342, 76 })) return true; // quick items
+    if (CheckCollisionPointRec(m, { 181, kViewport.y + kViewport.height - 208.0f, 342, 194 })) return true; // spell hotbar
     if (CheckCollisionPointRec(m, JournalHuntButtonRect())) return true; // LOG button (always visible, incl. dungeons)
     if (s.journalOpen && CheckCollisionPointRec(m, JournalPanelRect())) return true; // journal panel
     return false;
@@ -34376,7 +34420,7 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
     const int perPage = 4, pages = ((int)spells.size() + perPage - 1) / perPage, spreads = (pages + 1) / 2;
     spread = std::clamp(spread, 0, std::max(0, spreads - 1));
     for (int b = 0; b < 3; b++) { // three tomes on the shelf (2026-09-28: + Chivalry)
-        Rectangle r = { 22.0f + b * 150.0f, 290, 140, 34 };
+        Rectangle r = { 22.0f + b * 150.0f, 386, 140, 44 };
         bool on = book == b;
         Color cover = b == 0 ? Color{ 128, 30, 30, 255 } : b == 1 ? Color{ 34, 28, 40, 255 } : Color{ 40, 70, 130, 255 };
         DrawRectangleRounded({ r.x, r.y + (on ? 0 : 6), r.width, r.height }, 0.2f, 6, on ? cover : ColorBrightness(cover, -0.25f));
@@ -34387,7 +34431,7 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
         if (!pickerOpen && !on && UOTapped(r)) { book = b; spread = 0; PlaySfx(SfxId::Click); }
     }
     // --- the open book ---
-    Rectangle cover = { 10, 322, (float)screenW - 20, (float)screenH - 336 };
+    Rectangle cover = { 10, 430, (float)screenW - 20, (float)screenH - 444 };
     Color coverCol = book == 0 ? Color{ 110, 26, 26, 255 } : book == 1 ? Color{ 30, 24, 36, 255 } : Color{ 34, 60, 112, 255 };
     DrawRectangleRounded({ cover.x + 4, cover.y + 6, cover.width, cover.height }, 0.03f, 6, Fade(BLACK, 0.4f));
     DrawRectangleRounded(cover, 0.03f, 6, coverCol);
@@ -37340,20 +37384,37 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     g_uiShieldBypass = false; g_uiShield = oldShield; g_uiShieldOn = oldShieldOn;
 }
 
+struct DenGroundGesture {
+    Vector2 press={};bool held=false,dragged=false;
+    bool Update(Vector2 p,bool pressed,bool down,bool released,bool eligible) {
+        if(pressed) {press=p;held=eligible;dragged=false;}
+        if(down && hypotf(p.x-press.x,p.y-press.y)>10.0f) dragged=true;
+        if(!eligible) held=false;
+        const bool tap=released && held && !dragged && hypotf(p.x-press.x,p.y-press.y)<=10.0f;
+        if(released || (!down && !pressed)) held=false;
+        return tap;
+    }
+};
 // Blackwake Den: a separate harbor zone, reached by ferry from town.
 static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
     static RenderTexture2D scene={};static float scroll=0;
+    static DenGroundGesture groundGesture;
+    const Vector2 pointer=GetMousePosition();
+    const bool groundTap=groundGesture.Update(pointer,IsMouseButtonPressed(MOUSE_BUTTON_LEFT),
+        IsMouseButtonDown(MOUSE_BUTTON_LEFT),IsMouseButtonReleased(MOUSE_BUTTON_LEFT),
+        !s.exploreMenuOpen && !g_denPanel && !DenFighting() && !UIHit(pointer) &&
+        CheckCollisionPointRec(pointer,kViewport) && !CheckCollisionPointRec(pointer,kJoystickZone));
     const Rectangle view=kViewport;
     if(!scene.id) {scene=LoadRenderTexture((int)view.width,(int)view.height);SetTextureFilter(scene.texture,TEXTURE_FILTER_BILINEAR);}
     bool fighting=DenFighting(),sideA=g_den.a==g_mpMyId;
     if(!s.exploreMenuOpen && !g_denPanel && (!fighting || g_den.countdown<=0)) {
-        UpdatePlayerMovement(s.townPlayerPos,s.playerFacing,GameDt(),1500);
+        UpdatePlayerMovement(s.townPlayerPos,s.playerFacing,GameDt(),1500,-atan2f(500.0f,600.0f));
         for(Vector2 b:std::vector<Vector2>{{1150,650},{1150,1000},{350,350},{1100,350}}) ResolveCircleCollision(s.townPlayerPos,kPlayerRadius,b,100);
         s.townPlayerPos.x=std::clamp(s.townPlayerPos.x,fighting ? 535.0f:120.0f,fighting ? 965.0f:1380.0f);
         s.townPlayerPos.y=std::clamp(s.townPlayerPos.y,fighting ? 535.0f:120.0f,fighting ? 965.0f:1380.0f);
     }
     Town3DLoadModels();Town3DEnsureLit();T3DUpdateDayNight(s.worldTime,true);
-    Vector3 focus={s.townPlayerPos.x,0,s.townPlayerPos.y};
+    Vector3 focus=fighting ? Vector3{750,0,750}:Vector3{s.townPlayerPos.x,0,s.townPlayerPos.y};
     Camera3D cam={{focus.x+500,780,focus.z+600},focus,{0,1,0},48,CAMERA_PERSPECTIVE};
     if(g_t3dLit.ready) {
         SetShaderValue(g_t3dLit.shader,g_t3dLit.viewPosLoc,&cam.position,SHADER_UNIFORM_VEC3);
@@ -37367,6 +37428,14 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
     DrawCube({860,1,650},650,2,80,Color{141,133,112,255});
     DrawCube({750,2,750},510,4,510,Color{58,48,36,255});
     DrawCube({750,5,750},480,3,480,Color{170,135,84,255});
+    // Symmetric court: unobstructed center and clear distance markers.
+    for(int row=0;row<8;++row) for(int col=0;col<8;++col)
+        DrawCube({540+col*60.0f,7,540+row*60.0f},58,1,58,
+            (row+col)%2 ? Color{155,148,126,255}:Color{171,162,139,255});
+    DrawCube({750,8,750},4,1,420,Color{115,105,83,255});
+    DrawCube({750,8,750},420,1,4,Color{115,105,83,255});
+    DrawCylinder({625,9,750},26,26,1,24,Color{70,121,169,255});
+    DrawCylinder({875,9,750},26,26,1,24,Color{177,73,56,255});
     for(int i=0;i<=10;++i) for(int side:{-1,1}) {
         float along=500+i*50.0f;
         if(i==4 || i==5 || i==6) continue;
@@ -37427,17 +37496,17 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
             if(closest && IsKeyPressed(KEY_E)) {g_denPanel=closest->panel;scroll=0;WalkTargetClear();}
             // Ground picking uses the same camera and viewport as rendering.
             Vector2 mouse=GetMousePosition();
-            if(s.optTapWalk && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !g_uiGestureOwned && !UIHit(mouse) && CheckCollisionPointRec(mouse,view)) {
-                Ray ray=GetScreenToWorldRayEx({mouse.x,mouse.y-view.y},cam,540,790);
+            if(s.optTapWalk && groundTap && !g_uiGestureOwned && !UIHit(mouse) && CheckCollisionPointRec(mouse,view)) {
+                Ray ray=GetScreenToWorldRayEx({mouse.x-view.x,mouse.y-view.y},cam,(int)view.width,(int)view.height);
                 if(fabsf(ray.direction.y)>.001f) {float t=-ray.position.y/ray.direction.y;if(t>0) WalkTargetSet(s.townPlayerPos,{std::clamp(ray.position.x+ray.direction.x*t,120.0f,1380.0f),std::clamp(ray.position.z+ray.direction.z*t,120.0f,1380.0f)},0);}
             }
         } else {
-            DrawUIText("Space: strike  Q: lunge  R: guard",190,718,12,kUoGoldText);
+            DrawUIText("Space: strike  Q: lunge  R: guard",190,678,12,kUoGoldText);
             bool go=g_den.countdown<=0 && g_mpStatus==2;
-            if(Button({190,744,104,52},"Strike",go) || (go && IsKeyPressed(KEY_SPACE))) JS_DenAction("strike","",0);
-            if(Button({302,744,104,52},"Lunge",go) || (go && IsKeyPressed(KEY_Q))) JS_DenAction("lunge","",0);
-            if(Button({414,744,104,52},"Guard",go) || (go && IsKeyPressed(KEY_R))) JS_DenAction("guard","",0);
-            if(Button({330,806,188,44},"Surrender duel",true)) JS_DenAction("surrender","",0);
+            if(Button({190,704,98,84},"Strike",go) || (go && IsKeyPressed(KEY_SPACE))) JS_DenAction("strike","",0);
+            if(Button({302,704,98,84},"Lunge",go) || (go && IsKeyPressed(KEY_Q))) JS_DenAction("lunge","",0);
+            if(Button({414,704,98,84},"Guard",go) || (go && IsKeyPressed(KEY_R))) JS_DenAction("guard","",0);
+            if(Button({330,820,188,56},"Surrender duel",true)) JS_DenAction("surrender","",0);
         }
     }
     Rectangle top={12,116,516,82};UODrawGump(top,kUoDarkWood);UIRegister(top);
