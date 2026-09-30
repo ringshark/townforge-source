@@ -33,7 +33,11 @@ stick={.5f,0};pos={500,500};for(int i=0;i<60;i++)tick(1.f/60);
 assert(pos.x>600 && pos.x<611);stick={};tick(1.f/60);
 g_walkOn=true;g_walkFor=&pos;g_walkTarget={pos.x+20,pos.y};g_walkLastPos=pos;
 for(int i=0;i<60;i++)tick(1.f/60);assert(!g_walkOn && pos.x<=g_walkTarget.x+.001f);
-keys[KEY_D]=true;float before=pos.x;tick(1.f);assert(pos.x-before<=11.001f);
+keys[KEY_D]=true;float before=pos.x;tick(1.f);assert(pos.x-before<=22.001f);
+keys[KEY_D]=false;tick(.016f);
+// A slow device retains the same sustained walking pace as a 60 fps device.
+pos={500,500};keys[KEY_D]=true;for(int i=0;i<10;i++)tick(.1f);
+assert(pos.x-500>219 && pos.x-500<=220.01f);
 keys[KEY_D]=false;tick(.016f);
 // Switching zones starts fresh, so velocity cannot carry between position owners.
 Vector2 town{600,600};keys[KEY_D]=true;

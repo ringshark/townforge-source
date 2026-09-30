@@ -5,7 +5,8 @@ speed in about 63 ms. Releasing stops immediately and reversing starts in the ne
 direction immediately. Keyboard diagonals remain normalized. Joystick speed rises
 continuously out of its dead zone, instead of jumping to 20% speed. Tap destinations
 remain bounded, and movement resets after leaving a view or pausing in a panel.
-Movement delta is capped at 50 ms to limit jumps after a stalled browser frame.
+Movement delta is capped at 100 ms to limit jumps after a stalled browser frame
+while retaining full walking pace down to 10 fps.
 
 The player's rendered facing eases along the shortest angle, with faster turning
 during attacks. Gameplay facing remains immediate. Automatic melee faces the target

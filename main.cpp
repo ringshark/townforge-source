@@ -2383,9 +2383,9 @@ static Vector2 g_moveVelocity = {};
 static const Vector2* g_moveOwner = nullptr;
 static double g_moveLastInputT = -99.0;
 static bool UpdatePlayerMovement(Vector2& pos, Vector2& facing, float dt, float worldSize = kWorldSize) {
-    dt = std::clamp(dt, 0.0f, 0.05f); // do not jump through walls after a stalled frame
+    dt = std::clamp(dt, 0.0f, 0.10f); // preserve walking pace down to 10 fps; bound stalled-frame jumps
     double now = GetTime();
-    if (g_moveOwner != &pos || now - g_moveLastInputT > 0.12) g_moveVelocity = {};
+    if (g_moveOwner != &pos || now - g_moveLastInputT > 0.25) g_moveVelocity = {};
     g_moveOwner = &pos; g_moveLastInputT = now;
     auto stop = [&]() { g_moveVelocity = {}; return false; };
     Vector2 dir = {0, 0};
