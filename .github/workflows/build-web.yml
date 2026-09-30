@@ -1,0 +1,58 @@
+name: Build Town Forge Web
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ringshark-patch-1
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: emsdk-cache
+
+      - name: Build raylib for web
+        run: |
+          git clone --depth 1 --branch 6.0 https://github.com/raysan5/raylib.git /tmp/raylib
+          cd /tmp/raylib/src
+          make PLATFORM=PLATFORM_WEB -j2
+
+      - name: Build Town Forge
+        run: |
+          mkdir -p build-web
+          em++ -O1 -std=c++17 -DPLATFORM_WEB main.cpp \
+            -I /tmp/raylib/src /tmp/raylib/src/libraylib.web.a \
+            -sUSE_GLFW=3 \
+            -sINITIAL_MEMORY=536870912 \
+            -sSTACK_SIZE=1048576 \
+            -lidbfs.js \
+            --preload-file assets \
+            --shell-file shell_3d.html \
+            -o build-web/index.html
+
+      - name: Stage deployable site
+        run: |
+          mkdir -p site
+          TF_MP_URL="${{ secrets.TF_MP_URL }}" \
+          SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
+          SUPABASE_ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}" \
+          bash web/deploy_web.sh build-web site
+
+      - name: Upload web build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: townforge-web
+          path: site/
+          if-no-files-found: error
+          retention-days: 14
