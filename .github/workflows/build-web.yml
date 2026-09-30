@@ -41,6 +41,7 @@ jobs:
         run: |
           git clone --depth 1 --branch 6.0 https://github.com/raysan5/raylib.git /tmp/raylib
           make -C /tmp/raylib/src PLATFORM=PLATFORM_WEB -j2
+          RAYLIB_DIR=/tmp/raylib python tests/avatar-motion.py
       - name: Build game
         run: RAYLIB_DIR=/tmp/raylib bash web/build_web.sh
       - name: Package game

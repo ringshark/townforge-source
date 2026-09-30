@@ -4,6 +4,7 @@
   "rigging_credits": 5,
   "animation_source": "Existing assets/characters3d/hero.glb, retargeted without additional API purchases",
   "height_meters": 1.8,
+  "root_motion": "Hips X/Z anchored to bind position in all 19 clips; vertical motion and joint rotations preserved. Reapply tools/characters3d/in_place.py after retargeting.",
   "triangle_budget": 20000,
   "texture_size": 1024,
   "dye_markers": {"green": "shirt", "blue": "trousers", "yellow": "gloves / hands"},

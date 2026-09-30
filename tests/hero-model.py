@@ -31,6 +31,13 @@ assert triangles <= 20000
 clips = {a['name'] for a in g['animations']}
 assert {'Idle','walking_man','running','Combat_Stance','Right_Hand_Sword_Slash','Sword_Parry','Hit_Reaction','dying_backwards','mage_soell_cast'} <= clips
 for animation in g['animations']:
+    for channel in animation['channels']:
+        target = channel['target']; node = g['nodes'][target['node']]
+        if node.get('name') == 'Hips' and target['path'] == 'translation':
+            sampler = animation['samplers'][channel['sampler']]
+            x, _, z = node.get('translation', [0, 0, 0])
+            for frame in values(sampler['output']):
+                assert abs(frame[0] - x) < 1e-6 and abs(frame[2] - z) < 1e-6, animation['name'] + ' root drift'
     for sampler in animation['samplers']:
         times = [x[0] for x in values(sampler['input'])]
         assert len(times) >= 2 and times == sorted(times) and times[-1] > times[0]

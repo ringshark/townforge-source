@@ -14401,6 +14401,7 @@ struct SkinPose {
     float move = 0.0f;     // 0 idle .. 1 full run
     float speed = -1.0f;   // ground speed, world units/s (<0: taken from move)
     float attackT = -1.0f; // a swing's phase (edge-triggered: a new swing starts on the rising edge)
+    float attackDuration = 0.0f; // >0: combat owns the phase; do not replay a longer visual swing
     float castT = -1.0f;
     float hurtT = -1.0f;
     float deathT = -1.0f;  // 0..1 through dying
@@ -14419,7 +14420,7 @@ struct SkinAnimState {
     bool moving = false;
     float vSm = 0.0f; // smoothed ground speed
 };
-static std::map<int, SkinAnimState> g_skinAnim;
+static std::map<std::pair<int, int>, SkinAnimState> g_skinAnim;
 // Meshy's walk and run clips, measured (tools: foot travel over a cycle): the
 // walk covers 1.36 m/s, the run 3.8 m/s, and both plant the left foot forward
 // at a quarter cycle, so they blend stride-for-stride.
@@ -14433,6 +14434,15 @@ static SkinArmorFit g_skinFitChest = { 1.22f, 1.18f, 0.02f, 0.03f }, g_skinFitPa
                     g_skinFitBracer = { 1.25f, 1.0f, 0.0f, 0.0f }, g_skinFitGreave = { 1.25f, 1.0f, 0.0f, 0.0f },
                     g_skinFitCuisse = { 1.2f, 1.0f, 0.0f, 0.0f }, g_skinFitGorget = { 1.2f, 1.1f, 0.0f, 0.0f },
                     g_skinFitHelm = { 1.1f, 1.0f, -0.01f, 0.015f };
+static Matrix SkinCloakLocal(float u, float move, Matrix restRotation) {
+    // Pivot at the shoulders. Positive X tilt carries the hanging hem toward
+    // -Z (the back); negative tilt pushed it through the chest while running.
+    const float top = 0.22f * u;
+    Matrix local = MatrixMultiply(MatrixScale(u * 1.18f, u, u), MatrixTranslate(0, -top, 0));
+    local = MatrixMultiply(local, MatrixRotateX(0.06f + 0.30f * std::clamp(move, 0.0f, 1.0f)));
+    local = MatrixMultiply(local, MatrixTranslate(0, top - 0.12f * u, -0.04f * u));
+    return MatrixMultiply(local, restRotation);
+}
 static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, float heightW, Color tint,
                          const SkinPose& p, bool shadowPass, const HumanOutfit* gear = nullptr, float maxDepth = 0.0f,
                          const SkinDye* dye = nullptr) {
@@ -14458,7 +14468,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         }
     }
     const double now = g_gameClock;
-    SkinAnimState& st = g_skinAnim[track * 4 + id];
+    SkinAnimState& st = g_skinAnim[{track, id}]; // model IDs can exceed four; keep actor tracks independent
     auto edge = [](float cur, float& last) {
         bool e = cur >= 0.0f && (last < 0.0f || cur < last - 0.3f);
         last = cur;
@@ -14468,7 +14478,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     if (edge(p.castT, st.lastCast)) { st.castStart = now; st.castVariant++; }
     if (edge(p.hurtT, st.lastHurt)) st.hurtStart = now;
     static const float kAtkDur[7] = { 0.55f, 0.62f, 0.85f, 0.75f, 0.50f, 0.95f, 0.80f };
-    float atkT = (float)((now - st.atkStart) / kAtkDur[std::clamp(p.style, 0, 6)]);
+    float atkT = p.attackDuration > 0.0f ? p.attackT : (float)((now - st.atkStart) / kAtkDur[std::clamp(p.style, 0, 6)]);
     float castT = (float)((now - st.castStart) / 0.85);
     float hurtT = (float)((now - st.hurtStart) / 0.45);
     bool attacking = atkT >= 0.0f && atkT < 1.0f, casting = castT >= 0.0f && castT < 1.0f, hurting = hurtT >= 0.0f && hurtT < 1.0f;
@@ -14488,7 +14498,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         if (p.style == kHsBow && has(kSkBow)) { k = kSkBow; a0 = 0.50f; a1 = 0.80f; }            // the draw and loose
         else if ((p.style == kHsTwoHand || p.style == kHsPolearm) && has(kSkHammer)) { k = kSkHammer; a0 = 0.08f; a1 = 0.80f; }
         else if (p.style == kHsMagic && has(kSkCast)) { k = kSkCast; }
-        else if ((p.style == kHsUnarmed || p.style == kHsDagger || st.atkVariant % 2) && has(kSkCombo)) {
+        else if ((p.style == kHsUnarmed || p.style == kHsDagger) && has(kSkCombo)) {
             k = kSkCombo; int part = st.atkVariant % 3; a0 = part / 3.0f; a1 = (part + 1) / 3.0f; // one blow of the three
         } else if (has(kSkSlash)) { k = kSkSlash; a0 = 0.10f; a1 = 0.85f; }
         else ph = -1.0f;
@@ -14553,7 +14563,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     }
     if (st.clip != clip) { st.prevClip = st.clip; st.prevFrame = st.frame; st.switchT = now; st.clip = clip; }
     st.frame = frame;
-    float fade = (float)((now - st.switchT) / 0.16);
+    float fade = (float)((now - st.switchT) / (attacking ? 0.04 : 0.10));
     if (skipSkin) {}
     else if (riding) UpdateModelAnimation(C.model, C.sit, 0.0f);
     else if (runW > 0.02f) { // walk <-> run blend on the shared stride phase
@@ -14695,8 +14705,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
                 piece(H.hat[o.hat], C.head, g_skinFitHelm, o.hatCol);
             if (o.robe) piece(H.robeSkirt, C.spine, {1.05f, 1.12f, 0.0f, -0.08f}, o.robeCol);
             if (o.cloak && C.spine >= 0) {
-                Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(u * 1.18f, u, u),
-                    MatrixRotateX(-0.06f - 0.30f * p.move)), C.armorRot[(size_t)C.spine]);
+                Matrix local = SkinCloakLocal(u, p.move, C.armorRot[(size_t)C.spine]);
                 HumanDrawAttached(H.cloak, &flat, local, boneM(C.spine), world, HumanMul(o.cloakCol, tint));
             }
         }
@@ -14733,6 +14742,7 @@ static bool DrawEquippedHero(int track, float x, float z, float yaw, Color tint,
     HumanOutfit outfit = HumanOutfitFor(equipment);
     SkinPose pose;
     pose.move = hp.move; pose.attackT = hp.attackT; pose.castT = hp.castT;
+    pose.attackDuration = hp.attackDuration;
     pose.hurtT = hp.hurtT; pose.deathT = hp.deathT; pose.engaged = hp.engaged;
     pose.gather = hp.gather; pose.style = outfit.style;
     pose.sneaking = sneaking; pose.blocking = blocking;
@@ -15201,7 +15211,7 @@ static void MpDraw3D(const std::string& zoneKey, bool shadowPass, const Town3DCa
         sp.style = held.style;
         if(zoneKey=="den" && !g_den.id.empty() && (p.id==g_den.a || p.id==g_den.b)) {
             float phase=p.id==g_den.a ? g_den.swingA:g_den.swingB;
-            sp.attackT=phase>=0 && phase<.35f ? 1.0f-phase/.35f:-1.0f;sp.engaged=true;sp.blocking=p.id==g_den.a ? g_den.guardA:g_den.guardB;
+            sp.attackT=phase>=0 && phase<.35f ? phase/.35f:-1.0f;sp.attackDuration=.35f;sp.engaged=true;sp.blocking=p.id==g_den.a ? g_den.guardA:g_den.guardB;
         }
         SkinDye dye; bool ok;
         for (int k = 0; k < 3; k++) { Color c = MpHex(f[6 + k], &ok); if (ok) dye.c[1 + k] = c; }
@@ -37511,7 +37521,7 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
     T3CKitUseSunShader();
     rlPushMatrix();rlTranslatef(0,8,0);
     if(!DrawPlayerHuman(s,kT3CTrackPlayerTown,s.townPlayerPos.x,s.townPlayerPos.y,atan2f(s.playerFacing.y,s.playerFacing.x),animation.move,nullptr,false,
-        fighting && phase>=0 && phase<.35f ? 1-phase/.35f:-1.0f,fighting))
+        fighting && phase>=0 && phase<.35f ? phase/.35f:-1.0f,fighting))
         T3CDrawHumanoid(g_t3cHumans[2].parts,s.townPlayerPos.x,s.townPlayerPos.y,atan2f(s.playerFacing.y,s.playerFacing.x),1.0f,Color{70,130,220,255},Color{50,55,70,255},Color{240,210,180,255},animation,false);
     MpDraw3D("den",false,nullptr);rlPopMatrix();
     EndMode3D();EndTextureMode();
