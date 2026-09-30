@@ -1,5 +1,8 @@
 name: Meshy Assets
 on:
+  push:
+    branches: [ringshark-patch-1]
+    paths: ['.github/workflows/meshy-assets.yml']
   workflow_dispatch:
     inputs:
       operation:
@@ -39,8 +42,8 @@ jobs:
       - name: Connect or stage one asset
         env:
           MESHY_API_KEY: ${{ secrets.MESHY_API_KEY }}
-          MESHY_OPERATION: ${{ inputs.operation }}
-          MESHY_TASK_TYPE: ${{ inputs.task_type }}
+          MESHY_OPERATION: ${{ inputs.operation || 'check' }}
+          MESHY_TASK_TYPE: ${{ inputs.task_type || 'text-to-3d' }}
           MESHY_TASK_ID: ${{ inputs.task_id }}
           MESHY_PROMPT: ${{ inputs.prompt }}
         run: python tools/characters3d/meshy.py
