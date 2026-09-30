@@ -9,3 +9,5 @@ townforge_save.txt
 
 build-web/
 site/
+meshy-output/
+__pycache__/

@@ -1,0 +1,53 @@
+name: Meshy Assets
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'check/download are free of generation charges; preview/refine spend Meshy credits'
+        type: choice
+        options: [check, download, preview, refine]
+        default: check
+      task_type:
+        description: 'Type of existing task to download (preview/refine always use text-to-3d)'
+        type: choice
+        options: [text-to-3d, image-to-3d, rigging, animations]
+        default: text-to-3d
+      task_id:
+        description: 'Existing task ID for download, or preview task ID for refine'
+        type: string
+      prompt:
+        description: 'Preview only: describe one asset, maximum 800 characters'
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: meshy-assets
+  cancel-in-progress: false
+jobs:
+  asset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ringshark-patch-1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test Meshy asset tooling without spending credits
+        run: python tests/meshy-assets.py
+      - name: Connect or stage one asset
+        env:
+          MESHY_API_KEY: ${{ secrets.MESHY_API_KEY }}
+          MESHY_OPERATION: ${{ inputs.operation }}
+          MESHY_TASK_TYPE: ${{ inputs.task_type }}
+          MESHY_TASK_ID: ${{ inputs.task_id }}
+          MESHY_PROMPT: ${{ inputs.prompt }}
+        run: python tools/characters3d/meshy.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: meshy-assets-${{ github.run_id }}
+          path: meshy-output/
+          if-no-files-found: ignore
+          retention-days: 30
