@@ -24,3 +24,14 @@ await assert.rejects(verifyLadderAccount(env,'invalid'),/Sign in/);await assert.
 // Harder opponents react to guard, use lunges and remain in bounds.
 const ai=new DenEngine({},()=>now);ai.peersFrom([player]);ai.weekly().records[account]={name:'QA',cleared:4,wins:4,losses:0,clearMs:40000};ai.practice('p',true);now+=4000;ai.practiceTick();assert.ok(ai.state.duel.npc.x>=535&&ai.state.duel.npc.x<=965);assert.equal(ai.state.duel.npc.pace,185);
 console.log('PASS ladder account verification, five ordered stages, knockout-only progress, cross-device persistence, titles, reset, free practice and bot profiles');
+// The real Worker alarm refreshes an open ladder panel after rollover and persists
+// that reset even when nobody starts another match. Empty zones do not keep waking.
+const {readFileSync}=await import('node:fs');
+let worker=readFileSync(new URL('../src/index.js',import.meta.url),'utf8').replace('import { DurableObject } from "cloudflare:workers";','class DurableObject {}');
+worker=worker.replace('"./den-engine.js"',JSON.stringify(new URL('../src/den-engine.js',import.meta.url).href)).replace('"./ladder-auth.js"',JSON.stringify(new URL('../src/ladder-auth.js',import.meta.url).href));
+const {Zone}=await import('data:text/javascript,'+encodeURIComponent(worker));
+const packets=[],peer={...player,den:true,hello:true,lastSeen:Date.now()},socket={deserializeAttachment:()=>peer,send:raw=>packets.push(JSON.parse(raw))};let stored,alarmAt,open=true;
+const zone=Object.create(Zone.prototype);zone.den=new DenEngine({weekly:{week:0,records:{[account]:{name:'QA',cleared:5}}}},()=>Date.now());zone.ctx={getWebSockets:()=>open?[socket]:[],storage:{put:async(k,v)=>{stored=structuredClone(v)},setAlarm:async at=>{alarmAt=at}}};
+await zone.alarm();assert.equal(stored.weekly.week,ladderWeek(Date.now()));assert.equal(packets.at(-1).ladder.cleared,0);assert.ok(alarmAt>Date.now()&&alarmAt<Date.now()+16000);
+open=false;alarmAt=null;await zone.alarm();assert.equal(alarmAt,null);
+console.log('PASS Worker idle-panel weekly refresh, durable rollover and empty-zone alarm shutdown');

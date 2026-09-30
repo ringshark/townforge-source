@@ -197,7 +197,7 @@ export class Zone extends DurableObject {
       try {w.close(1001,"presence heartbeat expired");}catch(e) {}
     }
   }
-  async alarm() {await this.expirePresence();this.denPeers();this.den.tick();this.den.practiceTick();await this.ctx.storage.put("den",this.den.state);this.denSync();if(this.den.state.duel || this.den.state.offers.length) await this.ctx.storage.setAlarm(Date.now()+1000);else if(this.players().some(([,p])=>!p.den)) await this.ctx.storage.setAlarm(Date.now()+15000);}
+  async alarm() {await this.expirePresence();this.denPeers();this.den.tick();this.den.practiceTick();this.den.weekly();await this.ctx.storage.put("den",this.den.state);this.denSync();if(this.den.state.duel || this.den.state.offers.length) await this.ctx.storage.setAlarm(Date.now()+1000);else if(this.players().length) await this.ctx.storage.setAlarm(Date.now()+15000);}
   async webSocketClose(ws) { await this.left(ws); }
   async webSocketError(ws) { await this.left(ws); }
   async left(ws) {
