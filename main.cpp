@@ -1087,7 +1087,7 @@ struct Spell {
 // gate (added 2026-09-21, see its comment) doesn't lock a starting Magery-0
 // character out of practicing anything at all - a deliberate deviation from the
 // port, not a formula mismatch.
-static const std::array<Spell, 31> kSpells = {{
+static const std::array<Spell, 32> kSpells = {{
     {"Spark Dart", 1, SpellType::Offensive, 0, 50, 4, 1, 4},
     {"Mending Word", 1, SpellType::Utility, 0, 50, 4, 1, 4},
     {"Sap Strength", 1, SpellType::Debuff, 0, 50, 4, 1, 4},
@@ -1131,9 +1131,12 @@ static const std::array<Spell, 31> kSpells = {{
     {"Consecrate Weapon", 2, SpellType::Buff, 15, 65, 10, 0, 0, false, true},
     {"Holy Light", 3, SpellType::Offensive, 30, 80, 14, 0, 18, false, true},
     {"Divine Shield", 4, SpellType::Buff, 45, 95, 16, 0, 0, false, true},
+    // (2026-09-30) UO's Cure: draws the poison out of you. Circle 2, Magery 20. Index 31.
+    {"Cure", 2, SpellType::Utility, 20, 70, 6, 1, 0},
 }};
 static const int kSpCloseWounds = 27, kSpConsecrate = 28, kSpHolyLight = 29, kSpDivineShield = 30;
 static const int kSpBless = 25;
+static const int kSpCure = 31;
 static const int kSpTeleport = 26;
 static const float kTeleportRange = 380.0f; // world units (about 1.7 s of walking)
 static int g_teleAimZone = -1;              // aiming a Teleport: 0 wilds, 1 dungeon, -1 not
@@ -10408,7 +10411,7 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
 // open slot, plus a Clear/Cancel option - opened by tapping any hotbar slot while not
 // engaged in a fight (see the DrawCombatHotbarRow call sites).
 // Spell descriptions (2026-09-28, #62): what each spell does, for the spellbook.
-static const char* kSpellDesc[31] = {
+static const char* kSpellDesc[32] = {
     "A crackling dart of energy at your foe.",                                   // Spark Dart
     "Heals you a little.",                                                       // Mending Word
     "Your foe hits 30% softer for 20 seconds.",                                  // Sap Strength
@@ -10440,6 +10443,7 @@ static const char* kSpellDesc[31] = {
     "+30% melee damage for 30 seconds.",                                         // Consecrate Weapon
     "A bolt of holy light at your foe (stronger with Karma).",                   // Holy Light
     "A holy ward that absorbs damage (stronger with Karma).",                    // Divine Shield
+    "Cures poison. Deadly poison needs more Magery.",                            // Cure
 };
 static std::string SpellEffectLine(const GameState& s, int idx) { // the short line under the name
     const Spell& sp = kSpells[(size_t)idx];
@@ -10545,6 +10549,7 @@ static GameState::WorldCorpse* NecroFindCorpse(GameState& s, int zone, Vector2 n
 // Best self-heal spell you can cast right now (Greater Mending once Magery allows), or -1.
 static int BestHealSpell(const GameState& s) {
     float mag = EffectiveSkill(s, &GameState::magery);
+    if (s.poisonT > 0.0f && mag >= (float)kSpells[kSpCure].minSkill) return kSpCure; // (2026-09-30) poisoned: cure it first
     if (EffectiveSkill(s, &GameState::chivalry) > mag && ChivKarmaOk(s)) return kSpCloseWounds; // a paladin's heal (2026-09-28)
     if (mag >= (float)kSpells[9].minSkill) return 9; // Greater Mending
     return 1;                                        // Mending Word (circle 1, anyone may try)
@@ -10560,7 +10565,7 @@ static bool BeltPointIn(Vector2 m) { return GetTime() - g_beltDrawnAt < 0.25 && 
 static void CastHealOutOfCombat(GameState& s, int zone) {
     int sp = BestHealSpell(s);
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
-    if (s.hp >= s.maxHp) { s.logLine = "You're already at full health."; return; }
+    if (s.hp >= s.maxHp && s.poisonT <= 0.0f) { s.logLine = "You're already at full health."; return; }
     if (g_oocHealCd > 0.0f) return;
     if (s.mana < kSpells[sp].manaCost) { s.logLine = "Not enough mana for " + kSpells[sp].name + "."; return; }
     if (s.reagents < LiveReagentCost(sp)) { s.logLine = "No reagents for " + kSpells[sp].name + "."; return; }
@@ -30160,6 +30165,7 @@ static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
         return;
     }
     if (spell.type == SpellType::Debuff) { CastLiveDebuffSpell(s, spellIdx, zone); return; }
+    if (spellIdx == kSpCure && s.poisonT <= 0.0f) { s.logLine = "You aren't poisoned."; return; } // (2026-09-30) no mana wasted
     s.mana -= spell.manaCost;
     s.reagents -= LiveReagentCost(spellIdx);
     std::string note;
@@ -30206,6 +30212,22 @@ static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
                 s.logLine = "A holy ward surrounds you (absorbs " + std::to_string((int)s.boneArmor) + ")" + note;
             }
         } else s.logLine = std::string(!ChivKarmaOk(s) ? "The virtues turn away from the Wicked - " + spell.name + " fails!" : spell.name + " fizzles!") + note;
+        return;
+    }
+    if (spellIdx == kSpCure) { // (2026-09-30) Magery against the poison's strength
+        setCastPose();
+        if (success) {
+            float mag = EffectiveSkill(s, &GameState::magery);
+            float chance = std::clamp(115.0f - 25.0f * s.poisonLvl + mag * 0.35f, 10.0f, 100.0f); // lesser ~always, deadly needs a master
+            Vector2 ppos = (zone == 0) ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+            SpawnSpellImpact(s, zone, ppos, -11, 0.9f);
+            PlaySfx(SfxId::Heal);
+            if (RandUnit() * 100.0f < chance) {
+                s.poisonT = 0.0f; s.poisonLvl = 0;
+                s.healGlowT = 0.0f; s.healGlowKind = 1;
+                s.logLine = "You are cured of the poison." + note;
+            } else s.logLine = std::string(s.poisonLvl >= 3 ? "The deadly poison resists your Cure!" : "The poison resists your Cure!") + note;
+        } else s.logLine = spell.name + " fizzles!" + note;
         return;
     }
     if (spellIdx == kSpBless) {
@@ -34179,6 +34201,8 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
     std::vector<int> spells;
     for (size_t i = 0; i < kSpells.size(); i++)
         if ((kSpells[i].necro ? 1 : kSpells[i].chiv ? 2 : 0) == book) spells.push_back((int)i); // (2026-09-28) + Chivalry
+    // (2026-09-30) in circle order: later additions (Bless, Teleport, Cure) sit with their circle
+    std::stable_sort(spells.begin(), spells.end(), [](int a, int b) { return kSpells[(size_t)a].circle < kSpells[(size_t)b].circle; });
     const int perPage = 4, pages = ((int)spells.size() + perPage - 1) / perPage, spreads = (pages + 1) / 2;
     spread = std::clamp(spread, 0, std::max(0, spreads - 1));
     for (int b = 0; b < 3; b++) { // three tomes on the shelf (2026-09-28: + Chivalry)
