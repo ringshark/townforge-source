@@ -19841,7 +19841,7 @@ static void WildSolidsBuild() {
 // pecking in small flocks and burst into the air when you come close.
 // night: 0 day .. 1 full night (fireflies replace butterflies after dusk).
 static bool HidingCoverFor(const GameState& s) {
-    if(s.screen==Screen::Dungeon && s.selectedDungeon.has_value()) {
+    if(s.screen==Screen::Hunt && s.selectedDungeon.has_value()) {
         const Vector2 p=s.dungeonPlayerPos;
         for(int i=0;i<16;++i) {
             const float angle=i*6.2831853f/16.0f;
