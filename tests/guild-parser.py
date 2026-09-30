@@ -25,7 +25,10 @@ wire = "cfg=1\\nready=1\\nbusy=0\\nmy=g|Wolves|IW\\nhall=1|0|30|-1|0|0|0|\\n";
 GuildNetPoll(); assert(g_gnet.hub); assert(g_gnet.rec.empty()); assert(g_gnet.hall == 1);
 wire = "my=g|Wolves|IW\\nhall=2|400|32|1200|3600|1|1|timber\\n";
 GuildNetPoll(); assert(g_gnet.hub); assert(g_gnet.rec == "timber"); assert(g_gnet.lent);
-wire = "cfg=1\\nready=1\\n"; GuildNetPoll(); assert(!g_gnet.hub);
+wire = "my=g|Wolves|IW\\nhall=3|400|32|-1|0|1|0|\\ncitystock=50|60|70|2\\ncitybuilding=workshop|2|120\\ncityrun=5|boss|200|30|1800|0|0|1|0\\ncitybattle=8|enemy|100|200|2|0|30|40\\ncitypending=1\\n";
+GuildNetPoll(); assert(g_gnet.cityReady && g_gnet.cityPending); assert(g_gnet.cityWood==50 && g_gnet.cityContracts==2);
+assert(g_gnet.cityBuildings[0].level==2 && g_gnet.cityRuns[0].joined && g_gnet.cityBattles[0].mine==30);
+wire = "cfg=1\\nready=1\\n"; GuildNetPoll(); assert(!g_gnet.hub); assert(!g_gnet.cityReady && g_gnet.cityRuns.empty());
 }
 '''
 with tempfile.TemporaryDirectory() as tmp:

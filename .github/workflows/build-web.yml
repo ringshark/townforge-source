@@ -23,6 +23,7 @@ jobs:
           node tests/guildnet-refresh.cjs
           node tests/guild-project.cjs
           python tests/guild-parser.py
+          node tests/guild-city-cloud.cjs
       - name: Build raylib 6.0
         run: |
           git clone --depth 1 --branch 6.0 https://github.com/raysan5/raylib.git /tmp/raylib

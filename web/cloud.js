@@ -23,7 +23,10 @@
   // The same moment comes back from the database as "...Z" or "...+00:00" (and with
   // extra digits) - compare the times, not the text, or every check looks like
   // another device saved and the dialog pops up (2026-09-28).
-  function sameTime(a, b) { return !!a && !!b && Date.parse(a) === Date.parse(b); }
+  function sameTime(a, b) {
+    function fraction(t) { var m=String(t).match(/\.(\d+)/); return ((m ? m[1] : '')+'000000').slice(0,6); }
+    return !!a && !!b && Date.parse(a) === Date.parse(b) && fraction(a) === fraction(b);
+  }
   // The save rewrites its timestamp every 2 s - ignore it when asking "did anything change?"
   function contentHash(t) { return hash((t || '').replace(/^lastActiveEpoch=.*$/m, '')); }
   function field(t, k) { var m = t && t.match(new RegExp('^' + k + '=(.*)$', 'm')); return m ? m[1] : ''; }
@@ -82,6 +85,7 @@
   function afterSignIn() {
     var go = function () {
       if (!ready()) return setTimeout(go, 500);
+      if(pendingGuild()) { status='error'; msg='Finish the pending guild transaction to resume.'; return; }
       fetchCloud().then(function () {
         if (!cloud) { upload(true); return; }
         var stamp = getStamp();
@@ -96,7 +100,7 @@
     go();
   }
   function upload(force) {
-    if (!sb || !user || busy || (paused && !force) || !ready()) return Promise.resolve();
+    if (!sb || !user || busy || guildLock || pendingGuild() || (paused && !force) || !ready()) return Promise.resolve();
     var local = readLocal();
     if (!local) return Promise.resolve();
     if (!force && contentHash(local) === lastUpHash) return Promise.resolve();
@@ -107,14 +111,11 @@
         busy = false; paused = true; status = 'newer';
         msg = 'Your character was just saved from another device.'; open(); return;
       }
-      var row = { user_id: user.id, data: local, updated_at: new Date().toISOString() };
-      if (c && c.data && contentHash(c.data) !== contentHash(local) &&
-          (!c.updated_at || Date.now() - Date.parse(c.updated_at) > PREV_MIN_AGE)) row.prev_data = c.data;
-      return sb.from('saves').upsert(row).then(function (r) {
+      return sb.rpc('tf_save_commit',{p_data:local,p_stamp:c ? c.updated_at : null}).then(function (r) {
         busy = false;
         if (r.error) { status = 'error'; msg = 'Upload failed: ' + r.error.message; render(); return; }
-        cloud = { data: local, prev_data: row.prev_data || (c && c.prev_data), updated_at: row.updated_at };
-        setStamp(row.updated_at); lastUpHash = contentHash(local); lastUp = Date.now(); paused = false;
+        cloud = r.data;
+        setStamp(cloud.updated_at); lastUpHash = contentHash(local); lastUp = Date.now(); paused = false;
         status = 'synced'; msg = ''; render();
       });
     }).catch(function (e) { busy = false; status = 'error'; msg = 'Cloud error: ' + (e.message || e); render(); });
@@ -238,7 +239,48 @@
     }, true);
   });
 
+  // Guild mutations and cloud uploads share one lock. Pending UUID + snapshot
+  // survive refreshes; the game persists the applied receipt before acknowledging.
+  var GUILD_PENDING = 'tf-guild-city-pending';
+  var guildLock = false;
+  function pendingGuild() {
+    try { var p=JSON.parse(localStorage.getItem(GUILD_PENDING)||'null'); return p && user && p.user===user.id ? p : null; } catch(e) { return null; }
+  }
+  function guildAction(action,target) {
+    if (!sb || !user || !ready()) return Promise.reject(Error('Sign in with Cloud save first.'));
+    var pending=pendingGuild();
+    if (busy || (guildLock && !pending)) return Promise.reject(Error('A cloud transaction is still finishing.'));
+    if (paused && !pending) return Promise.reject(Error('Resolve your cloud save before contributing.'));
+    busy=true; guildLock=true;
+    return (pending ? Promise.resolve(pending) : fetchCloud().then(function(c) {
+      if (c && !sameTime(c.updated_at,getStamp())) throw Error('Your cloud character changed. Sync it before contributing.');
+      var p={user:user.id,action:action,target:target,request:crypto.randomUUID(),save:readLocal(),stamp:c ? c.updated_at : null};
+      if (!p.save) throw Error('Save the character before contributing.');
+      localStorage.setItem(GUILD_PENDING,JSON.stringify(p)); return p;
+    })).then(function(p) {
+      return sb.rpc('tf_city_action',{p_action:p.action,p_target:p.target,p_request:p.request,p_save:p.save,p_stamp:p.stamp}).then(function(r) {
+        if (r.error) {
+          // A database rejection rolled back: no spend or reward needs recovery.
+          localStorage.removeItem(GUILD_PENDING); guildLock=false; throw r.error;
+        }
+        busy=false; status='syncing'; return r.data;
+      });
+    }).catch(function(e) { busy=false; guildLock=!!pendingGuild(); throw e; });
+  }
+  function guildAck(request,stamp) {
+    var p=pendingGuild(); if (!p || p.request!==request) return;
+    // SaveGame has already written the receipt and resource changes to FS.
+    fs().syncfs(false,function(error) {
+      if(error) { status='error'; msg='Guild action accepted; saving locally failed. Retry to finish.'; render(); return; }
+      var local=readLocal(); cloud={data:local,updated_at:stamp,prev_data:cloud && cloud.data};
+      setStamp(stamp); lastUpHash=''; lastUp=0; paused=false;
+      localStorage.removeItem(GUILD_PENDING); guildLock=false; busy=false; status='synced'; render();
+    });
+  }
   window.TFCloud = {
+    guildAction: guildAction,
+    guildAck: guildAck,
+    guildPending: function () { return !!pendingGuild() || guildLock; },
     configured: !!(CFG && CFG.url && CFG.key),
     open: open,
     client: function () { return sb; },   // for the online guild (guildnet.js)

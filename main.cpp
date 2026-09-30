@@ -1638,6 +1638,7 @@ struct GameState {
     std::array<int, 7> warPts{};
     // Guild Hall (2026-09-29): the guild's research levels, as last seen online
     // (kept so the bonuses hold while offline), and the help request on your build.
+    std::string guildCityReceipt; // persisted replay marker for inventory transactions
     std::array<int, 10> guildTech{};
     long long guildHelpId = 0; int guildHelpApplied = 0; int guildHelpBuild = -1;
     float warPlayAcc = 0.0f; // Muster: seconds played toward the next point
@@ -4690,6 +4691,7 @@ static int GuildYield(const GameState& s, int res, int n) {
     int whole = (int)f;
     return whole + (RandUnit() < f - whole ? 1 : 0);
 }
+static void GuildCityBossVictory(GameState& s);
 static void GuildSendGift(int kind); // with the Guild Hall screens: 0 dungeon boss, 1 world boss, 2 treasure chest, 3 raid thrown back
 static void UpdateGathering(GameState& s, float dt) {
     if (!s.gatheringResource.has_value()) return;
@@ -7337,6 +7339,7 @@ static void SaveGame(const GameState& s) {
     out << "wyrmRespawnT=" << s.wyrmRespawnT << "\nwyrmHp=" << s.wyrmHp << "\nwyrmKills=" << s.wyrmKills << "\n"; // world boss
     out << "warWeek=" << s.warWeek << "\nwarPlayMin=" << s.warPlayMin << "\nwarPts=";
     for (int d = 0; d < 7; d++) out << (d ? "," : "") << s.warPts[(size_t)d];
+    out << "\nguildCityReceipt=" << s.guildCityReceipt << "\n";
     out << "\nguildTech=";
     for (int t = 0; t < 10; t++) out << (t ? "," : "") << s.guildTech[(size_t)t];
     out << "\nguildHelp=" << s.guildHelpId << "|" << s.guildHelpApplied << "|" << s.guildHelpBuild << "\n";
@@ -7667,6 +7670,7 @@ static bool LoadGame(GameState& s) {
         else if (key == "wyrmKills") s.wyrmKills = std::atoi(val.c_str());
         else if (key == "warWeek") s.warWeek = std::atoll(val.c_str());
         else if (key == "warPlayMin") s.warPlayMin = std::atoi(val.c_str());
+        else if (key == "guildCityReceipt") s.guildCityReceipt = val;
         else if (key == "guildTech") { auto p = SplitStr(val, ','); for (size_t t = 0; t < p.size() && t < 10; t++) s.guildTech[t] = std::clamp(std::atoi(p[t].c_str()), 0, 5); }
         else if (key == "guildHelp") { auto p = SplitStr(val, '|'); if (p.size() >= 3) { s.guildHelpId = std::atoll(p[0].c_str()); s.guildHelpApplied = std::atoi(p[1].c_str()); s.guildHelpBuild = std::atoi(p[2].c_str()); } }
         else if (key == "warPts") { auto p = SplitStr(val, ','); for (size_t d = 0; d < p.size() && d < 7; d++) s.warPts[d] = std::atoi(p[d].c_str()); }
@@ -27377,7 +27381,7 @@ static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
     c.yaw = T3CHash01(dm.pos.x * 0.37f, dm.pos.y) * 6.2832f;
     int goldFound = std::max(1, dm.baseGold + (std::rand() % 3) - 1);
     goldFound = (int)std::round(goldFound * (1.0f + 0.04f * GuildTechLv(s, kGtCoffers))); // guild research
-    if (dm.isBoss && dm.zone == 1) GuildSendGift(0); // a dungeon boss: every guildmate gets a gift
+    if (dm.isBoss && dm.zone == 1) { GuildSendGift(0); GuildCityBossVictory(s); } // a dungeon boss: every guildmate gets a gift
     c.loot.push_back({ GameState::kClGold, goldFound, std::nullopt });
     bool packCarrier = dm.isRival || dm.bladeIdx >= 0 || CorpseMonsterHumanoid(c);
     if (packCarrier ? RandUnit() < 0.55f : RandUnit() < 0.15f)
@@ -27405,7 +27409,7 @@ static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
         std::string extra;
         if (s.tmaps.size() < 10) { GameState::TreasureMap m; m.tier = breakout ? 4 : 3; s.tmaps.push_back(m); extra += " a treasure map"; }
         if (RandUnit() < 0.5f) { s.rareDyeCharges++; extra += extra.empty() ? " a rare dye" : " and a rare dye"; }
-        if (breakout) { GuildSendGift(0); WarAward(s, 3, 50); GainFame(s, 10.0f); }
+        if (breakout) { GuildSendGift(0); GuildCityBossVictory(s); WarAward(s, 3, 50); GainFame(s, 10.0f); }
         Journal(s, std::string(breakout ? "The loose boss is slain!" : "The Dread boss is slain!") + " A rich hoard on its body" +
                    (extra.empty() ? "." : "; you also take" + extra + "."));
     }
@@ -35066,10 +35070,16 @@ EM_JS(void, JS_GuildNetOpenGifts, (), { if (window.TFGuildNet && TFGuildNet.open
 EM_JS(void, JS_GuildNetSubmit, (const char* week, int day, int pts, const char* ch, int power), {
     if (window.TFGuildNet) TFGuildNet.submit(UTF8ToString(week), day, pts, UTF8ToString(ch), power);
 });
+EM_JS(void, JS_GuildCityAction, (const char* action,const char* target), { if(window.TFGuildNet) TFGuildNet.cityAction(UTF8ToString(action),UTF8ToString(target)); });
+EM_JS(int, JS_GuildCityPending, (), { return window.TFCloud && TFCloud.guildPending && TFCloud.guildPending() ? 1 : 0; });
+EM_JS(void, JS_GuildCityAck, (const char* request), { if(window.TFGuildNet) TFGuildNet.cityAck(UTF8ToString(request)); });
 EM_JS(void, JS_GuildProjectWork, (const char* kind), {
     if (window.TFGuildNet) TFGuildNet.projectWork(UTF8ToString(kind), crypto.randomUUID());
 });
 #else
+static void JS_GuildCityAction(const char*,const char*) {}
+static int JS_GuildCityPending() { return 0; }
+static void JS_GuildCityAck(const char*) {}
 static void JS_GuildProjectWork(const char*) {}
 static int JS_GuildNetState(char*, int) { return 0; }
 static void JS_GuildNetRefresh(const char*) {}
@@ -35097,6 +35107,9 @@ struct GuildNetRow { std::string id, name, tag; int members = 0; long long point
 struct GuildNetMember { std::string name; int power = 0; int points = 0; std::string uid; int rank = 0; int seen = -1; };
 struct GuildNetWar { std::string id, name, tag, dir; };
 struct GuildNetHelp { long long id = 0; std::string who, what; int n = 0, max = 0; bool mine = false, done = false; };
+struct GuildCityBuilding { std::string kind; int level=1,left=-1; };
+struct GuildCityRun { std::string id,kind; int goal=0,progress=0,left=0; bool finished=false,success=false,joined=false,claimed=false; };
+struct GuildCityBattle { std::string id,enemy; long long starts=0,ends=0; int actions=0; bool claimed=false; int mine=0,theirs=0; };
 static struct {
     bool cfg = false, ready = false, busy = false;
     std::string msg, myId, myName, myTag, myUid, motd;
@@ -35104,6 +35117,9 @@ static struct {
     std::vector<GuildNetRow> guilds;
     std::vector<GuildNetMember> roster;
     std::vector<GuildNetWar> wars;
+    bool cityReady=false,cityPending=false; int cityWood=0,cityOre=0,cityLeather=0,cityContracts=0;
+    std::vector<GuildCityBuilding> cityBuildings; std::vector<GuildCityRun> cityRuns; std::vector<GuildCityBattle> cityBattles;
+    std::vector<std::string> cityLedger;
     // Guild Hall (2026-09-29)
     bool projectReady = false, projectWorked = false; int project[4] = {};
     bool hub = false;
@@ -35127,6 +35143,7 @@ static void GuildNetPoll() {
     if (!JS_GuildNetState(buf, (int)sizeof(buf))) { g_gnet.cfg = g_gnet.ready = false; return; }
     g_gnet.guilds.clear(); g_gnet.roster.clear(); g_gnet.wars.clear(); g_gnet.myId.clear(); g_gnet.myName.clear(); g_gnet.myTag.clear();
     g_gnet.myUid.clear(); g_gnet.motd.clear(); g_gnet.myRank = 0;
+    g_gnet.cityReady=false; g_gnet.cityPending=false; g_gnet.cityBuildings.clear(); g_gnet.cityRuns.clear(); g_gnet.cityBattles.clear(); g_gnet.cityLedger.clear();
     bool hadHub = false;
     g_gnet.projectReady = false; g_gnet.projectWorked = false;
     g_gnet.helps.clear(); g_gnet.gifts.clear(); g_gnet.board.clear();
@@ -35177,6 +35194,12 @@ static void GuildNetPoll() {
             for (int j=0;j<4;j++) g_gnet.project[j] = std::atoi(p[j].c_str());
             g_gnet.projectWorked = p[4] == "1";
         }
+        else if (k == "citypending") g_gnet.cityPending = v == "1";
+        else if (k == "citystock" && p.size()>=4) { g_gnet.cityReady=true; g_gnet.cityWood=std::atoi(p[0].c_str()); g_gnet.cityOre=std::atoi(p[1].c_str()); g_gnet.cityLeather=std::atoi(p[2].c_str()); g_gnet.cityContracts=std::atoi(p[3].c_str()); }
+        else if (k == "citybuilding" && p.size()>=3) g_gnet.cityBuildings.push_back({p[0],std::atoi(p[1].c_str()),std::atoi(p[2].c_str())});
+        else if (k == "citylog" && p.size()>=2) g_gnet.cityLedger.push_back(p[0]+": "+p[1]);
+        else if (k == "cityrun" && p.size()>=9) g_gnet.cityRuns.push_back({p[0],p[1],std::atoi(p[2].c_str()),std::atoi(p[3].c_str()),std::atoi(p[4].c_str()),p[5]=="1",p[6]=="1",p[7]=="1",p[8]=="1"});
+        else if (k == "citybattle" && p.size()>=8) g_gnet.cityBattles.push_back({p[0],p[1],std::atoll(p[2].c_str()),std::atoll(p[3].c_str()),std::atoi(p[4].c_str()),p[5]=="1",std::atoi(p[6].c_str()),std::atoi(p[7].c_str())});
         else if (k == "done" && p.size() >= 2) { g_gnet.doneSeq = std::atoi(p[0].c_str()); g_gnet.doneAct = p[1]; g_gnet.doneRes = p.size() >= 3 ? p[2] : ""; }
     }
     g_gnet.hub = hadHub && !g_gnet.myId.empty();
@@ -35202,6 +35225,14 @@ static float GuildHelpCut(const GameState& s) {
     if (s.settleUpgrading < 0) return 0.0f;
     int g, w, o; float secs; SettleCost(s, s.settleUpgrading, g, w, o, secs);
     return std::max(60.0f, secs * 0.03f);
+}
+static void GuildCityAct(GameState& s,const char* action,const std::string& target) {
+    if(g_gnet.busy) return;
+    SaveGame(s); JS_GuildCityAction(action,target.c_str());
+}
+static void GuildCityBossVictory(GameState& s) {
+    if(!g_gnet.ready || g_gnet.busy || g_gnet.cityPending) return;
+    for(const auto& r:g_gnet.cityRuns) if(r.kind=="boss" && r.joined && !r.finished) { GuildCityAct(s,"boss_hit",r.id); break; }
 }
 static void GuildSendGift(int kind) { if (g_gnet.ready && !g_gnet.myId.empty()) JS_GuildNetSendGift(kind); }
 static std::string GuildGiftOpen(GameState& s, int kind) {
@@ -35235,7 +35266,18 @@ static void GuildHallTick(GameState& s) {
     if (g_gnet.doneSeq > seen) {
         seen = g_gnet.doneSeq;
         const std::string& a = g_gnet.doneAct; const std::string& r = g_gnet.doneRes;
-        if (a == "bought") GuildShopGrant(s, r);
+        if (a == "city") {
+            auto fields=SplitStr(r,',');
+            if(fields.size()>=6) {
+                if(s.guildCityReceipt!=fields[0]) {
+                    s.wood=std::max(0,s.wood+std::atoi(fields[1].c_str())); s.ore=std::max(0,s.ore+std::atoi(fields[2].c_str()));
+                    s.leather=std::max(0,s.leather+std::atoi(fields[3].c_str())); s.gold=std::max(0,s.gold+std::atoi(fields[4].c_str()));
+                    s.guildCityReceipt=fields[0]; s.logLine=fields[5]; Journal(s,s.logLine); SaveGame(s); PlaySfx(SfxId::Coin);
+                }
+                JS_GuildCityAck(fields[0].c_str());
+            }
+        }
+        else if (a == "bought") GuildShopGrant(s, r);
         else if (a == "donated" && g_pendingDonate.tech >= 0) {
             int* pool = GuildDonateRes(s, g_pendingDonate.res);
             *pool = std::max(0, *pool - g_pendingDonate.amt);
@@ -35327,10 +35369,10 @@ static float DrawGuildSettlement(float x, float y, float w, Rectangle area) {
     struct Site { const char* name; const char* model; float x,z; int tab; int tier; };
     static const Site sites[] = {
         {"Guild Hall","townhall",0,-60,9,1},
-        {"Workshop","smith",-235,-60,2,2},
-        {"Storehouse","bank",-235,175,4,2},
-        {"Aid Lodge","healer",235,-60,3,1},
-        {"Command Post","minersguild",235,175,5,1},
+        {"Workshop","smith",-235,-60,10,2},
+        {"Storehouse","bank",-235,175,11,2},
+        {"Aid Lodge","healer",235,-60,12,1},
+        {"Command Post","minersguild",235,175,13,1},
         {"Warband Lodge","stable",0,285,7,1},
         {"Guild Homes","house",-235,-310,6,1},
         {"Council House","tailor",0,-310,0,1},
@@ -35397,7 +35439,19 @@ static float DrawGuildSettlement(float x, float y, float w, Rectangle area) {
         // A soft footprint shadow anchors the modular building to its plot.
         DrawCube({b.x+9,2,b.z+10},134,1,119,Color{95,111,80,255});
         Town3DDrawBuilding(b.model,b.x,b.z);
-        if(locked || (b.tab==9 && g_gnet.buildLeft>=0)) {
+        if(b.tab>=10) {
+            static const char* kinds[]={"workshop","storehouse","aid","command"};
+            for(const auto& cb:g_gnet.cityBuildings) if(cb.kind==kinds[b.tab-10] && cb.level>1) {
+                for(int banner=0;banner<cb.level-1;++banner) {
+                    float bx=b.x-45+banner*24;
+                    DrawCylinder({bx,0,b.z+72},1.4f,1.4f,45,6,Color{86,67,45,255});
+                    DrawCube({bx+7,37,b.z+72},14,16,2,Color{64,93,140,255});
+                }
+            }
+        }
+        bool cityBuilding=false;
+        if(b.tab>=10) { static const char* kinds[]={"workshop","storehouse","aid","command"}; for(const auto& cb:g_gnet.cityBuildings) if(cb.kind==kinds[b.tab-10] && cb.left>=0) cityBuilding=true; }
+        if(locked || cityBuilding || (b.tab==9 && g_gnet.buildLeft>=0)) {
             for(int side:{-1,1}) {
                 DrawCube({b.x+side*75,50,b.z},3,100,3,Color{157,112,62,255});
                 DrawCube({b.x+side*75,50,b.z+50},3,100,3,Color{157,112,62,255});
@@ -35433,6 +35487,11 @@ static float DrawGuildSettlement(float x, float y, float w, Rectangle area) {
         Vector2 pt=GetWorldToScreenEx({b.x,110,b.z},cam,rw,rh); pt.x+=view.x; pt.y+=view.y;
         bool locked=g_gnet.hall<b.tier;
         std::string label=b.name;
+        if(b.tab>=10) {
+            static const char* kinds[]={"workshop","storehouse","aid","command"};
+            int lv=1; for(const auto& cb:g_gnet.cityBuildings) if(cb.kind==kinds[b.tab-10]) lv=cb.level;
+            label += " Lv "+std::to_string(lv);
+        }
         if(b.tab==9) label += "  Lv "+std::to_string(g_gnet.hall);
         float lw=MeasureUIText(label.c_str(),11)+14;
         Rectangle badge={pt.x-lw*.5f,pt.y-13,lw,22};
@@ -35480,8 +35539,8 @@ static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangl
         y += 38;
         if (g_gnet.hall == 1) {
             DrawUIText("Stage One: Guild Hall foundation", (int)x, (int)y, 17, gold); y += 26;
-            DrawUIText("Daily construction orders supply the shared project. One order per member per day.", (int)x, (int)y, 11, soft); y += 18;
-            DrawUIText("Prototype supplies: orders do not spend your personal inventory.", (int)x, (int)y, 11, soft); y += 22;
+            DrawUIText("Deliver personal resources to finish the shared foundation.", (int)x, (int)y, 11, soft); y += 18;
+            DrawUIText("Real supplies: timber/ore 10 each, tools 5 wood + 5 ore, contracts 50 gold.", (int)x, (int)y, 11, soft); y += 22;
             static const char* ids[4] = {"timber","ore","tools","contracts"};
             static const char* names[4] = {"Timber loads","Ore loads","Crafted tool sets","Supply contracts"};
             static const int need[4] = {20,12,8,3};
@@ -35489,7 +35548,7 @@ static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangl
             else for (int j=0;j<4;j++) {
                 DrawUIText(TextFormat("%s: %d / %d", names[j], g_gnet.project[j], need[j]), (int)x, (int)y, 13, ink);
                 Rectangle order = {x + w - 136,y-4,132,28};
-                if (UOButton(order,"Deliver order",!g_gnet.busy && !g_gnet.projectWorked && g_gnet.buildLeft < 0 && g_gnet.project[j] < need[j]) && vis(order)) JS_GuildProjectWork(ids[j]);
+                if (UOButton(order,"Deliver order",!g_gnet.busy && !g_gnet.cityPending && g_gnet.cityReady && g_gnet.buildLeft < 0 && g_gnet.project[j] < need[j]) && vis(order)) GuildCityAct(s,"foundation",ids[j]);
                 y += 34; bar(x,y,w,(float)g_gnet.project[j]/need[j],good); y += 20;
             }
             DrawUIText("Finish all orders, then an officer starts the 1-hour build. Completion opens Workshop and Storehouse.", (int)x, (int)y, 11, soft); y += 24;
@@ -35569,10 +35628,9 @@ static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangl
                 DrawUIText(TextFormat("%d/%d", pr, need), (int)(x + 16 + std::max(60.0f, w - 320)), (int)y + 45, 11, soft);
                 int cost = GuildDonateCost(t, lv), have = *GuildDonateRes(s, d.res);
                 Rectangle db = { x + w - 170, y + 6, 164, 30 };
-                bool can = !g_gnet.busy && ch > 0 && have >= cost && g_pendingDonate.tech < 0;
+                bool can = !g_gnet.busy && !g_gnet.cityPending && g_gnet.cityReady && ch > 0 && have >= cost;
                 if (UOButton(db, TextFormat("Donate %d %s", cost, GuildResName(d.res)), can) && vis(db)) {
-                    g_pendingDonate.tech = t; g_pendingDonate.res = d.res; g_pendingDonate.amt = cost;
-                    JS_GuildNetDonate(d.id);
+                    GuildCityAct(s,"research",d.id);
                 }
                 if (have < cost) DrawUIText(TextFormat("you have %d", have), (int)(x + w - 250), (int)y + 14, 10, bad);
             }
@@ -35628,6 +35686,96 @@ static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangl
     }
     return y + 10;
 }
+static float DrawGuildCityProgress(GameState& s,float x,float y,float w,Rectangle area,int section) {
+    const Color ink={40,24,12,255},soft={78,52,30,255},gold={150,100,20,255};
+    auto text=[&](const std::string& value,int size=12) { DrawUIText(value.c_str(),(int)x,(int)y,size,ink); y+=size+9; };
+    auto act=[&](const std::string& label,const char* action,const std::string& target,bool enabled=true) {
+        Rectangle b={x,y,std::min(w,290.0f),28};
+        bool visible=b.y>=area.y && b.y+b.height<=area.y+area.height;
+        if(UOButton(b,label.c_str(),enabled && g_gnet.ready && !g_gnet.busy && !g_gnet.cityPending) && visible) GuildCityAct(s,action,target);
+        y+=36;
+    };
+    auto link=[&](const char* label,int tab) { Rectangle b={x,y,220,28}; if(UOButton(b,label,true) && b.y>=area.y && b.y+28<=area.y+area.height) { g_guildTab=tab; g_warScroll=0; } y+=36; };
+    if(!g_gnet.cityReady) { text("Sign in and join a guild to use city progression."); return y+10; }
+    if(g_gnet.cityPending) {
+        text("A saved transaction needs to finish before another action.");
+        Rectangle retry={x,y,220,28}; if(UOButton(retry,"Retry pending transaction",!g_gnet.busy) && retry.y>=area.y && retry.y+28<=area.y+area.height) GuildCityAct(s,"retry",""); y+=38;
+    }
+    link("Back to city",1);
+    text(TextFormat("Treasury: %d wood / %d ore / %d leather / %lld gold",g_gnet.cityWood,g_gnet.cityOre,g_gnet.cityLeather,g_gnet.funds));
+    text(TextFormat("Your pack: %d wood / %d ore / %d leather / %d gold",s.wood,s.ore,s.leather,s.gold));
+    if(section>=10 && section<=13) {
+        static const char* kinds[]={"workshop","storehouse","aid","command"};
+        static const char* names[]={"Workshop","Storehouse","Aid Lodge","Command Post"};
+        static const char* effects[]={"Each level adds 5 merit to completed contracts.","Each level adds 10 gold to expedition and raid rewards.","Each level improves help on city construction.","Each level reduces enemy battle orders by 5 points."};
+        int index=section-10; const char* kind=kinds[index]; int lv=1,left=-1;
+        for(const auto& b:g_gnet.cityBuildings) if(b.kind==kind) {lv=b.level;left=b.left;}
+        text(TextFormat("%s - level %d / 5",names[index],lv),17); text(effects[index]);
+        if(left>=0) {
+            text("Upgrade in progress: "+SettleClock((float)left));
+            act("Lend a hand (+5 merit)","help_build",kind);
+        } else {
+            text(TextFormat("Next level: %d wood + %d ore + %d guild gold; %d minutes",50*lv,50*lv,100*lv,15*lv));
+            act("Start upgrade (officers)","upgrade",kind,g_gnet.myRank>=1 && lv<5 && lv<g_gnet.hall && (index>=2 || g_gnet.hall>=2));
+        }
+        if(index==0) {
+            link("Open guild research",2);
+            text(TextFormat("Daily contracts: %d / 3 complete",g_gnet.cityContracts),15);
+            act("Timber contract: spend 20 wood","contract","timber",s.wood>=20 && g_gnet.cityContracts<3 && g_gnet.hall>=2);
+            act("Ore contract: spend 15 ore","contract","ore",s.ore>=15 && g_gnet.cityContracts<3 && g_gnet.hall>=2);
+            act("Leather contract: spend 15 leather","contract","leather",s.leather>=15 && g_gnet.cityContracts<3 && g_gnet.hall>=2);
+            text("Contracts add their materials to the treasury and earn merit.");
+        }
+        if(index==1) link("Open quartermaster shop",4);
+        if(index==2) link("Help guildmates",3);
+    }
+    if(section==11) {
+        text("Deposit personal resources (+10 merit per deposit)",15);
+        act("Deposit 20 wood","contribute","wood",s.wood>=20);
+        act("Deposit 20 ore","contribute","ore",s.ore>=20);
+        act("Deposit 20 leather","contribute","leather",s.leather>=20);
+        act("Deposit 100 gold","contribute","gold",s.gold>=100);
+        text("Recent contributions and officer actions",15);
+        for(const auto& line:g_gnet.cityLedger) text(line.substr(0,78),11);
+    }
+    if(section==7) {
+        text("Guild expeditions and boss raids",17);
+        text("Officers may launch one of each activity per UTC day.");
+        act("Launch expedition: 50 guild gold","launch","expedition",g_gnet.myRank>=1 && g_gnet.hall>=2);
+        act("Launch boss raid: 100 guild gold","launch","boss",g_gnet.myRank>=1 && g_gnet.hall>=2);
+        text("Expeditions need 3 members and resolve after 30 minutes.");
+        text("Raids last 1 hour. Joined members' dungeon boss wins deal damage.");
+        for(const auto& r:g_gnet.cityRuns) {
+            text(TextFormat("%s: %d / %d - %s",r.kind=="boss" ? "Boss raid" : "Expedition",r.progress,r.goal,r.finished ? (r.success ? "Completed" : "Failed") : SettleClock((float)r.left).c_str()),15);
+            if(!r.finished) act(r.joined ? "Joined" : "Join: spend 25 gold","join_run",r.id,!r.joined && s.gold>=25);
+            if(r.finished && r.success) act(r.claimed ? "Reward claimed" : "Claim participation reward","claim_run",r.id,r.joined && !r.claimed);
+        }
+        y+=16;
+    }
+    if(section==13 || section==5) {
+        text("Scheduled guild warfare",17);
+        text("Battles run Saturday 18:00-19:00 UTC, with at least 1 hour notice.");
+        text("Command Post levels reduce enemy objective points.");
+        for(const auto& enemy:g_gnet.wars) act("Schedule vs ["+enemy.tag+"] "+enemy.name,"schedule_war",enemy.id,g_gnet.myRank>=1);
+        long long now=(long long)std::time(nullptr);
+        for(const auto& b:g_gnet.cityBattles) {
+            std::string enemyName=b.enemy;
+            for(const auto& row:g_gnet.guilds) if(row.id==b.enemy) enemyName="["+row.tag+"] "+row.name;
+            text("Battle vs "+enemyName,15);
+            text(TextFormat("Score %d : %d   Your orders: %d / 3",b.mine,b.theirs,b.actions));
+            if(now<b.starts) text("Starts in "+SettleClock((float)(b.starts-now)));
+            else if(now<b.ends) {
+                text("Battle ends in "+SettleClock((float)(b.ends-now)));
+                act("Gate assault: 15 wood / 30 base points","war_gate",b.id,b.actions<3 && s.wood>=15);
+                act("Tower assault: 15 ore / 40 base points","war_tower",b.id,b.actions<3 && s.ore>=15);
+                act("Keep assault: 15 leather / 50 base points","war_keep",b.id,b.actions<3 && s.leather>=15);
+            } else act(b.claimed ? "Battle reward claimed" : "Claim battle reward","claim_war",b.id,b.actions>0 && !b.claimed);
+        }
+        text("Participation is capped at 3 orders per member per battle.");
+        y+=12;
+    }
+    return y+10;
+}
 static void DrawWarWeek(GameState& s, int screenW, int screenH) {
     Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
     UODrawGump(G, kUoParchment);
@@ -35637,14 +35785,14 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
     WarCheckWeek(s);
     int today = WarDayNow();
     { // the tabs (2026-09-28: one Guild screen for everything guild)
-        static const char* kTabs[8] = { "Overview", "City", "Research", "Help", "Shop", "Wars", "Members", "Warband" };
+        static const char* kTabs[8] = { "Overview", "City", "Research", "Help", "Shop", "Wars", "Members", "Activities" };
         float tw = (G.width - 36) / 4.0f;
         bool hub = g_gnet.hub;
         bool helpDot = false; for (const auto& h : g_gnet.helps) if (!h.mine && !h.done) helpDot = true;
         bool hallDot = !g_gnet.gifts.empty() || (g_gnet.buildLeft >= 0 && !g_gnet.lent);
         for (int t = 0; t < 8; t++) {
             Rectangle tb = { G.x + 18 + (t % 4) * tw, G.y + 34 + (t / 4) * 36, tw - 6, 32 };
-            bool on = g_guildTab == t || (t == 1 && g_guildTab == 9);
+            bool on = g_guildTab == t || (t == 1 && (g_guildTab == 9 || g_guildTab >= 10));
             DrawRectangleRounded(tb, 0.3f, 6, on ? Color{ 110, 70, 36, 255 } : Color{ 70, 50, 34, 200 });
             DrawRectangleRoundedLines(tb, 0.3f, 6, on ? kUoBronzeHi : kUoBronze);
             int lw = MeasureUIText(kTabs[t], 14);
@@ -35659,7 +35807,9 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
     float x = G.x + 18, w = G.width - 36, y = area.y + 4 - g_warScroll;
     auto vis = [&](Rectangle r) { return r.y >= area.y && r.y + r.height <= area.y + area.height; };
     BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
-    if (g_guildTab == 0) { // ---- Overview: War Week and your online guild ----
+    if (g_guildTab >= 10 && g_guildTab <= 13) { y=DrawGuildCityProgress(s,x,y,w,area,g_guildTab); }
+    else if (g_guildTab == 7) { y=DrawGuildCityProgress(s,x,y,w,area,7); y=DrawGuildstoneBody(s,x,y,w,0); }
+    else if (g_guildTab == 0) { // ---- Overview: War Week and your online guild ----
     // the week: one theme a day
     long long secsLeft = 86400LL - ((long long)std::time(nullptr) - 345600LL) % 86400LL;
     DrawUIText(TextFormat("Today: %s  -  %dh %02dm left (days turn at midnight UTC)", kWarDayName[today], (int)(secsLeft / 3600), (int)(secsLeft / 60 % 60)),
@@ -35773,12 +35923,13 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
         const Color war = { 150, 30, 30, 255 };
         bool inGuild = g_gnet.ready && !g_gnet.myId.empty();
         bool officer = g_gnet.myRank >= 1;
+        y=DrawGuildCityProgress(s,x,y,w,area,5);
         DrawUIText("Guild wars", (int)x, (int)y, 16, ink); y += 22;
         if (!inGuild) {
             DrawUIText(g_gnet.cfg ? "Join or found an online guild (Overview) to wage war on other guilds." : "Online guilds aren't switched on for this version yet.", (int)x, (int)y, 12, soft);
             y += 28;
         } else {
-            DrawUIText("Wars show here for both guilds. (Battle Day - guild vs guild fights - is coming.)", (int)x, (int)y, 11, soft); y += 20;
+            DrawUIText("Declare a rival below, then schedule a battle at the Command Post.", (int)x, (int)y, 11, soft); y += 20;
             if (g_gnet.wars.empty()) { DrawUIText("You're at peace with every guild.", (int)x, (int)y, 13, ink); y += 22; }
             for (const auto& wr : g_gnet.wars) {
                 Rectangle row = { x, y, w, 40 };
@@ -37178,6 +37329,16 @@ static void UpdateDrawFrame() {
     int screenW = kScreenW, screenH = kScreenH;
     float& autosaveTimer = g_autosaveTimer;
     float& resetArmedTimer = g_resetArmedTimer;
+    // Inventory cannot be spent elsewhere while a guild transaction is in flight.
+    if(JS_GuildCityPending()) {
+        GuildNetPoll(); GuildHallTick(state);
+        BeginDrawing(); ClearBackground(kColorPageBg);
+        DrawUIText("Finishing guild transaction...",30,180,18,kColorHeading);
+        DrawUIText("Your materials are reserved until the receipt is saved.",30,214,12,kColorText);
+        if(!g_gnet.msg.empty()) DrawUIText(g_gnet.msg.c_str(),30,246,12,Color{150,40,30,255});
+        if(UOButton({30,290,240,36},"Retry pending transaction",!g_gnet.busy)) JS_GuildCityAction("retry","");
+        EndDrawing(); return;
+    }
     {
         CombatFeelTick(); // hit-stop / shake timers, before anything reads GameDt()
         float dt = GameDt();

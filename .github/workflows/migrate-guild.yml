@@ -1,6 +1,9 @@
 name: Apply guild database migration
 on:
   workflow_dispatch:
+  push:
+    branches: [ringshark-patch-1]
+    paths: [web/guild-city.sql]
 permissions:
   contents: read
 concurrency:
@@ -13,6 +16,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ringshark-patch-1
+      - name: Validate city transactions in PostgreSQL
+        run: |
+          npm install --prefix /tmp/tf-guild-tests @electric-sql/pglite@0.5.8
+          NODE_PATH=/tmp/tf-guild-tests/node_modules node tests/guild-city.cjs
+          node tests/guild-city-cloud.cjs
       - name: Apply repeatable guild schema
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
@@ -23,4 +31,4 @@ jobs:
             echo 'Add the SUPABASE_DB_URL repository secret first.'
             exit 1
           fi
-          psql "$SUPABASE_DB_URL" --no-psqlrc --single-transaction --set ON_ERROR_STOP=1 --file web/supabase.sql
+          psql "$SUPABASE_DB_URL" --no-psqlrc --single-transaction --set ON_ERROR_STOP=1 --file web/supabase.sql --file web/guild-city.sql
