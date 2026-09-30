@@ -31,6 +31,8 @@ jobs:
           python tests/player-movement.py
           python tests/ui-input.py
           python tests/menu-status.py
+          node server/mp/test/den.mjs
+          node tests/den-client.cjs
       - name: Build raylib 6.0
         run: |
           git clone --depth 1 --branch 6.0 https://github.com/raysan5/raylib.git /tmp/raylib

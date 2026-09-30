@@ -1,6 +1,7 @@
 {
   "name": "townforge-mp",
   "private": true,
+  "type": "module",
   "version": "0.1.0",
   "description": "Town Forge multiplayer zone server (Cloudflare Worker + Durable Objects)",
   "scripts": {

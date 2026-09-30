@@ -1362,12 +1362,12 @@ struct UpgradeInProgress {
 // it's reached by walking to a gate at the edge of Town, not by clicking a tab, so
 // it's excluded wherever the other 8 screens are enumerated for that UI.
 enum class Screen; static bool IsPlayScreen(Screen sc);
-enum class Screen { Character, Town, Hunt, Craft, Magic, Pets, Bank, House, Skills, Wilderness, Provisioner, FurTrader, MinersGuild, Interior, Refuge, Guide }; // Phase 6: Refuge = outlaw black market; Guide = newbie walkthrough (2026-09-25)
+enum class Screen { Character, Town, Hunt, Craft, Magic, Pets, Bank, House, Skills, Wilderness, Provisioner, FurTrader, MinersGuild, Interior, Refuge, Guide, Blackwake }; // Phase 6: Refuge = outlaw black market; Guide = newbie walkthrough (2026-09-25)
 
 // Where "Play" takes you back to (2026-09-27): the world screen you were last
 // on - opening Me/Craft/Magic from the wilderness must not drop you in town.
 static bool IsPlayScreen(Screen sc) {
-    return sc == Screen::Town || sc == Screen::Wilderness || sc == Screen::Interior || sc == Screen::Hunt;
+    return sc == Screen::Town || sc == Screen::Wilderness || sc == Screen::Interior || sc == Screen::Hunt || sc == Screen::Blackwake;
 }
 static Screen g_playScreen = Screen::Town;
 static bool g_questOpen = false; // the Town Hall quest board (2026-09-28, #72), over the House screen
@@ -14677,10 +14677,11 @@ static void PlayerCombatPhases3D(const GameState& s, float* atk, float* cast);
 // timers the kit poses did; red flash + knockback on a hit, translucent blue
 // as a ghost. enemy (optional) is what the knockback pushes away from.
 static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, float yawRad, float move,
-                            const Vector2* enemy, bool shadowPass) {
+                            const Vector2* enemy, bool shadowPass, float arenaAttack=-1.0f, bool arenaEngaged=false) {
     if (shadowPass) return true;
     float atk = -1.0f, cast = -1.0f;
     PlayerCombatPhases3D(s, &atk, &cast);
+    if(arenaAttack>=0) atk=arenaAttack;
     struct TurnState { float yaw = 0.0f; double last = -99.0; };
     static std::map<int, TurnState> turns;
     TurnState& turn = turns[trackId];
@@ -14692,6 +14693,7 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
     else turn.yaw = tfmotion::Turn(turn.yaw, yawRad, GameDt(), atk >= 0.0f || cast >= 0.0f);
     turn.last = realNow; yawRad = turn.yaw;
     HumanPose hp = HumanPlayerPose(s, move, atk, cast);
+    if(arenaEngaged) {hp.engaged=true;hp.attackDuration=.35f;}
     Color tint = WHITE;
     if (s.playerIsGhost) {
         tint = Fade(Color{ 170, 205, 255, 255 }, 0.45f);
@@ -14759,6 +14761,20 @@ static void JS_MpPos(float, float, float, int) {}
 static void JS_MpChat(const char*) {}
 static int JS_MpState(char*, int) { return 0; }
 #endif
+struct DenOffer {std::string id,a,b,nameA,nameB;int stake=0;float left=0;};
+static struct {
+    bool ready=false,pending=false;int gold=0,sequence=0;
+    std::string message,id,a,b,nameA,nameB;int hpA=100,hpB=100,staminaA=100,staminaB=100,stake=0;
+    float countdown=0,left=0,swingA=99,swingB=99;bool guardA=false,guardB=false;
+    std::vector<DenOffer> offers;std::vector<std::string> results;
+} g_den;
+static int g_denPanel=0,g_denStake=0,g_denFace=1,g_denCasinoStake=10;
+static bool DenFighting();
+#ifdef __EMSCRIPTEN__
+EM_JS(void,JS_DenAction,(const char* action,const char* target,int value),{if(window.TFMp && TFMp.denAction) TFMp.denAction(UTF8ToString(action),UTF8ToString(target),value);});
+#else
+static void JS_DenAction(const char*,const char*,int) {}
+#endif
 struct MpPlayer {
     std::string id, name, look;
     Vector2 pos{}, target{};
@@ -14775,6 +14791,7 @@ static const int kMpSlots = 20, kT3CTrackMp = 210; // animation tracks 210..229
 static bool MpOn(const GameState& s) { return s.optOnline && JS_MpConfigured(); }
 static std::string MpZoneFor(const GameState& s) {
     if (!MpOn(s)) return "";
+    if (s.screen == Screen::Blackwake) return "den";
     if (s.screen == Screen::Wilderness) return "wild";
     if (s.screen == Screen::Town) return "town" + std::to_string(s.selectedTown);
     if (s.screen == Screen::Hunt) return ""; // a dungeon: nobody else is in yours (yet)
@@ -14813,7 +14830,7 @@ static void MpTick(GameState& s) {
     static Vector2 lastMe{ -1e9f, -1e9f };
     bool moving = hypotf(me.x - lastMe.x, me.y - lastMe.y) > 0.5f && hypotf(me.x - lastMe.x, me.y - lastMe.y) < 300.0f;
     lastMe = me;
-    if (s.screen == Screen::Wilderness || s.screen == Screen::Town)
+    if (s.screen == Screen::Wilderness || s.screen == Screen::Town || s.screen == Screen::Blackwake)
         JS_MpPos(me.x, me.y, atan2f(s.playerFacing.y, s.playerFacing.x), moving ? 1 : 0);
     // everyone else
     static char buf[16384];
@@ -14822,10 +14839,26 @@ static void MpTick(GameState& s) {
     std::vector<std::string> lines, f;
     MpSplit(std::string(buf, (size_t)std::min(n, (int)sizeof(buf) - 1)), '\n', lines);
     for (auto& p : g_mp) p.seen = false;
+    std::string previousDuel=g_den.id;g_den.ready=false;g_den.id.clear();g_den.offers.clear();g_den.results.clear();
     for (const std::string& ln : lines) {
         if (ln.rfind("st=", 0) == 0) {
             MpSplit(ln.substr(3), '|', f);
             if (f.size() >= 3) { g_mpStatus = std::atoi(f[0].c_str()); g_mpCount = std::atoi(f[1].c_str()); g_mpMyId = f[2]; }
+        } else if(ln.rfind("den=",0)==0) {
+            MpSplit(ln.substr(4),'|',f);if(f.size()>=5) {g_den.ready=f[0]=="1";g_den.gold=std::atoi(f[1].c_str());g_den.sequence=std::atoi(f[2].c_str());g_den.message=f[3];g_den.pending=f[4]=="1";}
+        } else if(ln.rfind("denpos=",0)==0) {
+            MpSplit(ln.substr(7),'|',f);static int serial=-1;
+            if(f.size()>=3 && serial!=std::atoi(f[0].c_str())) {serial=std::atoi(f[0].c_str());s.townPlayerPos={(float)std::atof(f[1].c_str()),(float)std::atof(f[2].c_str())};WalkTargetClear();}
+        } else if(ln.rfind("offer=",0)==0) {
+            MpSplit(ln.substr(6),'|',f);if(f.size()>=7) g_den.offers.push_back({f[0],f[1],f[2],f[3],f[4],std::atoi(f[5].c_str()),(float)std::atof(f[6].c_str())});
+        } else if(ln.rfind("duel=",0)==0) {
+            MpSplit(ln.substr(5),'|',f);if(f.size()>=16) {
+                g_den.id=f[0];g_den.a=f[1];g_den.b=f[2];g_den.nameA=f[3];g_den.nameB=f[4];
+                g_den.hpA=std::atoi(f[5].c_str());g_den.hpB=std::atoi(f[6].c_str());g_den.staminaA=std::atoi(f[7].c_str());g_den.staminaB=std::atoi(f[8].c_str());
+                g_den.countdown=std::atof(f[9].c_str());g_den.left=std::atof(f[10].c_str());g_den.stake=std::atoi(f[11].c_str());g_den.guardA=f[12]=="1";g_den.guardB=f[13]=="1";g_den.swingA=std::atof(f[14].c_str());g_den.swingB=std::atof(f[15].c_str());
+            }
+        } else if(ln.rfind("denresult=",0)==0) {
+            MpSplit(ln.substr(10),'|',f);if(f.size()>=4) g_den.results.push_back(f[1]+": "+f[2]+" / stake "+f[3]);
         } else if (ln.rfind("p=", 0) == 0) {
             MpSplit(ln.substr(2), '|', f);
             if (f.size() < 7) continue;
@@ -14850,6 +14883,8 @@ static void MpTick(GameState& s) {
             MpSay(s, f[1], f[2]);
         }
     }
+    if(DenFighting() && g_den.id!=previousDuel) {s.screen=Screen::Blackwake;s.exploreMenuOpen=false;g_denPanel=0;WalkTargetClear();}
+    if(s.screen==Screen::Blackwake && !g_den.offers.empty() && g_denPanel==0) g_denPanel=1;
     g_mp.erase(std::remove_if(g_mp.begin(), g_mp.end(), [](const MpPlayer& p) { return !p.seen; }), g_mp.end());
     for (auto& p : g_mp) { // glide toward the last reported spot; jump if they teleported
         float d = hypotf(p.target.x - p.pos.x, p.target.y - p.pos.y);
@@ -14861,6 +14896,7 @@ static void MpTick(GameState& s) {
     }
     if (g_mpMySayT > 0.0f) g_mpMySayT -= dt;
 }
+static bool DenFighting() {return g_mpZone=="den" && !g_den.id.empty() && (g_den.a==g_mpMyId || g_den.b==g_mpMyId);}
 // Orbit-camera state for the 3D town view. File-statics (like g_scrollDragging),
 // not GameState - purely transient view state, never saved.
 // g_t3dYaw/Pitch/Dist are the *targets* written by input; the smoothed copies
@@ -15082,6 +15118,10 @@ static void MpDraw3D(const std::string& zoneKey, bool shadowPass, const Town3DCa
         held.meshWeapon = f[3].empty() ? -1 : std::atoi(f[3].c_str());
         held.shield = f[4] == "1"; held.meshShield = f[5] == "1";
         sp.style = held.style;
+        if(zoneKey=="den" && !g_den.id.empty() && (p.id==g_den.a || p.id==g_den.b)) {
+            float phase=p.id==g_den.a ? g_den.swingA:g_den.swingB;
+            sp.attackT=phase>=0 && phase<.35f ? 1.0f-phase/.35f:-1.0f;sp.engaged=true;sp.blocking=p.id==g_den.a ? g_den.guardA:g_den.guardB;
+        }
         SkinDye dye; bool ok;
         for (int k = 0; k < 3; k++) { Color c = MpHex(f[6 + k], &ok); if (ok) dye.c[1 + k] = c; }
         int heroId = kScHero;
@@ -17058,11 +17098,11 @@ static bool IsMenuScreen(Screen sc) {
 static bool ExploreHeaderCollapsed(const GameState& s) {
     return (s.screen == Screen::Town && s.town3DView) ||
            (s.screen == Screen::Wilderness && s.wild3DView) ||
-           (s.screen == Screen::Interior && s.interior3DView) || IsMenuScreen(s.screen);
+           (s.screen == Screen::Interior && s.interior3DView) || s.screen == Screen::Blackwake || IsMenuScreen(s.screen);
 }
 static const Rectangle kCompactMenuBtn = { 20, 56, 104, 40 };
 static Rectangle CompactMenuPanelRect(bool inDungeon) {
-    return { 12, 104, 516, inDungeon ? 388.0f : 324.0f };
+    return { 12, 104, 516, inDungeon ? 454.0f : 388.0f };
 }
 static bool ExploreMenuPointInUI(Vector2 m, const GameState& s) {
     if (!ExploreHeaderCollapsed(s)) return false;
@@ -32598,7 +32638,7 @@ static void DrawMenuGroupTabs(GameState& s) {
 #endif
         bool armed = g_resetArmedTimer > 0.0f;
         if (armed) DrawRectangleRounded({ rb.x - 3, rb.y - 3, rb.width + 6, rb.height + 6 }, 0.35f, 6, Fade(RED, 0.5f));
-        if (Button(rb, armed ? "Sure? Tap" : "Reset", !s.combat.has_value())) {
+        if (Button(rb, armed ? "Sure? Tap" : "Reset", !s.combat.has_value() && !DenFighting())) {
             if (armed) {
                 ResetGame(s); g_resetArmedTimer = 0.0f;
 #ifdef __EMSCRIPTEN__
@@ -32610,7 +32650,7 @@ static void DrawMenuGroupTabs(GameState& s) {
 }
 static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
     g_uiShieldBypass = true; // this panel's own buttons sit inside the shield
-    if (IsPlayScreen(s.screen)) { // HP and mana (2026-09-28, #58): down beside the hotbar, where your eyes are in a fight
+    if (IsPlayScreen(s.screen) && s.screen!=Screen::Blackwake) { // HP and mana (2026-09-28, #58): down beside the hotbar, where your eyes are in a fight
         const float px = 8, py = kViewport.y + kViewport.height - 88, pw = 152, ph = 78;
         UIRegister({ px, py, pw, ph }); // a tap on it never walks
         DrawRectangleRounded({ px, py, pw, ph }, 0.2f, 6, Fade(Color{ 20, 14, 10, 255 }, 0.78f));
@@ -32640,7 +32680,7 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         DrawRectangleRounded(panel, 0.08f, 8, Fade(kColorPageBg, 0.97f));
         DrawRectangleRoundedLines(panel, 0.08f, 8, Fade(BLACK, 0.45f));
         DrawUIText(TextFormat("Gold %d   Wood %d   Ore %d   Leather %d", s.gold, s.wood, s.ore, s.leather), 24, 116, 14, kColorText);
-        bool tabsEnabled = !s.combat.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f;
+        bool tabsEnabled = !DenFighting() && !s.combat.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f;
         if (!tabsEnabled) DrawUIText("Finish combat before opening other pages.",24,138,12,kColorText);
         else DrawUIText("Choose what you want to do.",24,138,12,kColorText);
         const float x0=24,x1=280,w=236,h=52;
@@ -32654,13 +32694,18 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
             MenuGoScreen(s,Screen::House); g_questOpen=true; g_questTab=0; open=false;
         }
         y+=62;
-        if(Button({x0,y,w,h},"Settings",true)) { MenuGoScreen(s,Screen::House); g_optOpen=true; open=false; }
+        if(Button({x0,y,w,h},"Settings",!DenFighting())) { MenuGoScreen(s,Screen::House); g_optOpen=true; open=false; }
         if(Button({x1,y,w,h},"Return to World",true)) { s.screen=g_playScreen; open=false; }
         DrawUIText("Gear, pack and skills are in Character. Help and saves are in Settings.",24,352,12,kColorText);
         DrawUIText("Your equipped gear stays visible on your character in the world.",24,373,12,kColorText);
+        if(Button({24,410,492,52},s.screen==Screen::Blackwake ? "Ferry back to Saltmere":"Visit Blackwake Den",tabsEnabled && (s.screen==Screen::Town || s.screen==Screen::Blackwake))) {
+            if(s.screen==Screen::Blackwake) {s.screen=Screen::Town;s.selectedTown=1;s.townPlayerPos=TS(450,830);}
+            else {s.screen=Screen::Blackwake;s.townPlayerPos={750,1250};}
+            g_denPanel=0;open=false;WalkTargetClear();
+        }
         if(inDungeon) {
             bool canLeave=!s.playerIsGhost && s.playerDeathAnimT<=0.0f && s.leaveDungT<0.0f;
-            if(Button({24,410,492,52},"Leave Dungeon (Magery)",canLeave)) TryStartLeaveDungeon(s);
+            if(Button({24,480,492,52},"Leave Dungeon (Magery)",canLeave)) TryStartLeaveDungeon(s);
         }
     }
     if (Button(kCompactMenuBtn, open ? "HIDE" : "MENU", true)) open = !open;
@@ -37214,6 +37259,171 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     g_uiShieldBypass = false; g_uiShield = oldShield; g_uiShieldOn = oldShieldOn;
 }
 
+// Blackwake Den: a separate harbor zone, reached by ferry from town.
+static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
+    static RenderTexture2D scene={};static float scroll=0;
+    const Rectangle view=kViewport;
+    if(!scene.id) {scene=LoadRenderTexture((int)view.width,(int)view.height);SetTextureFilter(scene.texture,TEXTURE_FILTER_BILINEAR);}
+    bool fighting=DenFighting(),sideA=g_den.a==g_mpMyId;
+    if(!s.exploreMenuOpen && !g_denPanel && (!fighting || g_den.countdown<=0)) {
+        UpdatePlayerMovement(s.townPlayerPos,s.playerFacing,GameDt(),1500);
+        for(Vector2 b:std::vector<Vector2>{{1150,650},{1150,1000},{350,350},{1100,350}}) ResolveCircleCollision(s.townPlayerPos,kPlayerRadius,b,100);
+        s.townPlayerPos.x=std::clamp(s.townPlayerPos.x,fighting ? 535.0f:120.0f,fighting ? 965.0f:1380.0f);
+        s.townPlayerPos.y=std::clamp(s.townPlayerPos.y,fighting ? 535.0f:120.0f,fighting ? 965.0f:1380.0f);
+    }
+    Town3DLoadModels();Town3DEnsureLit();T3DUpdateDayNight(s.worldTime,true);
+    Vector3 focus={s.townPlayerPos.x,0,s.townPlayerPos.y};
+    Camera3D cam={{focus.x+500,780,focus.z+600},focus,{0,1,0},48,CAMERA_PERSPECTIVE};
+    if(g_t3dLit.ready) {
+        SetShaderValue(g_t3dLit.shader,g_t3dLit.viewPosLoc,&cam.position,SHADER_UNIFORM_VEC3);
+        float fog[2]={2500,4000};SetShaderValue(g_t3dLit.shader,g_t3dLit.fogRangeLoc,fog,SHADER_UNIFORM_VEC2);T3DGroundShaderSync(&cam.position,fog);
+    }
+    BeginTextureMode(scene);ClearBackground(Color{82,125,144,255});BeginMode3D(cam);
+    DrawPlane({750,-14,750},{5000,5000},Color{35,83,102,255});
+    DrawCube({750,-7,750},1340,12,1340,Color{99,95,76,255});
+    DrawPlane({750,0,750},{1320,1320},Color{128,119,92,255});
+    DrawCube({750,1,1040},100,2,780,Color{141,133,112,255});
+    DrawCube({860,1,650},650,2,80,Color{141,133,112,255});
+    DrawCube({750,2,750},510,4,510,Color{58,48,36,255});
+    DrawCube({750,5,750},480,3,480,Color{170,135,84,255});
+    for(int i=0;i<=10;++i) for(int side:{-1,1}) {
+        float along=500+i*50.0f;
+        if(i==4 || i==5 || i==6) continue;
+        DrawCylinder({along,0,750+side*250.0f},4,4,35,6,Color{72,50,30,255});
+        DrawCylinder({750+side*250.0f,0,along},4,4,35,6,Color{72,50,30,255});
+    }
+    // Raised benches face the open pit; low posts keep fighters visible.
+    for(int i=0;i<5;++i) {DrawCube({560+i*90.0f,18,450},72,8,30,Color{76,53,35,255});DrawCube({450,18,560+i*90.0f},30,8,72,Color{76,53,35,255});}
+    Town3DDrawBuilding("townhall",1150,650);Town3DDrawBuilding("bank",1150,1000);
+    Town3DDrawBuilding("healer",350,350);Town3DDrawBuilding("smith",1100,350);
+    Town3DDrawBuilding("stable",350,1100);
+    // Weathered wharf, mooring piles, cargo and a small sailboat.
+    for(int i=0;i<24;++i) DrawCube({750,5,1230+i*15.0f},165,5,13,Color{(unsigned char)(100+(i%3)*6),71,43,255});
+    for(int z=1250;z<=1570;z+=80) for(int side:{-1,1}) DrawCylinder({750+side*86.0f,-14,(float)z},5,6,45,8,Color{69,49,32,255});
+    DrawCube({950,-1,1490},85,18,190,Color{70,41,25,255});DrawCylinder({950,4,1490},3,3,180,8,Color{110,79,47,255});
+    DrawTriangle3D({953,180,1490},{953,50,1490},{953,50,1570},Color{194,183,151,255});
+    DrawTriangle3D({953,50,1570},{953,50,1490},{953,180,1490},Color{194,183,151,255});
+    for(int i=0;i<5;++i) Town3DDrawPiece(g_t3dModels.barrel,{650+i*36.0f,6,1230},i*37.0f);
+    for(Vector2 p:std::vector<Vector2>{{390,500},{1080,520},{1060,850},{580,1100}}) {
+        DrawCylinder({p.x,0,p.y},3,3,45,6,Color{55,43,28,255});DrawSphere({p.x,50,p.y},6,Color{245,163,70,255});
+    }
+    float phase=sideA ? g_den.swingA:g_den.swingB;
+    T3CAnim animation=T3CMakeAnim(kT3CTrackPlayerTown,s.townPlayerPos.x,s.townPlayerPos.y,true);
+    T3CKitUseSunShader();
+    rlPushMatrix();rlTranslatef(0,8,0);
+    if(!DrawPlayerHuman(s,kT3CTrackPlayerTown,s.townPlayerPos.x,s.townPlayerPos.y,atan2f(s.playerFacing.y,s.playerFacing.x),animation.move,nullptr,false,
+        fighting && phase>=0 && phase<.35f ? 1-phase/.35f:-1.0f,fighting))
+        T3CDrawHumanoid(g_t3cHumans[2].parts,s.townPlayerPos.x,s.townPlayerPos.y,atan2f(s.playerFacing.y,s.playerFacing.x),1.0f,Color{70,130,220,255},Color{50,55,70,255},Color{240,210,180,255},animation,false);
+    MpDraw3D("den",false,nullptr);rlPopMatrix();
+    EndMode3D();EndTextureMode();
+#ifndef __EMSCRIPTEN__
+    BeginTextureMode(g_zoomTarget);
+#endif
+    DrawTexturePro(scene.texture,{0,0,view.width,-view.height},view,{0,0},0,WHITE);
+    struct Landmark {const char* name;Vector2 pos;int panel;};
+    const Landmark landmarks[]={{"Dueling Pit",{750,750},1},{"The Loaded Die",{1150,650},2},{"Harbor bank",{1150,1000},3},{"Dock / ferry",{750,1250},4},{"The Blackwake Inn",{350,350},3}};
+    for(const auto& b:landmarks) {
+        Vector2 at=GetWorldToScreenEx({b.pos.x,110,b.pos.y},cam,540,790);at.y+=view.y;
+        if(at.x<30 || at.x>510 || at.y<210 || at.y>700) continue;
+        int w=MeasureUIText(b.name,13)+20;
+        DrawRectangleRounded({at.x-w*.5f,at.y-10,(float)w,28},.25f,4,Fade(Color{30,20,12,255},.9f));
+        DrawUIText(b.name,(int)(at.x-w*.5f+10),(int)at.y-4,13,kUoGoldText);
+    }
+    for(const MpPlayer& p:g_mp) {
+        Vector2 at=GetWorldToScreenEx({p.pos.x,88,p.pos.y},cam,540,790);at.y+=view.y;
+        if(at.y>210 && at.y<720) {DrawUIText(p.name.c_str(),(int)at.x-MeasureUIText(p.name.c_str(),12)/2,(int)at.y,12,kUoGoldText);}
+    }
+    if(!s.exploreMenuOpen && !g_denPanel) {
+        DrawVirtualJoystick();
+        if(!fighting) {
+            const Landmark* closest=nullptr;float dist=190;
+            for(const auto& b:landmarks) {float d=Dist(s.townPlayerPos,b.pos);if(d<dist) {dist=d;closest=&b;}}
+            if(closest && Button({290,760,230,56},TextFormat("Open %s",closest->name),true)) {g_denPanel=closest->panel;scroll=0;WalkTargetClear();}
+            if(closest && IsKeyPressed(KEY_E)) {g_denPanel=closest->panel;scroll=0;WalkTargetClear();}
+            // Ground picking uses the same camera and viewport as rendering.
+            Vector2 mouse=GetMousePosition();
+            if(s.optTapWalk && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !g_uiGestureOwned && !UIHit(mouse) && CheckCollisionPointRec(mouse,view)) {
+                Ray ray=GetScreenToWorldRayEx({mouse.x,mouse.y-view.y},cam,540,790);
+                if(fabsf(ray.direction.y)>.001f) {float t=-ray.position.y/ray.direction.y;if(t>0) WalkTargetSet(s.townPlayerPos,{std::clamp(ray.position.x+ray.direction.x*t,120.0f,1380.0f),std::clamp(ray.position.z+ray.direction.z*t,120.0f,1380.0f)},0);}
+            }
+        } else {
+            DrawUIText("Space: strike  Q: lunge  R: guard",190,718,12,kUoGoldText);
+            bool go=g_den.countdown<=0 && g_mpStatus==2;
+            if(Button({190,744,104,52},"Strike",go) || (go && IsKeyPressed(KEY_SPACE))) JS_DenAction("strike","",0);
+            if(Button({302,744,104,52},"Lunge",go) || (go && IsKeyPressed(KEY_Q))) JS_DenAction("lunge","",0);
+            if(Button({414,744,104,52},"Guard",go) || (go && IsKeyPressed(KEY_R))) JS_DenAction("guard","",0);
+            if(Button({330,806,188,44},"Surrender duel",true)) JS_DenAction("surrender","",0);
+        }
+    }
+    Rectangle top={12,116,516,82};UODrawGump(top,kUoDarkWood);UIRegister(top);
+    if(!g_den.id.empty()) {
+        DrawUIText(TextFormat("%s: %d HP / %d stamina",g_den.nameA.c_str(),g_den.hpA,g_den.staminaA),24,126,14,kUoGoldText);
+        DrawUIText(TextFormat("%s: %d HP / %d stamina",g_den.nameB.c_str(),g_den.hpB,g_den.staminaB),24,150,14,kUoGoldText);
+        DrawUIText(g_den.countdown>0 ? TextFormat("Starts in %.0f / stake %d each",ceilf(g_den.countdown),g_den.stake) : TextFormat("%.0fs remaining / stake %d each",g_den.left,g_den.stake),24,174,12,kUoGoldText);
+    } else {
+        DrawUIText("BLACKWAKE DEN",24,128,18,kUoGoldText);
+        DrawUIText("Consent-only duels / no gear loss / casino",24,154,13,kUoGoldText);
+        DrawUIText(g_den.ready ? TextFormat("Den test purse: %d gold",g_den.gold) : "Waiting for the Den server combat update",24,176,12,kUoGoldText);
+    }
+    if(g_denPanel && !s.exploreMenuOpen) {
+        Rectangle panel={20,212,500,490};UODrawGump(panel,kUoParchment);UIRegister(panel);
+        UODrawTitle(panel,g_denPanel==1 ? "Dueling Pit":g_denPanel==2 ? "The Loaded Die":"Blackwake Harbor",16);
+        if(UOCloseButton(panel) || IsKeyPressed(KEY_ESCAPE)) g_denPanel=0;
+        const Color ink={45,27,15,255};float y=panel.y+38;
+        if(g_denPanel==1) {
+            DrawUIText("Equal arena stats. First to 0 HP loses; equipment is kept.",40,(int)y,13,ink);y+=24;
+            DrawUIText("Both agree to the stake. Winner receives the whole pot.",40,(int)y,13,ink);y+=28;
+            const int stakes[]={0,10,50,100};
+            for(int i=0;i<4;++i) if(MenuGroupTab({40+i*116.0f,y,108,44},i==0 ? "Practice":TextFormat("%d gold",stakes[i]),g_denStake==stakes[i],g_den.ready)) g_denStake=stakes[i];
+            y+=56;
+            if(!g_den.ready) DrawUIText("The multiplayer server must be updated to enable duels.",40,(int)y,13,ink);
+            else if(!g_den.offers.empty()) {
+                const DenOffer& o=g_den.offers[0];bool mine=o.a==g_mpMyId;
+                DrawUIText(TextFormat("%s / %d gold each / %.0fs left",mine ? o.nameB.c_str():o.nameA.c_str(),o.stake,o.left),40,(int)y,14,ink);y+=30;
+                if(!mine && Button({40,y,220,52},"Accept duel",true)) JS_DenAction("accept",o.id.c_str(),0);
+                if(Button({280,y,220,52},mine ? "Cancel challenge":"Decline",true)) JS_DenAction("decline",o.id.c_str(),0);
+            } else if(!g_den.id.empty()) DrawUIText("The pit is occupied. Watch the fight or wait for it to finish.",40,(int)y,12,ink);
+            else {
+                Rectangle area={40,y,460,panel.y+panel.height-y-20};scroll-=ScrollDelta(area);
+                scroll=std::clamp(scroll,0.0f,std::max(0.0f,g_mp.size()*64.0f-area.height));
+                UIBeginScissorMode((int)area.x,(int)area.y,(int)area.width,(int)area.height);
+                if(g_mp.empty()) DrawUIText("Invite a friend to Blackwake Den to practice a duel.",40,(int)y+8,13,ink);
+                for(size_t i=0;i<g_mp.size();++i) {
+                    const MpPlayer& p=g_mp[i];float row=y+i*64-scroll;
+                    DrawUIText(p.name.c_str(),44,(int)row+18,14,ink);
+                    bool near=Dist(p.pos,{750,750})<=350 && Dist(s.townPlayerPos,{750,750})<=350;
+                    if(Button({310,row+4,188,52},near ? "Challenge":"Bring both to pit",near && g_den.gold>=g_denStake)) JS_DenAction("challenge",p.id.c_str(),g_denStake);
+                }
+                UIEndScissorMode();
+            }
+        } else if(g_denPanel==2) {
+            DrawUIText(TextFormat("Purse: %d test gold / server-owned dice",g_den.gold),40,(int)y,15,ink);y+=30;
+            DrawUIText("Pick one face. A match returns 5 times the stake.",40,(int)y,13,ink);y+=22;
+            DrawUIText("Chance: 1 in 6. A miss loses your stake. No real money.",40,(int)y,12,ink);y+=34;
+            for(int i=1;i<=6;++i) if(MenuGroupTab({40+(i-1)%3*156.0f,y+(i-1)/3*56.0f,146,48},TextFormat("Face %d",i),g_denFace==i,!g_den.pending)) g_denFace=i;
+            y+=124;const int stakes[]={10,25,50};
+            for(int i=0;i<3;++i) if(MenuGroupTab({40+i*156.0f,y,146,48},TextFormat("Stake %d",stakes[i]),g_denCasinoStake==stakes[i],!g_den.pending)) g_denCasinoStake=stakes[i];
+            y+=62;
+            if(Button({40,y,460,56},g_den.pending ? "Recover pending roll":"Roll the die",g_den.ready && (g_den.pending || g_den.gold>=g_denCasinoStake))) JS_DenAction(g_den.pending ? "retry":"roll",TextFormat("%d",g_denFace),g_denCasinoStake);
+        } else {
+            DrawUIText("A harbor for outlaws, duellists and fortune-seekers.",40,(int)y,14,ink);y+=30;
+            DrawUIText("500 test gold starts your browser's separate Den purse.",40,(int)y,13,ink);y+=26;
+            DrawUIText("Duel stakes and casino gold never take character gold.",40,(int)y,13,ink);y+=26;
+            DrawUIText("Strike: 10 damage / Lunge: 16 damage / Guard: half damage.",40,(int)y,12,ink);y+=30;
+            DrawUIText("A live disconnect forfeits. Countdown stops refund stakes.",40,(int)y,12,ink);y+=42;
+            if(Button({40,y,460,52},"Open personal bank",!fighting)) {MenuGoScreen(s,Screen::Bank);g_denPanel=0;}
+            y+=64;
+            if(Button({40,y,460,52},"Ferry to Saltmere",!fighting && !g_den.pending)) {s.screen=Screen::Town;s.selectedTown=1;s.townPlayerPos=TS(450,830);g_denPanel=0;WalkTargetClear();}
+        }
+    }
+    if(!g_den.message.empty() && !s.exploreMenuOpen) {
+        Rectangle msg={20,860,500,34};DrawRectangleRounded(msg,.2f,4,Fade(BLACK,.85f));
+        std::string text=g_den.message;while(MeasureUIText(text.c_str(),12)>474 && !text.empty()) text.pop_back();
+        DrawUIText(text.c_str(),32,870,12,kUoGoldText);UIRegister(msg);
+    }
+    (void)screenW;(void)screenH;
+}
+
 // ---- Directions HUD (2026-09-27) ----
 // Screen angle of a world direction: turned with the 3D camera in the wilds, north-up elsewhere.
 static float ScreenAngleOf(Vector2 d) {
@@ -37628,7 +37838,7 @@ static void UpdateDrawFrame() {
             if (IsKeyPressed(KEY_B)) UseBandageInCombat(state);
         }
         // --- Input: switch screens with Tab (cycles Character -> Town -> Hunt -> Craft -> Magic -> Pets -> Bank -> House -> Skills -> Guide -> Character) ---
-        if (!encounterPending && IsKeyPressed(KEY_TAB)) {
+        if (!encounterPending && !DenFighting() && IsKeyPressed(KEY_TAB)) {
             if (!(state.screen == Screen::Hunt && state.combat.has_value())) { // don't tab away mid-fight
                 Screen next = IsPlayScreen(state.screen) ? Screen::Character // (2026-09-27) the world, then the menus, then back
                             : (state.screen == Screen::Character) ? Screen::Craft
@@ -37776,6 +37986,8 @@ static void UpdateDrawFrame() {
             DrawInnocentPanel(state, screenW);
         } else if (state.screen == Screen::Character) {
             DrawCharacterScreen(state, screenW, screenH);
+        } else if (state.screen == Screen::Blackwake) {
+            DrawBlackwakeScreen(state,screenW,screenH);
         } else if (state.screen == Screen::Town) {
             DrawTownScreen(state, screenW, screenH);
         } else if (state.screen == Screen::Interior) {

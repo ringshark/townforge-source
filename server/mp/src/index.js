@@ -18,6 +18,7 @@
 //     {t:"full"}                              the zone is full (then closed)
 //   P = {id, name, look, x, z, yaw, mv}
 import { DurableObject } from "cloudflare:workers";
+import { DenEngine } from "./den-engine.js";
 
 const MAX_PLAYERS = 60;       // per zone
 const MAX_MSGS_PER_SEC = 12;  // a client flooding past this gets dropped messages
@@ -53,6 +54,8 @@ export default {
 export class Zone extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
+    this.env=env;
+    this.ctx.blockConcurrencyWhile(async()=>{this.den=new DenEngine(await this.ctx.storage.get("den") || {});});
     this.rate = new Map(); // ws -> {sec, n}; not persisted - a wake resets it, which is fine
   }
 
@@ -66,7 +69,7 @@ export class Zone extends DurableObject {
       return new Response(null, { status: 101, webSocket: client });
     }
     const id = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
-    server.serializeAttachment({ id, name: "", look: "", x: 0, z: 0, yaw: 0, mv: 0, hello: false, lastChat: 0 });
+    server.serializeAttachment({ id, name: "", look: "", x: 0, z: 0, yaw: 0, mv: 0, hello: false, lastChat: 0, den: new URL(request.url).pathname.endsWith("/den"), lastPos: Date.now() });
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -105,6 +108,13 @@ export class Zone extends DurableObject {
       const first = !a.hello;
       a.name = cleanText(m.name, NAME_MAX) || "Adventurer";
       a.look = cleanText(m.look, LOOK_MAX);
+      if(a.den && first) {
+        if(!/^[a-f0-9]{64}$/.test(String(m.token || ""))) {ws.send(JSON.stringify({t:"den_error",text:"Update the game to enter the Den."}));return;}
+        const hash=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(m.token));
+        a.key=Array.from(new Uint8Array(hash),n=>n.toString(16).padStart(2,"0")).join("");
+        if(this.players().some(([,p])=>p.key===a.key)) {ws.send(JSON.stringify({t:"den_error",text:"This Den purse is already open in another tab."}));ws.close(1008,"duplicate purse");return;}
+        a.x=750;a.z=1250;a.lastPos=Date.now();
+      }
       a.hello = true;
       ws.serializeAttachment(a);
       if (first) {
@@ -112,10 +122,32 @@ export class Zone extends DurableObject {
         ws.send(JSON.stringify({ t: "welcome", id: a.id, players: others }));
       }
       this.broadcast({ t: "join", p: this.pub(a) }, ws);
+      if(a.den) {this.denPeers();this.den.wallet(a.key);await this.saveDen();ws.send(JSON.stringify({t:"den_pos",x:a.x,z:a.z}));this.denSync();}
       return;
     }
     if (!a.hello) return;
+    if(a.den && m.t.startsWith("den_")) {
+      this.denPeers();let placement,applied=false;
+      try {
+        if(m.t==="den_challenge") this.den.challenge(a.id,String(m.target),m.stake);
+        else if(m.t==="den_answer") placement=this.den.answer(a.id,String(m.offer),m.accept===true);
+        else if(m.t==="den_fight") this.den.fight(a.id,String(m.action));
+        else if(m.t==="den_roll") {const result=this.den.casino(a.id,String(m.request),m.stake,m.face,m.sequence);applied=true;await this.saveDen();ws.send(JSON.stringify(result));}
+        else if(m.t!=="den_poll") return;
+        this.den.tick();
+        if(placement) for(const [w,p] of this.players()) {const at=placement.a.id===p.id ? placement.a:placement.b.id===p.id ? placement.b:null;if(at) {p.x=at.x;p.z=at.z;p.lastPos=Date.now();w.serializeAttachment(p);w.send(JSON.stringify({t:"den_pos",x:p.x,z:p.z}));this.broadcast({t:"pos",...this.pub(p)},w);}}
+        await this.saveDen();this.denSync();
+      } catch(e) {ws.send(JSON.stringify({t:"den_error",text:e.message,request:m.request,rejected:!applied}));}
+      return;
+    }
     if (m.t === "pos") {
+      if(a.den) {
+        this.denPeers();const at=this.den.move(a.id,Number(m.x),Number(m.z),(Date.now()-a.lastPos)/1000);
+        a.x=at.x;a.z=at.z;a.lastPos=Date.now();a.yaw=num(m.yaw,-10,10);a.mv=m.mv ? 1:0;
+        ws.serializeAttachment(a);this.broadcast({t:"pos",...this.pub(a)},ws);
+        if(Math.hypot(a.x-Number(m.x),a.z-Number(m.z))>24) ws.send(JSON.stringify({t:"den_pos",x:a.x,z:a.z}));
+        return;
+      }
       a.x = num(m.x, -100000, 100000); a.z = num(m.z, -100000, 100000);
       a.yaw = num(m.yaw, -10, 10); a.mv = m.mv ? 1 : 0;
       ws.serializeAttachment(a);
@@ -133,11 +165,16 @@ export class Zone extends DurableObject {
     }
   }
 
-  async webSocketClose(ws) { this.left(ws); }
-  async webSocketError(ws) { this.left(ws); }
-  left(ws) {
+  denPeers() {this.den.peersFrom(this.players().filter(([,a])=>a.den).map(([,a])=>a));}
+  async saveDen() {await this.ctx.storage.put("den",this.den.state);const d=this.den.state.duel;await this.ctx.storage.setAlarm(Date.now()+(d ? 1000:30000));}
+  denSync() {this.denPeers();for(const [w,a] of this.players()) if(a.den) {try {w.send(JSON.stringify(this.den.snapshot(a.id)));}catch(e) {}}}
+  async alarm() {this.den.tick();await this.ctx.storage.put("den",this.den.state);this.denSync();if(this.den.state.duel || this.den.state.offers.length) await this.ctx.storage.setAlarm(Date.now()+1000);}
+  async webSocketClose(ws) { await this.left(ws); }
+  async webSocketError(ws) { await this.left(ws); }
+  async left(ws) {
     const a = ws.deserializeAttachment();
     this.rate.delete(ws);
+    if(a && a.den && a.hello) {this.den.leave(a.id);await this.saveDen();}
     try { ws.close(1000, "bye"); } catch (e) { /* already closed */ }
     if (a && a.hello) this.broadcast({ t: "leave", id: a.id }, ws);
   }
