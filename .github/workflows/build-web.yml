@@ -29,6 +29,7 @@ jobs:
           g++ -std=c++17 tests/combat-motion.cpp -o /tmp/tf-combat-test
           /tmp/tf-combat-test
           python tests/player-movement.py
+          python tests/ui-input.py
       - name: Build raylib 6.0
         run: |
           git clone --depth 1 --branch 6.0 https://github.com/raysan5/raylib.git /tmp/raylib

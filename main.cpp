@@ -2319,9 +2319,10 @@ static Vector2 g_joystickOrigin = { 0, 0 };
 static Vector2 g_joystickCurrent = { 0, 0 };
 static bool g_joystickActive = false;
 
+static bool UIHit(Vector2 m);
 static Vector2 VirtualJoystickDir() {
     Vector2 mouse = GetMousePosition();
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, kJoystickZone)) {
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, kJoystickZone) && !UIHit(mouse)) {
         g_joystickActive = true;
         g_joystickOrigin = mouse;
     }
@@ -10027,16 +10028,64 @@ static bool g_uiShieldOn = false, g_uiShieldBypass = false;
 // them - or just beside one - never also counts as a tap on the world below
 // (tap to walk, flag, Teleport). The list from the last frame is what counts.
 static std::vector<Rectangle> g_uiRects, g_uiRectsPrev;
-static void UIRegister(Rectangle r) { if (g_uiRects.size() < 256) g_uiRects.push_back(r); }
-static void UIFrameReset() { g_uiRectsPrev.swap(g_uiRects); g_uiRects.clear(); }
+static std::vector<Rectangle> g_uiClips;
+static bool g_uiClickTaken = false, g_uiGestureOwned = false;
+static Rectangle UIClipped(Rectangle r) {
+    for (const Rectangle& clip : g_uiClips) {
+        float right = std::min(r.x + r.width, clip.x + clip.width);
+        float bottom = std::min(r.y + r.height, clip.y + clip.height);
+        r.x = std::max(r.x, clip.x); r.y = std::max(r.y, clip.y);
+        r.width = std::max(0.0f, right - r.x); r.height = std::max(0.0f, bottom - r.y);
+    }
+    return r;
+}
+static bool UIContains(Vector2 p, Rectangle r) {
+    r = UIClipped(r);
+    return r.width > 0 && r.height > 0 && CheckCollisionPointRec(p, r);
+}
+static void UIBeginScissorMode(int x, int y, int w, int h) {
+    Rectangle clip = UIClipped({(float)x, (float)y, (float)w, (float)h});
+    g_uiClips.push_back(clip);
+    BeginScissorMode((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
+}
+static void UIEndScissorMode() {
+    if (!g_uiClips.empty()) g_uiClips.pop_back();
+    if (g_uiClips.empty()) EndScissorMode();
+    else { Rectangle r = g_uiClips.back(); BeginScissorMode((int)r.x, (int)r.y, (int)r.width, (int)r.height); }
+}
+static void UIRegister(Rectangle r) {
+    r = UIClipped(r);
+    if (r.width <= 0 || r.height <= 0) return;
+    if (g_uiRects.size() < 256) g_uiRects.push_back(r);
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), r)) g_uiGestureOwned = true;
+}
 static bool UIHit(Vector2 m) {
-    const float pad = 14.0f; // the finger is fat: a near miss is still "the button"
-    for (const Rectangle& r : g_uiRectsPrev)
-        if (m.x > r.x - pad && m.x < r.x + r.width + pad && m.y > r.y - pad && m.y < r.y + r.height + pad) return true;
+    if (g_uiGestureOwned || g_uiClickTaken) return true;
+    if (g_uiShieldOn && CheckCollisionPointRec(m, g_uiShield)) return true;
+    // A control protects its visible bounds. Extra world-only padding is small
+    // enough that adjacent controls and open ground keep their intended meaning.
+    const float pad = 3.0f;
+    for (const auto* list : { &g_uiRectsPrev, &g_uiRects })
+        for (const Rectangle& r : *list)
+            if (m.x >= r.x - pad && m.x <= r.x + r.width + pad && m.y >= r.y - pad && m.y <= r.y + r.height + pad) return true;
     return false;
 }
-static bool Button(Rectangle r, const std::string& label, bool enabled) {
+static void UIFrameReset() {
+    g_uiRectsPrev.swap(g_uiRects); g_uiRects.clear(); g_uiClips.clear();
+    g_uiClickTaken = false;
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        g_uiGestureOwned = false;
+        g_uiGestureOwned = UIHit(GetMousePosition());
+    } else if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) g_uiGestureOwned = false;
+}
+static bool UIClick(Rectangle r, bool enabled = true) {
     UIRegister(r);
+    if (!enabled || g_uiClickTaken || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || !UIContains(GetMousePosition(), r)) return false;
+    if (g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(GetMousePosition(), g_uiShield)) return false;
+    g_uiClickTaken = true; g_uiGestureOwned = true;
+    return true;
+}
+static bool Button(Rectangle r, const std::string& label, bool enabled) {
     // A small (1.5px/side) outset on both the visual rect and the click/tap hit-test -
     // enough to feel a bit more generous without crowding neighboring buttons the way
     // a bigger outset plus a drop shadow did (both have been tried and back out).
@@ -10055,7 +10104,7 @@ static bool Button(Rectangle r, const std::string& label, bool enabled) {
     int tx = (int)(big.x + (big.width - tw) / 2.0f), ty = (int)(big.y + (big.height - fs) / 2.0f);
     if (enabled) DrawUIText(label.c_str(), tx + 1, ty + 1, fs, Fade(BLACK, 0.55f));
     DrawUIText(label.c_str(), tx, ty, fs, fg);
-    bool clicked = enabled && hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    bool clicked = UIClick(big, enabled);
     if (clicked && g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(mouse, g_uiShield)) clicked = false;
     if (clicked) PlaySfx(SfxId::Click); // central UI click - one place covers all buttons
     return clicked;
@@ -10149,14 +10198,13 @@ static bool UOCloseButton(Rectangle gump) {
     DrawRectangleLinesEx(b, 1.5f, kUoBronze);
     DrawLineEx({ b.x + 6, b.y + 6 }, { b.x + 16, b.y + 16 }, 2.5f, kUoGoldText);
     DrawLineEx({ b.x + 16, b.y + 6 }, { b.x + 6, b.y + 16 }, 2.5f, kUoGoldText);
-    bool clicked = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(m, { b.x - 6, b.y - 6, b.width + 12, b.height + 12 });
+    bool clicked = UIClick(b);
     if (clicked && g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(m, g_uiShield)) clicked = false;
     if (clicked) PlaySfx(SfxId::Click);
     return clicked;
 }
 // Bronze-and-leather action button in the gump style.
 static bool UOButton(Rectangle r, const std::string& label, bool enabled = true) {
-    UIRegister(r);
     Vector2 m = GetMousePosition();
     bool hover = enabled && CheckCollisionPointRec(m, r);
     DrawRectangleRec(r, enabled ? (hover ? Color{ 96, 62, 34, 255 } : Color{ 70, 44, 24, 255 }) : Color{ 60, 56, 52, 255 });
@@ -10165,15 +10213,14 @@ static bool UOButton(Rectangle r, const std::string& label, bool enabled = true)
     int tw = MeasureUIText(label.c_str(), 14);
     DrawUIText(label.c_str(), (int)(r.x + (r.width - tw) / 2), (int)(r.y + (r.height - 14) / 2), 14,
                enabled ? kUoGoldText : Color{ 150, 146, 140, 255 });
-    bool clicked = enabled && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(m, r);
+    bool clicked = UIClick(r, enabled);
     if (clicked && g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(m, g_uiShield)) clicked = false;
     if (clicked) PlaySfx(SfxId::Click);
     return clicked;
 }
 static bool UOTapped(Rectangle r) {
-    UIRegister(r);
     Vector2 m = GetMousePosition();
-    bool clicked = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(m, r);
+    bool clicked = UIClick(r);
     if (clicked && g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(m, g_uiShield)) clicked = false;
     return clicked;
 }
@@ -10298,7 +10345,7 @@ static bool DrawInteractButton(const std::string& label) {
     DrawUIText(t.c_str(), (int)(r.x + (r.width - tw) / 2), (int)(r.y + r.height / 2 - fs / 2 - 6), fs, Color{ 40, 24, 10, 255 });
     const char* hint = "tap or press E";
     DrawUIText(hint, (int)(r.x + (r.width - MeasureUIText(hint, 10)) / 2), (int)(r.y + r.height - 16), 10, Color{ 80, 50, 20, 255 });
-    bool clicked = hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    bool clicked = UIClick(r);
     if (clicked && g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(m, g_uiShield)) clicked = false;
     if (clicked) PlaySfx(SfxId::Click);
     return clicked;
@@ -10382,7 +10429,6 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
     // and a cold blue cast when you can't afford it. Tap/keys behave as before.
     int tapped = -1;
     Vector2 mouse = GetMousePosition();
-    bool pressEdge = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     const int n = (int)s.combatHotbar.size();
     const float slotW = n > 5 ? 41.0f : 60.0f, gap = n > 5 ? 4.0f : 8.0f; // (2026-09-28) eight slots fit one row
     Rectangle bar = { x - 9.0f, y - 8.0f, n * slotW + (n - 1) * gap + 18.0f, slotW + 30.0f };
@@ -10409,7 +10455,7 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
         } else if (inCombat) {
             enabled = false;
         }
-        bool hover = CheckCollisionPointRec(mouse, big);
+        bool hover = UIContains(mouse, r);
         bool shielded = g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(mouse, g_uiShield);
         bool down = hover && IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !shielded;
         // slot + icon
@@ -10429,10 +10475,10 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
             else DrawUIText(sp.name.substr(0, 2).c_str(), (int)ir.x + 14, (int)ir.y + 16, 18, kUoGoldText);
             // cooldown sweep: the unready part of the dial darkened, clockwise from 12
             if (cdFrac > 0.001f) {
-                BeginScissorMode((int)ir.x, (int)ir.y, (int)ir.width, (int)ir.height);
+                UIBeginScissorMode((int)ir.x, (int)ir.y, (int)ir.width, (int)ir.height);
                 DrawCircleSector({ ir.x + ir.width / 2, ir.y + ir.height / 2 }, ir.width, -90.0f + 360.0f * (1.0f - cdFrac), 270.0f, 32,
                                  Fade(BLACK, 0.62f));
-                EndScissorMode();
+                UIEndScissorMode();
                 if (cdLeft > 0.25f) {
                     std::string cs = TextFormat("%.1f", cdLeft);
                     int cw = MeasureUIText(cs.c_str(), 16);
@@ -10465,7 +10511,7 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
         DrawUIText(TextFormat("%d", i + 1), (int)r.x + 1, (int)r.y - 3, 11, kUoGoldText);
         if (hover && !down) DrawRectangleLinesEx(r, 1.0f, Fade(WHITE, 0.35f));
         // taps: enabled slots, and (in combat) denied slots too so the caller can explain
-        bool press = pressEdge && hover && !shielded;
+        bool press = UIClick(r, enabled || inCombat);
         if (press && (enabled || inCombat)) {
             tapped = i;
             PlaySfx(SfxId::Click);
@@ -16324,7 +16370,7 @@ static const float kTown3DBuildingHalf = 55.0f; // 110-unit footprint, ~kNodeRad
 static bool g_touchSeen = false; // latched on first touch input - desktop never sees the TARGET button
 static Rectangle TargetFrameRect() { return { 20.0f, 208.0f, 230.0f, 58.0f }; }
 static Rectangle TargetButtonRect() {
-    return { kViewport.x + kViewport.width - 150.0f, kViewport.y + kViewport.height - 160.0f, 130.0f, 60.0f };
+    return { kViewport.x + kViewport.width - 130.0f, kViewport.y + kViewport.height - 218.0f, 110.0f, 52.0f };
 }
 
 // ---------------------------------------------------------------------
@@ -16798,7 +16844,7 @@ static void DrawWorldMap(GameState& s) {
     WildMapEnsureTexture();
     Rectangle panel = WorldMapPanelRect(), mm = WorldMapRect();
     if (g_worldMapJustOpened) g_worldMapJustOpened = false;
-    else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { s.worldMapOpen = false; return; } // any tap closes
+    else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !g_uiClickTaken) { g_uiClickTaken = g_uiGestureOwned = true; s.worldMapOpen = false; return; } // any tap closes
     DrawRectangleRounded(panel, 0.04f, 8, Fade(kColorPageBg, 0.97f));
     DrawRectangleRoundedLines(panel, 0.04f, 8, Fade(BLACK, 0.5f));
     DrawUIText("Wilderness", (int)panel.x + 12, (int)panel.y + 8, 18, kColorHeading);
@@ -16886,7 +16932,7 @@ static void DrawMinimap(GameState& s) {
         return;
     }
     Rectangle mm = MinimapRect();
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), mm)) {
+    if (UIClick(mm)) {
         s.worldMapOpen = true;
         g_worldMapJustOpened = true;
         return;
@@ -16904,7 +16950,7 @@ static void DrawMinimap(GameState& s) {
     auto inside = [&](Vector2 p, float pad) {
         return p.x >= mm.x + pad && p.x <= mm.x + mm.width - pad && p.y >= mm.y + pad && p.y <= mm.y + mm.height - pad;
     };
-    BeginScissorMode((int)mm.x, (int)mm.y, (int)mm.width, (int)mm.height);
+    UIBeginScissorMode((int)mm.x, (int)mm.y, (int)mm.width, (int)mm.height);
     if (s.housePlotIdx >= 0 && s.housePlotIdx < (int)kHousePlots.size()) {
         Vector2 p = toMap(kHousePlots[s.housePlotIdx].pos);
         DrawRectangleV({ p.x - 4, p.y - 4 }, { 8, 8 }, Color{ 90, 190, 110, 255 });
@@ -16988,7 +17034,7 @@ static void DrawMinimap(GameState& s) {
             DrawDirArrow({ ctr.x + cosf(a) * r, ctr.y + sinf(a) * r }, a, 9.0f, gold);
         }
     }
-    EndScissorMode();
+    UIEndScissorMode();
     MapCompassLetters(mm, 11);
     DrawRectangleLinesEx(mm, 1.5f, Fade(Color{ 250, 236, 170, 255 }, 0.85f));
     const char* rn = RegionName(RegionAt(s.wildernessPlayerPos));
@@ -17597,7 +17643,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     Town3DPinchZoom(kT3DDistMin, kT3DDistMax);
     // --- Orbit / zoom / pick input (left-drag orbits, wheel zooms, click picks) ---
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !panelOpen &&
-        CheckCollisionPointRec(mouse, kViewport) && !Town3DPointInUI(mouse, s, screenW)) {
+        CheckCollisionPointRec(mouse, kViewport) && !UIHit(mouse) && !Town3DPointInUI(mouse, s, screenW)) {
         g_t3dOrbiting = true;
         g_t3dLastMouse = mouse;
         g_t3dDragDist = 0.0f;
@@ -17615,7 +17661,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
         bool wasClick = g_t3dDragDist < 8.0f;
         g_t3dOrbiting = false;
         if (wasClick && !panelOpen && !UIHit(mouse) &&
-            CheckCollisionPointRec(mouse, kViewport) && !Town3DPointInUI(mouse, s, screenW))
+            CheckCollisionPointRec(mouse, kViewport) && !UIHit(mouse) && !Town3DPointInUI(mouse, s, screenW))
             Town3DPick(s, mouse, screenW, screenH);
     }
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
@@ -22492,7 +22538,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     // shared). No click-picking in Phase 1 - interaction stays walk-up + E / tap,
     // exactly like the 2D wilderness.
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-        CheckCollisionPointRec(mouse, kViewport) && !Wild3DPointInUI(mouse, s)) {
+        CheckCollisionPointRec(mouse, kViewport) && !UIHit(mouse) && !Wild3DPointInUI(mouse, s)) {
         g_t3dOrbiting = true;
         g_t3dLastMouse = mouse;
         g_t3dDragDist = 0.0f;
@@ -22511,14 +22557,14 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
         // same way the 2D click does - flagging it for auto-approach.
         bool wasClick = g_t3dDragDist < 8.0f;
         g_t3dOrbiting = false;
-        if (wasClick && CheckCollisionPointRec(mouse, kViewport) && !Wild3DPointInUI(mouse, s) && !UIHit(mouse)) {
+        if (wasClick && CheckCollisionPointRec(mouse, kViewport) && !UIHit(mouse) && !Wild3DPointInUI(mouse, s) && !UIHit(mouse)) {
             Town3DCam pc = Wild3DGetCam(s, screenW, screenH);
             Wild3DPickFlag(s, pc, mouse);
         }
     }
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
     float wheel = GetMouseWheelMove();
-    if (wheel != 0.0f && CheckCollisionPointRec(mouse, kViewport) && !Wild3DPointInUI(mouse, s))
+    if (wheel != 0.0f && CheckCollisionPointRec(mouse, kViewport) && !UIHit(mouse) && !Wild3DPointInUI(mouse, s))
         g_t3dDist = std::clamp(g_t3dDist * (1.0f - wheel * 0.12f), kWild3DDistMin, kWild3DDistMax);
     { // (2026-09-29) Vyrathax fills the screen: ease the camera out as you come to fight it (once - zoom back in freely)
         // (2026-09-29) and the same for Murder Inc.'s war camp and Grimtusk Hold, so the whole yard fits
@@ -23418,7 +23464,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
     // --- Orbit / zoom input (the shared orbit state; tighter dungeon limits).
     // No click-picking - interaction stays walk-up + E / tap, like the 2D view.
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-        CheckCollisionPointRec(mouse, kViewport) && !Dung3DPointInUI(mouse, s)) {
+        CheckCollisionPointRec(mouse, kViewport) && !UIHit(mouse) && !Dung3DPointInUI(mouse, s)) {
         g_t3dOrbiting = true;
         g_t3dLastMouse = mouse;
         g_t3dDragDist = 0.0f;
@@ -23437,14 +23483,14 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         // same way the 2D click does - flagging it for auto-approach.
         bool wasClick = g_t3dDragDist < 8.0f;
         g_t3dOrbiting = false;
-        if (wasClick && CheckCollisionPointRec(mouse, kViewport) && !Dung3DPointInUI(mouse, s) && !UIHit(mouse)) {
+        if (wasClick && CheckCollisionPointRec(mouse, kViewport) && !UIHit(mouse) && !Dung3DPointInUI(mouse, s) && !UIHit(mouse)) {
             Town3DCam pc = Dungeon3DGetCam(s, screenW, screenH);
             Dungeon3DPickFlag(s, pc, mouse);
         }
     }
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
     float wheel = GetMouseWheelMove();
-    if (wheel != 0.0f && CheckCollisionPointRec(mouse, kViewport) && !Dung3DPointInUI(mouse, s))
+    if (wheel != 0.0f && CheckCollisionPointRec(mouse, kViewport) && !UIHit(mouse) && !Dung3DPointInUI(mouse, s))
         g_t3dDist = std::clamp(g_t3dDist * (1.0f - wheel * 0.12f), kDung3DDistMin, kDung3DDistMax);
 
     // --- 3D scene ---
@@ -25243,7 +25289,7 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
     // Drag orbits (follow mode keeps the fixed view from the door side).
     Vector2 mouse = GetMousePosition();
     if (!uiOpen && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, kViewport) &&
-        !Interior3DPointInUI(screenW, screenH) && !ExploreMenuPointInUI(mouse, s)) {
+        !UIHit(mouse) && !Interior3DPointInUI(screenW, screenH) && !ExploreMenuPointInUI(mouse, s)) {
         g_t3dOrbiting = true;
         g_t3dLastMouse = mouse;
     }
@@ -25309,7 +25355,7 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
         }
     }
     EndMode3D();
-    BeginScissorMode((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height);
+    UIBeginScissorMode((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height);
     for (auto& p : props) { // floating signs over every crafting station
         const char* verb = InteriorStationVerb(s.interiorKey, p);
         if (!verb) continue;
@@ -25317,7 +25363,7 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
         if (T3VDot(T3VSub(top, cam3d.position), T3VSub(cam3d.target, cam3d.position)) <= 0) continue;
         DrawStationSign(GetWorldToScreen(top, cam3d), verb, p.label, nearest == &p);
     }
-    EndScissorMode();
+    UIEndScissorMode();
 }
 
 // Runs one E/tap interaction. Returns true when it left the interior.
@@ -25363,26 +25409,26 @@ static void DrawHouseChestPanel(GameState& s, int screenW, int screenH) {
     DrawUIText("Backpack", (int)x + 16, (int)listY - 18, 14, kUoGoldText);
     scrollL -= ScrollDelta({ x, listY, w / 2, listH });
     scrollL = std::clamp(scrollL, 0.0f, std::max(0.0f, s.backpack.size() * rowH - listH));
-    BeginScissorMode((int)x, (int)listY, (int)(w / 2), (int)listH);
+    UIBeginScissorMode((int)x, (int)listY, (int)(w / 2), (int)listH);
     for (int i = 0; i < (int)s.backpack.size(); i++) {
         float ry = listY + i * rowH - scrollL;
         if (ry < listY - rowH || ry > listY + listH) continue;
         DrawUIText(s.backpack[i].name.c_str(), (int)x + 16, (int)ry + 8, 13, Color{ 236, 222, 196, 255 });
         if (Button({ x + 176, ry + 2, 60, 26 }, "Store", true)) { DepositItem(s, i); PlaySfx(SfxId::Click); break; }
     }
-    EndScissorMode();
+    UIEndScissorMode();
     // Bank column (take back)
     DrawUIText("Bank box", (int)x + 262, (int)listY - 18, 14, kUoGoldText);
     scrollR -= ScrollDelta({ x + w / 2, listY, w / 2, listH });
     scrollR = std::clamp(scrollR, 0.0f, std::max(0.0f, s.bankItems.size() * rowH - listH));
-    BeginScissorMode((int)(x + w / 2), (int)listY, (int)(w / 2), (int)listH);
+    UIBeginScissorMode((int)(x + w / 2), (int)listY, (int)(w / 2), (int)listH);
     for (int i = 0; i < (int)s.bankItems.size(); i++) {
         float ry = listY + i * rowH - scrollR;
         if (ry < listY - rowH || ry > listY + listH) continue;
         DrawUIText(s.bankItems[i].name.c_str(), (int)x + 262, (int)ry + 8, 13, Color{ 236, 222, 196, 255 });
         if (Button({ x + 422, ry + 2, 60, 26 }, "Take", (int)s.backpack.size() < BackpackCap(s))) { WithdrawItem(s, i); PlaySfx(SfxId::Click); break; }
     }
-    EndScissorMode();
+    UIEndScissorMode();
 }
 
 // ---- The homestead inside (Housing 2.0, 2026-09-26) -------------------------------
@@ -25880,7 +25926,7 @@ static void DrawHouseDecorateUI(GameState& s, int screenW, int screenH) {
     int rows = ((int)items.size() + 1) / 2;
     g_hdScroll -= ScrollDelta(area);
     g_hdScroll = std::clamp(g_hdScroll, 0.0f, std::max(0.0f, rows * rowH - area.height));
-    BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
+    UIBeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
     static Vector2 pressAt = { -1, -1 };
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) pressAt = m;
     bool tap = IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && Dist(pressAt, m) < 10.0f && CheckCollisionPointRec(m, area);
@@ -25907,7 +25953,7 @@ static void DrawHouseDecorateUI(GameState& s, int screenW, int screenH) {
             }
         }
     }
-    EndScissorMode();
+    UIEndScissorMode();
     if (!g_hdMsg.empty()) msgLine(G.y + G.height - 28);
     else DrawUIText("Tap a piece in the room to move, turn or pick it up.", (int)G.x + 18, (int)(G.y + G.height - 28), 12, Color{ 190, 175, 150, 255 });
 }
@@ -25937,7 +25983,7 @@ static void DrawHouseCraftGump(GameState& s) {
     const float rowH = 40.0f;
     g_hcScroll -= ScrollDelta(area);
     g_hcScroll = std::clamp(g_hcScroll, 0.0f, std::max(0.0f, b.recipes.size() * rowH - area.height));
-    BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
+    UIBeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
     for (size_t r = 0; r < b.recipes.size(); r++) {
         const Recipe& recipe = b.recipes[r];
         float y = area.y + r * rowH - g_hcScroll;
@@ -25952,7 +25998,7 @@ static void DrawHouseCraftGump(GameState& s) {
             else TryCraftItem(s, def.buildingIdx, (int)r, cap);
         }
     }
-    EndScissorMode();
+    UIEndScissorMode();
 }
 static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
     const InteriorRoomDef* room = InteriorRoomFor(s.interiorKey);
@@ -30507,14 +30553,14 @@ static void DrawJournalPanel(GameState& s) {
     }
     s.journalScroll = std::clamp(s.journalScroll, 0.0f, maxScroll);
 
-    BeginScissorMode((int)panel.x, (int)listTop, (int)panel.width, (int)listH);
+    UIBeginScissorMode((int)panel.x, (int)listTop, (int)panel.width, (int)listH);
     float y = listBottom - (float)rows.size() * lineH + s.journalScroll;
     for (size_t i = 0; i < rows.size(); i++) {
         if (y + lineH >= listTop && y <= listBottom)
             DrawUIText(rows[i].c_str(), (int)panel.x + 10, (int)y, 12, kColorText);
         y += lineH;
     }
-    EndScissorMode();
+    UIEndScissorMode();
     if (maxScroll > 0.0f) {
         float th = std::max(20.0f, listH * listH / ((float)rows.size() * lineH));
         float ty = listTop + (listH - th) * (s.journalScroll / maxScroll);
@@ -30700,7 +30746,7 @@ static void UpdateDrawStarter(GameState& s, int screenW, int screenH) {
     if (!l2.empty()) DrawUIText(l2.c_str(), (int)bn.x + 66, ty + 22, fs, Color{ 255, 236, 190, 255 });
     Rectangle skip = { bn.x + bn.width - 40, bn.y + 6, 32, 24 };
     DrawUIText("skip", (int)skip.x, (int)skip.y + 4, 12, Color{ 200, 170, 120, 255 });
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), { skip.x - 6, skip.y - 6, skip.width + 12, skip.height + 12 }))
+    if (UIClick(skip))
         s.starterStep = -1;
     (void)screenH;
 }
@@ -32743,7 +32789,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         float maxSpellScroll = std::max(0.0f, (float)knownIdx.size() * 24.0f - spellListHeight);
         c.spellScroll = std::clamp(c.spellScroll, 0.0f, maxSpellScroll);
 
-        BeginScissorMode(0, spellListTop, screenW, spellListHeight);
+        UIBeginScissorMode(0, spellListTop, screenW, spellListHeight);
         if (knownIdx.empty()) {
             DrawUIText("No spells known yet - practice in Magic (MENU).", 20, spellListTop + 4, 13, DARKGRAY);
         }
@@ -32763,7 +32809,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
                 else CastHealSpell(s, idx);
             }
         }
-        EndScissorMode();
+        UIEndScissorMode();
         y = spellListTop + spellListHeight + 6;
 
         // Throw damage potions - a free action (see ThrowExplosionPotion(): no
@@ -32826,8 +32872,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         DrawUIText("Dungeons", (int)dungeonSubTab.x + 14, (int)dungeonSubTab.y + 6, 13, BLACK);
         DrawRectangleRounded(bloodSubTab, 0.3f, 6, s.huntSubView == 1 ? kColorSlate : Fade(GRAY, 0.3f));
         DrawUIText("Bloodstained Road", (int)bloodSubTab.x + 6, (int)bloodSubTab.y + 6, 12, BLACK);
-        if (CheckCollisionPointRec(GetMousePosition(), dungeonSubTab) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) s.huntSubView = 0;
-        if (CheckCollisionPointRec(GetMousePosition(), bloodSubTab) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) s.huntSubView = 1;
+        if (UIClick(dungeonSubTab)) s.huntSubView = 0;
+        if (UIClick(bloodSubTab)) s.huntSubView = 1;
     }
 
     if (s.huntSubView == 1) {
@@ -32851,7 +32897,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (inRange && IsKeyPressed(KEY_E)) FightBloodstainedTier(s, std::stoi(nearestKey));
 
         Rectangle roadViewport = { kViewport.x, (float)y + 6, kViewport.width, kViewport.y + kViewport.height - (y + 6) };
-        BeginScissorMode((int)roadViewport.x, (int)roadViewport.y, (int)roadViewport.width, (int)roadViewport.height);
+        UIBeginScissorMode((int)roadViewport.x, (int)roadViewport.y, (int)roadViewport.width, (int)roadViewport.height);
         DrawTiledGround(g_assets.groundDirtOk ? &g_assets.groundDirt : nullptr, roadViewport,
                           CameraTopLeft(s.bloodstainedPlayerPos), 48.0f, Color{ 90, 70, 55, 255 }); // packed dirt road
         Vector2 camera = CameraTopLeft(s.bloodstainedPlayerPos);
@@ -32876,7 +32922,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             prompt = (i == kPathGray ? "[E] Approach " : "[E] Fight ") + kBloodstainedPaths[i].name;
         }
         DrawPlayer(s, WorldToScreen(s.bloodstainedPlayerPos, camera), s.playerFacing, prompt);
-        EndScissorMode();
+        UIEndScissorMode();
         DrawVirtualJoystick();
         if (inRange && DrawInteractButton(prompt)) FightBloodstainedTier(s, std::stoi(nearestKey));
         return;
@@ -32899,7 +32945,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         DrawRectangleRoundedLines(r, 0.3f, 6, Fade(BLACK, 0.4f));
         int tw = MeasureUIText(kDungeons[i].name.c_str(), 12);
         DrawUIText(kDungeons[i].name.c_str(), (int)(r.x + (r.width - tw) / 2), (int)(r.y + 7), 12, BLACK);
-        if (CheckCollisionPointRec(GetMousePosition(), r) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        if (UIClick(r)) {
             if (!s.selectedDungeon.has_value() || *s.selectedDungeon != (int)i)
                 s.dungeonPlayerPos = { 900, 1300 }; // fresh spawn point when entering a (different) dungeon
             s.selectedDungeon = (int)i;
@@ -33510,7 +33556,7 @@ static void DrawPillTabs(const std::vector<std::string>& labels, int* selected, 
         DrawRectangleRoundedLines(r, 0.3f, 6, Fade(BLACK, 0.4f));
         int tw = MeasureUIText(labels[i].c_str(), 12);
         DrawUIText(labels[i].c_str(), (int)(r.x + (r.width - tw) / 2), (int)(r.y + 6), 12, BLACK);
-        if (CheckCollisionPointRec(GetMousePosition(), r) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) *selected = (int)i;
+        if (UIClick(r)) *selected = (int)i;
         tabX += w + 8;
     }
 }
@@ -33543,7 +33589,7 @@ static void DrawDyeTub(GameState& s, int y, int screenW, int screenH) {
         DrawRectangleRoundedLines(r, 0.15f, 6, sel ? kColorHeading : Fade(BLACK, 0.3f));
         DrawItemIcon(*gs[k].it, r.x + 4, r.y + 4, r.width - 8);
         if (gs[k].worn) DrawUIText("worn", (int)r.x + 3, (int)(r.y + r.height + 1), 10, Fade(kColorText, 0.8f));
-        if (CheckCollisionPointRec(GetMousePosition(), r) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { g_dyeSel = gs[k].id; PlaySfx(SfxId::Click); }
+        if (UIClick(r)) { g_dyeSel = gs[k].id; PlaySfx(SfxId::Click); }
     }
     if (!selValid) g_dyeSel = gs.empty() ? -1 : gs[0].id;
     y += (int)(((gs.size() + cols - 1) / std::max(1, cols)) * (cell + 14)) + 6;
@@ -33569,7 +33615,7 @@ static void DrawDyeTub(GameState& s, int y, int screenW, int screenH) {
         bool sel = g_dyeHue == hue;
         DrawRectangleRoundedLines(r, 0.25f, 6, sel ? kColorHeading : Fade(BLACK, 0.35f));
         if (sel) DrawRectangleRoundedLines({ r.x - 3, r.y - 3, r.width + 6, r.height + 6 }, 0.25f, 6, kColorHeading);
-        if (CheckCollisionPointRec(GetMousePosition(), r) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        if (UIClick(r)) {
             if (locked) s.logLine = std::string(kDyeHues[hue].name) + " is a rare hue - only a Tailor of 80+ can mix it.";
             else { g_dyeHue = hue; PlaySfx(SfxId::Click); }
         }
@@ -33754,7 +33800,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
         DrawRectangleRoundedLines(r, 0.3f, 6, Fade(BLACK, 0.4f));
         int tw = MeasureUIText(b.name.c_str(), 12);
         DrawUIText(b.name.c_str(), (int)(r.x + (r.width - tw) / 2), (int)(r.y + 6), 12, BLACK);
-        if (CheckCollisionPointRec(GetMousePosition(), r) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        if (UIClick(r)) {
             s.craftBuildingTab = i;
             s.craftScroll = 0;
         }
@@ -33785,7 +33831,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
         for (const Item& it : s.backpack) if (it.type == ItemType::Weapon || it.type == ItemType::Armor) ++count;
         s.backpackScroll -= ScrollDelta({ 0, (float)top, (float)screenW, (float)height });
         s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, std::max(0.0f, count * 52.0f - height));
-        BeginScissorMode(0, top, screenW, height);
+        UIBeginScissorMode(0, top, screenW, height);
         if (!count) DrawUIText("No armor or weapons in your backpack. Unequip worn gear in Me first.", 20, top + 4, 12, DARKGRAY);
         int row = 0;
         for (size_t i = 0; i < s.backpack.size(); ++i) {
@@ -33801,7 +33847,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
             std::string label = recovery.amount > 0 ? "Recycle (+" + std::to_string(recovery.amount) + " " + RecoveryMaterial(recovery.resource) + ")" : "Cannot recycle";
             if (Button({ 164, rowY + 24, 170, 22 }, label, recovery.amount > 0)) { RecycleFromBackpack(s, (int)i); break; }
         }
-        EndScissorMode();
+        UIEndScissorMode();
         return;
     }
     if (s.craftModeTab == 3 && s.craftBuildingTab == 2) { DrawDyeTub(s, y, screenW, screenH); return; }
@@ -33815,7 +33861,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
         s.craftScroll -= ScrollDelta(listArea);
         float maxScroll = std::max(0.0f, (float)b.recipes.size() * 30.0f - listHeight);
         s.craftScroll = std::clamp(s.craftScroll, 0.0f, maxScroll);
-        BeginScissorMode(0, listTop, screenW, listHeight);
+        UIBeginScissorMode(0, listTop, screenW, listHeight);
         for (size_t i = 0; i < b.recipes.size(); i++) {
             const Recipe& r = b.recipes[i];
             float rowY = listTop + (float)i * 30 - s.craftScroll;
@@ -33832,7 +33878,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
                 else TryBuyPremadeItem(s, s.craftBuildingTab, (int)i);
             }
         }
-        EndScissorMode();
+        UIEndScissorMode();
         return;
     }
 
@@ -33858,7 +33904,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
     float maxScroll = std::max(0.0f, (float)b.recipes.size() * 30.0f - listHeight);
     s.craftScroll = std::clamp(s.craftScroll, 0.0f, maxScroll);
 
-    BeginScissorMode(0, listTop, screenW, listHeight);
+    UIBeginScissorMode(0, listTop, screenW, listHeight);
     for (size_t i = 0; i < b.recipes.size(); i++) {
         const Recipe& r = b.recipes[i];
         float rowY = listTop + (float)i * 30 - s.craftScroll;
@@ -33890,7 +33936,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
                 TryCraftItem(s, s.craftBuildingTab, (int)i);
         }
     }
-    EndScissorMode();
+    UIEndScissorMode();
     y = listTop + listHeight + 8;
     DrawInfoLine("Scroll to see more recipes.", 20, y, 13, Fade(DARKGRAY, 0.8f));
     y += 20;
@@ -33914,7 +33960,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
         float maxPouchScroll = std::max(0.0f, (float)s.potions.size() * 28.0f - pouchHeight);
         s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, maxPouchScroll);
 
-        BeginScissorMode(0, pouchTop, screenW, pouchHeight);
+        UIBeginScissorMode(0, pouchTop, screenW, pouchHeight);
         if (s.potions.empty()) DrawUIText("No potions brewed yet.", 20, pouchTop + 4, 12, DARKGRAY);
         for (size_t i = 0; i < s.potions.size(); i++) {
             const PotionStack& p = s.potions[i];
@@ -33935,7 +33981,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
                 DrawUIText("(throw in combat)", (float)(screenW - 130), rowY + 4, 12, Fade(DARKGRAY, 0.8f));
             }
         }
-        EndScissorMode();
+        UIEndScissorMode();
         return;
     }
 
@@ -33952,7 +33998,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
     float maxBackpackScroll = std::max(0.0f, (float)s.backpack.size() * 28.0f - backpackHeight);
     s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, maxBackpackScroll);
 
-    BeginScissorMode(0, backpackTop, screenW, backpackHeight);
+    UIBeginScissorMode(0, backpackTop, screenW, backpackHeight);
     if (s.backpack.empty()) {
         DrawUIText("Nothing crafted yet.", 20, backpackTop + 4, 12, DARKGRAY);
     }
@@ -33965,7 +34011,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
         if (Button({ (float)(screenW - 180), rowY, 80, 22 }, "Equip", true)) { EquipFromBackpack(s, (int)i); break; }
         if (Button({ (float)(screenW - 90), rowY, 70, 22 }, "Sell", true)) SellFromBackpack(s, (int)i);
     }
-    EndScissorMode();
+    UIEndScissorMode();
 }
 
 // ---------------------------------------------------------------------
@@ -34143,7 +34189,7 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
     float maxBackpackScroll = std::max(0.0f, (float)s.backpack.size() * 28.0f - backpackHeight);
     s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, maxBackpackScroll);
 
-    BeginScissorMode(0, backpackTop, screenW, backpackHeight);
+    UIBeginScissorMode(0, backpackTop, screenW, backpackHeight);
     if (s.backpack.empty()) {
         DrawUIText("Nothing to sell.", 20, backpackTop + 4, 12, DARKGRAY);
     }
@@ -34156,7 +34202,7 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
         if (Button({ (float)(screenW - 180), rowY, 80, 22 }, "Equip", true)) { EquipFromBackpack(s, (int)i); break; }
         if (Button({ (float)(screenW - 90), rowY, 70, 22 }, "Sell", true)) SellFromBackpack(s, (int)i);
     }
-    EndScissorMode();
+    UIEndScissorMode();
 }
 
 // Phase 3 - the Frostmere Fur Trader: fur-lined armor (Buy) and the player's
@@ -34205,7 +34251,7 @@ static void DrawFurTraderScreen(GameState& s, int screenW, int screenH) {
     float maxBackpackScroll = std::max(0.0f, (float)s.backpack.size() * 28.0f - backpackHeight);
     s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, maxBackpackScroll);
 
-    BeginScissorMode(0, backpackTop, screenW, backpackHeight);
+    UIBeginScissorMode(0, backpackTop, screenW, backpackHeight);
     if (s.backpack.empty()) {
         DrawUIText("Nothing to sell.", 20, backpackTop + 4, 12, DARKGRAY);
     }
@@ -34218,7 +34264,7 @@ static void DrawFurTraderScreen(GameState& s, int screenW, int screenH) {
         if (Button({ (float)(screenW - 180), rowY, 80, 22 }, "Equip", true)) { EquipFromBackpack(s, (int)i); break; }
         if (Button({ (float)(screenW - 90), rowY, 70, 22 }, "Sell", true)) SellFromBackpack(s, (int)i);
     }
-    EndScissorMode();
+    UIEndScissorMode();
 }
 
 // ---------------------------------------------------------------------
@@ -34567,7 +34613,7 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
     float maxCreatureScroll = std::max(0.0f, (float)kWildCreatures.size() * 24.0f - listHeight);
     s.creatureScroll = std::clamp(s.creatureScroll, 0.0f, maxCreatureScroll);
 
-    BeginScissorMode(0, listTop, screenW, listHeight);
+    UIBeginScissorMode(0, listTop, screenW, listHeight);
     for (size_t i = 0; i < kWildCreatures.size(); i++) {
         const WildCreature& creature = kWildCreatures[i];
         float rowY = listTop + (float)i * 24 - s.creatureScroll;
@@ -34587,7 +34633,7 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
             DrawUIText(where.c_str(), screenW - 20 - ww, (int)rowY + 5, 11, DARKGRAY);
         }
     }
-    EndScissorMode();
+    UIEndScissorMode();
     y = listTop + listHeight + 8;
 
     // --- Pet roster ---
@@ -34600,7 +34646,7 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
     float maxScroll = std::max(0.0f, (float)s.pets.size() * 70.0f - rosterHeight);
     s.petsScroll = std::clamp(s.petsScroll, 0.0f, maxScroll);
 
-    BeginScissorMode(0, rosterTop, screenW, rosterHeight);
+    UIBeginScissorMode(0, rosterTop, screenW, rosterHeight);
     if (s.pets.empty()) {
         DrawUIText("No pets tamed yet.", 20, rosterTop + 4, 12, DARKGRAY);
     }
@@ -34640,7 +34686,7 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
         if (Button({ (float)(screenW - 150), rowY + 34, 70, 22 }, "Release", true)) ReleasePet(s, pet.id);
         if (Button({ (float)(screenW - 74), rowY + 34, 60, 22 }, "Sell", true)) SellPet(s, pet.id);
     }
-    EndScissorMode();
+    UIEndScissorMode();
 }
 
 // ---------------------------------------------------------------------
@@ -34850,7 +34896,7 @@ static void DrawBankScreen(GameState& s, int screenW, int screenH) {
     s.bankScroll -= ScrollDelta(backArea);
     float maxBackScroll = std::max(0.0f, (float)s.backpack.size() * 26.0f - backHeight);
     s.bankScroll = std::clamp(s.bankScroll, 0.0f, maxBackScroll);
-    BeginScissorMode(0, backTop, screenW, backHeight);
+    UIBeginScissorMode(0, backTop, screenW, backHeight);
     if (s.backpack.empty()) DrawUIText("Backpack is empty.", 20, backTop + 4, 13, DARKGRAY);
     for (size_t i = 0; i < s.backpack.size(); i++) {
         float rowY = backTop + (float)i * 26 - s.bankScroll;
@@ -34859,7 +34905,7 @@ static void DrawBankScreen(GameState& s, int screenW, int screenH) {
         DrawUIText(s.backpack[i].name.c_str(), 42, (int)rowY + 4, 13, kColorText);
         if (Button({ (float)(screenW - 90), rowY, 70, 20 }, "Deposit", true)) DepositItem(s, (int)i);
     }
-    EndScissorMode();
+    UIEndScissorMode();
     y = backTop + backHeight + 8;
 
     DrawUIText("Vault contents (Withdraw):", 20, y, 12, kColorAccent);
@@ -34870,7 +34916,7 @@ static void DrawBankScreen(GameState& s, int screenW, int screenH) {
     s.bankItemsScroll -= ScrollDelta(vaultArea);
     float maxVaultScroll = std::max(0.0f, (float)s.bankItems.size() * 26.0f - vaultHeight);
     s.bankItemsScroll = std::clamp(s.bankItemsScroll, 0.0f, maxVaultScroll);
-    BeginScissorMode(0, vaultTop, screenW, vaultHeight);
+    UIBeginScissorMode(0, vaultTop, screenW, vaultHeight);
     if (s.bankItems.empty()) DrawUIText("Vault is empty.", 20, vaultTop + 4, 13, DARKGRAY);
     for (size_t i = 0; i < s.bankItems.size(); i++) {
         float rowY = vaultTop + (float)i * 26 - s.bankItemsScroll;
@@ -34878,7 +34924,7 @@ static void DrawBankScreen(GameState& s, int screenW, int screenH) {
         DrawUIText(s.bankItems[i].name.c_str(), 20, (int)rowY + 4, 13, kColorText);
         if (Button({ (float)(screenW - 100), rowY, 80, 20 }, "Withdraw", true)) WithdrawItem(s, (int)i);
     }
-    EndScissorMode();
+    UIEndScissorMode();
     y = vaultTop + vaultHeight + 12;
 
     DrawUIText("Weekly goals have moved to MENU > Quests.", 20, y, 12, Fade(kColorText, 0.7f));
@@ -34925,8 +34971,17 @@ static void PromptTextInto(const char* title, std::string& value, size_t maxLen)
 }
 // Tap on a text box: open the prompt (released inside the box, so a scroll/drag doesn't).
 static void TapToEditText(Rectangle box, const char* title, std::string& value, size_t maxLen) {
-    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), box))
-        PromptTextInto(title, value, maxLen);
+    static Rectangle pressedBox = {};
+    static Vector2 pressAt = {};
+    static bool editing = false;
+    UIRegister(box);
+    if (UIClick(box)) { pressedBox = box; pressAt = GetMousePosition(); editing = true; }
+    bool same = box.x == pressedBox.x && box.y == pressedBox.y && box.width == pressedBox.width && box.height == pressedBox.height;
+    if (editing && same && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+        editing = false;
+        if (UIContains(GetMousePosition(), box) && Dist(pressAt, GetMousePosition()) < 8.0f) PromptTextInto(title, value, maxLen);
+    }
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) editing = false;
 }
 static void UpdateTextInput(std::string& text, size_t maxLen) {
     int key = GetCharPressed();
@@ -35004,7 +35059,7 @@ static void DrawSettlement(GameState& s, int screenW, int screenH) {
     Rectangle area = { G.x, listTop, G.width, listH };
     g_settleScroll -= ScrollDelta(area);
     float contentH = 0;
-    BeginScissorMode((int)G.x, (int)listTop, (int)G.width, (int)listH);
+    UIBeginScissorMode((int)G.x, (int)listTop, (int)G.width, (int)listH);
     float yy = listTop - g_settleScroll;
     auto visible = [&](float top, float h) { return top + h > listTop && top < listTop + listH; };
     if (g_settleTab == 0) {
@@ -35123,7 +35178,7 @@ static void DrawSettlement(GameState& s, int screenW, int screenH) {
         }
     }
     contentH = yy + g_settleScroll - listTop;
-    EndScissorMode();
+    UIEndScissorMode();
     g_settleScroll = std::clamp(g_settleScroll, 0.0f, std::max(0.0f, contentH - listH));
 }
 static bool g_guildOpen = false;
@@ -35511,7 +35566,7 @@ static float DrawGuildSettlement(float x, float y, float w, Rectangle area) {
         float fog[2]={3000,5000}; SetShaderValue(g_t3dLit.shader,g_t3dLit.fogRangeLoc,fog,SHADER_UNIFORM_VEC2);
         T3DGroundShaderSync(&cam.position,fog);
     }
-    EndScissorMode();
+    UIEndScissorMode();
     BeginTextureMode(scene); ClearBackground(Color{120,143,108,255}); BeginMode3D(cam);
     DrawPlane({0,-2,0},{2400,2400},Color{113,137,91,255});
     DrawCube({0,-4,0},950,6,1000,Color{132,149,102,255});
@@ -35580,7 +35635,7 @@ static float DrawGuildSettlement(float x, float y, float w, Rectangle area) {
 #ifndef __EMSCRIPTEN__
     BeginTextureMode(g_zoomTarget);
 #endif
-    BeginScissorMode((int)area.x,(int)area.y,(int)area.width,(int)area.height);
+    UIBeginScissorMode((int)area.x,(int)area.y,(int)area.width,(int)area.height);
     DrawTexturePro(scene.texture,{0,0,(float)rw,-(float)rh},view,{0,0},0,WHITE);
     DrawRectangleLinesEx(view,2,Color{73,80,57,255});
     for(int i=0;i<9;++i) {
@@ -35907,7 +35962,7 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
     else g_warScroll -= ScrollDelta(area);
     float x = G.x + 18, w = G.width - 36, y = area.y + 4 - g_warScroll;
     auto vis = [&](Rectangle r) { return r.y >= area.y && r.y + r.height <= area.y + area.height; };
-    BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
+    UIBeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
     if (g_guildTab >= 10 && g_guildTab <= 13) { y=DrawGuildCityProgress(s,x,y,w,area,g_guildTab); }
     else if (g_guildTab == 7) { y=DrawGuildCityProgress(s,x,y,w,area,7); y=DrawGuildstoneBody(s,x,y,w,0); }
     else if (g_guildTab == 0) { // ---- Overview: War Week and your online guild ----
@@ -36124,7 +36179,7 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
     }
     if (!g_gnet.msg.empty()) { DrawUIText(g_gnet.msg.c_str(), (int)x, (int)y, 12, g_gnet.msg.back() == '!' ? Color{ 40, 110, 40, 255 } : bad); y += 18; }
     float contentH = y + g_warScroll - area.y + 10;
-    EndScissorMode();
+    UIEndScissorMode();
     g_warScroll = std::clamp(g_warScroll, 0.0f, std::max(0.0f, contentH - area.height));
 }
 // The household guild - your hired guildmates, colors and wars on Murder Inc.
@@ -36724,7 +36779,7 @@ static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
     int listTop = y, listH = screenH - listTop - 10;
     Rectangle listArea = { 0, (float)listTop, (float)screenW, (float)listH };
     g_skillsScroll -= ScrollDelta(listArea);
-    BeginScissorMode(0, listTop, screenW, listH);
+    UIBeginScissorMode(0, listTop, screenW, listH);
     float yy = listTop - g_skillsScroll;
     for (const auto& g : kGroups) {
         int gsum = 0; for (int k : g.keys) gsum += SkillLevel(SkillKeyValue(s, k));
@@ -36765,7 +36820,7 @@ static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
         yy += 6;
     }
     float contentH = yy + g_skillsScroll - listTop + 20;
-    EndScissorMode();
+    UIEndScissorMode();
     g_skillsScroll = std::clamp(g_skillsScroll, 0.0f, std::max(0.0f, contentH - listH));
 }
 
@@ -36968,6 +37023,9 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     UpdateTextInput(s.characterName, 24);
     Vector2 mouse = GetMousePosition();
 
+    // The item popover owns the covered part of the paperdoll.
+    Rectangle oldShield = g_uiShield; bool oldShieldOn = g_uiShieldOn;
+    if (g_pdSel >= 0) { g_uiShield = {60, kDollView.y + kDollView.height - 130, 420, 116}; g_uiShieldOn = true; }
     // ---- the paperdoll gump ----
     const Rectangle G = kDollGump;
     UODrawGump(G, kUoParchment);
@@ -36977,15 +37035,19 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     DrawRectangleLinesEx(kDollView, 1.0f, Fade(kUoBronzeLo, 0.5f));
     { // warm backlight behind the figure so it stands out from the parchment
         Vector2 c = { kDollView.x + kDollView.width / 2, kDollView.y + kDollView.height * 0.46f };
-        BeginScissorMode((int)kDollView.x, (int)kDollView.y, (int)kDollView.width, (int)kDollView.height);
+        UIBeginScissorMode((int)kDollView.x, (int)kDollView.y, (int)kDollView.width, (int)kDollView.height);
         DrawCircleGradient(c, 175.0f, Fade(Color{ 255, 226, 160, 255 }, 0.55f), Fade(Color{ 255, 226, 160, 255 }, 0.0f));
-        EndScissorMode();
+        UIEndScissorMode();
     }
     if (g_dollRTReady)
         DrawTexturePro(g_dollRT.texture, { 0, 0, (float)g_dollRT.texture.width, -(float)g_dollRT.texture.height },
                        kDollView, { 0, 0 }, 0.0f, WHITE);
     // drag the body to turn it
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, kDollView)) { g_dollDragging = true; g_dollLastX = mouse.x; }
+    UIRegister(kDollView);
+    if (!g_uiClickTaken && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && UIContains(mouse, kDollView) &&
+        mouse.y >= kDollView.y + 36 && !(g_uiShieldOn && CheckCollisionPointRec(mouse, g_uiShield))) {
+        g_uiClickTaken = g_uiGestureOwned = true; g_dollDragging = true; g_dollLastX = mouse.x;
+    }
     if (g_dollDragging && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { g_dollYaw += (mouse.x - g_dollLastX) * 0.012f; g_dollLastX = mouse.x; }
     else g_dollDragging = false;
     DrawUIText("drag to turn", (int)(kDollView.x + kDollView.width - 76), (int)(kDollView.y + 6), 10, Fade(kUoBronzeLo, 0.7f));
@@ -37126,7 +37188,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) bagPress = CheckCollisionPointRec(mouse, inner) ? mouse : Vector2{ -1, -1 };
     bool bagTap = IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && bagPress.x >= 0 && Dist(bagPress, mouse) < 10.0f &&
                   !(g_uiShieldOn && CheckCollisionPointRec(mouse, g_uiShield));
-    BeginScissorMode((int)inner.x, (int)inner.y, (int)inner.width, (int)inner.height);
+    UIBeginScissorMode((int)inner.x, (int)inner.y, (int)inner.width, (int)inner.height);
     for (size_t e = 0; e < entries.size(); e++) {
         const BagEntry& be = entries[e];
         Vector2 p = UOScatter(inner, (int)e, cell, 17);
@@ -37142,7 +37204,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
         Rectangle hit = { p.x - 30, p.y - 30, 60, 60 };
         if (bagTap && CheckCollisionPointRec(mouse, hit) && CheckCollisionPointRec(mouse, inner)) { g_pdSel = sel ? -1 : selId; PlaySfx(SfxId::Click); }
     }
-    EndScissorMode();
+    UIEndScissorMode();
     if (entries.empty())
         DrawUIText("Your backpack is empty.", (int)inner.x + 12, (int)inner.y + 12, 13, Color{ 230, 210, 170, 255 });
 
@@ -37170,6 +37232,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
             if (k < (int)(sizeof(res) / sizeof(res[0]))) { head = res[k].name; line = TextFormat("%d in your pack.", *res[k].v); }
         }
         if (g_pdSel >= 0) {
+            g_uiShieldBypass = true;
             UODrawGump(pop, kUoDarkWood);
             if (item) DrawItemIcon(*item, pop.x + 14, pop.y + 16, 50);
             else if (g_pdSel >= 200) UODrawIcon(res[g_pdSel - 200].icon, pop.x + 40, pop.y + 40, 44);
@@ -37188,6 +37251,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
         }
     }
     (void)screenW;
+    g_uiShieldBypass = false; g_uiShield = oldShield; g_uiShieldOn = oldShieldOn;
 }
 
 // ---- Directions HUD (2026-09-27) ----
@@ -37276,7 +37340,7 @@ static void MpSay(GameState& s, const std::string& name, const std::string& text
 }
 // A Chat button beside MENU on the world screens while you're online, with how many are here.
 static void MpDrawChatButton(GameState& s) {
-    if (g_mpZone.empty() || !(s.screen == Screen::Wilderness || s.screen == Screen::Town)) return;
+    if (g_mpZone.empty() || !(s.screen == Screen::Wilderness || s.screen == Screen::Town) || s.worldMapOpen || s.guideOpen) return;
     const char* lbl = g_mpStatus == 2 ? TextFormat("Chat (%d here)", g_mpCount) : "Connecting...";
     if (Button({ 134, 58, 132, 36 }, lbl, g_mpStatus == 2)) {
         PlaySfx(SfxId::Click);
@@ -37657,8 +37721,8 @@ static void UpdateDrawFrame() {
         if (state.screen != Screen::Wilderness) state.worldMapOpen = false;
         g_uiShieldOn = explore3D;
         g_uiShield = state.exploreMenuOpen ? CompactMenuPanelRect(false) : kCompactMenuBtn;
-        if (state.worldMapOpen) { g_uiShieldOn = true; g_uiShield = { 0, 0, (float)screenW, (float)screenH }; }
-        if (state.exploreMenuOpen && !state.worldMapOpen) {
+        if (state.worldMapOpen || state.guideOpen) { g_uiShieldOn = true; g_uiShield = { 0, 0, (float)screenW, (float)screenH }; }
+        if (state.exploreMenuOpen && !state.worldMapOpen && !state.guideOpen) {
             g_uiShield.y = kCompactMenuBtn.y; // cover the toggle too
             g_uiShield.height += CompactMenuPanelRect(false).y - kCompactMenuBtn.y;
         }
@@ -37745,6 +37809,7 @@ static void UpdateDrawFrame() {
         if (Button(guideTab, "Help", tabsEnabled)) { state.screen = Screen::Guide; state.guidePage = 0; }
         } // end if (!inDungeon): HUD + tab bar hidden inside dungeons
 
+        Screen renderedScreen = state.screen;
         if (state.ambush.has_value()) {
             DrawAmbushPanel(state, screenW);
         } else if (state.innocentEncounter.has_value()) {
@@ -37826,7 +37891,7 @@ static void UpdateDrawFrame() {
         // (2026-09-27) new players now get the "first steps" goals instead of the
         // five-page overlay; the pages live on under Help.
         (void)guideBlocked;
-        if (state.guideOpen && guideHome) DrawGuideOverlay(state);
+        if (state.guideOpen && guideHome) { g_uiShieldBypass = true; DrawGuideOverlay(state); g_uiShieldBypass = false; }
         if (!guideBlocked || state.starterStep == kStFight || state.starterStep == kStLoot) UpdateDrawStarter(state, screenW, screenH);
         DrawDirectionsHud(state, screenW); // compass + world-boss timer (2026-09-27)
         DrawWalkMarker(state);             // tap to walk + Teleport aim (2026-09-27)
@@ -37846,7 +37911,7 @@ static void UpdateDrawFrame() {
         // screens above the belt and spell bar, on menus at the bottom - colored by
         // what it means. The old faint line at the very bottom hid under the spell bar.
         MpTick(state);           // (2026-09-29) multiplayer: send where you are, hear everyone else
-        MpDrawChatButton(state); // and the Chat button, when you're online
+        if (state.screen == renderedScreen) MpDrawChatButton(state); // never reuse a navigation tap on newly shown Chat
         UpdateDrawToasts(state, screenW, screenH, IsPlayScreen(state.screen));
         UpdateDrawLevelUps(state, screenW, screenH, IsPlayScreen(state.screen)); // (2026-09-29) RuneScape-style level-ups
         DrawNotorietyFooter(state, screenW, screenH);
