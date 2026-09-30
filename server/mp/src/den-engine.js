@@ -12,7 +12,7 @@ export class DenEngine {
     this.state={wallets:{},offers:[],duel:null,results:[],...saved};
     this.clock=clock;this.roll=roll;this.peers=new Map();
   }
-  peersFrom(peers) {this.peers=new Map(peers.map(p=>[p.id,p]));}
+  peersFrom(peers) {this.peers=new Map(peers.map(p=>[p.id,p]));const d=this.state.duel;if(d?.npc)this.peers.set(d.b,{...d.npc,key:'training-npc'});}
   wallet(key) {return this.state.wallets[key] ?? (this.state.wallets[key]=500);}
   peer(id) {const p=this.peers.get(id);if(!p || !p.key) throw Error('Reconnect to Blackwake Den.');return p;}
   busy(id) {const d=this.state.duel;return !!d && (d.a===id || d.b===id);}
@@ -21,8 +21,29 @@ export class DenEngine {
     const p=this.peer(id),d=this.state.duel;
     return {t:'den_state',version:1,gold:this.wallet(p.key),offers:this.state.offers.filter(o=>o.a===id || o.b===id),
       duel:d ? {id:d.id,a:d.a,b:d.b,nameA:d.nameA,nameB:d.nameB,hpA:d.hpA,hpB:d.hpB,staminaA:d.staminaA,staminaB:d.staminaB,
-        starts:d.starts,ends:d.ends,stake:d.stake,guardA:d.guardA,guardB:d.guardB,swingA:d.swingA,swingB:d.swingB} : null,
+        starts:d.starts,ends:d.ends,stake:d.stake,guardA:d.guardA,guardB:d.guardB,swingA:d.swingA,swingB:d.swingB,npc:d.npc || null} : null,
       rollSeq:this.state.casino?.[p.key]?.sequence || 0,results:this.state.results.slice(-5)};
+  }
+  practice(id) {
+    this.tick();const a=this.peer(id);
+    if(this.state.duel || this.state.offers.some(o=>o.a===id || o.b===id)) throw Error('Finish the pending match or challenge first.');
+    if(!this.inPit(a)) throw Error('Walk to the pit before starting practice.');
+    const bot={id:'pit-trainer',name:'Captain Vale (practice)',key:'training-npc',x:850,z:750,yaw:Math.PI};
+    this.peers.set(bot.id,bot);this.wallet(bot.key);this.challenge(id,bot.id,0);
+    const placement=this.answer(bot.id,this.state.offers.find(o=>o.a===id).id,true);
+    this.state.duel.npc={id:bot.id,name:bot.name,x:850,z:750,yaw:Math.PI};
+    this.state.duel.botTick=this.clock();return placement;
+  }
+  practiceTick() {
+    const d=this.state.duel;if(!d?.npc || this.clock()<d.starts)return;
+    const a=this.peers.get(d.a);if(!a) {this.leave(d.a);return;}
+    const b=this.peer(d.b),dt=Math.max(0,Math.min(1,(this.clock()-d.botTick)/1000));d.botTick=this.clock();
+    const dist=distance(a,b),step=Math.min(Math.max(0,dist-85),125*dt);
+    if(dist>0){b.x+=(a.x-b.x)*step/dist;b.z+=(a.z-b.z)*step/dist;b.yaw=Math.atan2(a.z-b.z,a.x-b.x);}
+    Object.assign(d.npc,{x:b.x,z:b.z,yaw:b.yaw});
+    if(this.clock()>=(d.readyB || 0) && distance(a,b)<=115) {
+      try {this.fight(d.b,Math.floor(this.clock()/1000)%4===0 ? 'guard':'strike');}catch(e) {}
+    }
   }
   challenge(id,target,stake) {
     const a=this.peer(id),b=this.peer(target);this.tick();

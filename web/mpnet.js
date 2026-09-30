@@ -35,14 +35,16 @@
     try { sock = new WebSocket(url() + '/zone/' + encodeURIComponent(zone)); } catch (e) { schedule(); return; }
     ws = sock;
     sock.onopen = function () {
+      if(ws!==sock) return;
       retryMs = 1000;
-      try {send({ t: 'hello', name: name, look: look,token:zone==='den' ? denToken():'' });} catch(e) {denText='Enable browser storage to keep your Den purse.';return;}
+      try {send({ t: 'hello', name: name, look: look,token:denToken() });} catch(e) {denText='Enable browser storage to keep your Den purse.';return;}
       if (!isNaN(last.x)) { send({ t: 'pos', x: last.x, z: last.z, yaw: last.yaw, mv: last.mv }); lastSent = Date.now(); }
     };
     sock.onmessage = function (e) {
+      if(ws!==sock) return;
       var m; try { m = JSON.parse(e.data); } catch (err) { return; }
-      if (m.t === 'welcome') { myId = m.id; status = 2; players = {}; (m.players || []).forEach(function (p) { players[p.id] = p; }); }
-      else if (m.t === 'join' && m.p) players[m.p.id] = m.p;
+      if (m.t === 'welcome') { myId = m.id; status = 2; players = {}; (m.players || []).forEach(function (p) { if(p.id!==myId) players[p.id] = p; }); }
+      else if (m.t === 'join' && m.p && m.p.id!==myId) players[m.p.id] = m.p;
       else if (m.t === 'leave') delete players[m.id];
       else if (m.t === 'pos') { var p = players[m.id]; if (p) { p.x = m.x; p.z = m.z; p.yaw = m.yaw; p.mv = m.mv; } }
       else if(m.t==='den_state') {
@@ -59,7 +61,7 @@
       else if(m.t==='den_error') {denText=String(m.text||'Den action rejected.');var p=pendingRoll();if(m.rejected && p && p.request===m.request) localStorage.removeItem('tf-den-roll');}
       else if (m.t === 'chat') { chats.push(m); if (chats.length > 20) chats.shift(); }
     };
-    sock.onclose = function () { if (ws === sock) { ws = null; players = {}; status = 1; schedule(); } };
+    sock.onclose = function (e) { if (ws === sock) { ws = null; players = {}; if(e && (e.code===1008 || e.reason==='replaced by current browser connection')) {status=0;return;} status = 1; schedule(); } };
     sock.onerror = function () { /* onclose follows */ };
   }
   function schedule() {
@@ -91,7 +93,8 @@
     denAction:function(action,target,value) {
       if(status!==2 || den.version!==1) {denText='The Den server needs its combat update before you can play.';return;}
       denText='';
-      if(action==='challenge') send({t:'den_challenge',target:target,stake:value});
+      if(action==='practice') send({t:'den_practice'});
+      else if(action==='challenge') send({t:'den_challenge',target:target,stake:value});
       else if(action==='accept' || action==='decline') send({t:'den_answer',offer:target,accept:action==='accept'});
       else if(action==='strike' || action==='lunge' || action==='guard' || action==='surrender') send({t:'den_fight',action:action});
       else if(action==='roll') {
@@ -104,7 +107,7 @@
     state: function () {
       var n = 1, out = [];
       Object.keys(players).forEach(function (id) {
-        var p = players[id]; n++;
+        var p = players[id]; if(id===myId)return; n++;
         out.push('p=' + clean(p.id) + '|' + clean(p.name) + '|' + clean(p.look) + '|' + (+p.x || 0) + '|' + (+p.z || 0) + '|' + (+p.yaw || 0) + '|' + (p.mv ? 1 : 0));
       });
       chats.forEach(function (c) { out.push('c=' + clean(c.id) + '|' + clean(c.name) + '|' + clean(c.text)); });
@@ -114,6 +117,7 @@
         if(denPos) out.push('denpos='+[denPos.serial,denPos.x,denPos.z].join('|'));
         (den.offers||[]).forEach(o=>out.push('offer='+[o.id,o.a,o.b,clean(o.nameA),clean(o.nameB),o.stake,Math.max(0,(o.expires-now)/1000)].join('|')));
         var d=den.duel;
+        if(d && d.npc) {var bot=d.npc;out.push('p='+[bot.id,clean(bot.name),'hero,2,2,-1,0,0',bot.x,bot.z,bot.yaw,1].join('|'));}
         if(d) out.push('duel='+[d.id,d.a,d.b,clean(d.nameA),clean(d.nameB),d.hpA,d.hpB,Math.round(d.staminaA),Math.round(d.staminaB),Math.max(0,(d.starts-now)/1000),Math.max(0,(d.ends-now)/1000),d.stake,d.guardA>now ? 1:0,d.guardB>now ? 1:0,(now-d.swingA)/1000,(now-d.swingB)/1000].join('|'));
         (den.results||[]).forEach(r=>out.push('denresult='+[r.id,clean(r.name),clean(r.reason),r.stake].join('|')));
       }

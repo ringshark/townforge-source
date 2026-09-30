@@ -60,6 +60,7 @@ export class Zone extends DurableObject {
   }
 
   async fetch(request) {
+    await this.expirePresence();
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
@@ -104,10 +105,19 @@ export class Zone extends DurableObject {
     try { m = JSON.parse(raw); } catch (e) { return; }
     const a = ws.deserializeAttachment();
     if (!a || !m || typeof m.t !== "string") return;
+    a.lastSeen=Date.now();ws.serializeAttachment(a);
     if (m.t === "hello") {
       const first = !a.hello;
       a.name = cleanText(m.name, NAME_MAX) || "Adventurer";
       a.look = cleanText(m.look, LOOK_MAX);
+      if(!a.den && first && /^[a-f0-9]{64}$/.test(String(m.token || ""))) {
+        const hash=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(m.token));
+        a.clientKey=Array.from(new Uint8Array(hash),n=>n.toString(16).padStart(2,"0")).join("");
+        for(const [old,p] of this.players()) if(old!==ws && p.clientKey===a.clientKey) {
+          p.hello=false;old.serializeAttachment(p);this.broadcast({t:"leave",id:p.id},old);
+          try {old.close(1000,"replaced by current browser connection");} catch(e) {}
+        }
+      }
       if(a.den && first) {
         if(!/^[a-f0-9]{64}$/.test(String(m.token || ""))) {ws.send(JSON.stringify({t:"den_error",text:"Update the game to enter the Den."}));return;}
         const hash=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(m.token));
@@ -116,6 +126,7 @@ export class Zone extends DurableObject {
         a.x=750;a.z=1250;a.lastPos=Date.now();
       }
       a.hello = true;
+      if(!a.den) await this.ctx.storage.setAlarm(Date.now()+15000);
       ws.serializeAttachment(a);
       if (first) {
         const others = this.players().filter(([w]) => w !== ws).map(([, s]) => this.pub(s));
@@ -129,7 +140,8 @@ export class Zone extends DurableObject {
     if(a.den && m.t.startsWith("den_")) {
       this.denPeers();let placement,applied=false;
       try {
-        if(m.t==="den_challenge") this.den.challenge(a.id,String(m.target),m.stake);
+        if(m.t==="den_practice") placement=this.den.practice(a.id);
+        else if(m.t==="den_challenge") this.den.challenge(a.id,String(m.target),m.stake);
         else if(m.t==="den_answer") placement=this.den.answer(a.id,String(m.offer),m.accept===true);
         else if(m.t==="den_fight") this.den.fight(a.id,String(m.action));
         else if(m.t==="den_roll") {const result=this.den.casino(a.id,String(m.request),m.stake,m.face,m.sequence);applied=true;await this.saveDen();ws.send(JSON.stringify(result));}
@@ -168,7 +180,13 @@ export class Zone extends DurableObject {
   denPeers() {this.den.peersFrom(this.players().filter(([,a])=>a.den).map(([,a])=>a));}
   async saveDen() {await this.ctx.storage.put("den",this.den.state);const d=this.den.state.duel;await this.ctx.storage.setAlarm(Date.now()+(d ? 1000:30000));}
   denSync() {this.denPeers();for(const [w,a] of this.players()) if(a.den) {try {w.send(JSON.stringify(this.den.snapshot(a.id)));}catch(e) {}}}
-  async alarm() {this.den.tick();await this.ctx.storage.put("den",this.den.state);this.denSync();if(this.den.state.duel || this.den.state.offers.length) await this.ctx.storage.setAlarm(Date.now()+1000);}
+  async expirePresence() {
+    for(const [w,p] of this.players()) if(!p.den && Date.now()-(p.lastSeen || p.lastPos || 0)>45000) {
+      p.hello=false;w.serializeAttachment(p);this.broadcast({t:"leave",id:p.id},w);
+      try {w.close(1001,"presence heartbeat expired");}catch(e) {}
+    }
+  }
+  async alarm() {await this.expirePresence();this.denPeers();this.den.tick();this.den.practiceTick();await this.ctx.storage.put("den",this.den.state);this.denSync();if(this.den.state.duel || this.den.state.offers.length) await this.ctx.storage.setAlarm(Date.now()+1000);else if(this.players().some(([,p])=>!p.den)) await this.ctx.storage.setAlarm(Date.now()+15000);}
   async webSocketClose(ws) { await this.left(ws); }
   async webSocketError(ws) { await this.left(ws); }
   async left(ws) {

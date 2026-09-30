@@ -4,7 +4,7 @@ Visit from MENU → Visit Blackwake Den while in a town. The separate harbor has
 
 ## Consent-only arena
 
-Both players must stand near the pit. A challenge states its stake and expires after 30 seconds; the other player explicitly accepts or declines. Acceptance reserves both stakes atomically, places fighters inside the pit and starts a three-second countdown. One match occupies the pit; visitors may watch.
+Both players must stand near the pit. A challenge states its stake and expires after 30 seconds; the other player explicitly accepts or declines. Acceptance reserves both stakes atomically, places fighters inside the pit and starts a three-second countdown. One match occupies the pit; visitors may watch. Choose Practice with Captain Vale for a free NPC match. The trainer closes distance, strikes and guards using the same server combat rules; NPC practice never pays gold or progression rewards.
 
 Arena stats are normalized to 100 HP and 100 stamina. Appearance still follows equipment. Strike deals 10 damage at close range; Lunge deals 16 at a longer range and costs more stamina. Guard halves the next blow during its short window. The server checks membership, range, cooldown, stamina, movement speed and arena bounds. Clients never report damage or winners.
 

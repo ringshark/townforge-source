@@ -15106,6 +15106,7 @@ static void MpDraw3D(const std::string& zoneKey, bool shadowPass, const Town3DCa
     HumanEnsure();
     std::vector<std::string> f;
     for (const MpPlayer& p : g_mp) {
+        if(p.id==g_mpMyId) continue;
         if (cull && hypotf(cull->pos.x - p.pos.x, cull->pos.z - p.pos.y) > 3000.0f) continue;
         MpSplit(p.look, ',', f);
         while (f.size() < 9) f.push_back("");
@@ -15753,8 +15754,8 @@ static void Town3DEnsureGround(const GameState& s) {
     bool town2 = (s.selectedTown != 0);
     bool town3 = (s.selectedTown == 2); // Phase 3: Frostmere - snow-covered ground
     bool town4 = (s.selectedTown == 3); // Phase 4: Cragmoor - granite mountain ground
-    Color grassDark  = town4 ? Color{ 118, 114, 106, 255 } : town3 ? Color{ 218, 230, 242, 255 } : (town2 ? Color{ 96, 132, 88, 255 }   : Color{ 104, 148, 82, 255 });
-    Color grassLight = town4 ? Color{ 158, 154, 144, 255 } : town3 ? Color{ 240, 248, 252, 255 } : (town2 ? Color{ 132, 168, 118, 255 }  : Color{ 148, 190, 112, 255 });
+    Color grassDark  = town4 ? Color{ 118, 114, 106, 255 } : town3 ? Color{ 218, 230, 242, 255 } : (town2 ? Color{ 139, 145, 105, 255 }   : Color{ 104, 148, 82, 255 });
+    Color grassLight = town4 ? Color{ 158, 154, 144, 255 } : town3 ? Color{ 240, 248, 252, 255 } : (town2 ? Color{ 191, 184, 136, 255 }  : Color{ 148, 190, 112, 255 });
     Color plazaCol   = town4 ? Color{ 140, 136, 126, 255 } : town3 ? Color{ 180, 196, 212, 255 } : (town2 ? Color{ 160, 162, 168, 255 }  : Color{ 196, 168, 108, 255 });
     Color plazaRim   = town4 ? Color{ 110, 106, 98, 255 }  : town3 ? Color{ 150, 168, 186, 255 } : (town2 ? Color{ 128, 130, 136, 255 }  : Color{ 170, 142, 90, 255 });
     Color roadCol    = town4 ? Color{ 132, 128, 118, 255 } : town3 ? Color{ 200, 212, 226, 255 } : (town2 ? Color{ 150, 146, 138, 255 }  : Color{ 178, 146, 98, 255 });
@@ -16362,7 +16363,7 @@ static void Town3DDrawShopSign(const std::string& key, float x, float wallZ) {
     rlSetTexture(0);
     rlPopMatrix();
 }
-static void Town3DDrawBuilding(const std::string& key, float cx, float cz) {
+static void Town3DDrawBuilding(const std::string& key, float cx, float cz, int town = -1) {
     Town3DModels& M = g_t3dModels;
     bool brick = (key == "smith" || key == "alchemy" || key == "bank");
     const Model& w  = brick ? M.wallBrick : M.wallPlaster;
@@ -16372,6 +16373,9 @@ static void Town3DDrawBuilding(const std::string& key, float cx, float cz) {
     // buildings don't read as copy-pasted. Deterministic per key.
     Color wallTint = Town3DTintFor(key, false);
     Color roofTint = Town3DTintFor(key, true);
+    if(town==1) { // Saltmere: pale limewash and cool slate rather than Emberhold's terracotta.
+        wallTint=Color{218,234,230,255};roofTint=Color{100,151,194,255};
+    }
     const float S = kT3DModScale;
     if (key == "townhall") {
         // Two-story, 3x2 modules - the town's landmark. Roof46's long axis runs
@@ -17352,7 +17356,7 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     DrawModel(g_t3dGround.model, { tc, 0, tc }, 1.0f, WHITE);
     Color outerCol = (s.selectedTown == 0) ? Color{ 96, 138, 76, 255 } :
                      (s.selectedTown == 2) ? Color{ 226, 234, 242, 255 } : // Frostmere: snowfields
-                     (s.selectedTown == 3) ? Color{ 133, 129, 121, 255 } : Color{ 90, 124, 82, 255 };
+                     (s.selectedTown == 3) ? Color{ 133, 129, 121, 255 } : Color{ 151, 151, 108, 255 };
     // 2026-09-24: was -1.5 - z-fights with the ground model at long view
     // distances once the far clip plane is extended (see rlSetClipPlanes in
     // main(), fixing a web-only clipping bug); depth precision gets coarser
@@ -17371,7 +17375,7 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
         float fw = wide ? 140.0f : 118.0f; // 3x2 buildings are 132 wide
         float fd = wide ? 96.0f : 118.0f;  // ...and 88 deep
         DrawCube({ node.pos.x, 1, node.pos.y }, fw, 2, fd, ColorBrightness(col, -0.4f)); // foundation
-        Town3DDrawBuilding(node.key, node.pos.x, node.pos.y);
+        Town3DDrawBuilding(node.key, node.pos.x, node.pos.y, s.selectedTown);
     }
     if (s.selectedTown == 2) { // Phase 3 - Frostmere 3D winter dressing: snow drifts + frost pines
         static const std::array<Vector2, 6> kFrostDrifts3D = {{
@@ -18495,7 +18499,7 @@ static void T3DGrassBuildTown(int town) {
     const int SZ = kT3DGroundPx;
     const float k = SZ / kTownWorldSize;
     Color cDark = { 70, 112, 52, 255 }, cLight = { 150, 190, 96, 255 };
-    if (town == 1) { cDark = { 72, 108, 62, 255 }; cLight = { 146, 178, 110, 255 }; }
+    if (town == 1) { cDark = { 112, 128, 79, 255 }; cLight = { 191, 188, 128, 255 }; }
     if (town == 3) { cDark = { 84, 100, 62, 255 }; cLight = { 150, 160, 104, 255 }; }
     T3CMeshBuilder b;
     const float step = 15.0f;
@@ -37376,6 +37380,10 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
             const int stakes[]={0,10,50,100};
             for(int i=0;i<4;++i) if(MenuGroupTab({40+i*116.0f,y,108,44},i==0 ? "Practice":TextFormat("%d gold",stakes[i]),g_denStake==stakes[i],g_den.ready)) g_denStake=stakes[i];
             y+=56;
+            if(g_den.id.empty() && g_den.offers.empty()) {
+                if(Button({40,y,460,48},"Practice with Captain Vale (NPC)",g_den.ready && Dist(s.townPlayerPos,{750,750})<=350)) JS_DenAction("practice","",0);
+                y+=58;
+            }
             if(!g_den.ready) DrawUIText("The multiplayer server must be updated to enable duels.",40,(int)y,13,ink);
             else if(!g_den.offers.empty()) {
                 const DenOffer& o=g_den.offers[0];bool mine=o.a==g_mpMyId;

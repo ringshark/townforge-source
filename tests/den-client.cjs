@@ -15,3 +15,8 @@ client.denAction('roll','2',25);const second=ws.sent.at(-1);assert.equal(second.
 ws.message({t:'den_error',text:'Not enough gold',request:second.request,rejected:false});assert.ok(saved.has('tf-den-roll'));
 ws.message({t:'den_error',text:'Not enough gold',request:second.request,rejected:true});assert.ok(!saved.has('tf-den-roll'));
 console.log('PASS Den client capability gate, persistent purse, one pending roll, reconnect recovery, sequence and definitive rejection');
+
+const stale=sockets[0];stale.message({t:'welcome',id:'stale',players:[{id:'ghost',name:'Alice'}]});assert.ok(!client.state().includes('ghost'));
+ws.message({t:'join',p:{id:'a2',name:'Alice'}});assert.ok(!client.state().includes('p=a2|'));
+client.denAction('practice','',0);assert.equal(ws.sent.at(-1).t,'den_practice');
+console.log('PASS obsolete sockets ignored, self identity excluded and NPC practice action');
