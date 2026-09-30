@@ -103,4 +103,21 @@ begin
 end $$;
 
 
+create or replace function public.tf_shop_buy(p_item text) returns int
+language plpgsql security definer set search_path = public as $$
+declare me uuid := auth.uid(); price int; left_ int; m guild_members;
+begin
+  select * into m from guild_members where user_id = me for update;
+  if m.user_id is null then raise exception 'You are not in a guild.'; end if;
+  perform tf_hall_settle(m.guild_id);
+  if (select hall_level from guilds where id = m.guild_id) < 2 then raise exception 'Complete the Hall foundation to open the Storehouse.'; end if;
+  price := case p_item when 'bandages' then 60 when 'potions' then 120 when 'reagents' then 100
+                        when 'horn' then 150 when 'dye' then 300 when 'map' then 500 else null end;
+  if price is null then raise exception 'That is not for sale.'; end if;
+  update guild_members set merit = merit - price where user_id = me and merit >= price returning merit into left_;
+  if left_ is null then raise exception 'Not enough merit (% needed).', price; end if;
+  return left_;
+end $$;
+
+
 COMMIT;

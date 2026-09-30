@@ -35430,6 +35430,7 @@ static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangl
         }
         if (g_gnet.helps.empty()) { DrawUIText("No one has asked for help yet.", (int)x, (int)y, 12, soft); y += 20; }
     } else { // ---- Shop ----
+        if (g_gnet.hall < 2) { DrawUIText("Complete the Guild Hall foundation to open the Storehouse quartermaster.", (int)x, (int)y, 12, soft); return y + 28; }
         DrawUIText(TextFormat("Merit %d", g_gnet.merit), (int)x, (int)y, 16, gold); y += 22;
         DrawUIText("Earn merit by donating to research, lending a hand and helping guildmates.", (int)x, (int)y, 11, soft); y += 22;
         for (const auto& it : kGuildShop) {
