@@ -14313,7 +14313,11 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         if (p.sneaking && has(kSkSneak)) { k = kSkSneak; speed = 0.8f + 0.5f * p.move; }
         else k = kSkWalk; // walk and run blend by speed below
     } else if (gathering) {
-        if (p.gather == 1 && has(kSkAxe)) k = kSkAxe;
+        // (2026-09-30) chopping is the sideways slash into the trunk, looped - Meshy's
+        // "Charged_Axe_Chop" is a leaping power attack (a deep crouch, a jump, a slam),
+        // which read as kneeling down beside the tree.
+        if (p.gather == 1 && has(kSkSlash)) k = kSkSlash;
+        else if (p.gather == 1 && has(kSkAxe)) k = kSkAxe;
         else if (p.gather == 2 && has(kSkHammer)) k = kSkHammer;
         else k = kSkIdle;
     } else if (p.kneeling && has(kSkKneel)) { k = kSkKneel; ph = 0.42f; }               // down on one knee
