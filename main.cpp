@@ -8099,55 +8099,58 @@ static void ThrowExplosionPotion(GameState& s, int potionIdx) {
 
 // Mirrors equipItem(): a 2h weapon takes both hands (bumping whatever was there back
 // to the backpack); a 1h weapon takes the right hand by default; armor goes to its slot.
+// One equipment transition for actual equipping and the temporary Me preview.
+// A preview supplies no displaced-item list and never touches the backpack.
+static bool ApplyEquipmentItem(Equipment& equipped, const Item& item, std::vector<Item>* displaced = nullptr) {
+    auto putAway = [&](const std::optional<Item>& old) { if (old && displaced) displaced->push_back(*old); };
+    if (item.type == ItemType::Weapon) {
+        if (item.handed == "2h") {
+            putAway(equipped.leftHand);
+            if (equipped.rightHand && (!equipped.leftHand || equipped.rightHand->id != equipped.leftHand->id)) putAway(equipped.rightHand);
+            equipped.leftHand = item; equipped.rightHand = item;
+        } else {
+            bool twoH = equipped.rightHand && equipped.leftHand && equipped.rightHand->id == equipped.leftHand->id;
+            putAway(equipped.rightHand);
+            if (twoH) equipped.leftHand.reset();
+            equipped.rightHand = item;
+        }
+    } else if (item.type == ItemType::Armor && item.slot == "shield") {
+        bool twoH = equipped.rightHand && equipped.leftHand && equipped.rightHand->id == equipped.leftHand->id;
+        if (twoH) { putAway(equipped.rightHand); equipped.rightHand.reset(); }
+        else putAway(equipped.leftHand);
+        equipped.leftHand = item;
+    } else if (item.type == ItemType::Jewelry) {
+        auto field = item.slot == "ring" ? &Equipment::ring : item.slot == "bracelet" ? &Equipment::bracelet :
+                     item.slot == "amulet" ? &Equipment::amulet : nullptr;
+        if (!field) return false;
+        putAway(equipped.*field); equipped.*field = item;
+    } else if (item.type == ItemType::Clothing) {
+        auto field = ClothSlotField(item.slot);
+        if (!field) return false;
+        putAway(equipped.*field); equipped.*field = item;
+    } else if (item.type == ItemType::Armor) {
+        std::optional<Item>* target = item.slot == "helmet" ? &equipped.helmet
+            : item.slot == "gorget" ? &equipped.gorget : item.slot == "gloves" ? &equipped.gloves
+            : item.slot == "arms" ? &equipped.arms : item.slot == "legs" ? &equipped.legs
+            : item.slot.empty() || item.slot == "chest" ? &equipped.chest : nullptr;
+        if (!target) return false;
+        putAway(*target);
+        *target = item;
+    } else return false;
+    return true;
+}
+static Equipment EquipmentPreview(const Equipment& equipped, const Item* candidate) {
+    Equipment result = equipped;
+    if (candidate) ApplyEquipmentItem(result, *candidate);
+    return result;
+}
 static void EquipFromBackpack(GameState& s, int backpackIdx) {
     if (backpackIdx < 0 || backpackIdx >= (int)s.backpack.size()) return;
     Item item = s.backpack[backpackIdx];
+    std::vector<Item> displaced;
+    if (!ApplyEquipmentItem(s.equipped, item, &displaced)) return;
     s.backpack.erase(s.backpack.begin() + backpackIdx);
-
-    if (item.type == ItemType::Weapon) {
-        if (item.handed == "2h") {
-            if (s.equipped.leftHand) s.backpack.push_back(*s.equipped.leftHand);
-            if (s.equipped.rightHand && (!s.equipped.leftHand || s.equipped.rightHand->id != s.equipped.leftHand->id))
-                s.backpack.push_back(*s.equipped.rightHand);
-            s.equipped.leftHand = item;
-            s.equipped.rightHand = item;
-        } else {
-            bool wasTwoH = s.equipped.rightHand && s.equipped.leftHand && s.equipped.rightHand->id == s.equipped.leftHand->id;
-            if (s.equipped.rightHand) s.backpack.push_back(*s.equipped.rightHand);
-            if (wasTwoH) s.equipped.leftHand.reset(); // (2026-09-26 fix) the two-hander left both hands, not just one
-            s.equipped.rightHand = item;
-        }
-    } else if (item.slot == "shield") { // (2026-09-26) shields go in the off hand
-        bool twoH = s.equipped.rightHand && s.equipped.leftHand && s.equipped.rightHand->id == s.equipped.leftHand->id;
-        if (twoH) { // can't hold a two-hander and a shield
-            s.backpack.push_back(*s.equipped.rightHand);
-            s.equipped.rightHand.reset();
-            s.logLine = "You put away the " + s.backpack.back().name + " to take up the shield.";
-        } else if (s.equipped.leftHand) s.backpack.push_back(*s.equipped.leftHand);
-        s.equipped.leftHand = item;
-        if (twoH) { PlaySfx(SfxId::Click); return; }
-    } else if (item.type == ItemType::Jewelry) { // (2026-09-27)
-        std::optional<Item>& target = item.slot == "ring" ? s.equipped.ring : (item.slot == "bracelet" ? s.equipped.bracelet : s.equipped.amulet);
-        if (target.has_value()) s.backpack.push_back(*target);
-        target = item;
-        s.logLine = "You put on the " + item.name + (ItemBonusText(item).empty() ? "." : " (" + ItemBonusText(item) + ").");
-        return;
-    } else if (item.type == ItemType::Clothing) { // (2026-09-27) clothing layers
-        auto field = ClothSlotField(item.slot);
-        if (!field) { s.backpack.push_back(item); return; }
-        std::optional<Item>& target = s.equipped.*field;
-        if (target.has_value()) s.backpack.push_back(*target);
-        target = item;
-        s.logLine = "You put on the " + item.name + ".";
-        return;
-    } else { // armor
-        std::optional<Item>* target = item.slot == "helmet" ? &s.equipped.helmet
-            : item.slot == "gorget" ? &s.equipped.gorget : item.slot == "gloves" ? &s.equipped.gloves
-            : item.slot == "arms" ? &s.equipped.arms : item.slot == "legs" ? &s.equipped.legs
-            : &s.equipped.chest;
-        if (target->has_value()) s.backpack.push_back(**target);
-        *target = item;
-    }
+    s.backpack.insert(s.backpack.end(), displaced.begin(), displaced.end());
     s.logLine = "Equipped " + item.name + ".";
 }
 
@@ -13816,7 +13819,7 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
         for (int k = 0; k < kOpCount; k++)
             if (o.outfitMask & (1u << k)) OutfitDraw(H, k, world, HumanMul(o.outfitTint[k], tint), sh);
     }
-    else { // (2026-09-27) a real skeleton: bones between the animated joints, skull, ribs, pelvis
+    else if (o.skeleton) { // bones are exclusive to actual skeleton characters
         const int nb2 = H.model.skeleton.boneCount;
         std::vector<Vector3> J((size_t)nb2);
         for (int b = 0; b < nb2; b++) J[(size_t)b] = Vector3Transform(H.model.currentPose[b].translation, world);
@@ -32578,6 +32581,7 @@ static void DrawWalkMarker(const GameState& s) {
 // Primary destinations share one MENU and Return to World control.
 // Character owns gear, the pack, skills, magic and pets. Settings owns help and saves.
 static int g_pdSel = -1;
+static std::optional<Item> g_pdTryOn;
 static int g_questTab = 0;
 static bool g_characterPack = false;
 static std::string GuildAttentionLabel();
@@ -32591,6 +32595,7 @@ static int MenuGroupOf(Screen sc) {
     return -1;
 }
 static void MenuGoScreen(GameState& s, Screen t) {
+    g_pdTryOn.reset();
     if (t == Screen::Craft) GuardZoneConfiscateIfMurderer(s, t);
     s.screen = t;
     if (t == Screen::House) { g_warOpen = false; g_tmapOpen = false; g_optOpen = false; g_questOpen = false; }
@@ -32617,13 +32622,14 @@ static void DrawMenuGroupTabs(GameState& s) {
     struct T { const char* l; Screen sc; };
     std::vector<T> tabs;
     if (g == 0 && s.screen == Screen::Character) {
-        const char* names[] = { "Gear", "Pack", "Skills" };
-        for (int i=0; i<3; ++i) {
-            Rectangle r={x0+i*78.0f,y,74,h};
+        const char* names[] = { "Gear", "Pack", "Skills", "Spells" };
+        for (int i=0; i<4; ++i) {
+            Rectangle r={x0+i*58.0f,y,54,h};
             bool on=i<2 && g_characterPack==(i==1);
             if(MenuGroupTab(r,names[i],on,en)) {
                 g_pdSel = -1;
                 if(i==2) MenuGoScreen(s,Screen::Skills);
+                else if(i==3) MenuGoScreen(s,Screen::Magic);
                 else { g_characterPack=i==1; s.backpackScroll=0; }
             }
         }
@@ -36934,6 +36940,45 @@ static const Rectangle kDollGump = { 10, 122, 520, 440 };
 static const Rectangle kDollView = { 98, 134, 344, 352 };
 static const int kT3CTrackPaperdoll = 160;
 
+static const Item* PaperdollTryOnItem(const GameState& s) {
+    int index = g_pdSel - 100;
+    if (!g_pdTryOn || g_characterPack || index < 0 || index >= (int)s.backpack.size() ||
+        s.backpack[(size_t)index].id != g_pdTryOn->id) {
+        g_pdTryOn.reset(); return nullptr;
+    }
+    return &*g_pdTryOn;
+}
+static Rectangle PaperdollInspectRect(int screenH) {
+    // Keep the whole character visible while inspecting boots, legs and weapons.
+    return { 60, std::min((float)screenH - 152, g_characterPack ? (float)screenH - 152 : 636.0f), 420, 140 };
+}
+static std::string PaperdollShortName(std::string name) {
+    for (const auto& quality : kQualityTiersData) {
+        std::string prefix = std::string(quality.second.first) + " ";
+        if (name.compare(0, prefix.size(), prefix) == 0) { name.erase(0, prefix.size()); break; }
+    }
+    return name;
+}
+static void PaperdollText(std::string text, Rectangle box, int size, Color color, int lines = 1) {
+    // Fit labels by measured width rather than assuming a fixed character count.
+    for (int row = 0; row < lines && !text.empty(); ++row) {
+        size_t count = text.size();
+        while (count > 0 && MeasureUIText(text.substr(0, count).c_str(), size) > box.width) --count;
+        if (count < text.size() && row + 1 < lines) {
+            size_t space = text.rfind(' ', count);
+            if (space != std::string::npos && space > 0) count = space;
+        }
+        std::string line = text.substr(0, count);
+        if (count < text.size() && row + 1 == lines) {
+            while (!line.empty() && MeasureUIText((line + "...").c_str(), size) > box.width) line.pop_back();
+            line += "...";
+        }
+        DrawUIText(line.c_str(), (int)box.x, (int)box.y + row * (size + 3), size, color);
+        text.erase(0, count);
+        while (!text.empty() && text.front() == ' ') text.erase(0, 1);
+    }
+}
+
 static void PaperdollRenderPass(const GameState& s) {
     if (!g_dollRTReady) {
         g_dollRT = LoadRenderTexture((int)kDollView.width * 2, (int)kDollView.height * 2);
@@ -36955,7 +37000,8 @@ static void PaperdollRenderPass(const GameState& s) {
     DrawCylinder({ 0, -4.0f, 0 }, 25.0f, 28.0f, 4.0f, 40, Color{ 96, 88, 80, 255 });   // stone plinth
     DrawCylinder({ 0, -0.2f, 0 }, 22.5f, 25.0f, 0.4f, 40, Color{ 132, 122, 108, 255 });
     HumanPose hp; // standing idle (the engaged guard is a deep crouch - reads worse here)
-    DrawHuman(kT3CTrackPaperdoll, 0.0f, 0.0f, 1.5708f + g_dollYaw, 1.0f, WHITE, HumanOutfitFor(s.equipped), hp, false);
+    Equipment preview = EquipmentPreview(s.equipped, PaperdollTryOnItem(s));
+    DrawHuman(kT3CTrackPaperdoll, 0.0f, 0.0f, 1.5708f + g_dollYaw, 1.0f, WHITE, HumanOutfitFor(preview), hp, false);
     EndMode3D();
     EndTextureMode();
 }
@@ -36983,7 +37029,7 @@ static const PaperdollSlot kPdSlots[8] = {
 };
 static Rectangle PaperdollSlotRect(int i) {
     float x = i < 4 ? kDollGump.x + 16 : kDollGump.x + kDollGump.width - 16 - 66;
-    return { x, kDollGump.y + 22 + (i % 4) * 92.0f, 66, 66 };
+    return { x, kDollGump.y + 22 + (i % 4) * 87.0f, 66, 66 };
 }
 // Faint outline of what goes in an empty slot.
 static void PaperdollGlyph(int g, Rectangle r) {
@@ -37037,7 +37083,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
 
     // The item popover owns the covered part of the paperdoll.
     Rectangle oldShield = g_uiShield; bool oldShieldOn = g_uiShieldOn;
-    if (g_pdSel >= 0) { g_uiShield = {60, kDollView.y + kDollView.height - 130, 420, 116}; g_uiShieldOn = true; }
+    if (g_pdSel >= 0) { g_uiShield = PaperdollInspectRect(screenH); g_uiShieldOn = true; }
     // ---- the paperdoll gump ----
     const Rectangle G = kDollGump;
     if (!g_characterPack) {
@@ -37064,6 +37110,11 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     if (g_dollDragging && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { g_dollYaw += (mouse.x - g_dollLastX) * 0.012f; g_dollLastX = mouse.x; }
     else g_dollDragging = false;
     DrawUIText("drag to turn", (int)(kDollView.x + kDollView.width - 76), (int)(kDollView.y + 50), 10, Fade(kUoBronzeLo, 0.7f));
+    if (const Item* trying = PaperdollTryOnItem(s)) {
+        DrawRectangleRec({kDollView.x + 4, kDollView.y + 68, kDollView.width - 8, 38}, Fade(kUoDarkWood, 0.95f));
+        PaperdollText("Trying on: " + PaperdollShortName(trying->name), {kDollView.x + 12,kDollView.y + 73,kDollView.width - 24,16}, 12, kUoGoldText);
+        DrawUIText("Preview only - tap Equip to wear it",(int)kDollView.x + 12,(int)kDollView.y + 90,10,Color{226,212,180,255});
+    }
 
     // Armor | Clothes page toggle over the figure (2026-09-27)
     {
@@ -37095,6 +37146,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
         if (sel) DrawRectangleLinesEx({ r.x - 3, r.y - 3, r.width + 6, r.height + 6 }, 2.0f, Color{ 255, 214, 110, 255 });
         int lw = MeasureUIText(kPdClothSlots[i].label, 11);
         DrawUIText(kPdClothSlots[i].label, (int)(r.x + r.width / 2 - lw / 2), (int)(r.y + r.height + 3), 11, Color{ 90, 60, 34, 255 });
+        PaperdollText(it ? PaperdollShortName(it->name) : "Empty", {r.x-4,r.y+r.height+16,74,12}, 9, Color{110,80,50,255});
         if (UOTapped({ r.x - 4, r.y - 4, r.width + 8, r.height + 8 })) { g_pdSel = sel ? -1 : id; PlaySfx(SfxId::Click); }
     }
     // jewelry slots (page 2)
@@ -37113,6 +37165,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
         if (sel) DrawRectangleLinesEx({ r.x - 3, r.y - 3, r.width + 6, r.height + 6 }, 2.0f, Color{ 255, 214, 110, 255 });
         int lw = MeasureUIText(kPdJewelSlots[i].label, 11);
         DrawUIText(kPdJewelSlots[i].label, (int)(r.x + r.width / 2 - lw / 2), (int)(r.y + r.height + 3), 11, Color{ 90, 60, 34, 255 });
+        PaperdollText(it ? PaperdollShortName(it->name) : "Empty", {r.x-4,r.y+r.height+16,74,12}, 9, Color{110,80,50,255});
         if (UOTapped({ r.x - 4, r.y - 4, r.width + 8, r.height + 8 })) { g_pdSel = sel ? -1 : id; PlaySfx(SfxId::Click); }
     }
     // gear slots down both edges
@@ -37126,6 +37179,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
         if (sel) DrawRectangleLinesEx({ r.x - 3, r.y - 3, r.width + 6, r.height + 6 }, 2.0f, Color{ 255, 214, 110, 255 });
         int lw = MeasureUIText(kPdSlots[i].label, 11);
         DrawUIText(kPdSlots[i].label, (int)(r.x + r.width / 2 - lw / 2), (int)(r.y + r.height + 3), 11, Color{ 90, 60, 34, 255 });
+        PaperdollText(it ? PaperdollShortName(it->name) : "Empty", {r.x-4,r.y+r.height+16,74,12}, 9, Color{110,80,50,255});
         if (UOTapped({ r.x - 4, r.y - 4, r.width + 8, r.height + 8 })) { g_pdSel = sel ? -1 : i; PlaySfx(SfxId::Click); }
     }
 
@@ -37194,10 +37248,11 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     for (int k = 0; k < (int)(sizeof(res) / sizeof(res[0])); k++)
         if (*res[k].v > 0) entries.push_back({ 1, k, *res[k].v, res[k].icon, res[k].name });
     Rectangle inner = { bag.x + 14, bag.y + 20, bag.width - 28, bag.height - 30 };
-    const float cell = 64.0f;
-    int cols = std::max(1, (int)(inner.width / cell));
+    const float rowHeight = 88.0f;
+    int cols = std::max(1, (int)(inner.width / 116.0f));
+    float cellWidth = inner.width / cols;
     int rows = ((int)entries.size() + cols - 1) / cols;
-    float contentH = rows * cell + 8;
+    float contentH = rows * rowHeight + 8;
     s.backpackScroll -= ScrollDelta(inner);
     s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, std::max(0.0f, contentH - inner.height));
     // which bag items fit the selected empty slot - they glow
@@ -37212,18 +37267,22 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     UIBeginScissorMode((int)inner.x, (int)inner.y, (int)inner.width, (int)inner.height);
     for (size_t e = 0; e < entries.size(); e++) {
         const BagEntry& be = entries[e];
-        Vector2 p = UOScatter(inner, (int)e, cell, 17);
-        p.y -= s.backpackScroll;
-        if (p.y < inner.y - cell || p.y > inner.y + inner.height + cell) continue;
+        Rectangle card = {inner.x + (e % cols) * cellWidth + 2, inner.y + (e / cols) * rowHeight - s.backpackScroll + 2, cellWidth - 4, rowHeight - 4};
+        if (card.y + card.height < inner.y || card.y > inner.y + inner.height) continue;
+        Vector2 p = {card.x + card.width / 2, card.y + 25};
         int selId = be.kind == 0 ? 100 + be.idx : 200 + be.idx;
         bool sel = g_pdSel == selId;
         bool fits = be.kind == 0 && fitSlot >= 0 && PaperdollItemFits(s.backpack[(size_t)be.idx], fitSlot);
-        if (sel || fits) DrawCircleV(p, 30, Fade(Color{ 255, 214, 110, 255 }, sel ? 0.35f : 0.18f + 0.1f * sinf((float)GetTime() * 4)));
-        DrawEllipse((int)p.x, (int)p.y + 18, 22, 6, Fade(BLACK, 0.25f)); // resting shadow
-        if (be.kind == 0) DrawItemIcon(s.backpack[(size_t)be.idx], p.x - 24, p.y - 24, 48);
-        else { UODrawIcon(be.icon, p.x, p.y - 2, 44); UODrawCount(p.x + 28, p.y + 12, be.count); }
-        Rectangle hit = { p.x - 30, p.y - 30, 60, 60 };
-        if (bagTap && CheckCollisionPointRec(mouse, hit) && CheckCollisionPointRec(mouse, inner)) { g_pdSel = sel ? -1 : selId; PlaySfx(SfxId::Click); }
+        DrawRectangleRounded(card,0.12f,4,Fade(sel || fits ? Color{150,108,40,255} : Color{45,30,18,255},sel ? 0.8f : 0.5f));
+        if (sel || fits) DrawRectangleRoundedLines(card,0.12f,4,kUoGoldText);
+        std::string label = be.kind == 0 ? PaperdollShortName(s.backpack[(size_t)be.idx].name) : be.name;
+        if (be.kind == 0) DrawItemIcon(s.backpack[(size_t)be.idx], p.x - 20, p.y - 20, 40);
+        else { UODrawIcon(be.icon, p.x, p.y - 2, 36); UODrawCount(p.x + 24, p.y + 10, be.count); }
+        PaperdollText(label,{card.x+6,card.y+49,card.width-12,30},11,Color{240,224,194,255},2);
+        UIRegister(card);
+        if (bagTap && !g_uiClickTaken && CheckCollisionPointRec(mouse, card) && CheckCollisionPointRec(mouse, inner)) {
+            g_pdSel = sel ? -1 : selId; g_pdTryOn.reset(); g_uiClickTaken = true; PlaySfx(SfxId::Click);
+        }
     }
     UIEndScissorMode();
     if (entries.empty())
@@ -37231,7 +37290,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
 
     // ---- the inspect popup for whatever is selected ----
     if (g_pdSel >= 0) {
-        Rectangle pop = { 60, kDollView.y + kDollView.height - 130, 420, 116 };
+        Rectangle pop = PaperdollInspectRect(screenH);
         std::string head, line;
         const Item* item = nullptr;
         std::optional<Item>* eqSlot = nullptr;
@@ -37257,16 +37316,22 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
             UODrawGump(pop, kUoDarkWood);
             if (item) DrawItemIcon(*item, pop.x + 14, pop.y + 16, 50);
             else if (g_pdSel >= 200) UODrawIcon(res[g_pdSel - 200].icon, pop.x + 40, pop.y + 40, 44);
-            DrawUIText(head.c_str(), (int)pop.x + 76, (int)pop.y + 16, 16, kUoGoldText);
-            DrawUIText(line.c_str(), (int)pop.x + 76, (int)pop.y + 40, 12, Color{ 226, 212, 180, 255 });
-            if (UOCloseButton(pop)) g_pdSel = -1;
+            PaperdollText(head,{pop.x+76,pop.y+12,pop.width-114,36},14,kUoGoldText,2);
+            PaperdollText(line,{pop.x+76,pop.y+50,pop.width-90,36},11,Color{226,212,180,255},2);
+            if (UOCloseButton(pop)) { g_pdSel = -1; g_pdTryOn.reset(); }
             else if ((g_pdSel < 8 || (g_pdSel >= 20 && g_pdSel < 27) || (g_pdSel >= 30 && g_pdSel < 33)) && item) {
-                if (UOButton({ pop.x + 76, pop.y + 64, 150, 44 }, "Take off")) { UnequipToBackpack(s, *eqSlot); g_pdSel = -1; }
+                if (UOButton({ pop.x + 76, pop.y + 92, 150, 40 }, "Take off")) { UnequipToBackpack(s, *eqSlot); g_pdSel = -1; g_pdTryOn.reset(); }
             } else if (g_pdSel >= 100 && g_pdSel < 200 && item) {
-                if (UOButton({ pop.x + 76, pop.y + 64, 150, 44 }, "Equip")) {
+                bool trying = g_pdTryOn && g_pdTryOn->id == item->id;
+                if (UOButton({pop.x+76,pop.y+92,140,40}, trying ? "Cancel preview" : "Try on")) {
+                    if (trying) g_pdTryOn.reset();
+                    else { g_pdTryOn = *item; g_characterPack = false; }
+                }
+                if (UOButton({ pop.x + 224, pop.y + 92, 140, 40 }, "Equip")) {
                     EquipFromBackpack(s, g_pdSel - 100);
                     PlaySfx(SfxId::Click);
                     g_pdSel = -1;
+                    g_pdTryOn.reset();
                 }
             }
         }
@@ -37908,6 +37973,7 @@ static void UpdateDrawFrame() {
         // main 3D pass needs. Must run while the default framebuffer is bound,
         // before BeginTextureMode(g_zoomTarget)/BeginDrawing below. 2D screens
         // are untouched (guarded by town3DView).
+        if (state.screen != Screen::Character) g_pdTryOn.reset();
         if (state.screen == Screen::Character) PaperdollRenderPass(state); // the 3D body for the paperdoll
         else if (state.screen == Screen::Town && state.town3DView) Town3DShadowPass(state);
         else if (state.screen == Screen::Wilderness && state.wild3DView) {

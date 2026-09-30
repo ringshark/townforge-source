@@ -31,6 +31,7 @@ jobs:
           python tests/player-movement.py
           python tests/ui-input.py
           python tests/menu-status.py
+          python tests/equipment-preview.py
           node server/mp/test/den.mjs
           node server/mp/test/ladder.mjs
           node tests/den-client.cjs
