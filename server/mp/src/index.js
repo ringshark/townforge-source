@@ -40,7 +40,8 @@ export default {
     if (url.pathname === "/health") return new Response("ok", { headers: { "content-type": "text/plain" } });
     const m = url.pathname.match(ZONE_RE);
     if (!m) return new Response("not found", { status: 404 });
-    if (request.headers.get("Upgrade") !== "websocket") return new Response("expected a websocket", { status: 426 });
+    // Header values are case-insensitive: some clients and proxies send "WebSocket".
+    if ((request.headers.get("Upgrade") || "").toLowerCase() !== "websocket") return new Response("expected a websocket", { status: 426 });
     const allowed = String(env.ALLOWED_ORIGINS || "").split(",").map((o) => o.trim()).filter(Boolean);
     const origin = request.headers.get("Origin") || "";
     if (allowed.length && !allowed.includes(origin)) return new Response("origin not allowed", { status: 403 });
