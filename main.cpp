@@ -150,6 +150,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <ctime>
+#include "combat_motion.h"
 #include <cmath>
 #include <fstream>
 #include <sstream>
@@ -2046,6 +2047,7 @@ struct GameState {
         // of playerAttackCooldown (which can be much longer/shorter depending on DEX) so
         // the flash duration stays consistent regardless of swing speed.
         float swingEffectTimer = 0.0f;
+        float pendingStrikeT = -1.0f; // short windup; damage resolves once at contact
         // Same idea as swingEffectTimer but for spellcasting (2026-09-23, once the hero
         // sheet got a real Cast pose) - set alongside the per-spell cooldowns, drives
         // DrawPlayer's ActorAnim::Cast selection while live.
@@ -2104,6 +2106,7 @@ struct GameState {
         float spellCooldowns[kSpells.size()] = {};
         float castLockT = 0.0f;
         float swingEffectTimer = 0.0f;
+        float pendingStrikeT = -1.0f; // short windup; damage resolves once at contact
         float castEffectTimer = 0.0f;
         float monsterAttackT = -1.0f; // >=0: seconds since this fight's last monster attack started
         float monsterHurtT = -1.0f;  // >=0: seconds since the player last hurt this monster
@@ -2329,9 +2332,9 @@ static Vector2 VirtualJoystickDir() {
     float len = std::sqrt(delta.x * delta.x + delta.y * delta.y);
     if (len < 8.0f) return { 0, 0 }; // dead zone - avoids jitter right at the touch point
     // Analog (2026-09-28): how far the knob is pushed sets the pace - a light
-    // push walks, a full push runs (the vector's length is the speed, 0.2..1).
+    // push walks, a full push runs (the vector's length is the speed, 0..1).
     float t = std::clamp((len - 8.0f) / (kJoystickMaxDrag - 8.0f), 0.0f, 1.0f);
-    float mag = 0.2f + 0.8f * powf(t, 1.6f);
+    float mag = t; // continuous out of the dead zone, without a minimum-speed jump
     return { delta.x / len * mag, delta.y / len * mag };
 }
 // Mirrors VirtualJoystickDir()'s own dead-zone check using the globals it just updated
@@ -2376,7 +2379,15 @@ static void WalkTargetSet(const Vector2& who, Vector2 target, float groundY) {
     g_walkOn = true; g_walkFor = &who; g_walkTarget = target; g_walkY = groundY;
     g_walkLastPos = who; g_walkStuckT = 0.0f;
 }
+static Vector2 g_moveVelocity = {};
+static const Vector2* g_moveOwner = nullptr;
+static double g_moveLastInputT = -99.0;
 static bool UpdatePlayerMovement(Vector2& pos, Vector2& facing, float dt, float worldSize = kWorldSize) {
+    dt = std::clamp(dt, 0.0f, 0.05f); // do not jump through walls after a stalled frame
+    double now = GetTime();
+    if (g_moveOwner != &pos || now - g_moveLastInputT > 0.12) g_moveVelocity = {};
+    g_moveOwner = &pos; g_moveLastInputT = now;
+    auto stop = [&]() { g_moveVelocity = {}; return false; };
     Vector2 dir = {0, 0};
     if (IsKeyDown(KEY_W) || IsKeyDown(KEY_UP)) dir.y -= 1;
     if (IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN)) dir.y += 1;
@@ -2396,23 +2407,34 @@ static bool UpdatePlayerMovement(Vector2& pos, Vector2& facing, float dt, float 
         else if (g_walkOn) { // tap to walk
             Vector2 d = { g_walkTarget.x - pos.x, g_walkTarget.y - pos.y };
             float dl = std::sqrt(d.x * d.x + d.y * d.y);
-            if (dl < 8.0f) { WalkTargetClear(); return false; }
+            if (dl < 8.0f) { WalkTargetClear(); return stop(); }
             float progress = hypotf(pos.x - g_walkLastPos.x, pos.y - g_walkLastPos.y);
             g_walkStuckT = (progress < step * 0.25f && dt > 0.0f) ? g_walkStuckT + dt : 0.0f;
-            if (g_walkStuckT > 0.5f) { WalkTargetClear(); return false; } // blocked
+            if (g_walkStuckT > 0.5f) { WalkTargetClear(); return stop(); } // blocked
             g_walkLastPos = pos;
             dir = { d.x / dl, d.y / dl };
             step = std::min(step, dl);
-        } else return false;
+        } else return stop();
     } else {
         dir.x /= len; dir.y /= len;
         WalkTargetClear();
     }
-    pos.x += dir.x * step;
-    pos.y += dir.y * step;
+    if (dt <= 0.0f) return stop();
+    Vector2 targetVelocity = { dir.x * step / dt, dir.y * step / dt };
+    tfmotion::DriveVelocity(g_moveVelocity, targetVelocity, kPlayerSpeed * g_moveSpeedMul, dt);
+    Vector2 delta = { g_moveVelocity.x * dt, g_moveVelocity.y * dt };
+    // Never overshoot a tap destination, including when approaching at mount speed.
+    if (g_walkOn) {
+        float remaining = hypotf(g_walkTarget.x - pos.x, g_walkTarget.y - pos.y);
+        float travel = hypotf(delta.x, delta.y);
+        if (travel > remaining && travel > 0.0f) { delta.x *= remaining / travel; delta.y *= remaining / travel; }
+    }
+    Vector2 before = pos;
+    pos.x += delta.x;
+    pos.y += delta.y;
     pos = ClampToWorld(pos, kPlayerEdgeMargin, worldSize);
     facing = dir;
-    return true;
+    return hypotf(pos.x - before.x, pos.y - before.y) > 0.0001f;
 }
 static float Dist(Vector2 a, Vector2 b) { return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y)); }
 
@@ -8912,7 +8934,7 @@ static const float kCastLockTime = 0.35f;
 // 2026-09-23 the hero sheet (assets/hero/hero_v2.png) has real per-direction attack
 // frames, so this now just gates ActorAnim::Attack in DrawPlayer instead of driving a
 // fake rotation effect.
-static const float kSwingEffectDuration = 0.18f;
+static const float kSwingEffectDuration = tfmotion::swingDuration;
 // Same idea as kSwingEffectDuration but for spellcasting, gating ActorAnim::Cast -
 // longer than the swing window since each cast already has its own per-spell
 // cooldown (kSpellCooldown) to read against, unlike the DEX-scaled swing timer.
@@ -11848,7 +11870,8 @@ static float T3CSpeedTrack(int id, float x, float z, bool update) {
     }
     s.x = x; s.z = z; s.init = true;
     float target = fminf(inst, 400.0f);
-    s.v += (target - s.v) * fminf(1.0f, dt * 12.0f); // 12/s: a stop registers in ~0.2 s, so legs settle promptly
+    if (target < 1.0f) s.v = 0.0f;
+    else s.v += (target - s.v) * (1.0f - expf(-dt * 22.0f));
     return s.v;
 }
 
@@ -12538,6 +12561,7 @@ struct HumanOutfit {
 struct HumanPose {
     float move = 0.0f;     // 0 idle .. 1 full run (T3CAnim.move)
     float attackT = -1.0f; // 0..1 through a swing, <0 none
+    float attackDuration = 0.0f; // player overrides; NPCs retain their weapon-specific timings
     float castT = -1.0f;   // 0..1 through a cast, <0 none
     float hurtT = -1.0f;   // 0..1 through a hit reaction, <0 none
     float deathT = -1.0f;  // 0..1 through dying, <0 alive
@@ -13290,6 +13314,7 @@ struct HumanAnimState {
     double switchT = 0.0;
     float lastAtk = -1.0f, lastCast = -1.0f, lastHurt = -1.0f;
     double atkStart = -99.0, castStart = -99.0, hurtStart = -99.0;
+    float castDuration = 0.70f;
     int atkVariant = 0, castVariant = 0, hurtVariant = 0;
     // Locomotion (2026-09-26): each character owns its stride clock - advanced
     // by dt x rate, as a 0..1 cycle - so speed changes never jump the legs to
@@ -13619,16 +13644,22 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
         return e;
     };
     if (edge(magic ? -1.0f : p.attackT, st.lastAtk)) { st.atkStart = now; st.atkVariant++; }
-    if (edge(magic ? p.attackT : p.castT, st.lastCast)) { st.castStart = now; st.castVariant++; }
+    float castEvent = p.castT >= 0.0f ? p.castT : (magic ? p.attackT : -1.0f);
+    if (edge(castEvent, st.lastCast)) {
+        st.castStart = now; st.castVariant++;
+        st.castDuration = p.castT < 0.0f && magic && p.attackDuration > 0.0f ? p.attackDuration : 0.70f;
+    }
     if (edge(p.hurtT, st.lastHurt)) { st.hurtStart = now; st.hurtVariant++; }
     static const float kAtkDur[7] = { 0.45f, 0.62f, 0.80f, 0.62f, 0.45f, 0.95f, 0.70f };
-    float atkDur = kAtkDur[o.style];
+    float atkDur = p.attackDuration > 0.0f ? p.attackDuration : kAtkDur[o.style];
     float atkT = (float)((now - st.atkStart) / atkDur);
-    float castT = (float)((now - st.castStart) / 0.70);
+    float castT = (float)((now - st.castStart) / st.castDuration);
     float hurtT = (float)((now - st.hurtStart) / 0.40);
     bool attacking = atkT >= 0.0f && atkT < 1.0f;
     bool casting = castT >= 0.0f && castT < 1.0f;
     bool hurting = hurtT >= 0.0f && hurtT < 1.0f;
+    if (st.moving && p.move < 0.10f) st.moving = false;
+    else if (!st.moving && p.move > 0.16f) st.moving = true;
     // Working a resource: only while standing (walking cancels the loop visually).
     bool gathering = p.gather > 0 && p.deathT < 0.0f && !attacking && !casting && !hurting && !st.moving;
     static const float kGatherPeriod[4] = { 1.0f, 1.1f, 1.2f, 4.5f };
@@ -13636,7 +13667,7 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
 
     // ---- base clip (locomotion / stance) ----
     int clip = H.idle;
-    float speed = 1.0f, phase = -1.0f; // phase >= 0: a one-shot clip at that point
+    float phase = -1.0f; // phase >= 0: a one-shot clip at that point
     int procAttack = -1, procCast = 0;  // which procedural layer runs on top
     bool dying = p.deathT >= 0.0f && H.death >= 0;
     bool fightStance = p.engaged && o.style != kHsBow && o.style != kHsUnarmed && H.guard >= 0;
@@ -13660,18 +13691,18 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
     } else if (hurting && H.hit >= 0) {
         clip = (st.hurtVariant % 2 && H.hitHead >= 0) ? H.hitHead : H.hit;
         phase = hurtT;
-    } else if (st.moving && H.jog >= 0 && p.move > 0.62f) { clip = H.jog; speed = 0.9f + 0.3f * p.move; }
-    else if (st.moving) { clip = H.walk; speed = 0.8f + 0.6f * p.move; }
+    } else if (st.moving && H.jog >= 0 && p.move > 0.62f) { clip = H.jog; }
+    else if (st.moving) { clip = H.walk; }
     else if (fightStance) clip = H.guard;
     if (gathering && clip == H.guard) clip = H.idle;
     // Stop/start with a little hysteresis so a character easing to a halt
     // settles into idle instead of shuffling in slow motion.
-    if (st.moving && p.move < 0.10f) st.moving = false;
-    else if (!st.moving && p.move > 0.16f) st.moving = true;
     float dtA = (st.lastT < 0.0) ? 0.0f : std::clamp((float)(now - st.lastT), 0.0f, 0.1f);
     st.lastT = now;
     auto clipLen = [&](int c) { return std::max(1, H.anims[c].keyframeCount) / 60.0f; }; // seconds
-    if (clip == H.walk || clip == H.jog) st.cycle = fmodf(st.cycle + dtA * speed / clipLen(clip), 1.0f);
+    int locomotionClip = p.move > 0.62f && H.jog >= 0 ? H.jog : H.walk;
+    float locomotionSpeed = locomotionClip == H.jog ? 0.9f + 0.3f * p.move : 0.8f + 0.6f * p.move;
+    if (st.moving && locomotionClip >= 0) st.cycle = fmodf(st.cycle + dtA * locomotionSpeed / clipLen(locomotionClip), 1.0f);
     else st.idleCycle = fmodf(st.idleCycle + dtA / clipLen(clip), 1.0f);
     auto frameOf = [&](int c, float ph) {
         int n = std::max(1, H.anims[c].keyframeCount);
@@ -13686,13 +13717,31 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
         st.clip = clip;
     }
     HumanSample(H.anims[clip], frame, phase < 0.0f, H.pose.data(), nb);
-    float fade = (float)((now - st.switchT) / 0.14);
+    float fade = (float)((now - st.switchT) / ((attacking || casting || hurting) ? 0.045 : 0.10));
     if (st.prevClip >= 0 && fade < 1.0f && !dying) {
         HumanSample(H.anims[st.prevClip], st.prevFrame, true, H.poseB.data(), nb);
         HumanBlend(H.poseB.data(), H.pose.data(), std::clamp(fade, 0.0f, 1.0f), nb);
         std::swap(H.pose, H.poseB);
     } else {
         st.prevFrame = frame;
+    }
+
+    // Keep the legs stepping during moving attacks/casts. These clips contain
+    // global bone poses, so shift the upper body with the walking pelvis before
+    // replacing the legs; this avoids separating the torso from the hips.
+    if (!dying && st.moving && (attacking || casting) && locomotionClip >= 0 && H.boneHips >= 0) {
+        HumanSample(H.anims[locomotionClip], frameOf(locomotionClip, -1.0f), true, H.poseB.data(), nb);
+        float weight = std::clamp(p.move * 4.0f, 0.0f, 1.0f);
+        Vector3 shift = Vector3Scale(Vector3Subtract(H.poseB[H.boneHips].translation,
+                                                    H.pose[H.boneHips].translation), weight);
+        for (Transform& bone : H.pose) bone.translation = Vector3Add(bone.translation, shift);
+        for (int root : { H.boneThighR, H.boneThighL }) {
+            if (root < 0) continue;
+            for (int bone : H.desc[(size_t)root]) {
+                H.pose[bone].translation = Vector3Lerp(H.pose[bone].translation, H.poseB[bone].translation, weight);
+                H.pose[bone].rotation = QuaternionSlerp(H.pose[bone].rotation, H.poseB[bone].rotation, weight);
+            }
+        }
     }
 
     // ---- procedural layers ----
@@ -14131,6 +14180,7 @@ static HumanPose HumanPlayerPose(const GameState& s, float move, float atk, floa
     HumanPose hp;
     hp.move = move;
     hp.attackT = atk;
+    hp.attackDuration = tfmotion::swingDuration;
     hp.castT = cast;
     if (s.playerHurtT >= 0.0f) hp.hurtT = std::clamp(1.0f - s.playerHurtT / 0.30f, 0.0f, 1.0f);
     if (s.playerDeathAnimT > 0.0f) hp.deathT = std::clamp(1.0f - s.playerDeathAnimT / kPlayerDeathAnimTime, 0.0f, 1.0f);
@@ -14582,8 +14632,19 @@ static void PlayerCombatPhases3D(const GameState& s, float* atk, float* cast);
 // as a ghost. enemy (optional) is what the knockback pushes away from.
 static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, float yawRad, float move,
                             const Vector2* enemy, bool shadowPass) {
+    if (shadowPass) return true;
     float atk = -1.0f, cast = -1.0f;
     PlayerCombatPhases3D(s, &atk, &cast);
+    struct TurnState { float yaw = 0.0f; double last = -99.0; };
+    static std::map<int, TurnState> turns;
+    TurnState& turn = turns[trackId];
+    double realNow = GetTime();
+    if (enemy && (atk >= 0.0f || cast >= 0.0f || move < 0.1f)) {
+        if (hypotf(enemy->x - x, enemy->y - z) > 0.01f) yawRad = atan2f(enemy->y - z, enemy->x - x);
+    }
+    if (realNow - turn.last > 0.15) turn.yaw = yawRad;
+    else turn.yaw = tfmotion::Turn(turn.yaw, yawRad, GameDt(), atk >= 0.0f || cast >= 0.0f);
+    turn.last = realNow; yawRad = turn.yaw;
     HumanPose hp = HumanPlayerPose(s, move, atk, cast);
     Color tint = WHITE;
     if (s.playerIsGhost) {
@@ -27686,8 +27747,8 @@ static void SpawnFloatText(GameState& s, int zone, Vector2 pos, const std::strin
     if (ColorIsEqual(color, kFloatDmgColor)) {
         int dmg = std::max(1, std::atoi(text.c_str()));
         SpawnHitSparks(zone, pos, true, dmg);
-        CombatHitStop(dmg >= 20 ? 0.09f : 0.06f);
-        CombatShake(3.0f + fminf((float)dmg, 40.0f) * 0.12f);
+        CombatHitStop(dmg >= 20 ? 0.045f : 0.028f);
+        CombatShake(2.0f + fminf((float)dmg, 40.0f) * 0.075f);
     } else if (ColorIsEqual(color, kFloatMissColor)) {
         SpawnHitSparks(zone, pos, false, 0);
     }
@@ -29159,6 +29220,13 @@ static void TransferWildPrimary(GameState& s, int newSpotIdx) {
         newPrimary.maxHp = WildSpotMaxHp(s, newSpotIdx);
         newPrimary.hp = (newSpotIdx == kWyrmSpot && s.wyrmHp > 0.0f) ? std::min(newPrimary.maxHp, s.wyrmHp) : newPrimary.maxHp;
     }
+    newPrimary.pendingStrikeT = -1.0f;
+    newPrimary.swingEffectTimer = 0.0f;
+    if (hadPrimary) {
+        newPrimary.playerAttackCooldown = oldPrimary.playerAttackCooldown;
+        oldPrimary.playerAttackCooldown = 0.0f;
+        oldPrimary.pendingStrikeT = -1.0f; oldPrimary.swingEffectTimer = 0.0f;
+    }
     if (hadPrimary) s.wildExtraAttackers.push_back(oldPrimary); // the old target keeps fighting
     s.wildEngaged = newPrimary;
     GameState::FlagTarget f; f.zone = 0; f.spotIdx = newSpotIdx;
@@ -29202,6 +29270,13 @@ static void TransferDungeonPrimary(GameState& s, int dungeonIdx, int newMonsterI
         newPrimary.spawnPos = DungeonMonsterNodePos(dungeonIdx, slot);
         newPrimary.maxHp = MonsterMaxHp(s, (float)m.level, newIsBoss);
         newPrimary.hp = newPrimary.maxHp;
+    }
+    newPrimary.pendingStrikeT = -1.0f;
+    newPrimary.swingEffectTimer = 0.0f;
+    if (hadPrimary) {
+        newPrimary.playerAttackCooldown = oldPrimary.playerAttackCooldown;
+        oldPrimary.playerAttackCooldown = 0.0f;
+        oldPrimary.pendingStrikeT = -1.0f; oldPrimary.swingEffectTimer = 0.0f;
     }
     if (hadPrimary) s.dungeonExtraAttackers.push_back(oldPrimary);
     s.dungeonEngaged = newPrimary;
@@ -31740,10 +31815,23 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (!s.wildEngaged.has_value()) return;
         GameState::ActiveMonster& am = *s.wildEngaged;
         EngagedMonsterStats spot = EngagedWildMonsterStats(s, am);
-        if (Dist(am.pos, s.wildernessPlayerPos) >= kWildMeleeRange || am.playerAttackCooldown > 0) return;
-        am.playerAttackCooldown = PlayerSwingCooldown(s);
-        am.swingEffectTimer = kSwingEffectDuration;
-        PlaySfx(SfxId::Swing); // melee swing starts - world combat only
+        bool inRange = Dist(am.pos, s.wildernessPlayerPos) < kWildMeleeRange;
+        HumanOutfit outfit = HumanOutfitFor(s.equipped);
+        float contactPhase = outfit.style == kHsBow ? 0.64f : 0.40f;
+        auto strike = tfmotion::StepStrike(am, !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && am.hp > 0.0f,
+                                          inRange, GameDt(), PlayerSwingCooldown(s), contactPhase);
+        if (strike == tfmotion::Strike::Started) {
+            Vector2 to = { am.pos.x - s.wildernessPlayerPos.x, am.pos.y - s.wildernessPlayerPos.y };
+            float length = hypotf(to.x, to.y);
+            if (length > 0.001f) s.playerFacing = { to.x / length, to.y / length };
+            PlaySfx(SfxId::Swing);
+            return;
+        }
+        if (strike == tfmotion::Strike::Whiff) {
+            SpawnFloatText(s, 0, am.pos, "OUT OF REACH", kFloatMissColor);
+            return;
+        }
+        if (strike != tfmotion::Strike::Impact) return;
         int power = CombatPower(s);
         float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
         float hitChance = PlayerHitChance(s, spot.level);
@@ -33088,10 +33176,23 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (!s.dungeonEngaged.has_value()) return;
         GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
         const DungeonMonster& m = am.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, am.monsterIdx);
-        if (Dist(am.pos, s.dungeonPlayerPos) >= kWildMeleeRange || am.playerAttackCooldown > 0) return;
-        am.playerAttackCooldown = PlayerSwingCooldown(s);
-        am.swingEffectTimer = kSwingEffectDuration;
-        PlaySfx(SfxId::Swing); // melee swing starts - world combat only
+        bool inRange = Dist(am.pos, s.dungeonPlayerPos) < kWildMeleeRange;
+        HumanOutfit outfit = HumanOutfitFor(s.equipped);
+        float contactPhase = outfit.style == kHsBow ? 0.64f : 0.40f;
+        auto strike = tfmotion::StepStrike(am, !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && am.hp > 0.0f,
+                                          inRange, GameDt(), PlayerSwingCooldown(s), contactPhase);
+        if (strike == tfmotion::Strike::Started) {
+            Vector2 to = { am.pos.x - s.dungeonPlayerPos.x, am.pos.y - s.dungeonPlayerPos.y };
+            float length = hypotf(to.x, to.y);
+            if (length > 0.001f) s.playerFacing = { to.x / length, to.y / length };
+            PlaySfx(SfxId::Swing);
+            return;
+        }
+        if (strike == tfmotion::Strike::Whiff) {
+            SpawnFloatText(s, 1, am.pos, "OUT OF REACH", kFloatMissColor);
+            return;
+        }
+        if (strike != tfmotion::Strike::Impact) return;
         int power = CombatPower(s);
         float weaponSkillBonus = EffectiveSkill(s, ActiveWeaponSkillField(s)) * 0.2f;
         float hitChance = PlayerHitChance(s, m.level);

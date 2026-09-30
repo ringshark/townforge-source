@@ -1,0 +1,48 @@
+"""Run the production movement function with deterministic keyboard/stick input."""
+from pathlib import Path
+import subprocess, tempfile
+s = Path('main.cpp').read_text()
+start = s.index('static Vector2 g_moveVelocity =')
+end = s.index('static float Dist(', start)
+code = '''#include <algorithm>
+#include <cmath>
+#include <cassert>
+#include "combat_motion.h"
+struct Vector2 { float x=0,y=0; };
+enum {KEY_W,KEY_UP,KEY_S,KEY_DOWN,KEY_A,KEY_LEFT,KEY_D,KEY_RIGHT};
+bool keys[8]={}; double now=0; Vector2 stick{};
+bool IsKeyDown(int k){return keys[k];} double GetTime(){return now;}
+Vector2 VirtualJoystickDir(){return stick;}
+constexpr float kPlayerSpeed=220,kPlayerEdgeMargin=70,kWorldSize=2000;
+float g_moveSpeedMul=1;
+bool g_walkOn=false; const Vector2* g_walkFor=nullptr;
+Vector2 g_walkTarget{},g_walkLastPos{};float g_walkStuckT=0;
+void WalkTargetClear(){g_walkOn=false;g_walkFor=nullptr;}
+Vector2 ClampToWorld(Vector2 p,float m,float w){return {std::clamp(p.x,m,w-m),std::clamp(p.y,m,w-m)};}
+'''+s[start:end]+'''int main(){
+Vector2 pos{500,500},face{0,1};
+auto tick=[&](float dt){now+=dt;return UpdatePlayerMovement(pos,face,dt);};
+keys[KEY_D]=true; for(int i=0;i<60;i++)tick(1.f/60);
+float straight=pos.x-500;assert(straight>210 && straight<=220.01f);
+keys[KEY_D]=false;float stopped=pos.x;assert(!tick(1.f/60));assert(pos.x==stopped);
+pos={500,500};keys[KEY_D]=true;keys[KEY_S]=true;
+for(int i=0;i<60;i++)tick(1.f/60);
+float diagonal=std::hypot(pos.x-500,pos.y-500);assert(std::abs(diagonal-straight)<.02f);
+keys[KEY_D]=false;keys[KEY_S]=false;tick(1.f/60);
+stick={.5f,0};pos={500,500};for(int i=0;i<60;i++)tick(1.f/60);
+assert(pos.x>600 && pos.x<611);stick={};tick(1.f/60);
+g_walkOn=true;g_walkFor=&pos;g_walkTarget={pos.x+20,pos.y};g_walkLastPos=pos;
+for(int i=0;i<60;i++)tick(1.f/60);assert(!g_walkOn && pos.x<=g_walkTarget.x+.001f);
+keys[KEY_D]=true;float before=pos.x;tick(1.f);assert(pos.x-before<=11.001f);
+keys[KEY_D]=false;tick(.016f);
+// Switching zones starts fresh, so velocity cannot carry between position owners.
+Vector2 town{600,600};keys[KEY_D]=true;
+UpdatePlayerMovement(town,face,.016f);assert(town.x-600<1.0f);
+}
+'''
+with tempfile.TemporaryDirectory() as tmp:
+    cpp=Path(tmp)/'movement.cpp'; exe=Path(tmp)/'movement'
+    cpp.write_text(code)
+    subprocess.run(['g++','-std=c++17','-I.',str(cpp),'-o',str(exe)],check=True)
+    subprocess.run([str(exe)],check=True)
+print('PASS production movement: keyboard, diagonal, analog stick, tap arrival, frame stalls and zone changes')

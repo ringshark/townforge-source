@@ -24,6 +24,11 @@ jobs:
           node tests/guild-project.cjs
           python tests/guild-parser.py
           node tests/guild-city-cloud.cjs
+      - name: Check combat and movement
+        run: |
+          g++ -std=c++17 tests/combat-motion.cpp -o /tmp/tf-combat-test
+          /tmp/tf-combat-test
+          python tests/player-movement.py
       - name: Build raylib 6.0
         run: |
           git clone --depth 1 --branch 6.0 https://github.com/raysan5/raylib.git /tmp/raylib
