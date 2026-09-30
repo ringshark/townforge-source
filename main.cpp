@@ -12610,6 +12610,7 @@ struct HumanOutfit {
     Color cloakCol = { 104, 70, 44, 255 };
     int hat = kClStyleNone;             // clothing hat style (kClWizardHat..), hidden under a helm
     bool robe = false;                  // a robe's hanging skirt (2026-09-27)
+    bool footwear = false;
     float build = 1.0f;                 // side-to-side / front-to-back bulk (the player's hero build: 1.15)
     unsigned outfitMask = 0;            // OutfitPart bits drawn over the body
     Color outfitTint[kOpCount] = {};    // per part (dye); only read for parts in the mask
@@ -13243,6 +13244,7 @@ static void HumanArmWith(HumanOutfit& o, const std::optional<Item>& it) {
 // boots, brown cloak) with every equipped piece painted over its region.
 static HumanOutfit HumanOutfitFor(const Equipment& e) {
     HumanOutfit o;
+    o.footwear = e.shoes.has_value();
     o.build = 1.16f; // the player is a hero, not the mannequin (2026-09-27: "looks a little wimpy")
     Color tunic = { 112, 116, 78, 255 }, pants = { 92, 78, 60, 255 };
     Color skin = { 226, 188, 152, 255 };
@@ -14284,7 +14286,8 @@ struct SkinChar {
     // (2026-09-28) armor rides these bones; dye regions come from the file's vertex colours
     int spine = -1, head = -1, armR = -1, armL = -1, foreArmR = -1, upLegR = -1, upLegL = -1, legR = -1, legL = -1;
     std::vector<unsigned char> dyeReg; // mesh 0, per vertex: 0 none, 1 cloak, 2 shirt, 3 trousers
-    Color dyeNow[4] = {};
+    Color dyeNow[5] = {};
+    int footR = -1, footL = -1;
     // Armor fit per bone (2026-09-28): the body kit's pieces are built "+Y along
     // the bone, +Z forward"; Meshy's head bone leans 35 degrees forward and its
     // leg bones face backwards, so each piece is turned to match (from the rest pose).
@@ -14294,7 +14297,7 @@ struct SkinChar {
 };
 // The hero's cloth, dyed: cloak / shirt / trousers (index 1..3). The file marks
 // those vertices; their texels are neutral grey, so the vertex colour is the dye.
-struct SkinDye { Color c[4] = { WHITE, { 73, 49, 27, 255 }, { 114, 105, 94, 255 }, { 90, 81, 68, 255 } }; };
+struct SkinDye { Color c[5] = { WHITE, { 73, 49, 27, 255 }, { 114, 105, 94, 255 }, { 90, 81, 68, 255 }, {211,177,157,255} }; };
 static std::deque<SkinChar> g_skinChars;     // (deque: pointers stay put as it grows)
 static std::vector<std::string> g_skinCharFiles = { "hero" };
 // The id of a rigged character by its file stem in assets/characters3d/.
@@ -14333,6 +14336,8 @@ static SkinChar* SkinCharGet(int id) {
         else if (!strcmp(n, "LeftUpLeg")) C.upLegL = b;
         else if (!strcmp(n, "RightLeg")) C.legR = b;
         else if (!strcmp(n, "LeftLeg")) C.legL = b;
+        else if (!strcmp(n, "RightFoot")) C.footR = b;
+        else if (!strcmp(n, "LeftFoot")) C.footL = b;
     }
     if (C.model.meshes[0].colors) { // dye-region markers: pure red / green / blue
         const Mesh& me = C.model.meshes[0];
@@ -14340,7 +14345,8 @@ static SkinChar* SkinCharGet(int id) {
         for (int v = 0; v < me.vertexCount; v++) {
             const unsigned char* c = me.colors + v * 4;
             C.dyeReg[(size_t)v] = (c[0] > 200 && c[1] < 60 && c[2] < 60) ? 1 : (c[0] < 60 && c[1] > 200 && c[2] < 60) ? 2
-                                : (c[0] < 60 && c[1] < 60 && c[2] > 200) ? 3 : 0;
+                                : (c[0] < 60 && c[1] < 60 && c[2] > 200) ? 3
+                                : (c[0] > 200 && c[1] > 200 && c[2] < 60) ? 4 : 0;
         }
     }
     { // armor turned to each bone's rest frame (see armorRot)
@@ -14348,7 +14354,7 @@ static SkinChar* SkinCharGet(int id) {
         C.armorRot.assign((size_t)nb, MatrixIdentity());
         for (int b = 0; b < nb; b++) {
             Quaternion q = C.model.skeleton.bindPose[b].rotation, qi = QuaternionInvert(q);
-            if (b == C.head || b == C.spine) { C.armorRot[(size_t)b] = QuaternionToMatrix(qi); continue; } // world-upright at rest
+            if (b == C.head || b == C.spine || b == C.footR || b == C.footL) { C.armorRot[(size_t)b] = QuaternionToMatrix(qi); continue; } // world-upright at rest
             Vector3 f = Vector3RotateByQuaternion({ 0, 0, 1 }, qi); // body-forward, in bone space
             C.armorRot[(size_t)b] = MatrixRotateY(atan2f(f.x, f.z));  // keep +Y down the bone, face +Z forward
         }
@@ -14648,9 +14654,14 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         flat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
         auto piece = [&](const Model& m, int bone, const SkinArmorFit& fit, Color c) {
             if (bone < 0 || m.meshCount <= 0) return;
+            SkinArmorFit fitted = fit;
+            if (g_skinCharFiles[(size_t)id] == "hero-neutral") {
+                if (&fit == &g_skinFitChest) fitted.oy = -0.12f;
+                if (&fit == &g_skinFitHelm) fitted.oy = -0.12f;
+            }
             Matrix rot = bone < (int)C.armorRot.size() ? C.armorRot[(size_t)bone] : MatrixIdentity();
-            Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(u * fit.s * fit.sx, u * fit.s, u * fit.s * fit.sx),
-                                                         MatrixTranslate(0.0f, fit.oy * u, fit.oz * u)), rot);
+            Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(u * fitted.s * fitted.sx, u * fitted.s, u * fitted.s * fitted.sx),
+                                                         MatrixTranslate(0.0f, fitted.oy * u, fitted.oz * u)), rot);
             HumanDrawAttached(m, &flat, local, boneM(bone), world, HumanMul(c, tint));
         };
         if (o.armChest && !o.robe) piece(H.armor[o.armChest == 2 ? kArChestH : kArChestL], C.spine, g_skinFitChest, o.armChestCol);
@@ -14667,6 +14678,28 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         }
         if (o.armGorget) piece(H.armor[kArGorget], C.spine, g_skinFitGorget, o.armGorgetCol);
         if (o.helm != kHhNone) piece(H.helm[o.helm], C.head, g_skinFitHelm, o.helmCol);
+        if (g_skinCharFiles[(size_t)id] == "hero-neutral") {
+            if (o.footwear) {
+                static Model boots{};
+                if (boots.meshCount == 0) {
+                    T3CMeshBuilder b;
+                    T3CSphere(b, 0.0f, -0.065f, 0.055f, 0.065f, 0.07f, 0.135f, 6, 12, WHITE);
+                    T3CCylinder(b, 0.0f, -0.06f, 0.0f, 0.16f, 0.062f, 0.055f, 12, WHITE);
+                    boots = T3CFinish(b);
+                }
+                piece(boots, C.footR, {1.0f, 1.0f, 0.0f, 0.0f}, o.region[kHrBoots]);
+                piece(boots, C.footL, {1.0f, 1.0f, 0.0f, 0.0f}, o.region[kHrBoots]);
+            }
+            // Clothing shares the same bone transforms as the fitted armor.
+            if (o.helm == kHhNone && o.hat >= kClWizardHat && o.hat <= kClFeatherHat)
+                piece(H.hat[o.hat], C.head, g_skinFitHelm, o.hatCol);
+            if (o.robe) piece(H.robeSkirt, C.spine, {1.05f, 1.12f, 0.0f, -0.08f}, o.robeCol);
+            if (o.cloak && C.spine >= 0) {
+                Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(u * 1.18f, u, u),
+                    MatrixRotateX(-0.06f - 0.30f * p.move)), C.armorRot[(size_t)C.spine]);
+                HumanDrawAttached(H.cloak, &flat, local, boneM(C.spine), world, HumanMul(o.cloakCol, tint));
+            }
+        }
     }
     return true;
 }
@@ -14692,6 +14725,25 @@ static const char* HeroLookFor(const GameState& s) {
     return nullptr;
 }
 static void PlayerCombatPhases3D(const GameState& s, float* atk, float* cast);
+// One avatar and equipment path for the world and the Me/try-on preview.
+static bool DrawEquippedHero(int track, float x, float z, float yaw, Color tint,
+                             const Equipment& equipment, const HumanPose& hp, bool shadowPass,
+                             bool sneaking = false, bool blocking = false) {
+    HumanEnsure();
+    HumanOutfit outfit = HumanOutfitFor(equipment);
+    SkinPose pose;
+    pose.move = hp.move; pose.attackT = hp.attackT; pose.castT = hp.castT;
+    pose.hurtT = hp.hurtT; pose.deathT = hp.deathT; pose.engaged = hp.engaged;
+    pose.gather = hp.gather; pose.style = outfit.style;
+    pose.sneaking = sneaking; pose.blocking = blocking;
+    SkinDye dye;
+    dye.c[2] = equipment.robe ? ClothColor(*equipment.robe) : equipment.shirt ? ClothColor(*equipment.shirt) : Color{195,184,176,255};
+    dye.c[3] = equipment.robe ? ColorBrightness(ClothColor(*equipment.robe), -0.10f) : equipment.pants ? ClothColor(*equipment.pants) : Color{92,78,69,255};
+    Color glove;
+    if (HumanArmorColor(equipment.gloves, &glove)) dye.c[4] = glove;
+    if (DrawSkinChar(SkinCharFor("hero-neutral"), track, x, z, yaw, 66.0f, tint, pose, shadowPass, &outfit, 0.0f, &dye)) return true;
+    return DrawHuman(track, x, z, yaw, 1.0f, tint, outfit, hp, shadowPass);
+}
 // The player on the animated body: swing/cast/hit/death clips ride the same
 // timers the kit poses did; red flash + knockback on a hit, translucent blue
 // as a ghost. enemy (optional) is what the knockback pushes away from.
@@ -14749,10 +14801,7 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
         }
     }
     if (s.hidden) tint = Color{ (unsigned char)(tint.r * 0.35f), (unsigned char)(tint.g * 0.35f), (unsigned char)(tint.b * 0.45f), tint.a }; // in the shadows (2026-09-28)
-    HumanOutfit outfit = HumanOutfitFor(s.equipped);
-    // The world and Me preview use the same modular rig and equipped layers.
-    // Fixed archetype meshes bake in armor and cannot accurately unequip it.
-    return DrawHuman(trackId, x, z, yawRad, 1.0f, tint, outfit, hp, shadowPass);
+    return DrawEquippedHero(trackId, x, z, yawRad, tint, s.equipped, hp, shadowPass, s.hidden, s.playerBlockT >= 0.0f);
 }
 
 // ---- Multiplayer, phase 1 (2026-09-29): presence + chat ------------------------------
@@ -37045,7 +37094,7 @@ static void PaperdollRenderPass(const GameState& s) {
     DrawCylinder({ 0, -0.2f, 0 }, 22.5f, 25.0f, 0.4f, 40, Color{ 132, 122, 108, 255 });
     HumanPose hp; // standing idle (the engaged guard is a deep crouch - reads worse here)
     Equipment preview = EquipmentPreview(s.equipped, PaperdollTryOnItem(s));
-    DrawHuman(kT3CTrackPaperdoll, 0.0f, 0.0f, 1.5708f + g_dollYaw, 1.0f, WHITE, HumanOutfitFor(preview), hp, false);
+    DrawEquippedHero(kT3CTrackPaperdoll, 0.0f, 0.0f, 1.5708f + g_dollYaw, WHITE, preview, hp, false);
     EndMode3D();
     EndTextureMode();
 }

@@ -5,7 +5,7 @@
 import { NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
 import sharp from 'sharp';
-const [f] = process.argv.slice(2);
+const [f, profile] = process.argv.slice(2);
 const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
 const doc = await io.read(f);
 const p = doc.getRoot().listMeshes()[0].listPrimitives()[0];
@@ -18,6 +18,16 @@ const colAt = (u, v) => { const [x, y] = px(u, v); const i = (y * tw + x) * 3; r
 function classify(x, y, z, c) {
   const [R, G, B] = c, mx = Math.max(R, G, B), mn = Math.min(R, G, B), sat = mx ? (mx - mn) / mx : 0, lum = (R + G + B) / 3;
   const skin = R > 150 && R > G + 25 && G > B && sat > 0.2 && sat < 0.55;
+  if (profile === 'neutral') {
+    // This base has no baked cape or pack. Keep the head, exposed hands,
+    // neckline and bare feet out of the cloth masks, including shaded skin.
+    if (Math.abs(x) > 0.37 && y < 1.06 && y > 0.70) return 4;
+    if (y > 1.49 || y < 0.20) return 0;
+    if (y < 0.91 && Math.abs(x) < 0.23) return 3;
+    if (R > G * 1.18 && G > B * 1.08 && sat > 0.22) return 0;
+    if (y >= 0.91) return 2;
+    return 0;
+  }
   if (y > 1.52 || skin) return 0;
   const pack = y > 0.95 && Math.abs(x) < 0.21 && z < -0.12;
   const cloth = sat < 0.30 && lum > 50;
@@ -45,7 +55,7 @@ for (let t = 0; t < idx.length; t += 3) {
   }
 }
 // average colour per region (the undyed look), then grey the masked texels
-const sum = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
+const sum = Array.from({length: 5}, () => [0, 0, 0, 0]);
 for (let i = 0; i < tw * th; i++) { const m = mask[i]; if (!m) continue; sum[m][0] += T[i * 3]; sum[m][1] += T[i * 3 + 1]; sum[m][2] += T[i * 3 + 2]; sum[m][3]++; }
 const avg = sum.map(s => s[3] ? [s[0] / s[3], s[1] / s[3], s[2] / s[3]] : [128, 128, 128]);
 const K = 0.82;
@@ -58,9 +68,9 @@ for (let i = 0; i < tw * th; i++) {
 const png = await sharp(T, { raw: { width: tw, height: th, channels: 3 } }).png({ compressionLevel: 9 }).toBuffer();
 tex.setImage(new Uint8Array(png)).setMimeType('image/png');
 const colors = new Uint8Array(n * 4);
-const marker = [[255, 255, 255], [255, 0, 0], [0, 255, 0], [0, 0, 255]];
+const marker = [[255, 255, 255], [255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]];
 for (let i = 0; i < n; i++) { const m = marker[reg[i]]; colors.set([m[0], m[1], m[2], 255], i * 4); }
 p.setAttribute('COLOR_0', doc.createAccessor().setType('VEC4').setArray(colors).setNormalized(true).setBuffer(doc.getRoot().listBuffers()[0]));
 await io.write(f, doc);
-const cnt = [0, 0, 0, 0]; for (const v of reg) cnt[v]++;
+const cnt = [0, 0, 0, 0, 0]; for (const v of reg) cnt[v]++;
 console.log('regions', cnt, 'undyed tints (x1/0.82):', avg.slice(1).map(a => a.map(v => Math.min(255, Math.round(v / K)))).map(a => '{' + a.join(', ') + '}').join(' '));

@@ -1,0 +1,12 @@
+{
+  "source": "User-supplied Neutral Stance Figure, Meshy AI, 2026-09-30",
+  "rigging_task_id": "01a0f3f7-731e-736e-a569-2d9e0a17d4dd",
+  "rigging_credits": 5,
+  "animation_source": "Existing assets/characters3d/hero.glb, retargeted without additional API purchases",
+  "height_meters": 1.8,
+  "triangle_budget": 20000,
+  "texture_size": 1024,
+  "dye_markers": {"green": "shirt", "blue": "trousers", "yellow": "gloves / hands"},
+  "equipment": "Shared DrawEquippedHero renderer for world and Me; bone-attached weapons, shields, armor, hats, capes, robe skirt and footwear",
+  "limitations": ["Base shirt and trousers are baked into the body silhouette; garment styles currently change color rather than sleeve/pants length", "Meshy rig has no finger joints, so equipment grip does not animate individual fingers"]
+}
