@@ -103,6 +103,7 @@
     // Guild Hall (2026-09-29)
     donate: function (t) { call('tf_donate', { p_tech: t }, function (lv) { finished('donated', t + ':' + lv); }); },
     recommend: function (t) { call('tf_recommend', { p_tech: t }, function () { msg = t ? 'Research recommended!' : 'Recommendation cleared!'; }); },
+    projectWork: function (kind, request) { call('tf_project_work', { p_kind: kind, p_request: request }, function (result) { finished('project', result); msg = 'Construction order delivered!'; }); },
     hallUpgrade: function () { call('tf_hall_upgrade', {}, function () { msg = 'The builders start on the Hall!'; }); },
     lendHand: function () { call('tf_lend_hand', {}, function () { msg = 'You lend a hand - the Hall rises faster!'; }); },
     requestHelp: function (label, total) { call('tf_request_help', { p_label: label, p_total: total | 0 }, function () { msg = 'Your guild has been asked for help!'; finished('asked', label); }); },
@@ -124,6 +125,7 @@
       if (my) { var u = me(); out.push('me=' + (u ? u.id : '') + '|' + myRank); out.push('motd=' + clean(motd)); }
       wars.forEach(function (w) { out.push('war=' + [w.id, clean(w.name), clean(w.tag), w.dir].join('|')); });
       if (hub) {
+        if (hub.project) out.push('project=' + [hub.project.timber,hub.project.ore,hub.project.tools,hub.project.contracts,hub.project.worked ? 1 : 0].join('|'));
         out.push('hall=' + [hub.hall, hub.funds, hub.cap, hub.build_left, hub.build_secs, hub.hands, hub.lent ? 1 : 0, clean(hub.rec)].join('|'));
         out.push('mine=' + [hub.merit, hub.charges, hub.next_charge, hub.contrib, hub.help_merit].join('|'));
         (hub.tech || []).forEach(function (t) { out.push('tech=' + [clean(t.t), t.l, t.p].join('|')); });

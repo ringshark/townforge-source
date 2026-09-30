@@ -6,3 +6,6 @@ townforge.js
 townforge.wasm
 townforge.data
 townforge_save.txt
+
+build-web/
+site/

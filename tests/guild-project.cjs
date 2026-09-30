@@ -1,0 +1,12 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs'); const vm = require('node:vm');
+const calls=[];
+const client={from:()=>{const q={select:()=>q,eq:()=>q,maybeSingle:()=>Promise.resolve({data:null})};return q;},rpc:async(fn,args)=>{calls.push({fn,args}); return {data:fn==='tf_standings'?[]:'timber'};}};
+const ctx={Date,TFCloud:{client:()=>client,user:()=>({id:'u'}),configured:true}};
+ctx.window=ctx;vm.createContext(ctx);vm.runInContext(fs.readFileSync('web/guildnet.js','utf8'),ctx);
+ctx.TFGuildNet.projectWork('timber','00000000-0000-0000-0000-000000000001');
+setImmediate(()=>{assert.equal(calls[0].fn,'tf_project_work');
+assert.equal(calls[0].args.p_kind,'timber');
+assert.equal(calls[0].args.p_request,'00000000-0000-0000-0000-000000000001');
+assert.ok(ctx.TFGuildNet.state().includes('done=1|project|timber'));
+console.log('PASS: construction request identity and accepted receipt');});

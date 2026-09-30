@@ -1,0 +1,41 @@
+name: Build Town Forge Web
+on:
+  push:
+    branches: [ringshark-patch-1]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: townforge-build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: '4.0.20'
+          actions-cache-folder: emsdk-cache
+      - name: Check guild client
+        run: |
+          node tests/guildnet-hub.cjs
+          node tests/guildnet-refresh.cjs
+          node tests/guild-project.cjs
+      - name: Build raylib 6.0
+        run: |
+          git clone --depth 1 --branch 6.0 https://github.com/raysan5/raylib.git /tmp/raylib
+          make -C /tmp/raylib/src PLATFORM=PLATFORM_WEB -j2
+      - name: Build game
+        run: RAYLIB_DIR=/tmp/raylib bash web/build_web.sh
+      - name: Package game
+        env:
+          TF_MP_URL: ${{ secrets.TF_MP_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: bash web/deploy_web.sh build-web site
+      - uses: actions/upload-artifact@v4
+        with:
+          name: townforge-web
+          path: site/
+          if-no-files-found: error

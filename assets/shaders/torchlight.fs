@@ -31,7 +31,6 @@ uniform vec4 ambient;          // dark cool ambient, set once at load
 uniform vec3 torchPos[8];
 uniform int torchCount;
 uniform float time;            // seconds, for the flame flicker
-uniform float cutOn;           // (2026-09-29) 1 while drawing the wall mesh
 
 void main()
 {

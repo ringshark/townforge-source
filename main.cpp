@@ -22679,7 +22679,6 @@ struct Dungeon3DTorch {
     bool tried = false;
     Shader shader{};
     int torchPosLoc = -1, torchCountLoc = -1, timeLoc = -1, ambientLoc = -1;
-    int cutInfoLoc = -1, cutOnLoc = -1; // (2026-09-29) UO-style wall cut-away
     Texture2D flameTex{};
 };
 static Dungeon3DTorch g_dung3dTorch;
@@ -22694,8 +22693,6 @@ static void Dungeon3DEnsureTorch() {
     T.torchCountLoc = GetShaderLocation(T.shader, "torchCount");
     T.timeLoc = GetShaderLocation(T.shader, "time");
     T.ambientLoc = GetShaderLocation(T.shader, "ambient");
-    T.cutInfoLoc = GetShaderLocation(T.shader, "cutInfo");
-    T.cutOnLoc = GetShaderLocation(T.shader, "cutOn");
     // Cool dark ambient - the torches do the work. Linear-space value since the
     // 2026-09-25 gamma fix in torchlight.fs (0.30 there read far brighter).
     // (2026-09-29) darker still, UO-style: pools of torchlight in the dark.
@@ -22819,7 +22816,12 @@ static void Dungeon3DEnsureGround(int dungeonIdx) {
                 int col = (int)floorf(sx / stoneW);
                 float fx = sx - col * stoneW;
                 float sh = 0.84f + 0.24f * hsh(row, col) + 0.06f * (hsh(x, y) - 0.5f);
-                if (fz < joint || fx < joint) sh = 0.42f;
+                float edge = std::min(std::min(fx, stoneW - fx), std::min(fz, rowH - fz));
+                if (hsh(row + 23, col) < 0.16f && fabsf(fx - stoneW * 0.48f - fz * 0.3f) < 0.8f) sh *= 0.56f;
+                bool nearWall = gx == 0 || gz == 0 || gx == GN - 1 || gz == GN - 1;
+                if (!nearWall) nearWall = !fl[gz * GN + gx - 1] || !fl[gz * GN + gx + 1] || !fl[(gz - 1) * GN + gx] || !fl[(gz + 1) * GN + gx];
+                if (nearWall) sh *= 0.78f + 0.14f * std::min(1.0f, edge / 8.0f);
+                if (fz < joint || fx < joint) sh = 0.32f;
                 else if (fz < joint * 2.2f || fx < joint * 2.2f) sh *= 1.1f; // a light bevel on each stone's edge
                 px[y * SZ + x] = { (unsigned char)std::min(255.0f, ft.r * sh), (unsigned char)std::min(255.0f, ft.g * sh),
                                    (unsigned char)std::min(255.0f, ft.b * sh), 255 };
@@ -22954,7 +22956,7 @@ static void Dungeon3DBuildWalls(int dungeonIdx) {
             static const Color kTint[6] = { { 196, 204, 222, 255 }, { 200, 186, 190, 255 }, { 186, 204, 208, 255 },
                                             { 214, 170, 150, 255 }, { 214, 228, 248, 255 }, { 170, 164, 186, 255 } };
             Color t = kTint[(size_t)std::clamp(dungeonIdx, 0, 5)];
-            float k = v.ny > 0.5f ? 1.08f : 1.0f; // tops a touch lighter, like worn capstones
+            float k = v.ny > 0.5f ? 0.88f : (v.y < 1.0f ? 0.64f : 1.0f); // tops a touch lighter, like worn capstones
             mesh.colors[i * 4] = (unsigned char)std::min(255.0f, t.r * k); mesh.colors[i * 4 + 1] = (unsigned char)std::min(255.0f, t.g * k);
             mesh.colors[i * 4 + 2] = (unsigned char)std::min(255.0f, t.b * k);
         }
@@ -22971,11 +22973,13 @@ static void Dungeon3DBuildWalls(int dungeonIdx) {
             for (int col = -1; col < 5; col++) {
                 int x0 = col * 32 + off, y0 = row * 16;
                 float h = Town3DHash01((float)(col * 7 + row * 13), 3.0f);
-                unsigned char g = (unsigned char)(150 + 38 * h);
+                unsigned char g = (unsigned char)(136 + 44 * h);
                 for (int y = y0 + 1; y < y0 + 15; y++)
                     for (int x = x0 + 1; x < x0 + 31; x++) {
                         if (x < 0 || x >= B) continue;
-                        float n = Town3DHash01((float)x, (float)y) * 14.0f - 7.0f;
+                        float n = Town3DHash01((float)x, (float)y) * 10.0f - 5.0f;
+                        if (y == y0 + 1 || x == x0 + 1) n += 14.0f;
+                        if (y == y0 + 14 || x == x0 + 30) n -= 18.0f;
                         unsigned char c = (unsigned char)std::clamp(g + n, 0.0f, 255.0f);
                         ImageDrawPixel(&im, x, y, Color{ c, c, (unsigned char)std::min(255, c + 3), 255 });
                     }
@@ -23413,25 +23417,14 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         for (int i = 0; i < torchCount && lit < kDung3DMaxTorches; i++) tpos[lit++] = { torchSpots[order[i]].x, 62.0f, torchSpots[order[i]].z };
         SetShaderValueV(g_dung3dTorch.shader, g_dung3dTorch.torchPosLoc, tpos, SHADER_UNIFORM_VEC3, lit);
         SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.torchCountLoc, &lit, SHADER_UNIFORM_INT);
-        { // the cut-away: walls between the camera and you sink to stumps
-            Vector2 d = { c.pos.x - s.dungeonPlayerPos.x, c.pos.z - s.dungeonPlayerPos.y };
-            float L = std::max(1.0f, sqrtf(d.x * d.x + d.y * d.y));
-            float ci[4] = { s.dungeonPlayerPos.x, s.dungeonPlayerPos.y, d.x / L, d.y / L };
-            SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.cutInfoLoc, ci, SHADER_UNIFORM_VEC4);
-            float off = 0.0f;
-            SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.cutOnLoc, &off, SHADER_UNIFORM_FLOAT);
-        }
         float t = (float)GetTime();
         SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.timeLoc, &t, SHADER_UNIFORM_FLOAT);
         rlEnableShader(g_dung3dTorch.shader.id);
     }
     DrawModel(g_dung3dGround.model, { 900, 0, 900 }, 1.0f, WHITE);
-    if (g_dung3dWalls.loaded) {
-        float on = 1.0f, off = 0.0f; // (2026-09-29) the cut-away and dark tops apply to the wall mesh only
-        if (torchOn) SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.cutOnLoc, &on, SHADER_UNIFORM_FLOAT);
+    // Walls retain their full silhouette and naturally occlude actors.
+    if (g_dung3dWalls.loaded)
         DrawModel(g_dung3dWalls.model, { 0, 0, 0 }, 1.0f, WHITE);
-        if (torchOn) SetShaderValue(g_dung3dTorch.shader, g_dung3dTorch.cutOnLoc, &off, SHADER_UNIFORM_FLOAT);
-    }
     Dungeon3DDrawProps(); // KayKit wall dressing, same torch lighting as the walls
     // Phase 3 creatures use the same torch shader as the dungeon geometry
     // (falling back to the default shader when torch lighting is off).
@@ -35042,7 +35035,11 @@ EM_JS(void, JS_GuildNetOpenGifts, (), { if (window.TFGuildNet && TFGuildNet.open
 EM_JS(void, JS_GuildNetSubmit, (const char* week, int day, int pts, const char* ch, int power), {
     if (window.TFGuildNet) TFGuildNet.submit(UTF8ToString(week), day, pts, UTF8ToString(ch), power);
 });
+EM_JS(void, JS_GuildProjectWork, (const char* kind), {
+    if (window.TFGuildNet) TFGuildNet.projectWork(UTF8ToString(kind), crypto.randomUUID());
+});
 #else
+static void JS_GuildProjectWork(const char*) {}
 static int JS_GuildNetState(char*, int) { return 0; }
 static void JS_GuildNetRefresh(const char*) {}
 static void JS_GuildNetCreate(const char*, const char*, const char*, int) {}
@@ -35077,6 +35074,7 @@ static struct {
     std::vector<GuildNetMember> roster;
     std::vector<GuildNetWar> wars;
     // Guild Hall (2026-09-29)
+    bool projectReady = false, projectWorked = false; int project[4] = {};
     bool hub = false;
     int hall = 1, cap = 30, buildLeft = -1, buildSecs = 0, hands = 0; long long funds = 0; bool lent = false; std::string rec;
     int merit = 0, charges = 0, nextCharge = 0, contrib = 0, helpMerit = 0;
@@ -35099,6 +35097,7 @@ static void GuildNetPoll() {
     g_gnet.guilds.clear(); g_gnet.roster.clear(); g_gnet.wars.clear(); g_gnet.myId.clear(); g_gnet.myName.clear(); g_gnet.myTag.clear();
     g_gnet.myUid.clear(); g_gnet.motd.clear(); g_gnet.myRank = 0;
     bool hadHub = false;
+    g_gnet.projectReady = false; g_gnet.projectWorked = false;
     g_gnet.helps.clear(); g_gnet.gifts.clear(); g_gnet.board.clear();
     int techLv[kGtCount] = {}, techPr[kGtCount] = {};
     std::string all(buf);
@@ -35142,6 +35141,11 @@ static void GuildNetPoll() {
         }
         else if (k == "gift" && p.size() >= 3) g_gnet.gifts.push_back({ std::atoi(p[1].c_str()), p[2] });
         else if (k == "board" && p.size() >= 2) g_gnet.board.push_back({ p[0], std::atoi(p[1].c_str()) });
+        else if (k == "project" && p.size() >= 5) {
+            g_gnet.projectReady = true;
+            for (int j=0;j<4;j++) g_gnet.project[j] = std::atoi(p[j].c_str());
+            g_gnet.projectWorked = p[4] == "1";
+        }
         else if (k == "done" && p.size() >= 2) { g_gnet.doneSeq = std::atoi(p[0].c_str()); g_gnet.doneAct = p[1]; g_gnet.doneRes = p.size() >= 3 ? p[2] : ""; }
     }
     g_gnet.hub = hadHub && !g_gnet.myId.empty();
@@ -35293,6 +35297,24 @@ static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangl
     bool officer = g_gnet.myRank >= 1;
     float since = (float)(GetTime() - g_gnet.hubAt);
     if (g_guildTab == 1) { // ---- Hall ----
+        if (g_gnet.hall == 1) {
+            DrawUIText("Stage One: Guild Hall foundation", (int)x, (int)y, 17, gold); y += 26;
+            DrawUIText("Daily construction orders supply the shared project. One order per member per day.", (int)x, (int)y, 11, soft); y += 18;
+            DrawUIText("Prototype supplies: orders do not spend your personal inventory.", (int)x, (int)y, 11, soft); y += 22;
+            static const char* ids[4] = {"timber","ore","tools","contracts"};
+            static const char* names[4] = {"Timber loads","Ore loads","Crafted tool sets","Supply contracts"};
+            static const int need[4] = {20,12,8,3};
+            if (!g_gnet.projectReady) { DrawUIText("Construction migration required on the server.", (int)x, (int)y, 12, bad); y += 22; }
+            else for (int j=0;j<4;j++) {
+                DrawUIText(TextFormat("%s: %d / %d", names[j], g_gnet.project[j], need[j]), (int)x, (int)y, 13, ink);
+                Rectangle order = {x + w - 136,y-4,132,28};
+                if (UOButton(order,"Deliver order",!g_gnet.busy && !g_gnet.projectWorked && g_gnet.buildLeft < 0 && g_gnet.project[j] < need[j]) && vis(order)) JS_GuildProjectWork(ids[j]);
+                y += 34; bar(x,y,w,(float)g_gnet.project[j]/need[j],good); y += 20;
+            }
+            DrawUIText("Finish all orders, then an officer starts the 1-hour build. Completion opens Workshop and Storehouse.", (int)x, (int)y, 11, soft); y += 24;
+        } else {
+            DrawUIText("Workshop and Storehouse open: research orders and the guild quartermaster are available.", (int)x, (int)y, 12, good); y += 26;
+        }
         DrawUIText(TextFormat("Guild Hall  -  level %d", g_gnet.hall), (int)x, (int)y, 18, gold); y += 26;
         DrawUIText(TextFormat("Funds %lld   Members %d/%d   Your merit %d", g_gnet.funds, (int)g_gnet.roster.size(), g_gnet.cap, g_gnet.merit), (int)x, (int)y, 13, ink); y += 20;
         DrawUIText("Funds grow with every research donation. Officers spend them to raise the Hall.", (int)x, (int)y, 11, soft); y += 22;
@@ -35306,11 +35328,11 @@ static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangl
             DrawUIText("Each member's hand cuts 5% of the build.", (int)(x + 212), (int)y + 10, 11, soft);
             y += 44;
         } else if (g_gnet.hall < 10) {
-            long long cost = 200LL * g_gnet.hall * g_gnet.hall;
+            long long cost = g_gnet.hall == 1 ? 0 : 200LL * g_gnet.hall * g_gnet.hall;
             DrawUIText(TextFormat("Next level: %lld funds, %d hour%s to build.", cost, g_gnet.hall, g_gnet.hall == 1 ? "" : "s"), (int)x, (int)y, 13, ink); y += 20;
             if (officer) {
                 Rectangle ub = { x, y, 200, 34 };
-                if (UOButton(ub, "Upgrade the Hall", !g_gnet.busy && g_gnet.funds >= cost) && vis(ub)) JS_GuildNetHallUpgrade();
+                if (UOButton(ub, "Upgrade the Hall", !g_gnet.busy && g_gnet.funds >= cost && (g_gnet.hall > 1 || (g_gnet.projectReady && g_gnet.project[0] >= 20 && g_gnet.project[1] >= 12 && g_gnet.project[2] >= 8 && g_gnet.project[3] >= 3))) && vis(ub)) JS_GuildNetHallUpgrade();
                 if (g_gnet.funds < cost) DrawUIText(TextFormat("needs %lld more funds", cost - g_gnet.funds), (int)(x + 212), (int)y + 10, 11, bad);
                 y += 44;
             } else { DrawUIText("Officers start Hall upgrades - everyone can lend a hand.", (int)x, (int)y, 11, soft); y += 20; }
@@ -35336,7 +35358,8 @@ static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangl
         DrawUIText("This week's contributors", (int)x, (int)y, 15, ink); y += 22;
         int rank = 0;
         for (const auto& b : g_gnet.board) {
-            DrawUIText(TextFormat("%d. %s", ++rank, b.first.c_str()), (int)x + 6, (int)y, 13, rank <= 3 ? gold : ink);
+            ++rank;
+            DrawUIText(TextFormat("%d. %s", rank, b.first.c_str()), (int)x + 6, (int)y, 13, rank <= 3 ? gold : ink);
             const char* v = TextFormat("%d", b.second);
             DrawUIText(v, (int)(x + w - 6 - MeasureUIText(v, 13)), (int)y, 13, ink);
             y += 18;

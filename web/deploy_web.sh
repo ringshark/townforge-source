@@ -1,12 +1,13 @@
 #!/bin/bash
 # usage: web/deploy_web.sh <build dir with index.html/townforge.*> <site dir>
-set -e
-src=$1; dst=$2; here=$(cd "$(dirname "$0")" && pwd)
+set -euo pipefail
+src=${1:?build directory required}; dst=${2:?site directory required}; here=$(cd "$(dirname "$0")" && pwd)
+mkdir -p "$dst"
 cp "$src"/index.html "$src"/townforge.js "$src"/townforge.wasm "$src"/townforge.data "$dst"/
 cp "$here"/manifest.webmanifest "$here"/cloud.js "$here"/guildnet.js "$here"/mpnet.js "$dst"/
 # Multiplayer (2026-09-29): the zone server's address from TF_MP_URL (wss://...workers.dev).
-if [ -n "$TF_MP_URL" ]; then
-  printf "window.TF_MP_URL = '%s';\n" "$TF_MP_URL" > "$dst"/mp-config.js
+if [ -n "${TF_MP_URL:-}" ]; then
+  printf "window.TF_MP_URL = '%s';\n" "${TF_MP_URL:-}" > "$dst"/mp-config.js
   echo "multiplayer: ON ($TF_MP_URL)"
 elif [ -f "$dst"/mp-config.js ] && grep -q "wss://" "$dst"/mp-config.js; then
   echo "multiplayer: ON (kept the site's existing mp-config.js)"
@@ -16,8 +17,8 @@ else
 fi
 # Cloud saves: configured from the environment (never committed). The anon key is
 # Supabase's public browser key - row-level security is what protects the saves.
-if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_ANON_KEY" ]; then
-  printf 'window.TF_CLOUD = { url: "%s", key: "%s" };\n' "$SUPABASE_URL" "$SUPABASE_ANON_KEY" > "$dst"/cloud-config.js
+if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_ANON_KEY:-}" ]; then
+  printf 'window.TF_CLOUD = { url: "%s", key: "%s" };\n' "${SUPABASE_URL:-}" "${SUPABASE_ANON_KEY:-}" > "$dst"/cloud-config.js
   echo "cloud saves: ON"
 elif [ -f "$dst"/cloud-config.js ] && grep -q 'url:' "$dst"/cloud-config.js; then
   echo "cloud saves: ON (kept the site's existing cloud-config.js)"
