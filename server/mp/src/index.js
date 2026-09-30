@@ -18,6 +18,7 @@
 //     {t:"full"}                              the zone is full (then closed)
 //   P = {id, name, look, x, z, yaw, mv}
 import { DurableObject } from "cloudflare:workers";
+import { verifyLadderAccount } from "./ladder-auth.js";
 import { DenEngine } from "./den-engine.js";
 
 const MAX_PLAYERS = 60;       // per zone
@@ -100,9 +101,10 @@ export class Zone extends DurableObject {
   }
 
   async webSocketMessage(ws, raw) {
-    if (typeof raw !== "string" || raw.length > 1024 || !this.allow(ws)) return;
+    if (typeof raw !== "string" || raw.length > 16384 || !this.allow(ws)) return;
     let m;
     try { m = JSON.parse(raw); } catch (e) { return; }
+    if(raw.length>1024 && !["den_auth","den_ladder"].includes(m?.t))return;
     const a = ws.deserializeAttachment();
     if (!a || !m || typeof m.t !== "string") return;
     a.lastSeen=Date.now();ws.serializeAttachment(a);
@@ -138,9 +140,18 @@ export class Zone extends DurableObject {
     }
     if (!a.hello) return;
     if(a.den && m.t.startsWith("den_")) {
-      this.denPeers();let placement,applied=false;
+      let placement,applied=false;
       try {
-        if(m.t==="den_practice") placement=this.den.practice(a.id);
+        if(m.t==="den_auth" || m.t==="den_ladder") {
+          const account=m.accessToken ? await verifyLadderAccount(this.env,m.accessToken):null;
+          if(m.t==="den_ladder" && !account)throw Error('Sign in with Cloud save for the ladder.');
+          const fresh=ws.deserializeAttachment();if(!fresh?.hello)throw Error('Reconnect before entering the ladder.');
+          fresh.account=account;ws.serializeAttachment(fresh);Object.assign(a,fresh);
+        }
+        this.denPeers();
+        if(m.t==="den_ladder")placement=this.den.practice(a.id,true);
+        else if(m.t==="den_auth") {}
+        else if(m.t==="den_practice") placement=this.den.practice(a.id);
         else if(m.t==="den_challenge") this.den.challenge(a.id,String(m.target),m.stake);
         else if(m.t==="den_answer") placement=this.den.answer(a.id,String(m.offer),m.accept===true);
         else if(m.t==="den_fight") this.den.fight(a.id,String(m.action));

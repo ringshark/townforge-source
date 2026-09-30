@@ -14763,11 +14763,16 @@ static int JS_MpState(char*, int) { return 0; }
 #endif
 struct DenOffer {std::string id,a,b,nameA,nameB;int stake=0;float left=0;};
 static struct {
-    bool ready=false,pending=false;int gold=0,sequence=0;
+    bool ready=false,pending=false,ranked=false;int gold=0,sequence=0;
     std::string message,id,a,b,nameA,nameB;int hpA=100,hpB=100,staminaA=100,staminaB=100,stake=0;
     float countdown=0,left=0,swingA=99,swingB=99;bool guardA=false,guardB=false;
     std::vector<DenOffer> offers;std::vector<std::string> results;
 } g_den;
+struct DenLadderStage {std::string name,style;int hp=100;};
+static struct DenLadderState {
+    bool ready=false,verified=false;int cleared=0,wins=0,losses=0;float reset=0;
+    std::string title;std::vector<DenLadderStage> stages;std::vector<std::string> leaders;
+} g_ladder;
 static int g_denPanel=0,g_denStake=0,g_denFace=1,g_denCasinoStake=10;
 static bool DenFighting();
 #ifdef __EMSCRIPTEN__
@@ -14839,13 +14844,19 @@ static void MpTick(GameState& s) {
     std::vector<std::string> lines, f;
     MpSplit(std::string(buf, (size_t)std::min(n, (int)sizeof(buf) - 1)), '\n', lines);
     for (auto& p : g_mp) p.seen = false;
-    std::string previousDuel=g_den.id;g_den.ready=false;g_den.id.clear();g_den.offers.clear();g_den.results.clear();
+    bool previousRanked=g_den.ranked;std::string previousDuel=g_den.id;g_den.ranked=false;g_ladder=DenLadderState{};g_den.ready=false;g_den.id.clear();g_den.offers.clear();g_den.results.clear();
     for (const std::string& ln : lines) {
         if (ln.rfind("st=", 0) == 0) {
             MpSplit(ln.substr(3), '|', f);
             if (f.size() >= 3) { g_mpStatus = std::atoi(f[0].c_str()); g_mpCount = std::atoi(f[1].c_str()); g_mpMyId = f[2]; }
         } else if(ln.rfind("den=",0)==0) {
             MpSplit(ln.substr(4),'|',f);if(f.size()>=5) {g_den.ready=f[0]=="1";g_den.gold=std::atoi(f[1].c_str());g_den.sequence=std::atoi(f[2].c_str());g_den.message=f[3];g_den.pending=f[4]=="1";}
+        } else if(ln.rfind("ladder=",0)==0) {
+            MpSplit(ln.substr(7),'|',f);if(f.size()>=7){g_ladder.ready=f[0]=="1";g_ladder.verified=f[1]=="1";g_ladder.cleared=std::atoi(f[2].c_str());g_ladder.reset=std::atof(f[3].c_str());g_ladder.title=f[4];g_ladder.wins=std::atoi(f[5].c_str());g_ladder.losses=std::atoi(f[6].c_str());}
+        } else if(ln.rfind("ladderstage=",0)==0) {
+            MpSplit(ln.substr(12),'|',f);if(f.size()>=4)g_ladder.stages.push_back({f[1],f[2],std::atoi(f[3].c_str())});
+        } else if(ln.rfind("ladderleader=",0)==0) {
+            MpSplit(ln.substr(13),'|',f);if(f.size()>=3)g_ladder.leaders.push_back(f[0]+" / stage "+f[1]+" / "+f[2]+"s");
         } else if(ln.rfind("denpos=",0)==0) {
             MpSplit(ln.substr(7),'|',f);static int serial=-1;
             if(f.size()>=3 && serial!=std::atoi(f[0].c_str())) {serial=std::atoi(f[0].c_str());s.townPlayerPos={(float)std::atof(f[1].c_str()),(float)std::atof(f[2].c_str())};WalkTargetClear();}
@@ -14855,7 +14866,7 @@ static void MpTick(GameState& s) {
             MpSplit(ln.substr(5),'|',f);if(f.size()>=16) {
                 g_den.id=f[0];g_den.a=f[1];g_den.b=f[2];g_den.nameA=f[3];g_den.nameB=f[4];
                 g_den.hpA=std::atoi(f[5].c_str());g_den.hpB=std::atoi(f[6].c_str());g_den.staminaA=std::atoi(f[7].c_str());g_den.staminaB=std::atoi(f[8].c_str());
-                g_den.countdown=std::atof(f[9].c_str());g_den.left=std::atof(f[10].c_str());g_den.stake=std::atoi(f[11].c_str());g_den.guardA=f[12]=="1";g_den.guardB=f[13]=="1";g_den.swingA=std::atof(f[14].c_str());g_den.swingB=std::atof(f[15].c_str());
+                g_den.countdown=std::atof(f[9].c_str());g_den.left=std::atof(f[10].c_str());g_den.stake=std::atoi(f[11].c_str());g_den.guardA=f[12]=="1";g_den.guardB=f[13]=="1";g_den.swingA=std::atof(f[14].c_str());g_den.swingB=std::atof(f[15].c_str());g_den.ranked=f.size()>16 && f[16]=="1";
             }
         } else if(ln.rfind("denresult=",0)==0) {
             MpSplit(ln.substr(10),'|',f);if(f.size()>=4) g_den.results.push_back(f[1]+": "+f[2]+" / stake "+f[3]);
@@ -14884,6 +14895,7 @@ static void MpTick(GameState& s) {
         }
     }
     if(DenFighting() && g_den.id!=previousDuel) {s.screen=Screen::Blackwake;s.exploreMenuOpen=false;g_denPanel=0;WalkTargetClear();}
+    if(previousRanked && !previousDuel.empty() && g_den.id.empty() && s.screen==Screen::Blackwake && !s.exploreMenuOpen)g_denPanel=5;
     if(s.screen==Screen::Blackwake && !g_den.offers.empty() && g_denPanel==0) g_denPanel=1;
     g_mp.erase(std::remove_if(g_mp.begin(), g_mp.end(), [](const MpPlayer& p) { return !p.seen; }), g_mp.end());
     for (auto& p : g_mp) { // glide toward the last reported spot; jump if they teleported
@@ -37337,6 +37349,10 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
         Vector2 at=GetWorldToScreenEx({p.pos.x,88,p.pos.y},cam,540,790);at.y+=view.y;
         if(at.y>210 && at.y<720) {DrawUIText(p.name.c_str(),(int)at.x-MeasureUIText(p.name.c_str(),12)/2,(int)at.y,12,kUoGoldText);}
     }
+    if(!g_ladder.title.empty()) {
+        Vector2 badge=GetWorldToScreenEx({s.townPlayerPos.x,104,s.townPlayerPos.y},cam,540,790);badge.y+=view.y;
+        DrawUIText(g_ladder.title.c_str(),(int)badge.x-MeasureUIText(g_ladder.title.c_str(),12)/2,(int)badge.y,12,kUoGoldText);
+    }
     if(!s.exploreMenuOpen && !g_denPanel) {
         DrawVirtualJoystick();
         if(!fighting) {
@@ -37371,7 +37387,7 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
     }
     if(g_denPanel && !s.exploreMenuOpen) {
         Rectangle panel={20,212,500,490};UODrawGump(panel,kUoParchment);UIRegister(panel);
-        UODrawTitle(panel,g_denPanel==1 ? "Dueling Pit":g_denPanel==2 ? "The Loaded Die":"Blackwake Harbor",16);
+        UODrawTitle(panel,g_denPanel==1 ? "Dueling Pit":g_denPanel==2 ? "The Loaded Die":g_denPanel==5 ? "Weekly NPC Ladder":"Blackwake Harbor",16);
         if(UOCloseButton(panel) || IsKeyPressed(KEY_ESCAPE)) g_denPanel=0;
         const Color ink={45,27,15,255};float y=panel.y+38;
         if(g_denPanel==1) {
@@ -37381,7 +37397,8 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
             for(int i=0;i<4;++i) if(MenuGroupTab({40+i*116.0f,y,108,44},i==0 ? "Practice":TextFormat("%d gold",stakes[i]),g_denStake==stakes[i],g_den.ready)) g_denStake=stakes[i];
             y+=56;
             if(g_den.id.empty() && g_den.offers.empty()) {
-                if(Button({40,y,460,48},"Practice with Captain Vale (NPC)",g_den.ready && Dist(s.townPlayerPos,{750,750})<=350)) JS_DenAction("practice","",0);
+                if(Button({40,y,220,48},"NPC practice",g_den.ready && Dist(s.townPlayerPos,{750,750})<=350)) JS_DenAction("practice","",0);
+                if(Button({280,y,220,48},"Weekly NPC ladder",g_den.ready)) g_denPanel=5;
                 y+=58;
             }
             if(!g_den.ready) DrawUIText("The multiplayer server must be updated to enable duels.",40,(int)y,13,ink);
@@ -37404,6 +37421,30 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
                 }
                 UIEndScissorMode();
             }
+        } else if(g_denPanel==5) {
+            DrawUIText("5 stages / free retries / no gear loss",40,(int)y,14,ink);y+=24;
+            DrawUIText(TextFormat("Cleared %d/5 / wins %d / losses %d",g_ladder.cleared,g_ladder.wins,g_ladder.losses),40,(int)y,13,ink);y+=22;
+            int hours=std::max(0,(int)(g_ladder.reset/3600));
+            DrawUIText(TextFormat("Resets in %dd %dh / Monday 00:00 UTC",hours/24,hours%24),40,(int)y,12,ink);y+=26;
+            for(size_t i=0;i<g_ladder.stages.size() && i<5;++i) {
+                const auto& stage=g_ladder.stages[i];
+                DrawUIText(TextFormat("%d. %s",(int)i+1,stage.name.c_str()),40,(int)y,14,ink);
+                DrawUIText(i<(size_t)g_ladder.cleared ? "Cleared":i==(size_t)g_ladder.cleared ? "Next":"Locked",432,(int)y,12,ink);
+                DrawUIText(TextFormat("%s / %d HP",stage.style.c_str(),stage.hp),52,(int)y+18,12,Fade(ink,.8f));y+=40;
+            }
+            if(!g_ladder.ready) {DrawUIText("Waiting for ladder server support.",40,(int)y,13,ink);y+=30;}
+            else if(!g_ladder.verified) {
+                if(Button({40,y,460,44},"Cloud sign-in for ranked ladder",true)) JS_CloudOpen();y+=52;
+            } else if(g_ladder.cleared>=5) {
+                DrawUIText("Week complete! Free practice is always available.",40,(int)y,13,ink);y+=34;
+            } else {
+                bool can=g_den.id.empty() && g_den.offers.empty() && Dist(s.townPlayerPos,{750,750})<=350;
+                if(Button({40,y,460,44},can ? TextFormat("Fight stage %d",g_ladder.cleared+1):"Return to the empty pit to fight",can)) JS_DenAction("ladder","",0);y+=52;
+            }
+            DrawUIText(g_ladder.title.empty() ? "Titles: clear stage 3, then become champion at stage 5.":TextFormat("Unlocked title: %s",g_ladder.title.c_str()),40,(int)y,12,ink);y+=24;
+            DrawUIText("This week's leaders / stage, then fastest clear time",40,(int)y,12,ink);y+=20;
+            if(g_ladder.leaders.empty()) DrawUIText("No stages cleared yet. Be the first!",40,(int)y,12,ink);
+            for(size_t i=0;i<g_ladder.leaders.size() && i<3;++i) {DrawUIText(g_ladder.leaders[i].c_str(),40,(int)y,12,ink);y+=18;}
         } else if(g_denPanel==2) {
             DrawUIText(TextFormat("Purse: %d test gold / server-owned dice",g_den.gold),40,(int)y,15,ink);y+=30;
             DrawUIText("Pick one face. A match returns 5 times the stake.",40,(int)y,13,ink);y+=22;

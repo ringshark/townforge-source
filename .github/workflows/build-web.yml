@@ -32,6 +32,7 @@ jobs:
           python tests/ui-input.py
           python tests/menu-status.py
           node server/mp/test/den.mjs
+          node server/mp/test/ladder.mjs
           node tests/den-client.cjs
       - name: Build raylib 6.0
         run: |

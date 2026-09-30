@@ -11,7 +11,7 @@
   var players = {}, chats = [], retryMs = 1000, retryT = null;
   var last = { x: NaN, z: NaN, yaw: 0, mv: 0 }, lastSent = 0;
 
-  var den={version:0,gold:0,offers:[],duel:null,results:[],rollSeq:0},denText='',denPos=null,denSerial=0,recovered=false;
+  var den={version:0,gold:0,offers:[],duel:null,results:[],rollSeq:0},denText='',denPos=null,denSerial=0,recovered=false,authUser=null,authBusy=false;
   function denToken() {
     var token=localStorage.getItem('tf-den-purse');
     if(!/^[a-f0-9]{64}$/.test(token||'')) {token=Array.from(crypto.getRandomValues(new Uint8Array(32)),n=>n.toString(16).padStart(2,'0')).join('');localStorage.setItem('tf-den-purse',token);}
@@ -22,6 +22,19 @@
   function clean(s) { return String(s == null ? '' : s).replace(/[|\r\n]/g, ' '); }
   function send(o) { if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify(o)); } catch (e) {} } }
 
+  function accountAction(kind) {
+    if(authBusy)return;
+    var client=window.TFCloud && TFCloud.client(),socket=ws;
+    if(!client) {if(kind==='den_ladder')denText='Sign in using Cloud save for the weekly ladder.';return;}
+    authBusy=true;
+    client.auth.getSession().then(function(r) {
+      if(ws!==socket || zone!=='den')return;
+      var session=r.data && r.data.session;
+      if(kind==='den_ladder' && !session){denText='Sign in using Cloud save for the weekly ladder.';return;}
+      authUser=session ? session.user.id:'';
+      send({t:kind,accessToken:session ? session.access_token:null});
+    }).catch(function(){denText='Cloud sign-in could not be checked. Try again.';authUser=null;}).finally(function(){authBusy=false;});
+  }
   function close() {
     if (retryT) { clearTimeout(retryT); retryT = null; }
     if (ws) { var w = ws; ws = null; w.onclose = null; try { w.close(); } catch (e) {} }
@@ -30,7 +43,7 @@
   function connect() {
     close();
     if (!url() || !wantZone) return;
-    zone = wantZone; status = 1;den={version:0,gold:0,offers:[],duel:null,results:[],rollSeq:0};recovered=false;denPos=null;denText='';
+    zone = wantZone; status = 1;den={version:0,gold:0,offers:[],duel:null,results:[],rollSeq:0};recovered=false;authUser=null;authBusy=false;denPos=null;denText='';
     var sock;
     try { sock = new WebSocket(url() + '/zone/' + encodeURIComponent(zone)); } catch (e) { schedule(); return; }
     ws = sock;
@@ -50,7 +63,7 @@
       else if(m.t==='den_state') {
         var before=den.duel;den=m;
         if(before && !m.duel) {var result=(m.results||[]).find(r=>r.id===before.id);if(result) denText=result.name+' / '+result.reason+' / purse '+m.gold+' test gold';}
-        if(!recovered) {recovered=true;var p=pendingRoll();if(p) send(p);}
+        if(!recovered) {recovered=true;var p=pendingRoll();if(p) send(p);accountAction('den_auth');}
       }
       else if(m.t==='den_pos') {denPos={serial:++denSerial,x:m.x,z:m.z};}
       else if(m.t==='den_roll') {
@@ -79,6 +92,10 @@
       if (z !== wantZone) { wantZone = z; if (z) connect(); else close(); }
       else if (newLook !== look && ws && ws.readyState === 1) { look = newLook; send({ t: 'hello', name: name, look: look }); }
       look = newLook;
+      if(zone==='den' && den.version===1 && window.TFCloud) {
+        var user=TFCloud.user(),id=user ? user.id:'';
+        if(id!==authUser)accountAction('den_auth');
+      }
     },
     // Called every frame; sends ~5 times a second while moving, and a heartbeat every 5 s.
     pos: function (x, z, yaw, mv) {
@@ -93,7 +110,8 @@
     denAction:function(action,target,value) {
       if(status!==2 || den.version!==1) {denText='The Den server needs its combat update before you can play.';return;}
       denText='';
-      if(action==='practice') send({t:'den_practice'});
+      if(action==='ladder')accountAction('den_ladder');
+      else if(action==='practice') send({t:'den_practice'});
       else if(action==='challenge') send({t:'den_challenge',target:target,stake:value});
       else if(action==='accept' || action==='decline') send({t:'den_answer',offer:target,accept:action==='accept'});
       else if(action==='strike' || action==='lunge' || action==='guard' || action==='surrender') send({t:'den_fight',action:action});
@@ -113,12 +131,19 @@
       chats.forEach(function (c) { out.push('c=' + clean(c.id) + '|' + clean(c.name) + '|' + clean(c.text)); });
       chats = [];
       if(zone==='den') {
-        var now=Date.now();out.push('den='+[den.version,den.gold,den.rollSeq,clean(denText),pendingRoll() ? 1:0].join('|'));
+        var now=Date.now();
+        var ladder=den.ladder;
+        if(ladder && ladder.version===1) {
+          out.push('ladder='+[1,ladder.verified ? 1:0,ladder.cleared,Math.max(0,(ladder.resetAt-now)/1000),clean(ladder.title),ladder.wins,ladder.losses].join('|'));
+          (ladder.stages||[]).forEach((s,i)=>out.push('ladderstage='+[i+1,clean(s.name),clean(s.style),s.hp].join('|')));
+          (ladder.leaders||[]).forEach(s=>out.push('ladderleader='+[clean(s.name),s.cleared,Math.round(s.clearMs/1000)].join('|')));
+        }
+        out.push('den='+[den.version,den.gold,den.rollSeq,clean(denText),pendingRoll() ? 1:0].join('|'));
         if(denPos) out.push('denpos='+[denPos.serial,denPos.x,denPos.z].join('|'));
         (den.offers||[]).forEach(o=>out.push('offer='+[o.id,o.a,o.b,clean(o.nameA),clean(o.nameB),o.stake,Math.max(0,(o.expires-now)/1000)].join('|')));
         var d=den.duel;
         if(d && d.npc) {var bot=d.npc;out.push('p='+[bot.id,clean(bot.name),'hero,2,2,-1,0,0',bot.x,bot.z,bot.yaw,1].join('|'));}
-        if(d) out.push('duel='+[d.id,d.a,d.b,clean(d.nameA),clean(d.nameB),d.hpA,d.hpB,Math.round(d.staminaA),Math.round(d.staminaB),Math.max(0,(d.starts-now)/1000),Math.max(0,(d.ends-now)/1000),d.stake,d.guardA>now ? 1:0,d.guardB>now ? 1:0,(now-d.swingA)/1000,(now-d.swingB)/1000].join('|'));
+        if(d) out.push('duel='+[d.id,d.a,d.b,clean(d.nameA),clean(d.nameB),d.hpA,d.hpB,Math.round(d.staminaA),Math.round(d.staminaB),Math.max(0,(d.starts-now)/1000),Math.max(0,(d.ends-now)/1000),d.stake,d.guardA>now ? 1:0,d.guardB>now ? 1:0,(now-d.swingA)/1000,(now-d.swingB)/1000,d.npc && d.npc.stage>0 ? 1:0].join('|'));
         (den.results||[]).forEach(r=>out.push('denresult='+[r.id,clean(r.name),clean(r.reason),r.stake].join('|')));
       }
       return 'st=' + status + '|' + (status === 2 ? n : 0) + '|' + clean(myId) + '|' + clean(zone) + '\n' + out.join('\n');

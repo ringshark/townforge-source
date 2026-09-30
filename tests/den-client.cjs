@@ -20,3 +20,13 @@ const stale=sockets[0];stale.message({t:'welcome',id:'stale',players:[{id:'ghost
 ws.message({t:'join',p:{id:'a2',name:'Alice'}});assert.ok(!client.state().includes('p=a2|'));
 client.denAction('practice','',0);assert.equal(ws.sent.at(-1).t,'den_practice');
 console.log('PASS obsolete sockets ignored, self identity excluded and NPC practice action');
+(async()=>{
+  const cloud={user:()=>({id:'account-a'}),client:()=>({auth:{getSession:async()=>({data:{session:{user:{id:'account-a'},access_token:'signed.token.value'}}})}})};ctx.window.TFCloud=ctx.TFCloud=cloud;
+  client.zone('den','Alice','hero');await new Promise(setImmediate);assert.equal(ws.sent.at(-1).t,'den_auth');
+  client.denAction('ladder','',0);await new Promise(setImmediate);assert.deepEqual(ws.sent.at(-1),{t:'den_ladder',accessToken:'signed.token.value'});
+  ws.message({t:'den_state',version:1,gold:500,offers:[],duel:null,rollSeq:0,results:[],ladder:{version:1,verified:true,cleared:2,resetAt:Date.now()+100000,title:'Pit Contender',wins:2,losses:1,stages:[{name:'Jory',style:'Basics',hp:100}],leaders:[{name:'Alice',cleared:2,clearMs:42000}]}});
+  assert.match(client.state(),/ladder=1\|1\|2\|/);assert.match(client.state(),/ladderstage=1\|Jory\|Basics\|100/);assert.match(client.state(),/ladderleader=Alice\|2\|42/);
+  cloud.user=()=>null;cloud.client=()=>({auth:{getSession:async()=>({data:{session:null}})}});client.zone('den','Alice','hero');await new Promise(setImmediate);assert.equal(ws.sent.at(-1).accessToken,null);
+  client.denAction('ladder','',0);await new Promise(setImmediate);assert.match(client.state(),/Sign in using Cloud save/);
+  console.log('PASS ladder session token, sign-out, capability and ranked UI state');
+})().catch(e=>{console.error(e);process.exitCode=1});

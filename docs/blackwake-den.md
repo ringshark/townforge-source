@@ -25,3 +25,13 @@ The front end capability-checks `den_state.version=1`. An older presence/chat Wo
 `.github/workflows/deploy-mp.yml` tests the engine, actual WebSockets, legacy presence/chat and casino recovery before deployment. Add `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as GitHub Actions secrets in `ringshark/townforge-source`; the token must be authorized to deploy the existing `townforge-mp` Worker and Durable Object namespace. The workflow also has Run workflow for retrying after setup. No new Durable Object migration or Supabase migration is required.
 
 Checks: `node server/mp/test/den.mjs`, `node tests/den-client.cjs`, the original movement/input/guild checks, Emscripten build, `server/mp/test/smoke.mjs` and `server/mp/test/den-live.mjs` against a running Worker, plus browser navigation/layout checks.
+
+## Weekly NPC ladder
+
+The pit's Weekly NPC ladder is separate from unlimited free practice. It has five fixed opponents: Dockhand Jory, Cutlass Mira, Bosun Rook, Captain Vale and The Blackwake Champion. Each stage must be cleared in order by a server-confirmed knockout. Opponents gain health, movement pace, lunge range, reactive guards and spacing behavior. Players retain 100 HP and the ordinary arena actions. Entry and retries are free; gear, fame and main-character gold are untouched. Surrender, disconnect and timeout do not clear a stage. Countdown interruptions are not recorded as losses.
+
+Ranked entry requires the existing Cloud save account. The Worker verifies the access token with the configured Supabase Auth server, ignores any client-supplied account ID and keeps account-linked records in the Den Durable Object. A new device resumes the same stages after Cloud sign-in. Bearer tokens are not stored in attachments or ladder records. Only public character names, cleared stages and cumulative winning-fight times appear in the leaderboard.
+
+Weeks start Monday at 00:00 UTC. Progress, wins/losses and the leaderboard reset; unlocked cosmetic titles remain. Stage 3 unlocks Pit Contender; stage 5 unlocks Blackwake Champion. The title appears above your character inside Blackwake Den and in the ladder panel. A match crossing a weekly boundary cannot advance the new week. Leaderboard order is highest cleared stage, then lowest cumulative time in winning fights. Completing all five stages leaves free practice and friend duels available until reset.
+
+The Worker uses the existing public Cloud project URL and public anon key in `wrangler.toml`; no database migration or new secret is required. `node server/mp/test/ladder.mjs` verifies account rejection, ordered stages, settlements, cross-device persistence, rewards and weekly boundaries.

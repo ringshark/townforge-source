@@ -5,7 +5,9 @@ async function open(name,zone='den',token=randomBytes(32).toString('hex')){const
 const a=await open('QA Alice'),b=await open('QA Bob');
 try{
 assert.equal(a.state().gold,500);assert.equal(b.state().gold,500);
-a.send({t:'den_fight',action:'strike'});await until(()=>a.inbox.some(x=>x.t==='den_error'),'unsolicited rejection');
+assert.equal(a.state().ladder.version,1);assert.equal(a.state().ladder.stages.length,5);
+a.send({t:'den_ladder',accessToken:'invalid',account:'forged'});await until(()=>a.inbox.some(x=>x.t==='den_error'),'invalid ladder auth');assert.equal(a.state().ladder.verified,false);
+a.send({t:'den_fight',action:'strike'});await until(()=>a.inbox.some(x=>x.t==='den_error' && /Accept a duel/.test(x.text)),'unsolicited rejection');
 for(let z=1200;z>=750;z-=50){a.send({t:'pos',x:650,z,yaw:0,mv:1});b.send({t:'pos',x:850,z,yaw:0,mv:1});await sleep(240)}
 a.send({t:'den_challenge',target:b.id,stake:50});const offer=await until(()=>b.state().offers?.[0],'offer');assert.equal(a.state().gold,500);
 b.send({t:'den_answer',offer:offer.id,accept:true});await until(()=>a.state().duel,'accepted');assert.equal(a.state().gold,450);assert.equal(b.state().gold,450);

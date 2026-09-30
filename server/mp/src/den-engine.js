@@ -1,4 +1,15 @@
 // Server-owned test economy and consent-only combat. No character gold or gear.
+export const LADDER_STAGES = [
+  {name:'Dockhand Jory',style:'Close-range basics',hp:100,pace:100,damage:8,guardEvery:0,lunge:false},
+  {name:'Cutlass Mira',style:'Fast lunges',hp:110,pace:130,damage:10,guardEvery:5,lunge:true},
+  {name:'Bosun Rook',style:'Counters and guards',hp:120,pace:145,damage:11,guardEvery:4,lunge:true,counter:true},
+  {name:'Captain Vale',style:'Spacing and pressure',hp:130,pace:165,damage:12,guardEvery:3,lunge:true,counter:true,kite:true},
+  {name:'The Blackwake Champion',style:'Master of the pit',hp:145,pace:185,damage:14,guardEvery:3,lunge:true,counter:true,kite:true}
+];
+export function ladderWeek(now) {
+  const date=new Date(now),day=(date.getUTCDay()+6)%7;
+  return Date.UTC(date.getUTCFullYear(),date.getUTCMonth(),date.getUTCDate()-day);
+}
 export const PIT = { x: 750, z: 750, half: 250 };
 export function secureRoll(sides) {
   const limit = Math.floor(4294967296 / sides) * sides;
@@ -22,27 +33,52 @@ export class DenEngine {
     return {t:'den_state',version:1,gold:this.wallet(p.key),offers:this.state.offers.filter(o=>o.a===id || o.b===id),
       duel:d ? {id:d.id,a:d.a,b:d.b,nameA:d.nameA,nameB:d.nameB,hpA:d.hpA,hpB:d.hpB,staminaA:d.staminaA,staminaB:d.staminaB,
         starts:d.starts,ends:d.ends,stake:d.stake,guardA:d.guardA,guardB:d.guardB,swingA:d.swingA,swingB:d.swingB,npc:d.npc || null} : null,
+      ladder:this.ladderSnapshot(p),
       rollSeq:this.state.casino?.[p.key]?.sequence || 0,results:this.state.results.slice(-5)};
   }
-  practice(id) {
+  weekly() {
+    const week=ladderWeek(this.clock());
+    if(this.state.weekly?.week!==week)this.state.weekly={week,records:{}};
+    return this.state.weekly;
+  }
+  ladderSnapshot(p) {
+    const weekly=this.weekly(),record=p.account ? weekly.records[p.account]:null;
+    const leaders=Object.values(weekly.records).filter(r=>r.cleared>0).sort((a,b)=>b.cleared-a.cleared || a.clearMs-b.clearMs || a.name.localeCompare(b.name)).slice(0,5).map(r=>({name:r.name,cleared:r.cleared,clearMs:r.clearMs}));
+    return {version:1,verified:!!p.account,resetAt:weekly.week+7*86400000,cleared:record?.cleared || 0,wins:record?.wins || 0,losses:record?.losses || 0,
+      title:p.account ? this.state.cosmetics?.[p.account] || '':'',leaders,stages:LADDER_STAGES.map(s=>({name:s.name,style:s.style,hp:s.hp}))};
+  }
+  practice(id,ranked=false) {
     this.tick();const a=this.peer(id);
     if(this.state.duel || this.state.offers.some(o=>o.a===id || o.b===id)) throw Error('Finish the pending match or challenge first.');
     if(!this.inPit(a)) throw Error('Walk to the pit before starting practice.');
-    const bot={id:'pit-trainer',name:'Captain Vale (practice)',key:'training-npc',x:850,z:750,yaw:Math.PI};
+    let stage=0,weekly;
+    if(ranked) {
+      if(!a.account)throw Error('Sign in with Cloud save for the weekly ladder.');
+      weekly=this.weekly();stage=(weekly.records[a.account]?.cleared || 0)+1;
+      if(stage>LADDER_STAGES.length)throw Error('This week is complete. Practice or return after the reset.');
+    }
+    const profile=ranked ? LADDER_STAGES[stage-1]:{name:'Captain Vale (practice)',hp:100,pace:125,damage:10,guardEvery:4,lunge:false};
+    const bot={id:'pit-trainer',name:profile.name,key:'training-npc',x:850,z:750,yaw:Math.PI};
     this.peers.set(bot.id,bot);this.wallet(bot.key);this.challenge(id,bot.id,0);
     const placement=this.answer(bot.id,this.state.offers.find(o=>o.a===id).id,true);
-    this.state.duel.npc={id:bot.id,name:bot.name,x:850,z:750,yaw:Math.PI};
-    this.state.duel.botTick=this.clock();return placement;
+    this.state.duel.npc={...profile,id:bot.id,x:850,z:750,yaw:Math.PI,stage};
+    this.state.duel.hpB=profile.hp;this.state.duel.botTick=this.clock();
+    if(ranked)this.state.duel.ladder={account:a.account,week:weekly.week,stage};
+    return placement;
   }
   practiceTick() {
     const d=this.state.duel;if(!d?.npc || this.clock()<d.starts)return;
     const a=this.peers.get(d.a);if(!a) {this.leave(d.a);return;}
-    const b=this.peer(d.b),dt=Math.max(0,Math.min(1,(this.clock()-d.botTick)/1000));d.botTick=this.clock();
-    const dist=distance(a,b),step=Math.min(Math.max(0,dist-85),125*dt);
-    if(dist>0){b.x+=(a.x-b.x)*step/dist;b.z+=(a.z-b.z)*step/dist;b.yaw=Math.atan2(a.z-b.z,a.x-b.x);}
-    Object.assign(d.npc,{x:b.x,z:b.z,yaw:b.yaw});
-    if(this.clock()>=(d.readyB || 0) && distance(a,b)<=115) {
-      try {this.fight(d.b,Math.floor(this.clock()/1000)%4===0 ? 'guard':'strike');}catch(e) {}
+    const b=this.peer(d.b),bot=d.npc,dt=Math.max(0,Math.min(1,(this.clock()-d.botTick)/1000));d.botTick=this.clock();
+    const dist=distance(a,b),desired=bot.kite && d.guardA>this.clock() ? 160:85;
+    const step=Math.max(-55*dt,Math.min(dist-desired,(bot.pace || 125)*dt));
+    if(dist>0){b.x=Math.max(535,Math.min(965,b.x+(a.x-b.x)*step/dist));b.z=Math.max(535,Math.min(965,b.z+(a.z-b.z)*step/dist));b.yaw=Math.atan2(a.z-b.z,a.x-b.x);}
+    Object.assign(bot,{x:b.x,z:b.z,yaw:b.yaw});
+    if(this.clock()>=(d.readyB || 0)) {
+      const close=distance(a,b),counter=bot.counter && this.clock()-d.swingA<1200 && this.clock()-d.lastB>2000;
+      const guard=bot.guardEvery && (counter || Math.floor(this.clock()/1000)%bot.guardEvery===0);
+      const action=guard && d.staminaB>=20 ? 'guard':bot.lunge && close>110 && close<=170 ? 'lunge':close<=115 ? 'strike':'';
+      if(action)try {this.fight(d.b,action);}catch(e) {}
     }
   }
   challenge(id,target,stake) {
@@ -105,6 +141,7 @@ export class DenEngine {
     if(action==='guard') {d['guard'+side]=now+1200;return;}
     d['swing'+side]=now;
     let damage=action==='lunge' ? 16:10;
+    if(d.npc && side==='B')damage=action==='lunge' ? Math.ceil((d.npc.damage || 10)*1.6):(d.npc.damage || 10);
     if(d['guard'+other]>now) {damage=Math.ceil(damage/2);d['guard'+other]=0;}
     d['hp'+other]=Math.max(0,d['hp'+other]-damage);
     if(d['hp'+other]===0) this.finish(id,'Knockout');
@@ -114,7 +151,22 @@ export class DenEngine {
     if(winner===d.a) this.state.wallets[d.keyA]+=d.stake*2;
     else if(winner===d.b) this.state.wallets[d.keyB]+=d.stake*2;
     else {this.state.wallets[d.keyA]+=d.stake;this.state.wallets[d.keyB]+=d.stake;}
-    this.state.results.push({id:d.id,winner:winner || '',name:winner===d.a ? d.nameA:winner===d.b ? d.nameB:'Draw',reason,stake:d.stake});
+    let ladderNote='';
+    if(d.ladder) {
+      const weekly=this.weekly(),entry=d.ladder;
+      if(entry.week!==weekly.week)ladderNote='Weekly reset: this match does not advance the new ladder.';
+      else {
+        const r=weekly.records[entry.account] || (weekly.records[entry.account]={name:d.nameA,cleared:0,wins:0,losses:0,clearMs:0});
+        r.name=d.nameA;
+        if(winner===d.a && reason==='Knockout' && r.cleared===entry.stage-1) {
+          r.cleared=entry.stage;r.wins++;r.clearMs+=Math.max(0,this.clock()-d.starts);
+          if(r.cleared>=3) {const titles=this.state.cosmetics || (this.state.cosmetics={});titles[entry.account]=r.cleared===5 ? 'Blackwake Champion':titles[entry.account] || 'Pit Contender';}
+          ladderNote='Ladder stage '+entry.stage+' cleared.';
+          if(r.cleared===5)ladderNote+=' Blackwake Champion title unlocked.';
+        } else if(this.clock()>=d.starts) {r.losses++;ladderNote='Retry this stage for free.';}
+      }
+    }
+    this.state.results.push({id:d.id,winner:winner || '',name:winner===d.a ? d.nameA:winner===d.b ? d.nameB:'Draw',reason:reason+(ladderNote ? ' / '+ladderNote:''),stake:d.stake});
     this.state.results=this.state.results.slice(-20);this.state.duel=null;
   }
   leave(id) {

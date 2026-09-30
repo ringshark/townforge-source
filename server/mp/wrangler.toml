@@ -4,6 +4,9 @@ compatibility_date = "2026-09-01"
 
 # Only the game's own site may open a connection (plus local testing).
 [vars]
+SUPABASE_URL = "https://qcqhytzvjkqgtcwsmrnr.supabase.co"
+# Public browser anon key; account access is verified using the player's JWT.
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFjcWh5dHp2amtxZ3Rjd3Ntcm5yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA0NTI0ODUsImV4cCI6MjEwNjAyODQ4NX0.tz4sZG5F9NjDH3_GhnpMLF2rUs-GBu5Ggwt4TBGtkJ8"
 ALLOWED_ORIGINS = "https://ringshark.github.io,http://localhost:8080,http://127.0.0.1:8080"
 
 [[durable_objects.bindings]]

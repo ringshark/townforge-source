@@ -24,7 +24,9 @@ jobs:
           cache-dependency-path: server/mp/package-lock.json
       - run: npm ci
       - name: Check consent, combat and escrow
-        run: node test/den.mjs
+        run: |
+          node test/den.mjs
+          node test/ladder.mjs
       - name: Check actual sockets
         run: |
           npx wrangler dev --local --port 8787 --var 'ALLOWED_ORIGINS:' > /tmp/tf-worker.log 2>&1 &
