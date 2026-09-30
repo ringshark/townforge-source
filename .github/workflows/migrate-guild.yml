@@ -1,0 +1,26 @@
+name: Apply guild database migration
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: townforge-database-migration
+  cancel-in-progress: false
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ringshark-patch-1
+      - name: Apply repeatable guild schema
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PGSSLMODE: require
+        shell: bash
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo 'Add the SUPABASE_DB_URL repository secret first.'
+            exit 1
+          fi
+          psql "$SUPABASE_DB_URL" --no-psqlrc --single-transaction --set ON_ERROR_STOP=1 --file web/supabase.sql
