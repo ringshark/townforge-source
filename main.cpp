@@ -17062,7 +17062,7 @@ static bool ExploreHeaderCollapsed(const GameState& s) {
 }
 static const Rectangle kCompactMenuBtn = { 20, 56, 104, 40 };
 static Rectangle CompactMenuPanelRect(bool inDungeon) {
-    return { 12, 104, 336, inDungeon ? 332.0f : 252.0f }; // (2026-09-28) four merged rows (+ the Magery escape in a dungeon)
+    return { 12, 104, 516, inDungeon ? 388.0f : 324.0f };
 }
 static bool ExploreMenuPointInUI(Vector2 m, const GameState& s) {
     if (!ExploreHeaderCollapsed(s)) return false;
@@ -32519,13 +32519,17 @@ static void DrawWalkMarker(const GameState& s) {
     Vector2 c;
     if (Town3DProject(g_hudCam, { g_walkTarget.x, g_walkY + 2.0f, g_walkTarget.y }, &c)) DrawCircleV(c, 3.5f, Color{ 255, 214, 110, 230 });
 }
-// ---- Merged menu groups (2026-09-28) ----------------------------------------
-// Me & Skills / Craft, Magic, Pets / Bank & House / Help & Save. The MENU opens a
-// group; the tab strip right of "> Play" moves between that group's pages.
+// Primary destinations share one MENU and Return to World control.
+// Character owns gear, the pack, skills, magic and pets. Settings owns help and saves.
+static int g_pdSel = -1;
+static int g_questTab = 0;
+static bool g_characterPack = false;
+static std::string GuildAttentionLabel();
+static std::string JournalAttentionLabel(const GameState& s);
 static Screen g_menuGroupLast[3] = { Screen::Character, Screen::Craft, Screen::Bank };
 static int MenuGroupOf(Screen sc) {
-    if (sc == Screen::Character || sc == Screen::Skills) return 0;
-    if (sc == Screen::Craft || sc == Screen::Magic || sc == Screen::Pets) return 1;
+    if (sc == Screen::Character || sc == Screen::Skills || sc == Screen::Magic || sc == Screen::Pets) return 0;
+    if (sc == Screen::Craft) return 1;
     if (sc == Screen::Bank || sc == Screen::House) return 2;
     if (sc == Screen::Guide) return 3;
     return -1;
@@ -32549,14 +32553,28 @@ static bool MenuGroupTab(Rectangle r, const char* label, bool active, bool enabl
 }
 static void DrawMenuGroupTabs(GameState& s) {
     int g = MenuGroupOf(s.screen);
-    if (g < 0 || (s.screen == Screen::House && (g_warOpen || g_tmapOpen || g_optOpen || g_questOpen))) return;
+    if (g < 0 || (s.screen == Screen::House && (g_warOpen || g_tmapOpen || g_questOpen))) return;
+    if (s.screen == Screen::House && g_optOpen) g = 3;
     if (g < 3) g_menuGroupLast[g] = s.screen;
     bool en = !s.combat.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f;
-    const float x0 = 230, y = 56, h = 40, right = 540.0f - 8; // kScreenW
+    const float x0 = 300, y = 56, h = 40, right = 540.0f - 8; // kScreenW
     struct T { const char* l; Screen sc; };
     std::vector<T> tabs;
-    if (g == 0) tabs = { { "Me", Screen::Character }, { "Skills", Screen::Skills } };
-    else if (g == 1) tabs = { { "Craft", Screen::Craft }, { "Magic", Screen::Magic }, { "Pets", Screen::Pets } };
+    if (g == 0 && s.screen == Screen::Character) {
+        const char* names[] = { "Gear", "Pack", "Skills" };
+        for (int i=0; i<3; ++i) {
+            Rectangle r={x0+i*78.0f,y,74,h};
+            bool on=i<2 && g_characterPack==(i==1);
+            if(MenuGroupTab(r,names[i],on,en)) {
+                g_pdSel = -1;
+                if(i==2) MenuGoScreen(s,Screen::Skills);
+                else { g_characterPack=i==1; s.backpackScroll=0; }
+            }
+        }
+        return;
+    }
+    else if (g == 0) tabs = { { "Skills", Screen::Skills }, { "Magic", Screen::Magic }, { "Pets", Screen::Pets } };
+    else if (g == 1) return;
     else if (g == 2) tabs = { { "Bank", Screen::Bank }, { "House", Screen::House } };
     else tabs = { { "Help", Screen::Guide } };
     int n = (int)tabs.size() + (g == 3 ? 2 : 0);
@@ -32569,14 +32587,14 @@ static void DrawMenuGroupTabs(GameState& s) {
         Rectangle cb = { x0 + (w + 4), y, w, h }, rb = { x0 + 2 * (w + 4), y, w, h };
 #ifdef __EMSCRIPTEN__
         int cs = JS_CloudState();
-        if (Button(cb, "Cloud save", cs > 0)) JS_CloudOpen();
+        if (Button(cb, "Save", cs > 0)) JS_CloudOpen();
         if (cs > 0) {
             Color dot = cs == 2 ? Color{ 90, 200, 110, 255 } : cs == 3 ? Color{ 120, 170, 255, 255 }
                       : cs == 4 ? Color{ 240, 170, 60, 255 } : Color{ 150, 150, 150, 255 };
             DrawCircle((int)(cb.x + cb.width - 10), (int)cb.y + 10, 5.0f, dot);
         }
 #else
-        Button(cb, "Cloud save", false);
+        Button(cb, "Save", false);
 #endif
         bool armed = g_resetArmedTimer > 0.0f;
         if (armed) DrawRectangleRounded({ rb.x - 3, rb.y - 3, rb.width + 6, rb.height + 6 }, 0.35f, 6, Fade(RED, 0.5f));
@@ -32621,53 +32639,36 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         Rectangle panel = CompactMenuPanelRect(inDungeon);
         DrawRectangleRounded(panel, 0.08f, 8, Fade(kColorPageBg, 0.97f));
         DrawRectangleRoundedLines(panel, 0.08f, 8, Fade(BLACK, 0.45f));
-        float by = 140.0f;
-        if (inDungeon) {
-            DrawUIText(TextFormat("HP: %d / %d   Gold: %d", s.hp, s.maxHp, s.gold), 24, 116, 13, kColorText);
-        } else {
-            // The resource line the collapsed header no longer shows.
-            DrawUIText(TextFormat("Gold: %d   Wood: %d   Ore: %d   Leather: %d", s.gold, s.wood, s.ore, s.leather),
-                       24, 114, 13, kColorText);
-            DrawUIText(TextFormat("Fish: %d   Furs: %d   Ice: %d", s.fish, s.furs, s.ice), 24, 132, 13, kColorText);
-            by = 156.0f;
-        }
-        // Same gating as the main tab bar: no tab-travel mid-fight, as a
-        // ghost, or mid-death-animation.
+        DrawUIText(TextFormat("Gold %d   Wood %d   Ore %d   Leather %d", s.gold, s.wood, s.ore, s.leather), 24, 116, 14, kColorText);
         bool tabsEnabled = !s.combat.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f;
-        std::string townLabel = "Back to game"; // (2026-09-27) was the town's name - it teleported you home from the wilds
-        float bx0 = 24.0f, bx1 = 188.0f;
-        // (2026-09-28) Four merged groups; each opens its first (or last used)
-        // page, and a tab strip beside MENU flips between the group's pages.
-        if (Button({ bx0, by, 152, 40 }, "Me & Skills", tabsEnabled)) { MenuGoScreen(s, g_menuGroupLast[0]); open = false; }
-        if (Button({ bx1, by, 152, 40 }, townLabel, tabsEnabled)) { s.screen = g_playScreen; open = false; }
-        by += 48;
-        if (Button({ bx0, by, 152, 40 }, "Craft, Magic, Pets", tabsEnabled)) { MenuGoScreen(s, g_menuGroupLast[1]); open = false; }
-        if (Button({ bx1, by, 152, 40 }, "Bank & House", tabsEnabled)) { MenuGoScreen(s, g_menuGroupLast[2]); open = false; }
-        by += 48;
-        if (Button({ bx0, by, 152, 40 }, "Guild", tabsEnabled)) { s.screen = Screen::House; OpenWarWeek(s); g_guildTab = 0; open = false; }
-        if (Button({ bx1, by, 152, 40 }, "Quests", tabsEnabled)) { // (2026-09-28 cleanup) the one Quest Board: town, weekly goals, maps
-            s.screen = Screen::House; g_questOpen = true; g_tmapOpen = false; g_warOpen = false; g_optOpen = false; open = false;
+        if (!tabsEnabled) DrawUIText("Finish combat before opening other pages.",24,138,12,kColorText);
+        else DrawUIText("Choose what you want to do.",24,138,12,kColorText);
+        const float x0=24,x1=280,w=236,h=52;
+        float y=160;
+        if(Button({x0,y,w,h},"Character",tabsEnabled)) { g_characterPack=false; g_pdSel=-1; MenuGoScreen(s,Screen::Character); open=false; }
+        if(Button({x1,y,w,h},"Crafting",tabsEnabled)) { MenuGoScreen(s,Screen::Craft); open=false; }
+        y+=62;
+        std::string guild=GuildAttentionLabel(), journal=JournalAttentionLabel(s);
+        if(Button({x0,y,w,h},guild,tabsEnabled)) { MenuGoScreen(s,Screen::House); OpenWarWeek(s); g_guildTab=1; open=false; }
+        if(Button({x1,y,w,h},journal,tabsEnabled)) {
+            MenuGoScreen(s,Screen::House); g_questOpen=true; g_questTab=0; open=false;
         }
-        by += 48;
-        if (Button({ bx0, by, 152, 40 }, "Help & Save", tabsEnabled)) { MenuGoScreen(s, Screen::Guide); s.guidePage = 0; open = false; }
-        if (Button({ bx1, by, 152, 40 }, "Options", true)) {
-            s.screen = Screen::House; g_optOpen = true; g_tmapOpen = false; g_warOpen = false; open = false; // (2026-09-28)
-        }
-        by += 48;
-        if (inDungeon) {
-            // UO-style travel (2026-09-25): magery escape. Allowed mid-fight -
-            // the 3s cast breaks on damage, so it can't blank a boss mid-swing.
-            by += 48;
-            bool canLeave = !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && s.leaveDungT < 0.0f;
-            if (Button({ 24, by - 48, 312, 40 }, "Leave Dungeon (Magery)", canLeave)) TryStartLeaveDungeon(s);
+        y+=62;
+        if(Button({x0,y,w,h},"Settings",true)) { MenuGoScreen(s,Screen::House); g_optOpen=true; open=false; }
+        if(Button({x1,y,w,h},"Return to World",true)) { s.screen=g_playScreen; open=false; }
+        DrawUIText("Gear, pack and skills are in Character. Help and saves are in Settings.",24,352,12,kColorText);
+        DrawUIText("Your equipped gear stays visible on your character in the world.",24,373,12,kColorText);
+        if(inDungeon) {
+            bool canLeave=!s.playerIsGhost && s.playerDeathAnimT<=0.0f && s.leaveDungT<0.0f;
+            if(Button({24,410,492,52},"Leave Dungeon (Magery)",canLeave)) TryStartLeaveDungeon(s);
         }
     }
     if (Button(kCompactMenuBtn, open ? "HIDE" : "MENU", true)) open = !open;
     if (!open && IsMenuScreen(s.screen)) { // (2026-09-27) the way back, right beside MENU
-        Rectangle pb = { 130, 56, 92, 40 };
+        Rectangle pb = { 130, 56, 160, 40 };
         DrawRectangleRounded({ pb.x - 3, pb.y - 3, pb.width + 6, pb.height + 6 }, 0.35f, 6,
                              Fade(Color{ 255, 196, 70, 255 }, 0.5f + 0.25f * sinf((float)GetTime() * 3.0f)));
-        if (Button(pb, "> Play", !s.playerIsGhost || true)) s.screen = g_playScreen;
+        if (Button(pb, "Return to World", true)) s.screen = g_playScreen;
         DrawMenuGroupTabs(s);
     }
     g_uiShieldBypass = false;
@@ -33783,233 +33784,112 @@ static void DrawCommissions(GameState& s, int y, int screenW, int screenH) {
 }
 
 static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
-    // Themed backdrop, keyed by which workshop is open - see DrawInteriorBackdrop.
+    s.craftBuildingTab=std::clamp(s.craftBuildingTab,0,3);
     DrawInteriorBackdrop(g_assets.craftWallThemedOk[s.craftBuildingTab] ? &g_assets.craftWallThemed[s.craftBuildingTab] : nullptr,
-                           g_assets.craftFloorThemedOk[s.craftBuildingTab] ? &g_assets.craftFloorThemed[s.craftBuildingTab] : nullptr,
-                           screenW, screenH, 110);
-
-    // Workshop tabs - all 4 craftable buildings now that Alchemy has recipes too.
-    int y = 116;
-    float tabX = 20;
-    for (int i = 0; i < 4; i++) {
-        const BuildingDef& b = kCraftBuildings[i];
-        bool sel = s.craftBuildingTab == i;
-        float w = (float)MeasureUIText(b.name.c_str(), 12) + 20;
-        Rectangle r = { tabX, (float)y, w, 26 };
-        DrawRectangleRounded(r, 0.3f, 6, sel ? kColorSlate : Fade(GRAY, 0.3f));
-        DrawRectangleRoundedLines(r, 0.3f, 6, Fade(BLACK, 0.4f));
-        int tw = MeasureUIText(b.name.c_str(), 12);
-        DrawUIText(b.name.c_str(), (int)(r.x + (r.width - tw) / 2), (int)(r.y + 6), 12, BLACK);
-        if (UIClick(r)) {
-            s.craftBuildingTab = i;
-            s.craftScroll = 0;
-        }
-        tabX += w + 8;
+        g_assets.craftFloorThemedOk[s.craftBuildingTab] ? &g_assets.craftFloorThemed[s.craftBuildingTab] : nullptr,screenW,screenH,110);
+    static const char* workshops[]={"Smith","Carpenter","Tailor","Alchemy"};
+    for(int i=0;i<4;++i) if(MenuGroupTab({20+i*127.0f,116,119,44},workshops[i],s.craftBuildingTab==i,true)) {
+        s.craftBuildingTab=i; s.craftScroll=0;
+        if(s.craftModeTab==3 && i!=2) s.craftModeTab=0;
     }
-    y += 34;
-
-    const BuildingDef& b = kCraftBuildings[s.craftBuildingTab];
-    bool isAlchemy = s.craftBuildingTab == 3;
-
-    // Craft/Buy toggle, added 2026-09-21 - Buy sells the same recipes pre-made (always
-    // Standard quality, gold only) instead of letting you craft your own; see
-    // TryBuyPremadeItem/TryBuyPremadePotion. Reuses `b`/`isAlchemy` just resolved above.
-    {
-        int mode = s.craftModeTab;
-        if (s.craftBuildingTab == 2) DrawPillTabs({ "Craft", "Buy", "Commissions", "Dye", "Sell / Recycle" }, &mode, 20, (float)y, 26); // the Tailor dyes (2026-09-27)
-        else { int shown = mode == 4 ? 3 : mode; if (shown > 3) shown = 0; DrawPillTabs({ "Craft", "Buy", "Commissions", "Sell / Recycle" }, &shown, 20, (float)y, 26); mode = shown == 3 ? 4 : shown; }
-        s.craftModeTab = mode;
+    const BuildingDef& b=kCraftBuildings[s.craftBuildingTab];
+    bool alchemy=s.craftBuildingTab==3;
+    struct Mode {const char* name; int id;};
+    const Mode modes[]={{"Craft",0},{"Buy",1},{"Orders",2},{"Sell",4},{"Recycle",5},{"Dye",3}};
+    for(int i=0;i<6;++i) if(MenuGroupTab({20+(i%3)*170.0f,172+(i/3)*52.0f,160,44},i==5 && s.craftBuildingTab!=2 ? "Dye (Tailor)" : modes[i].name,s.craftModeTab==modes[i].id,i!=5 || s.craftBuildingTab==2)) {
+        s.craftModeTab=modes[i].id; s.craftScroll=0; s.backpackScroll=0;
     }
-    y += 34;
-    if (s.craftModeTab == 4) {
-        DrawInfoLine(TextFormat("Gold: %d   Ore: %d   Wood: %d   Leather: %d", s.gold, s.ore, s.wood, s.leather), 20, y, 13, kColorAccent);
-        y += 22;
-        DrawUIText("Backpack gear only. Recycling consumes the item and returns 50% of its recipe materials.", 20, y, 12, kColorText);
-        y += 24;
-        const int top = y, height = std::max(0, screenH - top - 40);
-        int count = 0;
-        for (const Item& it : s.backpack) if (it.type == ItemType::Weapon || it.type == ItemType::Armor) ++count;
-        s.backpackScroll -= ScrollDelta({ 0, (float)top, (float)screenW, (float)height });
-        s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, std::max(0.0f, count * 52.0f - height));
-        UIBeginScissorMode(0, top, screenW, height);
-        if (!count) DrawUIText("No armor or weapons in your backpack. Unequip worn gear in Me first.", 20, top + 4, 12, DARKGRAY);
-        int row = 0;
-        for (size_t i = 0; i < s.backpack.size(); ++i) {
-            const Item item = s.backpack[i];
-            if (item.type != ItemType::Weapon && item.type != ItemType::Armor) continue;
-            float rowY = top + row++ * 52.0f - s.backpackScroll;
-            if (rowY < top - 52 || rowY > top + height) continue;
-            DrawItemIcon(item, 20, rowY + 1, 20);
-            DrawUIText(item.name.c_str(), 44, (int)rowY + 4, 12, kColorText);
-            int value = std::max(1, (int)std::round(item.power * 2.0f)) + 80 * (item.bStr + item.bDex + item.bInt);
-            GearRecovery recovery = RecoveryFor(item);
-            if (Button({ 44, rowY + 24, 110, 22 }, TextFormat("Sell (%dg)", value), true)) { SellFromBackpack(s, (int)i); break; }
-            std::string label = recovery.amount > 0 ? "Recycle (+" + std::to_string(recovery.amount) + " " + RecoveryMaterial(recovery.resource) + ")" : "Cannot recycle";
-            if (Button({ 164, rowY + 24, 170, 22 }, label, recovery.amount > 0)) { RecycleFromBackpack(s, (int)i); break; }
-        }
-        UIEndScissorMode();
-        return;
-    }
-    if (s.craftModeTab == 3 && s.craftBuildingTab == 2) { DrawDyeTub(s, y, screenW, screenH); return; }
-    if (s.craftModeTab == 2) { DrawCommissions(s, y, screenW, screenH); return; }
-    if (s.craftModeTab == 1) {
-        DrawInfoLine(s.bankGold > 0 ? TextFormat("Gold: %d   Bank: %d (short? the rest comes from your bank, +2%% fee)", s.gold, s.bankGold) : TextFormat("Gold: %d", s.gold), 20, y, 13, kColorAccent);
-        y += 20;
-        int listTop = y;
-        int listHeight = screenH - listTop - 40;
-        Rectangle listArea = { 0, (float)listTop, (float)screenW, (float)listHeight };
-        s.craftScroll -= ScrollDelta(listArea);
-        float maxScroll = std::max(0.0f, (float)b.recipes.size() * 30.0f - listHeight);
-        s.craftScroll = std::clamp(s.craftScroll, 0.0f, maxScroll);
-        UIBeginScissorMode(0, listTop, screenW, listHeight);
-        for (size_t i = 0; i < b.recipes.size(); i++) {
-            const Recipe& r = b.recipes[i];
-            float rowY = listTop + (float)i * 30 - s.craftScroll;
-            if (rowY < listTop - 30 || rowY > listTop + listHeight) continue;
-            int price = VendorPriceFor(r);
-            std::string line = isAlchemy
-                ? TextFormat("%s  (%s %d)", r.name.c_str(), r.category.c_str(), r.power)
-                : r.type == ItemType::Clothing ? TextFormat("%s  (clothing - %s)", r.name.c_str(), r.slot.c_str())
-                : TextFormat("Standard %s  (%d %s)", r.name.c_str(), r.power, r.type == ItemType::Armor ? "def" : "pwr");
-            DrawUIText(line.c_str(), 20, (int)rowY + 6, 12, kColorText);
-            std::string priceLabel = TextFormat("Buy (%dg)", price);
-            if (Button({ (float)(screenW - 110), rowY, 90, 24 }, priceLabel, CanAfford(s, price))) {
-                if (isAlchemy) TryBuyPremadePotion(s, (int)i);
-                else TryBuyPremadeItem(s, s.craftBuildingTab, (int)i);
+    int top=286;
+    if(s.craftModeTab==3 && s.craftBuildingTab==2) {DrawDyeTub(s,top,screenW,screenH);return;}
+    if(s.craftModeTab==2) {DrawCommissions(s,top,screenW,screenH);return;}
+    if(s.craftModeTab==4 || s.craftModeTab==5) {
+        bool recycle=s.craftModeTab==5;
+        DrawUIText(recycle ? "Recycle backpack gear for half its recipe materials." : "Sell backpack armor and weapons for gold.",20,top,14,kColorHeading);
+        DrawUIText("Worn gear is protected. Take it off in Character to list it here.",20,top+24,12,kColorText);
+        top+=52;
+        int count=0; for(const Item& it:s.backpack) if(it.type==ItemType::Weapon || it.type==ItemType::Armor) ++count;
+        int height=screenH-top-20;
+        s.backpackScroll-=ScrollDelta({20,(float)top,(float)screenW-40,(float)height});
+        s.backpackScroll=std::clamp(s.backpackScroll,0.0f,std::max(0.0f,count*88.0f-height));
+        UIBeginScissorMode(20,top,screenW-40,height);
+        if(!count) DrawUIText("No spare armor or weapons in your backpack.",24,top+12,14,kColorText);
+        int row=0;
+        for(size_t i=0;i<s.backpack.size();++i) {
+            Item item=s.backpack[i]; if(item.type!=ItemType::Weapon && item.type!=ItemType::Armor) continue;
+            float y=top+row++*88.0f-s.backpackScroll; if(y<top-88 || y>top+height) continue;
+            DrawRectangleRounded({20,y,500,80},.1f,4,Fade(kColorPageBg,.94f));
+            DrawItemIcon(item,30,y+16,42); DrawUIText(item.name.c_str(),84,(int)y+10,14,kColorHeading);
+            int value=std::max(1,(int)std::round(item.power*2.0f))+80*(item.bStr+item.bDex+item.bInt);
+            GearRecovery recovery=RecoveryFor(item);
+            std::string detail=recycle ? (recovery.amount>0 ? TextFormat("Returns %d %s",recovery.amount,RecoveryMaterial(recovery.resource)) : "No recoverable recipe materials") : TextFormat("Receive %d gold",value);
+            DrawUIText(detail.c_str(),84,(int)y+40,12,kColorText);
+            if(Button({390,y+18,116,44},recycle ? "Recycle" : "Sell",!recycle || recovery.amount>0)) {
+                if(recycle) RecycleFromBackpack(s,(int)i); else SellFromBackpack(s,(int)i); break;
             }
         }
-        UIEndScissorMode();
-        return;
+        UIEndScissorMode();return;
     }
-
-    int buildingCap = b.levels[s.buildingLevel[s.craftBuildingTab] - 1].cap;
-    float skillVal = s.buildingSkill[s.craftBuildingTab];
-    DrawInfoLine(TextFormat("Skill: %.1f  (workshop cap: %d)", skillVal, buildingCap), 20, y, 13,
-              kColorText);
-    { // what you have to work with (2026-09-28, #61)
-        int have = isAlchemy ? s.reagents : b.resource == Resource::Wood ? s.wood : b.resource == Resource::Ore ? s.ore : s.leather;
-        const char* what = isAlchemy ? "reagents" : b.resource == Resource::Wood ? "wood" : b.resource == Resource::Ore ? "ore" : "leather";
-        std::string h = TextFormat("You have %d %s", have, what);
-        int hw = MeasureUIText(h.c_str(), 15);
-        DrawRectangleRounded({ (float)screenW - 28 - hw, (float)y - 5, (float)hw + 16, 24 }, 0.4f, 6, Fade(Color{ 214, 170, 90, 255 }, 0.35f));
-        DrawUIText(h.c_str(), screenW - 20 - hw, y - 1, 15, kColorHeading);
+    int cap=b.levels[s.buildingLevel[s.craftBuildingTab]-1].cap;
+    float skill=s.buildingSkill[s.craftBuildingTab];
+    int have=alchemy ? s.reagents : b.resource==Resource::Wood ? s.wood : b.resource==Resource::Ore ? s.ore : s.leather;
+    const char* material=alchemy ? "reagents" : b.resource==Resource::Wood ? "wood" : b.resource==Resource::Ore ? "ore" : "leather";
+    bool buy=s.craftModeTab==1;
+    DrawUIText(buy ? TextFormat("Gold %d   Bank %d (bank payments add a 2%% fee)",s.gold,s.bankGold) : TextFormat("%d %s available   Skill %.1f / workshop cap %d",have,material,skill,cap),20,top,14,kColorHeading);
+    if(Button({20,(float)top+26,244,44},"Open character backpack",true)) {g_characterPack=true;g_pdSel=-1;MenuGoScreen(s,Screen::Character);}
+    if(!buy && s.craftBuildingTab==2) {
+        if(Button({276,(float)top+26,244,44},"5 bandages / 2 leather",s.leather>=2)) CraftBandages(s);
     }
-    y += 22;
-
-    // --- Scrollable recipe list ---
-    int listTop = y;
-    int listHeight = 200;
-    Rectangle listArea = { 0, (float)listTop, (float)screenW, (float)listHeight };
-    s.craftScroll -= ScrollDelta(listArea);
-    float maxScroll = std::max(0.0f, (float)b.recipes.size() * 30.0f - listHeight);
-    s.craftScroll = std::clamp(s.craftScroll, 0.0f, maxScroll);
-
-    UIBeginScissorMode(0, listTop, screenW, listHeight);
-    for (size_t i = 0; i < b.recipes.size(); i++) {
-        const Recipe& r = b.recipes[i];
-        float rowY = listTop + (float)i * 30 - s.craftScroll;
-        if (rowY < listTop - 30 || rowY > listTop + listHeight) continue;
-
-        bool skillOk = std::min(skillVal, (float)buildingCap) >= r.reqSkill;
-        if (isAlchemy) {
-            std::string line = TextFormat("%s  (req %d, %d reagents, %s %d)", r.name.c_str(), r.reqSkill,
-                                            r.cost, r.category.c_str(), r.power);
-            bool canAfford = s.reagents >= r.cost;
-            DrawUIText(line.c_str(), 20, (int)rowY + 6, 12, canAfford && skillOk ? kColorText : Fade(kColorText, 0.5f));
-            if (!canAfford) DrawUIText(TextFormat("need %d more", r.cost - s.reagents), screenW - 180, (int)rowY + 6, 12, Color{ 170, 50, 40, 255 });
-            if (Button({ (float)(screenW - 90), rowY, 70, 24 }, "Brew", skillOk && canAfford))
-                TryCraftPotion(s, (int)i);
-        } else {
-            std::string resName = b.resource == Resource::Wood ? "wood"
-                                  : b.resource == Resource::Ore ? "ore"
-                                  : b.resource == Resource::Leather ? "leather" : "";
-            std::string line = r.type == ItemType::Clothing
-                ? TextFormat("%s  (req %d, %d %s, clothing)", r.name.c_str(), r.reqSkill, r.cost, resName.c_str())
-                : TextFormat("%s  (req %d, %d %s, %d %s)", r.name.c_str(), r.reqSkill,
-                                            r.cost, resName.c_str(), r.power, r.type == ItemType::Armor ? "def" : "pwr");
-            int haveResource = b.resource == Resource::Wood ? s.wood : b.resource == Resource::Ore ? s.ore : s.leather;
-            bool canAfford = haveResource >= r.cost;
-            DrawUIText(line.c_str(), 20, (int)rowY + 6, 12, canAfford && skillOk ? kColorText : Fade(kColorText, 0.5f)); // (2026-09-28, #61)
-            if (!canAfford) DrawUIText(TextFormat("need %d more", r.cost - haveResource), screenW - 180, (int)rowY + 6, 12, Color{ 170, 50, 40, 255 });
-            bool roomInBackpack = (int)s.backpack.size() < BackpackCap(s);
-            if (Button({ (float)(screenW - 90), rowY, 70, 24 }, "Craft", skillOk && canAfford && roomInBackpack))
-                TryCraftItem(s, s.craftBuildingTab, (int)i);
+    if(!buy && alchemy && !s.potions.empty()) {
+        // Keep every brewed potion usable; the pouch is selected separately from recipes.
+        static bool pouch=false;
+        if(Button({276,(float)top+26,244,44},pouch ? "Show recipes" : "Potion pouch",true)) {pouch=!pouch;s.craftScroll=0;}
+        if(pouch) {
+            top+=82; int height=screenH-top-20;
+            s.craftScroll-=ScrollDelta({20,(float)top,500,(float)height});
+            s.craftScroll=std::clamp(s.craftScroll,0.0f,std::max(0.0f,s.potions.size()*72.0f-height));
+            UIBeginScissorMode(20,top,500,height);
+            for(size_t i=0;i<s.potions.size();++i) {
+                const PotionStack& p=s.potions[i]; float y=top+i*72.0f-s.craftScroll;
+                DrawUIText(TextFormat("%s x%d",p.name.c_str(),p.count),28,(int)y+16,14,kColorText);
+                if(p.effect=="poison") {if(Button({390,y+8,116,44},"Poison weapon",true)) {PoisonWeapon(s,(int)i);break;}}
+                else if(p.effect=="damage") DrawUIText("Throw during combat",28,(int)y+36,12,kColorText);
+                else if(Button({390,y+8,116,44},"Drink",true)) {DrinkPotion(s,(int)i);break;}
+            }
+            UIEndScissorMode();return;
         }
     }
-    UIEndScissorMode();
-    y = listTop + listHeight + 8;
-    DrawInfoLine("Scroll to see more recipes.", 20, y, 13, Fade(DARKGRAY, 0.8f));
-    y += 20;
-
-    if (s.craftBuildingTab == 2) { // Tailor also crafts Bandages - consumable, no skill required
-        DrawInfoLine(TextFormat("Bandages: %d", s.bandages), 20, y, 13, kColorAccent);
-        if (Button({ (float)(screenW - 160), (float)y - 4, 140, 24 }, "Craft 5 (2 leather)", s.leather >= 2))
-            CraftBandages(s);
-        y += 28;
-    }
-
-    if (isAlchemy) {
-        // --- Potion pouch: Drink (heal/stamina) or Poison Weapon, instead of backpack ---
-        DrawInfoLine(TextFormat("Reagents: %d   Poisoning: %.1f", s.reagents, s.poisoning), 20, y, 13,
-                   kColorAccent);
-        y += 20;
-        int pouchTop = y;
-        int pouchHeight = screenH - pouchTop - 40;
-        Rectangle pouchArea = { 0, (float)pouchTop, (float)screenW, (float)pouchHeight };
-        s.backpackScroll -= ScrollDelta(pouchArea);
-        float maxPouchScroll = std::max(0.0f, (float)s.potions.size() * 28.0f - pouchHeight);
-        s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, maxPouchScroll);
-
-        UIBeginScissorMode(0, pouchTop, screenW, pouchHeight);
-        if (s.potions.empty()) DrawUIText("No potions brewed yet.", 20, pouchTop + 4, 12, DARKGRAY);
-        for (size_t i = 0; i < s.potions.size(); i++) {
-            const PotionStack& p = s.potions[i];
-            float rowY = pouchTop + (float)i * 28 - s.backpackScroll;
-            if (rowY < pouchTop - 28 || rowY > pouchTop + pouchHeight) continue;
-            std::string line = p.name + " x" + std::to_string(p.count);
-            if (const Texture2D* icon = FindItemIconTexture(p.effect)) {
-                DrawIconCentered(*icon, { 30, rowY + 10 }, 20.0f, WHITE);
-                DrawUIText(line.c_str(), 44, (int)rowY + 6, 12, kColorText);
-            } else {
-                DrawUIText(line.c_str(), 20, (int)rowY + 6, 12, kColorText);
-            }
-            if (p.effect == "heal" || p.effect == "stamina" || p.effect == "agility" || p.effect == "strength") {
-                if (Button({ (float)(screenW - 90), rowY, 70, 22 }, "Drink", true)) DrinkPotion(s, (int)i);
-            } else if (p.effect == "poison") {
-                if (Button({ (float)(screenW - 120), rowY, 100, 22 }, "Poison Wpn", true)) PoisonWeapon(s, (int)i);
-            } else { // "damage"
-                DrawUIText("(throw in combat)", (float)(screenW - 130), rowY + 4, 12, Fade(DARKGRAY, 0.8f));
-            }
+    top+=82; int height=screenH-top-20;
+    s.craftScroll-=ScrollDelta({20,(float)top,500,(float)height});
+    s.craftScroll=std::clamp(s.craftScroll,0.0f,std::max(0.0f,b.recipes.size()*112.0f-height));
+    UIBeginScissorMode(20,top,500,height);
+    for(size_t i=0;i<b.recipes.size();++i) {
+        const Recipe& r=b.recipes[i]; float y=top+i*112.0f-s.craftScroll;
+        if(y<top-112 || y>top+height) continue;
+        bool skillOk=std::min(skill,(float)cap)>=r.reqSkill;
+        bool room=alchemy || (int)s.backpack.size()<BackpackCap(s);
+        int price=VendorPriceFor(r);
+        bool enabled=buy ? CanAfford(s,price) && room : skillOk && have>=r.cost && room;
+        DrawRectangleRounded({20,y,500,104},.1f,4,Fade(kColorPageBg,.96f));
+        std::string recipeName=r.name;
+        if(MeasureUIText(recipeName.c_str(),16)>340) { while(!recipeName.empty() && MeasureUIText((recipeName+"...").c_str(),16)>340) recipeName.pop_back(); recipeName+="..."; }
+        DrawUIText(recipeName.c_str(),32,(int)y+12,16,kColorHeading);
+        const char* stat=alchemy ? r.category.c_str() : r.type==ItemType::Armor ? "Defense" : r.type==ItemType::Clothing ? r.slot.c_str() : "Weapon power";
+        DrawUIText(r.type==ItemType::Clothing ? stat : TextFormat("%s %d",stat,r.power),32,(int)y+36,12,kColorText);
+        std::string materials=buy ? TextFormat("Price: %d gold / Standard quality",price) : TextFormat("Materials: %d %s / Skill required: %d",r.cost,material,r.reqSkill);
+        DrawUIText(materials.c_str(),32,(int)y+60,12,kColorText);
+        std::string reason;
+        if(!room) reason="Backpack full: equip, sell or recycle spare gear.";
+        else if(!buy && cap<r.reqSkill) reason=TextFormat("Upgrade this workshop: need a skill cap of %d.",r.reqSkill);
+        else if(!buy && !skillOk) reason=TextFormat("Train this crafting skill to %d.",r.reqSkill);
+        else if(!buy && have<r.cost) reason=TextFormat("Need %d more %s.",r.cost-have,material);
+        else if(buy && !enabled) reason="Not enough gold, including any bank fee.";
+        else reason=buy ? "Ready to buy." : alchemy ? "Ready to brew." : "Ready to craft. Quality follows your skill.";
+        DrawUIText(reason.c_str(),32,(int)y+76,12,enabled ? kColorText : Color{160,55,35,255});
+        if(Button({390,y+12,116,44},buy ? "Buy" : alchemy ? "Brew" : "Craft",enabled)) {
+            if(buy) {if(alchemy) TryBuyPremadePotion(s,(int)i);else TryBuyPremadeItem(s,s.craftBuildingTab,(int)i);}
+            else if(alchemy) TryCraftPotion(s,(int)i); else TryCraftItem(s,s.craftBuildingTab,(int)i);
+            break;
         }
-        UIEndScissorMode();
-        return;
-    }
-
-    // --- Backpack + equipped summary (weapon/armor buildings only) ---
-    DrawInfoLine(TextFormat("Backpack (%d/%d)   Weapon power: %d   Defense: %d", (int)s.backpack.size(),
-                          BackpackCap(s), CombatPower(s), TotalDefense(s)),
-               20, y, 13, kColorAccent);
-    y += 20;
-
-    int backpackTop = y;
-    int backpackHeight = screenH - backpackTop - 40;
-    Rectangle backpackArea = { 0, (float)backpackTop, (float)screenW, (float)backpackHeight };
-    s.backpackScroll -= ScrollDelta(backpackArea);
-    float maxBackpackScroll = std::max(0.0f, (float)s.backpack.size() * 28.0f - backpackHeight);
-    s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, maxBackpackScroll);
-
-    UIBeginScissorMode(0, backpackTop, screenW, backpackHeight);
-    if (s.backpack.empty()) {
-        DrawUIText("Nothing crafted yet.", 20, backpackTop + 4, 12, DARKGRAY);
-    }
-    for (size_t i = 0; i < s.backpack.size(); i++) {
-        const Item& item = s.backpack[i];
-        float rowY = backpackTop + (float)i * 28 - s.backpackScroll;
-        if (rowY < backpackTop - 28 || rowY > backpackTop + backpackHeight) continue;
-        DrawItemIcon(item, 20, rowY + 1, 20);
-        DrawUIText(item.name.c_str(), 44, (int)rowY + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 180), rowY, 80, 22 }, "Equip", true)) { EquipFromBackpack(s, (int)i); break; }
-        if (Button({ (float)(screenW - 90), rowY, 70, 22 }, "Sell", true)) SellFromBackpack(s, (int)i);
     }
     UIEndScissorMode();
 }
@@ -35498,8 +35378,23 @@ static void WarNetTick(GameState& s, float dt) {
         }
     }
 }
+static int GuildRewardCount() {
+    int n=(int)g_gnet.gifts.size();
+    for(const auto& r:g_gnet.cityRuns) if(r.finished && r.success && r.joined && !r.claimed) ++n;
+    for(const auto& b:g_gnet.cityBattles) if((long long)std::time(nullptr)>=b.ends && b.actions>0 && !b.claimed) ++n;
+    return n;
+}
+static int GuildHelpCount() {
+    int n=0; for(const auto& h:g_gnet.helps) if(!h.mine && !h.done && h.n<h.max) ++n;
+    if(g_gnet.buildLeft>(float)(GetTime()-g_gnet.hubAt) && !g_gnet.lent) ++n;
+    return n;
+}
+static std::string GuildAttentionLabel() {
+    int rewards=GuildRewardCount(), helps=GuildHelpCount();
+    return rewards ? TextFormat("Guild / %d rewards",rewards) : helps ? TextFormat("Guild / %d help requests",helps) : "Guild";
+}
 static void OpenWarWeek(GameState& s) {
-    g_warOpen = true; g_tmapOpen = false; g_warScroll = 0.0f; g_leaveArmT = 0.0f;
+    g_warOpen = true; g_tmapOpen = false; g_optOpen = false; g_questOpen = false; g_guildTab = 1; g_warScroll = 0.0f; g_leaveArmT = 0.0f;
     WarCheckWeek(s);
     JS_GuildNetRefresh(WarWeekKey(s).c_str());
 }
@@ -35507,14 +35402,14 @@ static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int sec
 // The Guild Hall tabs (2026-09-29): 1 Hall, 2 Research, 3 Help, 4 Shop - the alliance loop, after Whiteout Survival.
 // A shared guild city: one landmark, residential streets and functional districts.
 // Render into a dedicated viewport so picking and labels use the same camera.
-static float DrawGuildSettlement(float x, float y, float w, Rectangle area) {
+static float DrawGuildSettlement(GameState& s, float x, float y, float w, Rectangle area) {
     static RenderTexture2D scene = {};
     static float zoom = 1450.0f;
     static Vector3 focus = {0,0,0};
     static bool dragging = false;
     static float dragDistance = 0;
-    float height = std::max(240.0f, area.height - 64);
-    Rectangle view = {x,y+42,w,height};
+    float height = std::max(240.0f, area.height - 100);
+    Rectangle view = {x,y+78,w,height};
     const int rw = std::max(1,(int)w), rh = std::max(1,(int)height);
     if (!scene.id || scene.texture.width != rw || scene.texture.height != rh) {
         if (scene.id) UnloadRenderTexture(scene);
@@ -35522,6 +35417,14 @@ static float DrawGuildSettlement(float x, float y, float w, Rectangle area) {
     }
     DrawUIText(TextFormat("[%s] %s",g_gnet.myTag.c_str(),g_gnet.myName.c_str()),(int)x,(int)y,16,Color{68,42,22,255});
     DrawUIText(TextFormat("Hall %d   Members %d/%d   Funds %lld",g_gnet.hall,(int)g_gnet.roster.size(),g_gnet.cap,g_gnet.funds),(int)x,(int)y+23,12,Color{88,65,40,255});
+    int builds=g_gnet.buildLeft>=0 ? 1 : 0, finished=0;
+    float elapsed=(float)(GetTime()-g_gnet.hubAt);
+    if(g_gnet.buildLeft>=0 && g_gnet.buildLeft<=elapsed) ++finished;
+    for(const auto& b:g_gnet.cityBuildings) if(b.left>=0) {++builds;if(b.left<=elapsed) ++finished;}
+    DrawUIText(TextFormat("%d rewards / %d help requests / %d upgrades%s",GuildRewardCount(),GuildHelpCount(),builds,finished ? " (refreshing completed builds)" : " underway"),(int)x,(int)y+46,12,Color{68,42,22,255});
+    if(finished && !g_gnet.busy) { static double next=0; if(GetTime()>=next) { next=GetTime()+10; JS_GuildNetRefresh(WarWeekKey(s).c_str()); } }
+    Rectangle zoomIn={x+w-172,view.y+height-52,44,44}, zoomOut={x+w-120,view.y+height-52,44,44}, reset={x+w-68,view.y+height-52,64,44};
+    UIRegister(zoomIn);UIRegister(zoomOut);UIRegister(reset);
     struct Site { const char* name; const char* model; float x,z; int tab; int tier; };
     static const Site sites[] = {
         {"Guild Hall","townhall",0,-60,9,1},
@@ -35535,8 +35438,10 @@ static float DrawGuildSettlement(float x, float y, float w, Rectangle area) {
         {"Guild Homes","house",235,-310,6,1},
     };
     Vector2 mouse=GetMousePosition();
-    bool inside=CheckCollisionPointRec(mouse,view) && CheckCollisionPointRec(mouse,area);
-    if (inside && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { dragging=true; dragDistance=0; }
+    bool inside=CheckCollisionPointRec(mouse,view) && CheckCollisionPointRec(mouse,area) &&
+        !CheckCollisionPointRec(mouse,zoomIn) && !CheckCollisionPointRec(mouse,zoomOut) && !CheckCollisionPointRec(mouse,reset) &&
+        !(g_uiShieldOn && CheckCollisionPointRec(mouse,g_uiShield));
+    if (inside && !g_uiClickTaken && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { dragging=true; dragDistance=0; g_uiClickTaken=g_uiGestureOwned=true; }
     if (dragging && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
         Vector2 delta=GetMouseDelta(); dragDistance+=Vector2Length(delta);
         if (dragDistance > 7) {
@@ -35641,6 +35546,7 @@ static float DrawGuildSettlement(float x, float y, float w, Rectangle area) {
     for(int i=0;i<9;++i) {
         const Site& b=sites[i];
         Vector2 pt=GetWorldToScreenEx({b.x,110,b.z},cam,rw,rh); pt.x+=view.x; pt.y+=view.y;
+        if(b.tab==7) pt.y-=20; // keep the reward caption clear of the Command Post label
         bool locked=g_gnet.hall<b.tier;
         std::string label=b.name;
         if(b.tab>=10) {
@@ -35655,17 +35561,24 @@ static float DrawGuildSettlement(float x, float y, float w, Rectangle area) {
         DrawRectangleRounded(badge,.25f,4,hovered==i ? Color{135,92,40,245} : Color{43,49,38,220});
         DrawUIText(label.c_str(),(int)badge.x+7,(int)badge.y+5,11,Color{250,234,193,255});
         if(locked) DrawUIText("Hall level 2",(int)badge.x+5,(int)badge.y+24,10,Color{255,223,137,255});
-        if(b.tab==9 && g_gnet.buildLeft>=0) {
-            float left=std::max(0.0f,g_gnet.buildLeft-(float)(GetTime()-g_gnet.hubAt));
-            DrawUIText(SettleClock(left).c_str(),(int)badge.x+5,(int)badge.y+24,11,Color{255,223,137,255});
+        int queue=b.tab==9 ? g_gnet.buildLeft : -1;
+        if(b.tab>=10) { static const char* kinds[]={"workshop","storehouse","aid","command"}; for(const auto& cb:g_gnet.cityBuildings) if(cb.kind==kinds[b.tab-10]) queue=cb.left; }
+        if(queue>=0) {
+            float left=std::max(0.0f,queue-elapsed);
+            std::string status=left<=0 ? "Finishing" : SettleClock(left);
+            if(b.tab==9 && !g_gnet.lent) status+=" / Help";
+            DrawUIText(status.c_str(),(int)badge.x+5,(int)badge.y+24,11,Color{255,223,137,255});
         }
+        else if(b.tab==7 && GuildRewardCount()>(int)g_gnet.gifts.size()) DrawUIText("Reward ready",(int)badge.x+5,(int)badge.y+24,11,Color{255,223,137,255});
+        else if(b.tab==12 && GuildHelpCount()>0) DrawUIText("Help ready",(int)badge.x+5,(int)badge.y+24,11,Color{255,223,137,255});
+        else if(b.tab==9 && !g_gnet.gifts.empty()) DrawUIText("Gifts to claim",(int)badge.x+5,(int)badge.y+24,11,Color{255,223,137,255});
         if(inside && CheckCollisionPointRec(mouse,badge)) hovered=i;
     }
     if(tapped && hovered>=0) { g_guildTab=sites[hovered].tab; g_warScroll=0; PlaySfx(SfxId::Click); }
     DrawUIText("Drag to explore  |  Scroll to zoom  |  Click a building",(int)x,(int)(view.y+height+8),11,Color{78,52,30,255});
-    if(UOButton({x+w-150,y+8,32,28},"+",true)) zoom=std::max(650.0f,zoom*.85f);
-    if(UOButton({x+w-112,y+8,32,28},"-",true)) zoom=std::min(1900.0f,zoom/ .85f);
-    if(UOButton({x+w-70,y+8,66,28},"Reset",true)) { focus={0,0,0}; zoom=1450; }
+    if(UOButton(zoomIn,"+",true)) zoom=std::max(650.0f,zoom*.85f);
+    if(UOButton(zoomOut,"-",true)) zoom=std::min(1900.0f,zoom/ .85f);
+    if(UOButton(reset,"Reset",true)) { focus={0,0,0}; zoom=1450; }
     return view.y+height+28;
 }
 static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangle area) {
@@ -35678,8 +35591,9 @@ static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangl
     };
     bool inGuild = g_gnet.ready && !g_gnet.myId.empty();
     if (!inGuild) {
-        DrawUIText(g_gnet.cfg ? "Join or found an online guild (Overview) to share a Guild Hall." : "Online guilds aren't switched on for this version yet.", (int)x, (int)y, 12, soft);
-        return y + 28;
+        DrawUIText(g_gnet.cfg ? "Join or found a guild to build your shared city." : "Online guilds are unavailable for this version.", (int)x, (int)y, 13, soft);
+        if(UOButton({x,y+30,240,44},"Find or create a guild",g_gnet.cfg)) {g_guildTab=0;g_warScroll=0;}
+        return y + 84;
     }
     if (!g_gnet.hub) {
         DrawUIText(g_gnet.busy ? "Reading the Guild Hall..." : "The Guild Hall isn't open on the server yet.", (int)x, (int)y, 13, soft);
@@ -35688,7 +35602,7 @@ static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangl
     if (!g_gnet.msg.empty()) { DrawUIText(g_gnet.msg.c_str(), (int)x, (int)y, 12, bad); y += 20; }
     bool officer = g_gnet.myRank >= 1;
     float since = (float)(GetTime() - g_gnet.hubAt);
-    if (g_guildTab == 1) return DrawGuildSettlement(x, y, w, area);
+    if (g_guildTab == 1) return DrawGuildSettlement(s, x, y, w, area);
     if (g_guildTab == 9) { // ---- Hall ----
         Rectangle back = {x,y,160,28};
         if (UOButton(back,"Back to city",true) && vis(back)) { g_guildTab=1; g_warScroll=0; }
@@ -35846,12 +35760,12 @@ static float DrawGuildCityProgress(GameState& s,float x,float y,float w,Rectangl
     const Color ink={40,24,12,255},soft={78,52,30,255},gold={150,100,20,255};
     auto text=[&](const std::string& value,int size=12) { DrawUIText(value.c_str(),(int)x,(int)y,size,ink); y+=size+9; };
     auto act=[&](const std::string& label,const char* action,const std::string& target,bool enabled=true) {
-        Rectangle b={x,y,std::min(w,290.0f),28};
+        Rectangle b={x,y,std::min(w,320.0f),44};
         bool visible=b.y>=area.y && b.y+b.height<=area.y+area.height;
         if(UOButton(b,label.c_str(),enabled && g_gnet.ready && !g_gnet.busy && !g_gnet.cityPending) && visible) GuildCityAct(s,action,target);
-        y+=36;
+        y+=52;
     };
-    auto link=[&](const char* label,int tab) { Rectangle b={x,y,220,28}; if(UOButton(b,label,true) && b.y>=area.y && b.y+28<=area.y+area.height) { g_guildTab=tab; g_warScroll=0; } y+=36; };
+    auto link=[&](const char* label,int tab) { Rectangle b={x,y,240,44}; if(UOButton(b,label,true) && b.y>=area.y && b.y+44<=area.y+area.height) { g_guildTab=tab; g_warScroll=0; } y+=52; };
     if(!g_gnet.cityReady) { text("Sign in and join a guild to use city progression."); return y+10; }
     if(g_gnet.cityPending) {
         text("A saved transaction needs to finish before another action.");
@@ -35868,15 +35782,23 @@ static float DrawGuildCityProgress(GameState& s,float x,float y,float w,Rectangl
         for(const auto& b:g_gnet.cityBuildings) if(b.kind==kind) {lv=b.level;left=b.left;}
         text(TextFormat("%s - level %d / 5",names[index],lv),17); text(effects[index]);
         if(left>=0) {
-            text("Upgrade in progress: "+SettleClock((float)left));
+            text("Upgrade in progress: "+SettleClock(std::max(0.0f,left-(float)(GetTime()-g_gnet.hubAt))));
             act("Lend a hand (+5 merit)","help_build",kind);
         } else {
             text(TextFormat("Next level: %d wood + %d ore + %d guild gold; %d minutes",50*lv,50*lv,100*lv,15*lv));
-            act("Start upgrade (officers)","upgrade",kind,g_gnet.myRank>=1 && lv<5 && lv<g_gnet.hall && (index>=2 || g_gnet.hall>=2));
+            if(lv>=5) text("Maximum building level reached.");
+            else if(g_gnet.hall<2 && index<2) text("Requires Guild Hall level 2.");
+            else if(lv>=g_gnet.hall) text(TextFormat("Requires Guild Hall level %d.",lv+1));
+            else if(g_gnet.myRank<1) text("A guild officer must start this upgrade.");
+            else if(g_gnet.cityWood<50*lv || g_gnet.cityOre<50*lv || g_gnet.funds<100*lv) text("Deposit the missing materials and gold in the Storehouse.");
+            act("Start upgrade (officers)","upgrade",kind,g_gnet.myRank>=1 && lv<5 && lv<g_gnet.hall && (index>=2 || g_gnet.hall>=2) && g_gnet.cityWood>=50*lv && g_gnet.cityOre>=50*lv && g_gnet.funds>=100*lv);
         }
         if(index==0) {
             link("Open guild research",2);
             text(TextFormat("Daily contracts: %d / 3 complete",g_gnet.cityContracts),15);
+            if(g_gnet.hall<2) text("Contracts require Guild Hall level 2.");
+            else if(g_gnet.cityContracts>=3) text("Daily limit reached. New contracts arrive at midnight UTC.");
+            else text("Each contract button shows the materials you must have.");
             act("Timber contract: spend 20 wood","contract","timber",s.wood>=20 && g_gnet.cityContracts<3 && g_gnet.hall>=2);
             act("Ore contract: spend 15 ore","contract","ore",s.ore>=15 && g_gnet.cityContracts<3 && g_gnet.hall>=2);
             act("Leather contract: spend 15 leather","contract","leather",s.leather>=15 && g_gnet.cityContracts<3 && g_gnet.hall>=2);
@@ -35897,8 +35819,11 @@ static float DrawGuildCityProgress(GameState& s,float x,float y,float w,Rectangl
     if(section==7) {
         text("Guild expeditions and boss raids",17);
         text("Officers may launch one of each activity per UTC day.");
-        act("Launch expedition: 50 guild gold","launch","expedition",g_gnet.myRank>=1 && g_gnet.hall>=2);
-        act("Launch boss raid: 100 guild gold","launch","boss",g_gnet.myRank>=1 && g_gnet.hall>=2);
+        if(g_gnet.hall<2) text("Activities require Guild Hall level 2.");
+        else if(g_gnet.myRank<1) text("A guild officer must launch activities. Members can join them.");
+        else if(g_gnet.funds<100) text("Treasury needs 50 gold for an expedition or 100 for a raid.");
+        act("Launch expedition: 50 guild gold","launch","expedition",g_gnet.myRank>=1 && g_gnet.hall>=2 && g_gnet.funds>=50);
+        act("Launch boss raid: 100 guild gold","launch","boss",g_gnet.myRank>=1 && g_gnet.hall>=2 && g_gnet.funds>=100);
         text("Expeditions need 3 members and resolve after 30 minutes.");
         text("Raids last 1 hour. Joined members' dungeon boss wins deal damage.");
         for(const auto& r:g_gnet.cityRuns) {
@@ -35937,27 +35862,29 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
     UODrawGump(G, kUoParchment);
     UODrawTitle(G, "Guild", 15);
     const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 }, gold = { 150, 100, 20, 255 }, bad = { 150, 40, 30, 255 };
-    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_warOpen = false; return; }
+    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_warOpen = false; s.screen=g_playScreen; return; }
     WarCheckWeek(s);
     int today = WarDayNow();
     { // the tabs (2026-09-28: one Guild screen for everything guild)
         static const char* kTabs[8] = { "Overview", "City", "Research", "Help", "Shop", "Wars", "Members", "Activities" };
         float tw = (G.width - 36) / 4.0f;
         bool hub = g_gnet.hub;
-        bool helpDot = false; for (const auto& h : g_gnet.helps) if (!h.mine && !h.done) helpDot = true;
+        bool helpDot = GuildHelpCount()>0;
         bool hallDot = !g_gnet.gifts.empty() || (g_gnet.buildLeft >= 0 && !g_gnet.lent);
+        bool activityDot=false; for(const auto& r:g_gnet.cityRuns) if(r.finished && r.success && r.joined && !r.claimed) activityDot=true;
+        bool warDot=false; for(const auto& b:g_gnet.cityBattles) if((long long)std::time(nullptr)>=b.ends && b.actions>0 && !b.claimed) warDot=true;
         for (int t = 0; t < 8; t++) {
-            Rectangle tb = { G.x + 18 + (t % 4) * tw, G.y + 34 + (t / 4) * 36, tw - 6, 32 };
+            Rectangle tb = { G.x + 18 + (t % 4) * tw, G.y + 34 + (t / 4) * 52, tw - 6, 44 };
             bool on = g_guildTab == t || (t == 1 && (g_guildTab == 9 || g_guildTab >= 10));
             DrawRectangleRounded(tb, 0.3f, 6, on ? Color{ 110, 70, 36, 255 } : Color{ 70, 50, 34, 200 });
             DrawRectangleRoundedLines(tb, 0.3f, 6, on ? kUoBronzeHi : kUoBronze);
             int lw = MeasureUIText(kTabs[t], 14);
-            DrawUIText(kTabs[t], (int)(tb.x + (tb.width - lw) / 2), (int)tb.y + 8, 14, on ? kUoGoldText : Color{ 236, 220, 190, 255 });
-            if (hub && ((t == 3 && helpDot) || (t == 1 && hallDot))) DrawCircle((int)(tb.x + tb.width - 8), (int)tb.y + 8, 5, Color{ 210, 40, 30, 255 });
+            DrawUIText(kTabs[t], (int)(tb.x + (tb.width - lw) / 2), (int)tb.y + 14, 14, on ? kUoGoldText : Color{ 236, 220, 190, 255 });
+            if (hub && ((t == 3 && helpDot) || (t == 1 && hallDot) || (t == 7 && activityDot) || (t == 5 && warDot))) DrawCircle((int)(tb.x + tb.width - 8), (int)tb.y + 8, 5, Color{ 210, 40, 30, 255 });
             if (g_guildTab != t && UOTapped(tb)) { g_guildTab = t; g_warScroll = 0.0f; PlaySfx(SfxId::Click); }
         }
     }
-    Rectangle area = { G.x + 8, G.y + 110, G.width - 16, G.height - 120 };
+    Rectangle area = { G.x + 8, G.y + 142, G.width - 16, G.height - 152 };
     if (g_guildTab == 1) g_warScroll = 0;
     else g_warScroll -= ScrollDelta(area);
     float x = G.x + 18, w = G.width - 36, y = area.y + 4 - g_warScroll;
@@ -36409,7 +36336,7 @@ static std::string BladeLastSeen(const GameState& s, int bi) {
 // The one Quest Board (2026-09-28 cleanup): Town (wanted + tasks), the Hearthmoot's
 // weekly goals (moved off the Bank screen) and your treasure maps - one place for
 // "what can I do", reachable from MENU > Quests anywhere, and at every Town Hall.
-static int g_questTab = 0;
+
 static void DrawWeeklyGoalsBody(GameState& s, float x, float y, float w) {
     const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 }, good = { 40, 110, 50, 255 };
     CheckWeeklyReset(s);
@@ -36434,29 +36361,48 @@ static void DrawWeeklyGoalsBody(GameState& s, float x, float y, float w) {
     y += 8;
     DrawUIText("Crafting commissions are taken at each workshop's Commissions tab.", (int)x, (int)y, 11, soft);
 }
+static std::string JournalAttentionLabel(const GameState& s) {
+    int n=s.bountyDone && s.bountyTarget>=0 ? 1 : 0;
+    if(s.taskKind && (s.taskKind==1 ? s.taskHave : TownTaskStock(const_cast<GameState&>(s),s.taskWhat))>=s.taskNeed) ++n;
+    return n ? TextFormat("Journal / %d rewards",n) : "Journal";
+}
 static void DrawQuestBoard(GameState& s, int screenW, int screenH) {
     { // tabs
-        static const char* kTabs[3] = { "Town", "Weekly", "Treasure maps" };
-        float tw = ((float)screenW - 20 - 8) / 3.0f;
-        for (int k = 0; k < 3; k++) {
-            Rectangle r = { 10 + k * (tw + 4), 112, tw, 32 };
+        static const char* kTabs[4] = { "Quests", "Weekly", "Maps", "Events" };
+        float tw = ((float)screenW - 20 - 12) / 4.0f;
+        for (int k = 0; k < 4; k++) {
+            Rectangle r = { 10 + k * (tw + 4), 112, tw, 44 };
             const char* lbl = k == 2 && !s.tmaps.empty() ? TextFormat("Maps (%d)", (int)s.tmaps.size()) : kTabs[k];
             if (MenuGroupTab(r, lbl, g_questTab == k, true)) { g_questTab = k; PlaySfx(SfxId::Click); }
         }
     }
     if (g_questTab == 2) { // the treasure-map list, under the tabs
         g_tmapOpen = true;
-        DrawTreasureMaps(s, screenW, screenH, 150.0f);
-        if (!g_tmapOpen) g_questOpen = false; // its X closes the board
+        DrawTreasureMaps(s, screenW, screenH, 168.0f);
+        if (!g_tmapOpen) {g_questOpen = false;s.screen=g_playScreen;} // its X closes the board
         g_tmapOpen = false;
         return;
     }
-    Rectangle G = { 10, 150, (float)screenW - 20, (float)screenH - 162 };
+    Rectangle G = { 10, 168, (float)screenW - 20, (float)screenH - 180 };
     UODrawGump(G, kUoParchment);
-    UODrawTitle(G, "Quest Board", 15);
+    UODrawTitle(G, "Journal", 15);
     const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 }, red = { 150, 30, 24, 255 }, good = { 40, 110, 50, 255 };
-    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_questOpen = false; return; }
+    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_questOpen = false; s.screen=g_playScreen; return; }
     float x = G.x + 18, y = G.y + 36, w = G.width - 36;
+    if(g_questTab==3) {
+        static float scroll=0;
+        std::vector<std::string> rows;
+        for(auto it=s.journal.rbegin();it!=s.journal.rend();++it) {
+            rows.push_back(JournalTimestamp(it->t));
+            auto lines=WrapJournalText(it->text,w-16); rows.insert(rows.end(),lines.begin(),lines.end()); rows.push_back("");
+        }
+        Rectangle area={x,y,w,G.y+G.height-y-14};
+        scroll-=ScrollDelta(area); scroll=std::clamp(scroll,0.0f,std::max(0.0f,rows.size()*20.0f-area.height));
+        UIBeginScissorMode((int)x,(int)y,(int)w,(int)area.height);
+        if(rows.empty()) DrawUIText("Your adventure history will appear here.",(int)x,(int)y+10,14,soft);
+        for(size_t i=0;i<rows.size();++i) DrawUIText(rows[i].c_str(),(int)x+8,(int)(y+i*20-scroll),12,ink);
+        UIEndScissorMode();return;
+    }
     if (g_questTab == 1) { DrawWeeklyGoalsBody(s, x, y, w); return; }
     DrawUIText("WANTED - by order of the Town Hall", (int)x, (int)y, 16, red); y += 22;
     for (int bi = 0; bi < 3; bi++) {
@@ -36526,17 +36472,22 @@ static void DrawQuestBoard(GameState& s, int screenW, int screenH) {
 static void DrawOptions(GameState& s, int screenW, int screenH) {
     Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
     UODrawGump(G, kUoParchment);
-    UODrawTitle(G, "Options", 15);
+    UODrawTitle(G, "Settings", 15);
     const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 };
-    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_optOpen = false; return; }
-    float x = G.x + 22, y = G.y + 40, w = G.width - 44;
+    if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_optOpen = false; s.screen=g_playScreen; return; }
+    static float scroll=0,content=0;
+    Rectangle area={G.x+12,G.y+36,G.width-24,G.height-50};
+    scroll-=ScrollDelta(area);scroll=std::clamp(scroll,0.0f,std::max(0.0f,content-area.height));
+    UIBeginScissorMode((int)area.x,(int)area.y,(int)area.width,(int)area.height);
+    float x = G.x + 22, y = area.y-scroll, start=y, w = G.width - 44;
     auto toggle = [&](const char* title, const char* what, bool& v) {
         DrawUIText(title, (int)x, (int)y + 4, 15, ink);
-        DrawUIText(what, (int)x, (int)y + 26, 12, soft);
-        Rectangle b = { x + w - 90, y + 4, 90, 34 };
+        auto lines=WrapJournalText(what,w-108);
+        for(size_t i=0;i<lines.size();++i) DrawUIText(lines[i].c_str(),(int)x,(int)y+26+(int)i*15,12,soft);
+        Rectangle b = { x + w - 90, y + 4, 90, 44 };
         if (UOButton(b, v ? "On" : "Off")) { v = !v; PlaySfx(SfxId::Click); }
         if (v) DrawCircleV({ b.x + 14, b.y + 17 }, 5.0f, Color{ 120, 220, 120, 255 });
-        y += 56;
+        y += std::max(68.0f,42.0f+lines.size()*15);
     };
     auto slider = [&](const char* title, float& v) { // (2026-09-29) drag or tap along the bar
         DrawUIText(title, (int)x, (int)y + 2, 15, ink);
@@ -36551,10 +36502,10 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
         UIRegister(hit);
         static bool dragging = false; static const float* who = nullptr;
         Vector2 m = GetMousePosition();
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(m, hit)) { dragging = true; who = &v; }
+        if (UIClick(hit)) { dragging = true; who = &v; }
         if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { if (dragging && who == &v) PlaySfx(SfxId::Click); dragging = false; who = nullptr; }
         if (dragging && who == &v) v = std::clamp((m.x - bar.x) / bar.width, 0.0f, 1.0f);
-        y += 54;
+        y += 62;
     };
     bool showWyrm = !s.optHideWyrm, showBoss = !s.optHideDungeonBoss;
     toggle("World boss alerts", "Vyrathax's wake-up warnings, banner and countdown.", showWyrm);
@@ -36571,7 +36522,8 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     toggle("Play online", "See other players in town and the wilds, and chat with them.", s.optOnline);
     toggle("Auto-restock reagents", "Top up to 30 reagents whenever you enter a town (1 gold each).", s.autoReagents);
     y += 6;
-    DrawUIText("Alerts you turn off still go in your journal (LOG).", (int)x, (int)y, 12, soft);
+    DrawUIText("Alert history is in Journal > Events.", (int)x, (int)y, 12, soft);
+    content=y+26-start;UIEndScissorMode();
 }
 static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     if (g_questOpen) { DrawQuestBoard(s, screenW, screenH); return; }
@@ -36917,7 +36869,6 @@ static bool g_dollRTReady = false;
 static float g_dollYaw = 0.35f;
 static bool g_dollDragging = false;
 static float g_dollLastX = 0.0f;
-static int g_pdSel = -1; // 0..7 gear slot, 100+i backpack item, 200+k resource stack; -1 none
 static const Rectangle kDollGump = { 10, 122, 520, 440 };
 static const Rectangle kDollView = { 98, 134, 344, 352 };
 static const int kT3CTrackPaperdoll = 160;
@@ -37028,6 +36979,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     if (g_pdSel >= 0) { g_uiShield = {60, kDollView.y + kDollView.height - 130, 420, 116}; g_uiShieldOn = true; }
     // ---- the paperdoll gump ----
     const Rectangle G = kDollGump;
+    if (!g_characterPack) {
     UODrawGump(G, kUoParchment);
     // the body's alcove: a darker recess behind the figure
     DrawRectangleGradientV((int)kDollView.x, (int)kDollView.y, (int)kDollView.width, (int)kDollView.height,
@@ -37045,23 +36997,23 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     // drag the body to turn it
     UIRegister(kDollView);
     if (!g_uiClickTaken && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && UIContains(mouse, kDollView) &&
-        mouse.y >= kDollView.y + 36 && !(g_uiShieldOn && CheckCollisionPointRec(mouse, g_uiShield))) {
+        mouse.y >= kDollView.y + 52 && !(g_uiShieldOn && CheckCollisionPointRec(mouse, g_uiShield))) {
         g_uiClickTaken = g_uiGestureOwned = true; g_dollDragging = true; g_dollLastX = mouse.x;
     }
     if (g_dollDragging && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { g_dollYaw += (mouse.x - g_dollLastX) * 0.012f; g_dollLastX = mouse.x; }
     else g_dollDragging = false;
-    DrawUIText("drag to turn", (int)(kDollView.x + kDollView.width - 76), (int)(kDollView.y + 6), 10, Fade(kUoBronzeLo, 0.7f));
+    DrawUIText("drag to turn", (int)(kDollView.x + kDollView.width - 76), (int)(kDollView.y + 50), 10, Fade(kUoBronzeLo, 0.7f));
 
     // Armor | Clothes page toggle over the figure (2026-09-27)
     {
         const char* labs[3] = { "Armor", "Clothes", "Jewels" };
         for (int k = 0; k < 3; k++) {
-            Rectangle tr = { kDollView.x + kDollView.width / 2 - 114 + k * 76, kDollView.y + 6, 74, 24 };
+            Rectangle tr = { kDollView.x + kDollView.width / 2 - 114 + k * 76, kDollView.y + 6, 74, 40 };
             bool on = g_pdPage == k;
             DrawRectangleRounded(tr, 0.35f, 6, on ? Color{ 120, 84, 44, 255 } : Fade(Color{ 236, 220, 184, 255 }, 0.85f));
             DrawRectangleRoundedLines(tr, 0.35f, 6, kUoBronze);
             int lw = MeasureUIText(labs[k], 12);
-            DrawUIText(labs[k], (int)(tr.x + tr.width / 2 - lw / 2), (int)tr.y + 6, 12, on ? Color{ 250, 236, 200, 255 } : Color{ 90, 60, 34, 255 });
+            DrawUIText(labs[k], (int)(tr.x + tr.width / 2 - lw / 2), (int)tr.y + 14, 12, on ? Color{ 250, 236, 200, 255 } : Color{ 90, 60, 34, 255 });
             if (UOTapped(tr) && !on) { g_pdPage = k; g_pdSel = -1; PlaySfx(SfxId::Click); }
         }
     }
@@ -37136,8 +37088,10 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     DrawUIText(title.c_str(), (int)(rib.x + rib.width / 2 - tw / 2), (int)rib.y + 24, 11,
                tier == NotorietyTier::Murderer ? Color{ 150, 30, 30, 255 } : Color{ 110, 80, 50, 255 });
 
+    } // equipment view
     // ---- status strip (UO status gump) ----
     Rectangle st = { 10, G.y + G.height + 10, 520, 52 };
+    if (!g_characterPack) {
     UODrawGump(st, kUoDarkWood);
     auto bar = [&](float x, float y, float w, float frac, Color c, const std::string& lab) {
         DrawRectangleRec({ x, y, w, 12 }, Color{ 20, 14, 10, 255 });
@@ -37155,8 +37109,14 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     DrawUIText(st1.c_str(), (int)st.x + 274, (int)st.y + 10, 12, kUoGoldText);
     DrawUIText(st2.c_str(), (int)st.x + 274, (int)st.y + 27, 12, Color{ 226, 212, 180, 255 });
 
+    }
+    if(g_characterPack) {
+        if(Button({20,120,244,44},"Bank storage",true)) MenuGoScreen(s,Screen::Bank);
+        if(Button({276,120,244,44},"Home & settlement",true)) MenuGoScreen(s,Screen::House);
+    }
     // ---- the backpack (UO bag gump) ----
     Rectangle bag = { 10, st.y + st.height + 18, 520, (float)screenH - (st.y + st.height + 18) - 8 };
+    if(g_characterPack) bag={10,180,520,(float)screenH-188};
     UODrawGump(bag, kUoLeather);
     // stitched seam just inside the frame
     for (float x = bag.x + 16; x < bag.x + bag.width - 16; x += 12)
@@ -37240,9 +37200,9 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
             DrawUIText(line.c_str(), (int)pop.x + 76, (int)pop.y + 40, 12, Color{ 226, 212, 180, 255 });
             if (UOCloseButton(pop)) g_pdSel = -1;
             else if ((g_pdSel < 8 || (g_pdSel >= 20 && g_pdSel < 27) || (g_pdSel >= 30 && g_pdSel < 33)) && item) {
-                if (UOButton({ pop.x + 76, pop.y + 68, 150, 32 }, "Take off")) { UnequipToBackpack(s, *eqSlot); g_pdSel = -1; }
+                if (UOButton({ pop.x + 76, pop.y + 64, 150, 44 }, "Take off")) { UnequipToBackpack(s, *eqSlot); g_pdSel = -1; }
             } else if (g_pdSel >= 100 && g_pdSel < 200 && item) {
-                if (UOButton({ pop.x + 76, pop.y + 68, 150, 32 }, "Equip")) {
+                if (UOButton({ pop.x + 76, pop.y + 64, 150, 44 }, "Equip")) {
                     EquipFromBackpack(s, g_pdSel - 100);
                     PlaySfx(SfxId::Click);
                     g_pdSel = -1;
