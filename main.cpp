@@ -35307,6 +35307,50 @@ static void OpenWarWeek(GameState& s) {
 }
 static float DrawGuildstoneBody(GameState& s, float x, float y, float w, int section);
 // The Guild Hall tabs (2026-09-29): 1 Hall, 2 Research, 3 Help, 4 Shop - the alliance loop, after Whiteout Survival.
+// Clickable guild settlement, driven by the same server state as the Hall panels.
+static float DrawGuildSettlement(float x, float y, float w, Rectangle area) {
+    const float height = 260;
+    Rectangle ground = { x, y, w, height };
+    DrawRectangleRounded(ground, 0.05f, 8, Color{ 77, 104, 69, 255 });
+    DrawRectangleLinesEx(ground, 2, Color{ 60, 74, 45, 255 });
+    DrawUIText("GUILD SETTLEMENT - click a building", (int)x + 14, (int)y + 12, 13, Color{ 245, 235, 202, 255 });
+    // Paths connect the physical buildings to a shared courtyard.
+    DrawLineEx({x+w*.2f,y+140}, {x+w*.8f,y+140}, 18, Color{154,139,106,255});
+    DrawLineEx({x+w*.5f,y+90}, {x+w*.5f,y+220}, 18, Color{154,139,106,255});
+    const char* names[] = { "Guild Hall", "Workshop", "Storehouse", "Aid Lodge" };
+    const int tabs[] = { 1, 2, 4, 3 };
+    for (int i=0; i<4; ++i) {
+        float cx = x + w * (i == 0 ? .5f : i == 1 ? .2f : i == 2 ? .8f : .5f);
+        float cy = y + (i == 0 ? 84 : i == 3 ? 198 : 146);
+        bool locked = (i == 1 || i == 2) && g_gnet.hall < 2;
+        bool building = i == 0 && g_gnet.buildLeft >= 0;
+        float bw = std::min(96.0f,w*.18f), bh = i == 0 ? 48 : 38;
+        Rectangle hit = {cx-bw*.6f,cy-bh-24,bw*1.2f,bh+49};
+        bool hover = CheckCollisionPointRec(GetMousePosition(),hit);
+        DrawEllipse((int)cx+5,(int)cy+6,bw*.65f,12,Fade(BLACK,.22f));
+        Color wall = locked ? Color{109,109,93,255} : Color{205,185,144,255};
+        DrawRectangleRec({cx-bw*.5f,cy-bh,bw,bh},wall);
+        DrawTriangle({cx+bw*.5f,cy-bh},{cx+bw*.5f,cy},{cx+bw*.65f,cy-9},Color{128,112,81,255});
+        DrawTriangle({cx-bw*.6f,cy-bh},{cx+bw*.6f,cy-bh},{cx,cy-bh-24},locked ? Color{88,91,77,255} : Color{108,65,44,255});
+        DrawRectangleRec({cx-8,cy-22,16,22},Color{65,47,32,255});
+        DrawRectangleRec({cx-bw*.35f,cy-bh+10,10,12},Color{82,110,114,255});
+        DrawRectangleRec({cx+bw*.24f,cy-bh+10,10,12},Color{82,110,114,255});
+        if (building) {
+            DrawLineEx({cx-bw*.55f,cy+1},{cx-bw*.55f,cy-bh-15},3,Color{176,142,83,255});
+            DrawLineEx({cx+bw*.55f,cy+1},{cx+bw*.55f,cy-bh-15},3,Color{176,142,83,255});
+            DrawLineEx({cx-bw*.55f,cy-12},{cx+bw*.55f,cy-12},3,Color{176,142,83,255});
+        }
+        if (hover) DrawRectangleRoundedLines(hit,.1f,4,Color{245,212,109,255});
+        const char* label = TextFormat("%s%s",names[i],locked ? " (locked)" : "");
+        DrawUIText(label,(int)(cx-MeasureUIText(label,11)*.5f),(int)cy+7,11,Color{255,243,209,255});
+        if (i == 0) {
+            const char* status = building ? "Under construction" : TextFormat("Level %d",g_gnet.hall);
+            DrawUIText(status,(int)(cx-MeasureUIText(status,10)*.5f),(int)cy+22,10,Color{245,212,109,255});
+        }
+        if (hover && hit.y >= area.y && hit.y+hit.height <= area.y+area.height && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) g_guildTab=tabs[i];
+    }
+    return y + height + 18;
+}
 static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangle area) {
     const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 }, gold = { 150, 100, 20, 255 }, good = { 40, 110, 40, 255 }, bad = { 150, 40, 30, 255 };
     auto vis = [&](Rectangle r) { return r.y >= area.y && r.y + r.height <= area.y + area.height; };
@@ -35327,6 +35371,7 @@ static float DrawGuildHallTabs(GameState& s, float x, float y, float w, Rectangl
     if (!g_gnet.msg.empty()) { DrawUIText(g_gnet.msg.c_str(), (int)x, (int)y, 12, bad); y += 20; }
     bool officer = g_gnet.myRank >= 1;
     float since = (float)(GetTime() - g_gnet.hubAt);
+    if (g_guildTab == 1) y = DrawGuildSettlement(x, y, w, area);
     if (g_guildTab == 1) { // ---- Hall ----
         if (g_gnet.hall == 1) {
             DrawUIText("Stage One: Guild Hall foundation", (int)x, (int)y, 17, gold); y += 26;
