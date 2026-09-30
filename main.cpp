@@ -19451,7 +19451,7 @@ static void Town3DDrawProps(int town, float t) {
     TownPropModelsEnsure();
     TownDressEnsure(town);
     const Wild3DDressing& D = g_wild3dDress;
-    if (g_townWaterShader.id != 0) {
+    if (g_townWaterShader.id != 0 && !g_t3dSceneShadowPass) {
         T3DPushLight(g_townWaterShader);
         Vector3 sky = { g_t3dSkyZenith.r / 255.0f, g_t3dSkyZenith.g / 255.0f, g_t3dSkyZenith.b / 255.0f };
         float waterTime = fmodf(t, 3600.0f);
@@ -19467,7 +19467,7 @@ static void Town3DDrawProps(int town, float t) {
                     (it.kind == kTPFountain ? 112.0f : it.kind == kTPStallRed || it.kind == kTPStallBlue || it.kind == kTPStallGreen ? 50.0f : 30.0f) * it.scale,
                     (it.kind == kTPFountain ? 112.0f : 30.0f) * it.scale, 0.32f);
             DrawModelEx(g_townPropModels[it.kind], { it.x, 0, it.z }, { 0, 1, 0 }, it.rot, { it.scale, it.scale, it.scale }, WHITE);
-            if (it.kind == kTPFountain && g_townFountainRipple.meshCount > 0) {
+            if (it.kind == kTPFountain && g_townFountainRipple.meshCount > 0 && !g_t3dSceneShadowPass) { // water casts nothing: skip it in the shadow pass (2026-09-30)
                 DrawModelEx(g_townFountainWater, { it.x, 0, it.z }, { 0, 1, 0 }, it.rot,
                             { it.scale, it.scale, it.scale }, WHITE);
                 // Fading overlays must not occlude one another or the opaque water.
