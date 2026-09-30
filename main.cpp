@@ -37111,7 +37111,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     else g_dollDragging = false;
     DrawUIText("drag to turn", (int)(kDollView.x + kDollView.width - 76), (int)(kDollView.y + 50), 10, Fade(kUoBronzeLo, 0.7f));
     if (const Item* trying = PaperdollTryOnItem(s)) {
-        DrawRectangleRec({kDollView.x + 4, kDollView.y + 68, kDollView.width - 8, 38}, Fade(kUoDarkWood, 0.95f));
+        DrawRectangleRec({kDollView.x + 4, kDollView.y + 68, kDollView.width - 8, 38}, Fade(Color{45,30,18,255}, 0.95f));
         PaperdollText("Trying on: " + PaperdollShortName(trying->name), {kDollView.x + 12,kDollView.y + 73,kDollView.width - 24,16}, 12, kUoGoldText);
         DrawUIText("Preview only - tap Equip to wear it",(int)kDollView.x + 12,(int)kDollView.y + 90,10,Color{226,212,180,255});
     }
