@@ -37110,11 +37110,6 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     if (g_dollDragging && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { g_dollYaw += (mouse.x - g_dollLastX) * 0.012f; g_dollLastX = mouse.x; }
     else g_dollDragging = false;
     DrawUIText("drag to turn", (int)(kDollView.x + kDollView.width - 76), (int)(kDollView.y + 50), 10, Fade(kUoBronzeLo, 0.7f));
-    if (const Item* trying = PaperdollTryOnItem(s)) {
-        DrawRectangleRec({kDollView.x + 4, kDollView.y + 68, kDollView.width - 8, 38}, Fade(Color{45,30,18,255}, 0.95f));
-        PaperdollText("Trying on: " + PaperdollShortName(trying->name), {kDollView.x + 12,kDollView.y + 73,kDollView.width - 24,16}, 12, kUoGoldText);
-        DrawUIText("Preview only - tap Equip to wear it",(int)kDollView.x + 12,(int)kDollView.y + 90,10,Color{226,212,180,255});
-    }
 
     // Armor | Clothes page toggle over the figure (2026-09-27)
     {
@@ -37189,6 +37184,10 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     DrawTriangle({ rib.x, rib.y }, { rib.x - 14, rib.y + rib.height / 2 }, { rib.x, rib.y + rib.height }, Color{ 206, 186, 146, 255 });
     DrawTriangle({ rib.x + rib.width, rib.y }, { rib.x + rib.width, rib.y + rib.height }, { rib.x + rib.width + 14, rib.y + rib.height / 2 }, Color{ 206, 186, 146, 255 });
     DrawRectangleLinesEx(rib, 1.5f, kUoBronze);
+    if (const Item* trying = PaperdollTryOnItem(s)) {
+        PaperdollText("Trying on: " + PaperdollShortName(trying->name), {rib.x+8,rib.y+5,rib.width-16,18}, 14, Color{70,40,20,255});
+        PaperdollText("Preview only - tap Equip to wear it", {rib.x+8,rib.y+24,rib.width-16,14}, 10, Color{110,80,50,255});
+    } else {
     TapToEditText(rib, "Name your character", s.characterName, 24);
     std::string nameLine = s.characterName.empty() ? "Tap to name your character" : CharacterDisplayName(s);
     int nw = MeasureUIText(nameLine.c_str(), 15);
@@ -37202,6 +37201,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     int tw = MeasureUIText(title.c_str(), 11);
     DrawUIText(title.c_str(), (int)(rib.x + rib.width / 2 - tw / 2), (int)rib.y + 24, 11,
                tier == NotorietyTier::Murderer ? Color{ 150, 30, 30, 255 } : Color{ 110, 80, 50, 255 });
+    }
 
     } // equipment view
     // ---- status strip (UO status gump) ----
