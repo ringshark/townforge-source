@@ -15870,6 +15870,7 @@ static float Town3DDistPtSeg(float px, float pz, float ax, float az, float bx, f
 }
 
 static std::vector<Vector2> Town3DTreeSpots(int town); // town greenery, with the wilderness dressing
+#include "town_square_art.h"
 static void Town3DEnsureGround(const GameState& s) {
     Town3DGround& G = g_t3dGround;
     if (G.loaded && G.town == s.selectedTown) return;
@@ -15883,8 +15884,8 @@ static void Town3DEnsureGround(const GameState& s) {
     bool town2 = (s.selectedTown != 0);
     bool town3 = (s.selectedTown == 2); // Phase 3: Frostmere - snow-covered ground
     bool town4 = (s.selectedTown == 3); // Phase 4: Cragmoor - granite mountain ground
-    Color grassDark  = town4 ? Color{ 118, 114, 106, 255 } : town3 ? Color{ 218, 230, 242, 255 } : (town2 ? Color{ 139, 145, 105, 255 }   : Color{ 104, 148, 82, 255 });
-    Color grassLight = town4 ? Color{ 158, 154, 144, 255 } : town3 ? Color{ 240, 248, 252, 255 } : (town2 ? Color{ 191, 184, 136, 255 }  : Color{ 148, 190, 112, 255 });
+    Color grassDark  = town4 ? Color{ 118, 114, 106, 255 } : town3 ? Color{ 218, 230, 242, 255 } : (town2 ? Color{ 139, 145, 105, 255 }   : Color{ 94, 126, 77, 255 });
+    Color grassLight = town4 ? Color{ 158, 154, 144, 255 } : town3 ? Color{ 240, 248, 252, 255 } : (town2 ? Color{ 191, 184, 136, 255 }  : Color{ 139, 164, 103, 255 });
     Color plazaCol   = town4 ? Color{ 140, 136, 126, 255 } : town3 ? Color{ 180, 196, 212, 255 } : (town2 ? Color{ 160, 162, 168, 255 }  : Color{ 196, 168, 108, 255 });
     Color plazaRim   = town4 ? Color{ 110, 106, 98, 255 }  : town3 ? Color{ 150, 168, 186, 255 } : (town2 ? Color{ 128, 130, 136, 255 }  : Color{ 170, 142, 90, 255 });
     Color roadCol    = town4 ? Color{ 132, 128, 118, 255 } : town3 ? Color{ 200, 212, 226, 255 } : (town2 ? Color{ 150, 146, 138, 255 }  : Color{ 178, 146, 98, 255 });
@@ -15943,6 +15944,10 @@ static void Town3DEnsureGround(const GameState& s) {
             float wx = px / k, wz = py / k;
             float dc = hypotf(wx - pcx, wz - pcz);
             int idx = py * SZ + px;
+            if(s.selectedTown==0 && dc<pRim) {
+                dst[idx]=tfsquare::Paving(wx-pcx,wz-pcz,pRim,np[idx].r/255.0f);
+                continue;
+            }
             if (dc < pR) { // plaza face: stone mottling from the fine noise
                 float s = (np[idx].r / 255.0f - 0.5f) * 22.0f;
                 dst[idx].r = (unsigned char)std::clamp(dst[idx].r + s, 0.0f, 255.0f);
@@ -15965,6 +15970,14 @@ static void Town3DEnsureGround(const GameState& s) {
                 wear = (1.0f - (dw - kT3DRoadW * 0.5f) / 23.0f) * 0.55f;
             float dpe = fabsf(dc - pRim); // worn ring just outside the plaza rim
             if (dpe < 24.0f) wear = fmaxf(wear, (1.0f - dpe / 24.0f) * 0.35f);
+            // Break the perfectly even road fringe with the existing noise.
+            if(s.selectedTown==0)wear*=0.65f+0.5f*(pp[idx].r/255.0f);
+            if(s.selectedTown==0 && dw<kT3DRoadW*.5f) {
+                float grain=(np[idx].r/255.0f-.5f)*13;
+                dst[idx].r=(unsigned char)std::clamp(dst[idx].r+grain,0.0f,255.0f);
+                dst[idx].g=(unsigned char)std::clamp(dst[idx].g+grain,0.0f,255.0f);
+                dst[idx].b=(unsigned char)std::clamp(dst[idx].b+grain,0.0f,255.0f);
+            }
             if (wear > 0.0f) {
                 dst[idx].r = (unsigned char)(dst[idx].r + (wornCol.r - dst[idx].r) * wear);
                 dst[idx].g = (unsigned char)(dst[idx].g + (wornCol.g - dst[idx].g) * wear);
@@ -17485,7 +17498,7 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
     // large flat outer field so the horizon never shows a hard edge.
     const float tc = kTownWorldSize * 0.5f; // town center
     DrawModel(g_t3dGround.model, { tc, 0, tc }, 1.0f, WHITE);
-    Color outerCol = (s.selectedTown == 0) ? Color{ 96, 138, 76, 255 } :
+    Color outerCol = (s.selectedTown == 0) ? Color{ 94, 126, 77, 255 } :
                      (s.selectedTown == 2) ? Color{ 226, 234, 242, 255 } : // Frostmere: snowfields
                      (s.selectedTown == 3) ? Color{ 133, 129, 121, 255 } : Color{ 151, 151, 108, 255 };
     // 2026-09-24: was -1.5 - z-fights with the ground model at long view
@@ -17505,7 +17518,16 @@ static void Town3DDrawSceneContents(GameState& s, bool shadowPass) {
         bool wide = (node.key == "townhall" || node.key == "bank" || node.key == "stable");
         float fw = wide ? 140.0f : 118.0f; // 3x2 buildings are 132 wide
         float fd = wide ? 96.0f : 118.0f;  // ...and 88 deep
-        DrawCube({ node.pos.x, 1, node.pos.y }, fw, 2, fd, ColorBrightness(col, -0.4f)); // foundation
+        Color foundation=s.selectedTown==0 ? Color{107,104,92,255}:ColorBrightness(col,-0.4f);
+        DrawCube({ node.pos.x, 1, node.pos.y }, fw, 2, fd, foundation);
+        if(s.selectedTown==0) {
+            // Ground-level entrance stones: align with the actual modular door
+            // slot, staying below the door leaf and off the street lane.
+            float doorX=node.pos.x+(wide?0.0f:kT3DModScale);
+            float front=node.pos.y+2*kT3DModScale;
+            DrawCube({doorX,1.2f,front+6},30,2.4f,12,Color{170,160,139,255});
+            DrawCube({doorX,0.5f,front+15},34,1,7,Color{146,139,121,255});
+        }
         Town3DDrawBuilding(node.key, node.pos.x, node.pos.y, s.selectedTown);
     }
     if (s.selectedTown == 2) { // Phase 3 - Frostmere 3D winter dressing: snow drifts + frost pines
