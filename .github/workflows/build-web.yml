@@ -31,6 +31,7 @@ jobs:
           g++ -std=c++17 tests/landscape-layout.cpp -o /tmp/tf-layout-test
           /tmp/tf-layout-test
           python tests/landscape-pointer.py
+          python tests/transitions.py
           node tests/landscape-shell.cjs
           python tests/player-movement.py
           python tests/ui-input.py

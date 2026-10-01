@@ -38059,6 +38059,24 @@ static bool LandscapeDialogOpen(const GameState& s) {
         s.houseChestOpen || s.houseCraftModule>=0 || s.openCorpseId>=0 ||
         g_trackOpen || (s.screen==Screen::Blackwake && g_denPanel!=0);
 }
+static void WarmWildernessCache(const GameState& s) {
+    // Spread independent cache preparation over quiet town frames. The complete
+    // town image remains displayed while each one-time task finishes.
+    static int step=0;static double quietSince=0;
+    if(step>=4)return;
+    bool busy=s.screen!=Screen::Town || LandscapeDialogOpen(s) ||
+        IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsKeyDown(KEY_W) || IsKeyDown(KEY_A) ||
+        IsKeyDown(KEY_S) || IsKeyDown(KEY_D) || IsKeyDown(KEY_UP) || IsKeyDown(KEY_DOWN) ||
+        IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_RIGHT) || g_walkOn;
+    if(busy){quietSince=GetTime();return;}
+    if(GetTime()-quietSince<1.5)return;
+    switch(step++) {
+        case 0:Wild3DLoadModels();break;
+        case 1:Wild3DEnsureGround();break;
+        case 2:Wild3DBuildScatter();break;
+        case 3:WildMapEnsureTexture();break;
+    }
+}
 static void UpdateDrawFrame() {
     UIFrameReset(); // (2026-09-28) buttons drawn last frame guard this frame's world taps
 #ifdef __EMSCRIPTEN__
@@ -38299,6 +38317,7 @@ static void UpdateDrawFrame() {
 
         // --- Draw ---
         bool wideWorld=!IsMenuScreen(state.screen) && (ExploreHeaderCollapsed(state) || (state.screen==Screen::Hunt && state.selectedDungeon.has_value() && state.hunt3DView)) && !state.ambush.has_value() && !state.innocentEncounter.has_value();
+        const Screen frameScreen=state.screen;
         LandscapeBeginFrame(wideWorld,LandscapeDialogOpen(state),(int)state.screen,state.screen==Screen::Character && !g_characterPack);
         ClearBackground(wideWorld ? BLANK:kColorPageBg);
 
@@ -38454,10 +38473,9 @@ static void UpdateDrawFrame() {
         }
         // 3D exploration MENU (2026-09-26), drawn over the world like the
         // dungeon's. Skipped on the frame a screen switch happened.
-        if (g_screenFadeT > 0.0f) { // area-change fade-in (walked out of town / through a gate or doorway)
-            DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, std::min(1.0f, g_screenFadeT / kScreenFadeTime)));
-            g_screenFadeT = fmaxf(0.0f, g_screenFadeT - GetFrameTime());
-        }
+        // Arrival titles provide the transition cue; never cover the gameplay
+        // with a black portrait-sized fade or add a fixed wait to entering an area.
+        g_screenFadeT=0.0f;
         if (g_zoneTitleT > 0.0f) { // the place's name as you arrive
             float t = kZoneTitleTime - g_zoneTitleT;
             float a = std::min(std::clamp((t - 0.2f) / 0.4f, 0.0f, 1.0f), std::clamp(g_zoneTitleT / 0.6f, 0.0f, 1.0f));
@@ -38515,9 +38533,15 @@ static void UpdateDrawFrame() {
 
         // A button may have opened or closed a panel during this frame. Present
         // the final state, rather than guessing from the size of HUD controls.
+        if(state.screen!=frameScreen) {
+            // Draw functions can navigate before rendering their world. Keep the
+            // last complete screen and still finish the frame to advance input.
+            LandscapeHoldFrame();EndDrawing();return;
+        }
         g_landscapeDialog=LandscapeDialogOpen(state);
         LandscapePresent(UiFont(),g_uiRects);
         EndDrawing();
+        WarmWildernessCache(state);
     }
 }
 

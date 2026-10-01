@@ -14,6 +14,19 @@ static bool g_landscapeActive=false,g_landscapeWorld=false,g_landscapeDialog=fal
 static bool g_presentedWorld=false,g_presentedDialog=true,g_landscapeRedirect=false;
 static RenderTexture2D g_landscapeUI{},g_landscapeScene{},g_zoomTarget{};
 static std::vector<RenderTexture2D> g_landscapeTargets;
+static RenderTexture2D g_landscapeFrame{};
+static bool g_landscapeFrameReady=false;
+static void LandscapeDrawLastFrame() {
+    ::BeginDrawing();
+    if(g_landscapeFrameReady)
+        ::DrawTexturePro(g_landscapeFrame.texture,{0,0,960,-540},{0,0,960,540},{0,0},0,WHITE);
+    else {::ClearBackground(Color{22,33,42,255});::DrawText("Entering the world...",330,260,22,WHITE);}
+}
+static void LandscapeHoldFrame() {
+    ::EndScissorMode();
+    g_landscapeActive=false;::EndTextureMode();g_landscapeTargets.clear();
+    LandscapeDrawLastFrame();
+}
 static std::set<unsigned> g_landscapeWorldTextures;
 // Keep world raster detail across the wide screen while retaining the existing
 // logical canvas for picking, collision and HUD coordinates.
@@ -171,8 +184,13 @@ static void LandscapeBeginFrame(bool world,bool dialog,int screen,bool gear=fals
     ::BeginTextureMode(g_landscapeUI);g_landscapeTargets.push_back(g_landscapeUI);g_landscapeActive=true;
 }
 static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
+    ::EndScissorMode();
     g_landscapeActive=false;::EndTextureMode();g_landscapeTargets.clear();
-    ::BeginDrawing();::ClearBackground(Color{22,33,42,255});
+    if(!g_landscapeFrame.id) {
+        g_landscapeFrame=::LoadRenderTexture(960,540);
+        ::SetTextureFilter(g_landscapeFrame.texture,TEXTURE_FILTER_BILINEAR);
+    }
+    ::BeginTextureMode(g_landscapeFrame);::ClearBackground(Color{22,33,42,255});
     auto blit=[](Texture2D texture,Rectangle s,Rectangle d){s.y=texture.height-s.y-s.height;s.height=-s.height;::DrawTexturePro(texture,s,d,{0,0},0,WHITE);};
     if(g_landscapeWorld) {
         blit(g_landscapeScene.texture,{0,0,(float)g_landscapeScene.texture.width,900},{0,0,960,540});
@@ -270,6 +288,8 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
             else ++it;
         }
     }
+    ::EndTextureMode();g_landscapeFrameReady=true;
+    LandscapeDrawLastFrame();
 }
 #define GetMousePosition LandscapeMouse
 #define GetTouchPosition LandscapeTouch

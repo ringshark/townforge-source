@@ -65,7 +65,7 @@ print('PASS production landscape pointer capture, fresh gestures, and ground rou
 # control dimensions (which missed menus and mistook broad HUD bars for panels).
 main=Path('main.cpp').read_text()
 start=main.index('static bool LandscapeDialogOpen(')
-selector=main[start:main.index('static void UpdateDrawFrame()',start)]
+selector=main[start:main.index('static void WarmWildernessCache(',start)]
 modal='''#include <optional>
 #include <cassert>
 enum class Screen {Town,Blackwake,Character};
