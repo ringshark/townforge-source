@@ -35,7 +35,7 @@ struct LandscapeCaption {std::string text;int size;Color color;bool prompt;};
 static std::vector<LandscapeCaption> g_landscapeCaptions;
 struct LandscapeNotice {std::vector<std::string> lines;Color color;float alpha;};
 static std::vector<LandscapeNotice> g_landscapeNotices;
-struct LandscapeWorldLabel {std::string text;Vector2 point;int size;Color color;float alpha;};
+struct LandscapeWorldLabel {std::string text;Vector2 point;int size;Color color;float alpha;bool plain=false;};
 static std::vector<LandscapeWorldLabel> g_landscapeLabels;
 static std::vector<Rectangle> g_landscapeHitRects;
 static bool g_presentedMap=false,g_landscapeMap=false;
@@ -183,6 +183,31 @@ static void LandscapeBeginFrame(bool world,bool dialog,int screen,bool gear=fals
     ::BeginTextureMode(g_landscapeScene);::ClearBackground(Color{22,33,42,255});::EndTextureMode();
     ::BeginTextureMode(g_landscapeUI);g_landscapeTargets.push_back(g_landscapeUI);g_landscapeActive=true;
 }
+// Measure at the final landscape resolution: text must never inherit the
+// nonuniform scale of the old portrait HUD bands.
+static std::vector<std::string> LandscapeWrap(Font font,const std::string& text,int size,float width) {
+    std::vector<std::string> lines;
+    std::string line,word;
+    auto append=[&]() {
+        if(word.empty())return;
+        std::string candidate=line.empty()?word:line+" "+word;
+        if(!line.empty() && ::MeasureTextEx(font,candidate.c_str(),size,1).x>width) {
+            lines.push_back(line);line=word;
+        } else line=candidate;
+        word.clear();
+    };
+    for(char c:text) {
+        if(c==' ' || c=='\n') {append();if(c=='\n'){lines.push_back(line);line.clear();}}
+        else word+=c;
+    }
+    append();if(!line.empty())lines.push_back(line);
+    return lines;
+}
+static void LandscapePlate(Rectangle r,Color edge,float alpha=1) {
+    ::DrawRectangleRounded({r.x+2,r.y+3,r.width,r.height},.18f,6,Fade(BLACK,.25f*alpha));
+    ::DrawRectangleRounded(r,.18f,6,Fade(Color{15,24,30,255},.94f*alpha));
+    ::DrawRectangleRoundedLines(r,.18f,6,Fade(edge,.7f*alpha));
+}
 static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
     ::EndScissorMode();
     g_landscapeActive=false;::EndTextureMode();g_landscapeTargets.clear();
@@ -197,16 +222,23 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
         ::DrawRectangleGradientV(0,0,960,100,Color{7,13,19,75},BLANK);
         ::DrawRectangleGradientV(0,440,960,100,BLANK,Color{7,13,19,95});
         if(!g_landscapeDialog)for(const auto& label:g_landscapeLabels) {
-            float w=::MeasureTextEx(font,label.text.c_str(),label.size,1).x;
-            float x=label.point.x-w*.5f,y=label.point.y-label.size;
-            if(x<4 || x+w>956 || y<8 || y+label.size>532)continue;
-            ::DrawRectangleRounded({x-6,y-3,w+12,(float)label.size+8},.2f,4,Fade(Color{12,21,27,255},label.alpha*.8f));
-            ::DrawTextEx(font,label.text.c_str(),{x,y},label.size,1,label.color);
+            if(label.point.x<0 || label.point.x>960 || label.point.y<12 || label.point.y>528)continue;
+            int size=label.size;
+            float w=::MeasureTextEx(font,label.text.c_str(),size,1).x;
+            while(w>320 && size>11)w=::MeasureTextEx(font,label.text.c_str(),--size,1).x;
+            float x=std::max(12.0f,std::min(948.0f-w,label.point.x-w*.5f));
+            float y=std::max(12.0f,label.point.y-size);
+            if(!label.plain)LandscapePlate({x-6,y-3,w+12,(float)size+8},Color{105,119,119,255},label.alpha);
+            else ::DrawTextEx(font,label.text.c_str(),{x+1,y+2},size,1,Fade(BLACK,label.alpha*.85f));
+            ::DrawTextEx(font,label.text.c_str(),{x,y},size,1,label.color);
         }
     }
     if(g_landscapeGear) {
         // Keep the whole gear gump together, then place the character details
         // beside it. Both columns share one scale and matching touch transforms.
+        ::DrawRectangleGradientV(0,0,960,540,Color{29,40,46,255},Color{10,18,24,255});
+        LandscapePlate({18,116,452,380},Color{163,132,82,255});
+        LandscapePlate({490,116,452,380},Color{163,132,82,255});
         blit(g_landscapeUI.texture,{0,0,540,110},{210,0,540,110});
         blit(g_landscapeUI.texture,{0,110,540,452},{24,122,440,452*tflayout::gearScale});
         blit(g_landscapeUI.texture,{0,562,540,338},{496,122,440,338*tflayout::gearScale});
@@ -236,7 +268,8 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
         blit(g_landscapeUI.texture,{0,0,540,110},{210,0,540,110});
         blit(g_landscapeUI.texture,{0,110+g_landscapeScroll,540,430},{210,110,540,430});
         for(auto r:{top,more}) {::DrawRectangleRounded(r,.15f,4,Color{37,48,54,255});::DrawRectangleRoundedLines(r,.15f,4,Color{163,132,82,255});}
-        ::DrawText("Top",833,49,18,Color{238,220,183,255});::DrawText("More",824,473,18,Color{238,220,183,255});
+        ::DrawTextEx(font,"Top",{833,49},18,1,Color{238,220,183,255});
+        ::DrawTextEx(font,"More",{824,473},18,1,Color{238,220,183,255});
         ::DrawRectangleRounded({848,104,16,332},.6f,6,Color{9,17,23,255});
         ::DrawRectangleRounded({850,108+g_landscapeScroll/tflayout::maxScroll*264,12,60},.6f,6,Color{177,145,91,255});
         ::DrawTextEx(font,"Drag to scroll",{798,418},13,1,Color{160,177,182,255});
@@ -249,30 +282,46 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
         blit(g_landscapeUI.texture,{0,600,170,300},{0,240,170,300});
         blit(g_landscapeUI.texture,{170,600,370,300},{590,240,370,300});
         float noticeBottom=368;
-        for(const auto& notice:g_landscapeNotices) {
-            float h=notice.lines.size()*19.0f+14,top=noticeBottom-h;
-            ::DrawRectangleRounded({176,top,408,h},.2f,5,Fade(Color{15,24,30,255},notice.alpha*.92f));
-            ::DrawRectangleRoundedLines({176,top,408,h},.2f,5,Fade(notice.color,notice.alpha*.7f));
-            for(size_t i=0;i<notice.lines.size();++i) {
-                float w=::MeasureTextEx(font,notice.lines[i].c_str(),15,1).x;
-                ::DrawTextEx(font,notice.lines[i].c_str(),{380-w*.5f,top+7+i*19},15,1,Fade(notice.color,notice.alpha));
+        // Newest messages take priority, and the stack cannot cover the top HUD.
+        for(auto it=g_landscapeNotices.rbegin();it!=g_landscapeNotices.rend();++it) {
+            const auto& notice=*it;
+            std::vector<std::string> lines;
+            for(const auto& line:notice.lines) {
+                auto wrapped=LandscapeWrap(font,line,15,380);
+                lines.insert(lines.end(),wrapped.begin(),wrapped.end());
             }
-            noticeBottom=top-6;
+            float h=lines.size()*19.0f+14,top=noticeBottom-h;
+            if(top<170)break;
+            LandscapePlate({176,top,408,h},notice.color,notice.alpha);
+            for(size_t i=0;i<lines.size();++i) {
+                float w=::MeasureTextEx(font,lines[i].c_str(),15,1).x;
+                ::DrawTextEx(font,lines[i].c_str(),{380-w*.5f,top+7+i*19},15,1,Fade(notice.color,notice.alpha));
+            }
+            noticeBottom=top-8;
         }
-        int y=394;
+        int y=394;bool promptDrawn=false;
         for(const auto& caption:g_landscapeCaptions) {
-            int w=(int)::MeasureTextEx(font,caption.text.c_str(),caption.size,1).x;if(w>396)continue;
+            if(caption.prompt && promptDrawn)continue;
+            auto lines=LandscapeWrap(font,caption.text,caption.size,380);
             int cy=caption.prompt ? 465:y;
-            Rectangle plate={380-w*.5f-12,(float)cy-6,(float)w+24,(float)caption.size+14};
-            ::DrawRectangleRounded(plate,.25f,5,Color{15,24,30,230});
-            ::DrawRectangleRoundedLines(plate,.25f,5,caption.prompt ? Color{175,140,82,255}:Color{65,83,92,255});
-            ::DrawTextEx(font,caption.text.c_str(),{380-w*.5f,(float)cy},caption.size,1,caption.color);
-            if(!caption.prompt)y+=caption.size+24;
+            int h=(int)lines.size()*(caption.size+4)+12;
+            if(cy+h>(caption.prompt?532:455))continue;
+            float w=0;for(const auto& line:lines)w=std::max(w,::MeasureTextEx(font,line.c_str(),caption.size,1).x);
+            LandscapePlate({380-w*.5f-12,(float)cy-6,w+24,(float)h},
+                caption.prompt ? Color{175,140,82,255}:Color{65,83,92,255});
+            for(const auto& line:lines) {
+                float lw=::MeasureTextEx(font,line.c_str(),caption.size,1).x;
+                ::DrawTextEx(font,line.c_str(),{380-lw*.5f,(float)cy},caption.size,1,caption.color);
+                cy+=caption.size+4;
+            }
+            if(caption.prompt)promptDrawn=true;else y+=h+8;
         }
     }
     if(g_landscapeWorld && !g_landscapeDialog)g_landscapeScroll=0;
     g_presentedMap=g_landscapeMap && g_landscapeWorld && !g_landscapeDialog;
     if(g_presentedMap) {
+        auto r=g_landscapeMapDest;
+        LandscapePlate({r.x-3,r.y-3,r.width+6,r.height+6},Color{163,132,82,255});
         blit(g_landscapeMapTarget.texture,g_landscapeMapSource,g_landscapeMapDest);
         g_presentedMapSource=g_landscapeMapSource;g_presentedMapDest=g_landscapeMapDest;
     }

@@ -25338,6 +25338,10 @@ static void DrawStationSign(Vector2 at, const char* verb, const char* label, boo
     float t = (float)GetTime();
     at.y += sinf(t * 2.4f) * 3.0f;
     std::string top = inRange ? std::string("Tap to ") + (char)tolower(verb[0]) + (verb + 1) : std::string(verb) + " here";
+    if(g_landscapeActive && g_landscapeWorld && !g_landscapeDialog) {
+        DrawWorldLabel(top+" - "+label,at,14,inRange ? Color{255,211,126,255}:Color{235,229,213,255});
+        return;
+    }
     int fs = 14, fs2 = 11;
     int w = std::max(MeasureText(top.c_str(), fs), MeasureText(label, fs2)) + 20;
     Rectangle r = { at.x - w / 2.0f, at.y - 40, (float)w, 36 };
@@ -30203,6 +30207,12 @@ static void DrawFloatTexts3D(GameState& s, const Town3DCam& c, int zone, int scr
         Vector2 sp;
         if (!Town3DProject(c, wp, &sp)) continue;
         if (sp.x < -40 || sp.x > screenW + 40 || sp.y < -20 || sp.y > screenH + 40) continue;
+        if(g_landscapeActive && g_landscapeWorld && !g_landscapeDialog) {
+            auto p=tflayout::WorldPoint({sp.x,sp.y});
+            float alpha=1.0f-f*f;
+            g_landscapeLabels.push_back({ft.text,{p.x,p.y},18,Fade(ft.color,alpha),alpha,true});
+            continue;
+        }
         int fsz = 16;
         int w = MeasureUIText(ft.text.c_str(), fsz);
         int sx = (int)(sp.x - w / 2), sy = (int)sp.y;
