@@ -12,5 +12,10 @@ int main(){
  auto panel=Input({480,270},true,true);assert(near(panel.x,270)&&near(panel.y,270));
  auto legacy=Input({480,270},false,false);assert(near(legacy.x,270)&&near(legacy.y,270));
  auto bottom=Input({480,270},true,true,360);assert(near(bottom.y,630));
+ // Smooth menu scroll retains exact picking at intermediate offsets.
+ auto middle=Input({480,270},true,true,Scroll(180));assert(near(middle.x,270)&&near(middle.y,450));
+ assert(near(Scroll(-80),0)&&near(Scroll(999),360));
+ // Status is above the resting stick and still follows the control transform.
+ auto status=Input({85,275},true,false);assert(near(status.x,85)&&near(status.y,635));
  assert(near((540.f/790)*aspectFactor,960.f/(790*.6f)));
 }

@@ -2352,7 +2352,16 @@ static bool VirtualJoystickIsMoving() {
 // so this always renders on top instead of underneath the ground/buildings. A no-op
 // (and cheap to call unconditionally every frame) whenever the joystick isn't active.
 static void DrawVirtualJoystick() {
-    if (!g_joystickActive) return;
+    if (!g_joystickActive) {
+        if(g_landscapeWorld && !g_landscapeDialog) {
+            // A quiet resting stick makes the movement zone discoverable on touch.
+            DrawCircleV({85,815},54,Color{12,22,29,90});
+            DrawCircleLines(85,815,54,Color{159,174,175,105});
+            DrawCircleV({85,815},22,Color{184,196,191,70});
+            for(Vector2 p:std::vector<Vector2>{{85,774},{126,815},{85,856},{44,815}})DrawCircleV(p,2,Color{210,200,165,130});
+        }
+        return;
+    }
     Vector2 delta = { g_joystickCurrent.x - g_joystickOrigin.x, g_joystickCurrent.y - g_joystickOrigin.y };
     float len = std::sqrt(delta.x * delta.x + delta.y * delta.y);
     if (len > kJoystickMaxDrag) { delta.x = delta.x / len * kJoystickMaxDrag; delta.y = delta.y / len * kJoystickMaxDrag; }
@@ -32792,7 +32801,7 @@ static void DrawMenuGroupTabs(GameState& s) {
 static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
     g_uiShieldBypass = true; // this panel's own buttons sit inside the shield
     if (IsPlayScreen(s.screen) && s.screen!=Screen::Blackwake) { // HP and mana (2026-09-28, #58): down beside the hotbar, where your eyes are in a fight
-        const float px = 8, py = kViewport.y + kViewport.height - 88, pw = 152, ph = 78;
+        const float px = 8, py = g_landscapeWorld && !open ? 610.0f:kViewport.y + kViewport.height - 88, pw = 152, ph = 78;
         UIRegister({ px, py, pw, ph }); // a tap on it never walks
         DrawRectangleRounded({ px, py, pw, ph }, 0.2f, 6, Fade(Color{ 20, 14, 10, 255 }, 0.78f));
         DrawRectangleRoundedLines({ px, py, pw, ph }, 0.2f, 6, Fade(Color{ 214, 170, 90, 255 }, 0.6f));
@@ -37961,7 +37970,8 @@ static void UpdateDrawToasts(GameState& s, int screenW, int screenH, bool play) 
         }
     }
     const int fs = 15;
-    const float maxW = (float)screenW - 60.0f;
+    const bool nativeLandscape=play && g_landscapeWorld && !g_landscapeDialog;
+    const float maxW = nativeLandscape ? 396.0f:(float)screenW - 60.0f;
     float y = play ? (float)screenH - 206.0f : (float)screenH - 44.0f; // bottom of the newest toast
     for (int i = (int)g_toasts.size() - 1; i >= 0; i--) {
         Toast& t = g_toasts[(size_t)i];
@@ -37977,7 +37987,12 @@ static void UpdateDrawToasts(GameState& s, int screenW, int screenH, bool play) 
             else cur = trial;
         }
         if (!cur.empty()) lines.push_back(cur);
-        if (lines.size() > 2) { lines.resize(2); lines[1] += "..."; }
+        if (lines.size() > 2) {
+            lines.resize(2);
+            while(!lines[1].empty() && MeasureUIText((lines[1]+"...").c_str(),fs)>maxW-24)lines[1].pop_back();
+            lines[1] += "...";
+        }
+        if(nativeLandscape){g_landscapeNotices.push_back({lines,t.col,a});continue;}
         float w = 0; for (auto& l : lines) w = std::max(w, (float)MeasureUIText(l.c_str(), fs));
         float h = lines.size() * (fs + 4.0f) + 12.0f;
         Rectangle r = { (screenW - w) / 2.0f - 14.0f, y - h, w + 28.0f, h };
@@ -38264,7 +38279,7 @@ static void UpdateDrawFrame() {
 
         // --- Draw ---
         bool wideWorld=!IsMenuScreen(state.screen) && (ExploreHeaderCollapsed(state) || (state.screen==Screen::Hunt && state.selectedDungeon.has_value() && state.hunt3DView)) && !state.ambush.has_value() && !state.innocentEncounter.has_value();
-        LandscapeBeginFrame(wideWorld,state.exploreMenuOpen || state.worldMapOpen || state.guideOpen);
+        LandscapeBeginFrame(wideWorld,state.exploreMenuOpen || state.worldMapOpen || state.guideOpen,(int)state.screen);
         ClearBackground(wideWorld ? BLANK:kColorPageBg);
 
         // Inside a dungeon (2026-09-25), and in the 3D town/wilderness/interior

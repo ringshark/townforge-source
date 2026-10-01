@@ -17,6 +17,8 @@ static std::set<unsigned> g_landscapeWorldTextures;
 static std::map<unsigned,Vector2> g_landscapeSceneSizes;
 struct LandscapeCaption {std::string text;int size;Color color;bool prompt;};
 static std::vector<LandscapeCaption> g_landscapeCaptions;
+struct LandscapeNotice {std::vector<std::string> lines;Color color;float alpha;};
+static std::vector<LandscapeNotice> g_landscapeNotices;
 static RenderTexture2D LandscapeLoadScene(int width,int height) {
     RenderTexture2D target=::LoadRenderTexture((int)std::round(width*tflayout::aspectFactor),height);
     g_landscapeSceneSizes[target.texture.id]={(float)width,(float)height};
@@ -87,8 +89,10 @@ static Ray LandscapeRay(Vector2 pos,Camera camera,int w,int h) {
     if(g_landscapeActive && g_landscapeWorld){pos.x*=tflayout::aspectFactor;return ::GetScreenToWorldRayEx(pos,camera,(int)(w*tflayout::aspectFactor),h);}
     return ::GetScreenToWorldRayEx(pos,camera,w,h);
 }
-static void LandscapeBeginFrame(bool world,bool dialog) {
-    g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();
+static void LandscapeBeginFrame(bool world,bool dialog,int screen) {
+    static int previousScreen=-1;
+    if(previousScreen!=screen){g_landscapeScroll=0;previousScreen=screen;}
+    g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();g_landscapeNotices.clear();
     ::BeginTextureMode(g_landscapeScene);::ClearBackground(Color{22,33,42,255});::EndTextureMode();
     ::BeginTextureMode(g_landscapeUI);g_landscapeTargets.push_back(g_landscapeUI);g_landscapeActive=true;
 }
@@ -102,6 +106,19 @@ static void LandscapePresent(Font font) {
         ::DrawRectangleGradientV(0,440,960,100,BLANK,Color{7,13,19,95});
     }
     if(!g_landscapeWorld || g_landscapeDialog) {
+        if(g_landscapeWorld && !g_presentedDialog)g_landscapeScroll=0;
+        Vector2 mouse=::GetMousePosition();
+        Rectangle top={786,34,140,48},more={786,458,140,48};
+        Rectangle rail={786,104,140,332};
+        static bool dragging=false;
+        if(::IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            dragging=CheckCollisionPointRec(mouse,rail);
+            if(CheckCollisionPointRec(mouse,top))g_landscapeScroll=0;
+            if(CheckCollisionPointRec(mouse,more))g_landscapeScroll=tflayout::maxScroll;
+        }
+        if(!::IsMouseButtonDown(MOUSE_BUTTON_LEFT))dragging=false;
+        if(dragging)g_landscapeScroll=tflayout::Scroll((mouse.y-rail.y-30)/(rail.height-60)*tflayout::maxScroll);
+        if(CheckCollisionPointRec(mouse,rail))g_landscapeScroll=tflayout::Scroll(g_landscapeScroll-::GetMouseWheelMove()*48);
         if(g_landscapeWorld)::DrawRectangle(0,0,960,540,Color{6,12,18,155});
         ::DrawRectangleGradientH(0,0,210,540,Color{12,21,28,255},Color{28,38,44,255});
         ::DrawRectangleGradientH(750,0,210,540,Color{28,38,44,255},Color{12,21,28,255});
@@ -109,12 +126,11 @@ static void LandscapePresent(Font font) {
         ::DrawTextEx(font,"TOWN",{48,224},26,1,Color{230,211,174,255});::DrawTextEx(font,"FORGE",{48,257},26,1,Color{230,211,174,255});
         ::DrawLine(48,302,149,302,Color{141,114,71,255});
         blit(g_landscapeUI.texture,{0,g_landscapeScroll,540,540},{210,0,540,540});
-        Vector2 mouse=::GetMousePosition();
-        Rectangle top={786,34,140,48},more={786,458,140,48};
         for(auto r:{top,more}) {::DrawRectangleRounded(r,.15f,4,Color{37,48,54,255});::DrawRectangleRoundedLines(r,.15f,4,Color{163,132,82,255});}
         ::DrawText("Top",833,49,18,Color{238,220,183,255});::DrawText("More",824,473,18,Color{238,220,183,255});
-        ::DrawText(g_landscapeScroll<1 ? "1 / 2":"2 / 2",833,263,16,Color{160,177,182,255});
-        if(::IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){if(CheckCollisionPointRec(mouse,top))g_landscapeScroll=0;if(CheckCollisionPointRec(mouse,more))g_landscapeScroll=360;}
+        ::DrawRectangleRounded({848,104,16,332},.6f,6,Color{9,17,23,255});
+        ::DrawRectangleRounded({850,108+g_landscapeScroll/tflayout::maxScroll*264,12,60},.6f,6,Color{177,145,91,255});
+        ::DrawTextEx(font,"Drag to scroll",{798,418},13,1,Color{160,177,182,255});
     }
     else {
         // Field labels follow the wider projection. HUD and touch controls keep native sizes.
@@ -123,14 +139,25 @@ static void LandscapePresent(Font font) {
         blit(g_landscapeUI.texture,{0,110,540,120},{210,12,540,120});
         blit(g_landscapeUI.texture,{0,600,170,300},{0,240,170,300});
         blit(g_landscapeUI.texture,{170,600,370,300},{590,240,370,300});
+        float noticeBottom=368;
+        for(const auto& notice:g_landscapeNotices) {
+            float h=notice.lines.size()*19.0f+14,top=noticeBottom-h;
+            ::DrawRectangleRounded({176,top,408,h},.2f,5,Fade(Color{15,24,30,255},notice.alpha*.92f));
+            ::DrawRectangleRoundedLines({176,top,408,h},.2f,5,Fade(notice.color,notice.alpha*.7f));
+            for(size_t i=0;i<notice.lines.size();++i) {
+                float w=::MeasureTextEx(font,notice.lines[i].c_str(),15,1).x;
+                ::DrawTextEx(font,notice.lines[i].c_str(),{380-w*.5f,top+7+i*19},15,1,Fade(notice.color,notice.alpha));
+            }
+            noticeBottom=top-6;
+        }
         int y=394;
         for(const auto& caption:g_landscapeCaptions) {
             int w=(int)::MeasureTextEx(font,caption.text.c_str(),caption.size,1).x;if(w>396)continue;
             int cy=caption.prompt ? 465:y;
-            Rectangle plate={480-w*.5f-12,(float)cy-6,(float)w+24,(float)caption.size+14};
+            Rectangle plate={380-w*.5f-12,(float)cy-6,(float)w+24,(float)caption.size+14};
             ::DrawRectangleRounded(plate,.25f,5,Color{15,24,30,230});
             ::DrawRectangleRoundedLines(plate,.25f,5,caption.prompt ? Color{175,140,82,255}:Color{65,83,92,255});
-            ::DrawTextEx(font,caption.text.c_str(),{480-w*.5f,(float)cy},caption.size,1,caption.color);
+            ::DrawTextEx(font,caption.text.c_str(),{380-w*.5f,(float)cy},caption.size,1,caption.color);
             if(!caption.prompt)y+=caption.size+24;
         }
     }

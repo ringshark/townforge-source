@@ -3,6 +3,8 @@ namespace tflayout {
 constexpr float width=960, height=540, legacyWidth=540, legacyHeight=900;
 constexpr float aspectFactor=(width/height)/(legacyWidth/legacyHeight);
 struct Point {float x,y;};
+constexpr float maxScroll=legacyHeight-height;
+inline float Scroll(float value) {return value<0 ? 0:value>maxScroll ? maxScroll:value;}
 inline Point Input(Point p,bool world,bool dialog,float scroll=0) {
     if(!world || dialog)return {p.x-(width-legacyWidth)*.5f,p.y+scroll};
     if(p.x<140 && p.y<110)return p; // menu
