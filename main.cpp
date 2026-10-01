@@ -10369,6 +10369,9 @@ static bool DrawInteractButton(const std::string& label) {
 }
 // The "[E] ..." prompt over the world: bigger, darker backing, above the belt and spell bar.
 static void DrawPromptLabel(const std::string& prompt, int screenW, int screenH) {
+    if(g_landscapeActive && g_landscapeWorld && !g_landscapeDialog) {
+        g_landscapeCaptions.push_back({prompt,16,Color{255,226,150,255},true});return;
+    }
     int fs = 16, w = MeasureUIText(prompt.c_str(), fs);
     int sx = (screenW - w) / 2, sy = screenH - 176;
     DrawRectangleRounded({ (float)sx - 10, (float)sy - 5, (float)w + 20, (float)fs + 12 }, 0.4f, 6, Fade(Color{ 20, 14, 10, 255 }, 0.82f));
@@ -10377,6 +10380,9 @@ static void DrawPromptLabel(const std::string& prompt, int screenW, int screenH)
 }
 // A HUD line over the 3D world: dark pill, light text.
 static void DrawHudLine(const char* text, int x, int y, int fs = 13, Color c = Color{ 240, 230, 206, 255 }) {
+    if(g_landscapeActive && g_landscapeWorld && !g_landscapeDialog && y>=600) {
+        g_landscapeCaptions.push_back({"Tap ground to walk. Approach a door to enter.",12,c,false});return;
+    }
     int tw = MeasureUIText(text, fs);
     DrawRectangleRounded({ (float)x - 7, (float)y - 3, (float)tw + 14, (float)fs + 8 }, 0.35f, 6, Fade(Color{ 20, 14, 10, 255 }, 0.72f));
     DrawUIText(text, x, y, fs, c);
@@ -37518,7 +37524,7 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
         !s.exploreMenuOpen && !g_denPanel && !DenFighting() && !UIHit(pointer) &&
         CheckCollisionPointRec(pointer,kViewport) && !CheckCollisionPointRec(pointer,kJoystickZone));
     const Rectangle view=kViewport;
-    if(!scene.id) {scene=LoadRenderTexture((int)view.width,(int)view.height);SetTextureFilter(scene.texture,TEXTURE_FILTER_BILINEAR);}
+    if(!scene.id) {scene=LandscapeLoadScene((int)view.width,(int)view.height);SetTextureFilter(scene.texture,TEXTURE_FILTER_BILINEAR);}
     bool fighting=DenFighting(),sideA=g_den.a==g_mpMyId;
     static DenVisualState visual;visual.Update(g_den.id,g_den.hpA,g_den.hpB,GameDt());
     Vector2 fighter[2]={s.townPlayerPos,s.townPlayerPos};fighter[sideA ? 0:1]=s.townPlayerPos;
@@ -37544,10 +37550,28 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
     }
     BeginTextureMode(scene);ClearBackground(Color{82,125,144,255});BeginMode3D(cam);
     DrawPlane({750,-14,750},{5000,5000},Color{35,83,102,255});
+    // Broken wave crests around the wharf: subtle movement across the wide view.
+    for(int i=0;i<36;++i) {
+        float x=110+(i%9)*170.0f,z=1450+(i/9)*155.0f;
+        float drift=sinf((float)g_gameClock*.65f+i*.7f)*12;
+        DrawCube({x+drift,-13.5f,z},38+(i%3)*14,0.3f,2,Color{65,119,132,255});
+    }
     DrawCube({750,-7,750},1340,12,1340,Color{99,95,76,255});
     DrawPlane({750,0,750},{1320,1320},Color{128,119,92,255});
     DrawCube({750,1,1040},100,2,780,Color{141,133,112,255});
     DrawCube({860,1,650},650,2,80,Color{141,133,112,255});
+    // Harbor cobbles and perimeter courses replace the flat sand apron.
+    for(int row=0;row<18;++row)for(int col=0;col<18;++col) {
+        float x=138+col*72.0f,z=138+row*72.0f;
+        if(x>475 && x<1025 && z>475 && z<1025)continue;
+        int tone=(row*17+col*11)%13;
+        DrawCube({x+(row%2)*16,0.6f,z},66,1,66,Color{(unsigned char)(116+tone),(unsigned char)(111+tone),(unsigned char)(93+tone),255});
+    }
+    for(int i=0;i<22;++i)for(int side:{-1,1}) {
+        float p=108+i*61.0f;
+        DrawCube({p,3,750+side*660.0f},58,8,16,Color{79,86,83,255});
+        DrawCube({750+side*660.0f,3,p},16,8,58,Color{79,86,83,255});
+    }
     DrawCube({750,2,750},516,4,516,Color{40,47,51,255});
     DrawCube({750,5,750},498,3,498,Color{169,142,88,255});
     // Weathered slate, brass inlay and an eight-point harbor compass.
@@ -37639,10 +37663,13 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
         bool guard=i==0 ? g_den.guardA:g_den.guardB,poison=i==0 ? g_den.poisonA:g_den.poisonB;
         if(guard || poison)DrawUIText(guard ? "GUARD":"POISON",(int)head.x-20,(int)head.y,10,guard ? Color{154,211,247,255}:Color{167,229,131,255});
     }
-    DrawRectangle(0,0,540,110,Color{22,33,42,255});
-    DrawRectangle(0,108,540,2,Color{176,142,86,255});
-    DrawUIText("BLACKWAKE",148,47,24,Color{228,208,164,255});
-    DrawUIText(fighting ? "DUELING GROUNDS":"THE OUTLAW HARBOR",150,78,11,Color{145,168,179,255});
+    // Landscape uses floating HUD plates; avoid an opaque empty horizon strip.
+    if(!g_landscapeWorld) {
+        DrawRectangle(0,0,540,110,Color{22,33,42,255});
+        DrawRectangle(0,108,540,2,Color{176,142,86,255});
+        DrawUIText("BLACKWAKE",148,47,24,Color{228,208,164,255});
+        DrawUIText(fighting ? "DUELING GROUNDS":"THE OUTLAW HARBOR",150,78,11,Color{145,168,179,255});
+    }
     if(!s.exploreMenuOpen && !g_denPanel) {
         DrawVirtualJoystick();
         if(!fighting) {
@@ -38452,7 +38479,7 @@ static void UpdateDrawFrame() {
         DrawNotorietyFooter(state, screenW, screenH);
 
         for(const Rectangle& r:g_uiRects)if(r.width>=350 && (r.height>=260 || (r.y>=230 && r.height>=90)))g_landscapeDialog=true;
-        LandscapePresent();
+        LandscapePresent(UiFont());
         EndDrawing();
     }
 }
@@ -38466,7 +38493,7 @@ int main() {
     std::srand((unsigned)std::time(nullptr));
     InitWindow((int)tflayout::width,(int)tflayout::height,"Town Forge");
     g_landscapeUI=LoadRenderTexture(kScreenW,kScreenH);
-    g_landscapeScene=LoadRenderTexture(kScreenW,kScreenH);
+    g_landscapeScene=LandscapeLoadScene(kScreenW,kScreenH);
     SetTextureFilter(g_landscapeUI.texture,TEXTURE_FILTER_BILINEAR);
     SetTextureFilter(g_landscapeScene.texture,TEXTURE_FILTER_BILINEAR);
     g_zoomTarget=g_landscapeUI;

@@ -4,12 +4,29 @@
 #include <vector>
 #include <set>
 #include <cmath>
+#include <map>
+#include <string>
 static float g_landscapeScroll=0;
 static bool g_landscapeActive=false,g_landscapeWorld=false,g_landscapeDialog=false;
 static bool g_presentedWorld=false,g_presentedDialog=true,g_landscapeRedirect=false;
 static RenderTexture2D g_landscapeUI{},g_landscapeScene{},g_zoomTarget{};
 static std::vector<RenderTexture2D> g_landscapeTargets;
 static std::set<unsigned> g_landscapeWorldTextures;
+// Keep world raster detail across the wide screen while retaining the existing
+// logical canvas for picking, collision and HUD coordinates.
+static std::map<unsigned,Vector2> g_landscapeSceneSizes;
+struct LandscapeCaption {std::string text;int size;Color color;bool prompt;};
+static std::vector<LandscapeCaption> g_landscapeCaptions;
+static RenderTexture2D LandscapeLoadScene(int width,int height) {
+    RenderTexture2D target=::LoadRenderTexture((int)std::round(width*tflayout::aspectFactor),height);
+    g_landscapeSceneSizes[target.texture.id]={(float)width,(float)height};
+    return target;
+}
+static void LandscapeRestoreViewport() {
+    if(!g_landscapeTargets.empty()) {
+        auto t=g_landscapeTargets.back();rlViewport(0,0,t.texture.width,t.texture.height);
+    }
+}
 static Vector2 LandscapeMouse() {
     Vector2 raw=::GetMousePosition();auto p=tflayout::Input({raw.x,raw.y},g_presentedWorld,g_presentedDialog,g_landscapeScroll);return {p.x,p.y};
 }
@@ -19,37 +36,45 @@ static Vector2 LandscapeTouch(int index) {
 static void LandscapeTextureBegin(RenderTexture2D target) {
     if(g_landscapeActive && (g_landscapeTargets.empty() || g_landscapeTargets.back().id!=target.id))g_landscapeTargets.push_back(target);
     ::BeginTextureMode(target);
+    auto logical=g_landscapeSceneSizes.find(target.texture.id);
+    if(logical!=g_landscapeSceneSizes.end()) {
+        rlMatrixMode(RL_PROJECTION);rlLoadIdentity();
+        rlOrtho(0,logical->second.x,logical->second.y,0,0,1);rlMatrixMode(RL_MODELVIEW);
+    }
 }
 static void LandscapeTextureEnd() {
     ::EndTextureMode();
     if(g_landscapeActive && !g_landscapeTargets.empty()) {
         g_landscapeTargets.pop_back();
-        if(!g_landscapeTargets.empty())::BeginTextureMode(g_landscapeTargets.back());
+        if(!g_landscapeTargets.empty())LandscapeTextureBegin(g_landscapeTargets.back());
     }
 }
 static void Landscape3DBegin(Camera3D camera) {
     g_landscapeRedirect=false;
     if(g_landscapeActive && g_landscapeWorld && !g_landscapeTargets.empty()) {
-        if(g_landscapeTargets.back().id==g_landscapeUI.id){rlDrawRenderBatchActive();rlEnableFramebuffer(g_landscapeScene.id);g_landscapeRedirect=true;}
+        if(g_landscapeTargets.back().id==g_landscapeUI.id){rlDrawRenderBatchActive();rlEnableFramebuffer(g_landscapeScene.id);rlViewport(0,0,g_landscapeScene.texture.width,g_landscapeScene.texture.height);g_landscapeRedirect=true;}
         else g_landscapeWorldTextures.insert(g_landscapeTargets.back().texture.id);
     }
     ::BeginMode3D(camera);
     if(g_landscapeActive && g_landscapeWorld && camera.projection==CAMERA_PERSPECTIVE && !g_landscapeTargets.empty()) {
         const auto& target=g_landscapeTargets.back();
-        double aspect=double(target.texture.width)/target.texture.height*tflayout::aspectFactor;
+        auto logical=g_landscapeSceneSizes.find(target.texture.id);
+        double aspect=logical==g_landscapeSceneSizes.end() ? double(target.texture.width)/target.texture.height*tflayout::aspectFactor : double(logical->second.x)/logical->second.y*tflayout::aspectFactor;
         double top=10*std::tan(camera.fovy*.5*DEG2RAD);
         rlMatrixMode(RL_PROJECTION);rlLoadIdentity();rlFrustum(-top*aspect,top*aspect,-top,top,10,5000);rlMatrixMode(RL_MODELVIEW);
     }
 }
 static void Landscape3DEnd() {
     ::EndMode3D();
-    if(g_landscapeRedirect){rlDrawRenderBatchActive();rlEnableFramebuffer(g_landscapeUI.id);g_landscapeRedirect=false;}
+    if(g_landscapeRedirect){rlDrawRenderBatchActive();rlEnableFramebuffer(g_landscapeUI.id);LandscapeRestoreViewport();g_landscapeRedirect=false;}
 }
 static void LandscapeTextureDraw(Texture2D texture,Rectangle source,Rectangle dest,Vector2 origin,float rotation,Color tint) {
     bool world=g_landscapeActive && g_landscapeWorld && !g_landscapeTargets.empty() && g_landscapeTargets.back().id==g_landscapeUI.id && g_landscapeWorldTextures.count(texture.id);
-    if(world){rlDrawRenderBatchActive();rlEnableFramebuffer(g_landscapeScene.id);}
+    auto logical=g_landscapeSceneSizes.find(texture.id);
+    if(logical!=g_landscapeSceneSizes.end()){float scale=texture.width/logical->second.x;source.x*=scale;source.width*=scale;}
+    if(world){rlDrawRenderBatchActive();rlEnableFramebuffer(g_landscapeScene.id);rlViewport(0,0,g_landscapeScene.texture.width,g_landscapeScene.texture.height);}
     ::DrawTexturePro(texture,source,dest,origin,rotation,tint);
-    if(world){rlDrawRenderBatchActive();rlEnableFramebuffer(g_landscapeUI.id);}
+    if(world){rlDrawRenderBatchActive();rlEnableFramebuffer(g_landscapeUI.id);LandscapeRestoreViewport();}
 }
 static Vector2 LandscapeProjection(Vector3 pos,Camera camera,int w,int h) {
     if(g_landscapeActive && g_landscapeWorld){Vector2 p=::GetWorldToScreenEx(pos,camera,(int)(w*tflayout::aspectFactor),h);p.x/=tflayout::aspectFactor;return p;}
@@ -63,21 +88,32 @@ static Ray LandscapeRay(Vector2 pos,Camera camera,int w,int h) {
     return ::GetScreenToWorldRayEx(pos,camera,w,h);
 }
 static void LandscapeBeginFrame(bool world,bool dialog) {
-    g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();
+    g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();
     ::BeginTextureMode(g_landscapeScene);::ClearBackground(Color{22,33,42,255});::EndTextureMode();
     ::BeginTextureMode(g_landscapeUI);g_landscapeTargets.push_back(g_landscapeUI);g_landscapeActive=true;
 }
-static void LandscapePresent() {
+static void LandscapePresent(Font font) {
     g_landscapeActive=false;::EndTextureMode();g_landscapeTargets.clear();
     ::BeginDrawing();::ClearBackground(Color{22,33,42,255});
     auto blit=[](Texture2D texture,Rectangle s,Rectangle d){s.y=texture.height-s.y-s.height;s.height=-s.height;::DrawTexturePro(texture,s,d,{0,0},0,WHITE);};
-    if(g_landscapeWorld)blit(g_landscapeScene.texture,{0,0,540,900},{0,0,960,540});
+    if(g_landscapeWorld) {
+        blit(g_landscapeScene.texture,{0,0,(float)g_landscapeScene.texture.width,900},{0,0,960,540});
+        ::DrawRectangleGradientV(0,0,960,100,Color{7,13,19,75},BLANK);
+        ::DrawRectangleGradientV(0,440,960,100,BLANK,Color{7,13,19,95});
+    }
     if(!g_landscapeWorld || g_landscapeDialog) {
+        if(g_landscapeWorld)::DrawRectangle(0,0,960,540,Color{6,12,18,155});
+        ::DrawRectangleGradientH(0,0,210,540,Color{12,21,28,255},Color{28,38,44,255});
+        ::DrawRectangleGradientH(750,0,210,540,Color{28,38,44,255},Color{12,21,28,255});
+        ::DrawLine(208,24,208,516,Color{141,114,71,255});::DrawLine(752,24,752,516,Color{141,114,71,255});
+        ::DrawTextEx(font,"TOWN",{48,224},26,1,Color{230,211,174,255});::DrawTextEx(font,"FORGE",{48,257},26,1,Color{230,211,174,255});
+        ::DrawLine(48,302,149,302,Color{141,114,71,255});
         blit(g_landscapeUI.texture,{0,g_landscapeScroll,540,540},{210,0,540,540});
         Vector2 mouse=::GetMousePosition();
         Rectangle top={786,34,140,48},more={786,458,140,48};
-        ::DrawRectangleRounded(top,.15f,4,Color{48,66,78,255});::DrawRectangleRounded(more,.15f,4,Color{48,66,78,255});
+        for(auto r:{top,more}) {::DrawRectangleRounded(r,.15f,4,Color{37,48,54,255});::DrawRectangleRoundedLines(r,.15f,4,Color{163,132,82,255});}
         ::DrawText("Top",833,49,18,Color{238,220,183,255});::DrawText("More",824,473,18,Color{238,220,183,255});
+        ::DrawText(g_landscapeScroll<1 ? "1 / 2":"2 / 2",833,263,16,Color{160,177,182,255});
         if(::IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){if(CheckCollisionPointRec(mouse,top))g_landscapeScroll=0;if(CheckCollisionPointRec(mouse,more))g_landscapeScroll=360;}
     }
     else {
@@ -87,6 +123,16 @@ static void LandscapePresent() {
         blit(g_landscapeUI.texture,{0,110,540,120},{210,12,540,120});
         blit(g_landscapeUI.texture,{0,600,170,300},{0,240,170,300});
         blit(g_landscapeUI.texture,{170,600,370,300},{590,240,370,300});
+        int y=394;
+        for(const auto& caption:g_landscapeCaptions) {
+            int w=(int)::MeasureTextEx(font,caption.text.c_str(),caption.size,1).x;if(w>396)continue;
+            int cy=caption.prompt ? 465:y;
+            Rectangle plate={480-w*.5f-12,(float)cy-6,(float)w+24,(float)caption.size+14};
+            ::DrawRectangleRounded(plate,.25f,5,Color{15,24,30,230});
+            ::DrawRectangleRoundedLines(plate,.25f,5,caption.prompt ? Color{175,140,82,255}:Color{65,83,92,255});
+            ::DrawTextEx(font,caption.text.c_str(),{480-w*.5f,(float)cy},caption.size,1,caption.color);
+            if(!caption.prompt)y+=caption.size+24;
+        }
     }
     if(g_landscapeWorld && !g_landscapeDialog)g_landscapeScroll=0;
     g_presentedWorld=g_landscapeWorld;g_presentedDialog=g_landscapeDialog;
