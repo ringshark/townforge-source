@@ -9,6 +9,7 @@ code='''#include <vector>
 #include <cassert>
 #include <cmath>
 struct Vector2 {float x,y;};struct Rectangle {float x,y,width,height;};
+struct RenderTexture2D {int id;};
 enum {MOUSE_BUTTON_LEFT};
 Vector2 raw{};bool pressed=false,down=false,released=false;double clockTime=0;
 Vector2 GetMousePosition(){return raw;}double GetTime(){return clockTime;}
@@ -38,6 +39,14 @@ frame({400,195},true,true,false);p=LandscapeMouse();assert(near(p.x,225)&&near(p
 frame({400,195},false,false,true);LandscapeMouse();
 g_presentedDialog=true;
 frame({480,195},true,true,false);p=LandscapeMouse();assert(near(p.x,270)&&near(p.y,195));assert(LandscapeUIAllowed()); // modal uses one centered mapping
+frame({480,195},false,false,true);LandscapeMouse();
+g_presentedDialog=false;g_presentedMap=true;
+g_presentedMapSource={388,152,148,148};g_presentedMapDest={796,92,148,148};
+frame({870,166},true,true,false);p=LandscapeMouse();assert(near(p.x,462)&&near(p.y,226));assert(LandscapeUIAllowed());
+frame({750,166},false,true,false);p=LandscapeMouse();assert(near(p.x,342)&&near(p.y,226)); // map gesture stays captured outside widget
+frame({750,166},false,false,true);LandscapeMouse();
+g_presentedMap=false;
+frame({870,166},true,true,false);p=LandscapeMouse();assert(near(p.x,489.375)&&near(p.y,276.6667));assert(!LandscapeUIAllowed()); // transition removes the map hit area
 }
 '''
 with tempfile.TemporaryDirectory() as tmp:
@@ -80,3 +89,35 @@ with tempfile.TemporaryDirectory() as tmp:
     subprocess.run(['g++','-std=c++17',str(cpp),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
 print('PASS production landscape menu and popup selection')
+
+# Production nested render-target restoration: drawing a complete minimap must
+# clear only its own target and return subsequent HUD drawing to the HUD target.
+widget = """#include <vector>
+#include <map>
+#include <cassert>
+struct Vector2{float x,y;};struct Rectangle{float x,y,width,height;};
+struct Texture{int id,width,height;};struct RenderTexture2D{int id;Texture texture;};
+int bound=0,cleared=0;
+void BeginTextureMode(RenderTexture2D t){bound=t.id;}void EndTextureMode(){bound=0;}
+void ClearBackground(int){cleared=bound;}void SetTextureFilter(Texture,int){}
+RenderTexture2D LoadRenderTexture(int w,int h){return {2,{2,w,h}};}
+void rlMatrixMode(int){}void rlLoadIdentity(){}void rlOrtho(float,float,float,float,int,int){}
+enum{BLANK, TEXTURE_FILTER_BILINEAR, RL_PROJECTION, RL_MODELVIEW};
+bool g_landscapeActive=true,g_landscapeWorld=true,g_landscapeDialog=false,g_landscapeMap=false;
+Rectangle g_landscapeMapSource{},g_landscapeMapDest{};RenderTexture2D g_landscapeMapTarget{};
+std::vector<RenderTexture2D> g_landscapeTargets;std::map<unsigned,Vector2> g_landscapeSceneSizes;
+"""+section('static void LandscapeTextureBegin(', 'static void Landscape3DBegin(')+"""
+int main(){
+RenderTexture2D hud{1,{1,540,900}};g_landscapeTargets.push_back(hud);bound=1;
+{LandscapeMapWidget map({388,152,148,148});assert(bound==2 && cleared==2);assert(g_landscapeTargets.size()==2);}
+assert(bound==1 && g_landscapeTargets.size()==1 && g_landscapeMap);
+assert(g_landscapeMapDest.x==796 && g_landscapeMapDest.width==148 && g_landscapeMapDest.height==148);
+g_landscapeDialog=true;{LandscapeMapWidget map({388,152,148,148});assert(!map.active && bound==1);}
+assert(bound==1 && cleared==2);
+}
+"""
+with tempfile.TemporaryDirectory() as tmp:
+    cpp=Path(tmp)/'widget.cpp';exe=Path(tmp)/'widget';cpp.write_text(widget)
+    subprocess.run(['g++','-std=c++17',str(cpp),'-o',str(exe)],check=True)
+    subprocess.run([str(exe)],check=True)
+print('PASS complete minimap target isolation and HUD restoration')

@@ -17097,6 +17097,8 @@ static void DrawWorldMap(GameState& s) {
 // you. Tap it for the full map; MAP / M hides or shows it.
 static void DrawMinimap(GameState& s) {
     if (s.worldMapOpen) return; // the full map is drawn last, from the main loop
+    Rectangle mapBounds=s.minimapOpen ? MinimapRect():MinimapToggleRect();
+    LandscapeMapWidget mapWidget({mapBounds.x-6,mapBounds.y-6,mapBounds.width+12,mapBounds.height+12});
     if (!s.minimapOpen) {
         if (Button(MinimapToggleRect(), "MAP", true)) {
             s.minimapOpen = true;
@@ -17794,6 +17796,9 @@ static void T3DDrawNightGlows(const Town3DCam& c, int town);
 // Soft vignette over the 3D viewport (2026-09-26): darkens the edges a touch so
 // the eye settles on the middle of the scene; drawn right after EndMode3D, under the HUD.
 static void T3DDrawVignette() {
+    // The landscape compositor already shades the world once. Copying this
+    // portrait-wide vignette through the HUD bands creates dark rectangular seams.
+    if(g_landscapeWorld)return;
     // (2026-09-28) from the very top of the screen: the 3D world shows behind the
     // collapsed header too, and starting at the viewport left a lighter band up there.
     const Rectangle v = { kViewport.x, 0.0f, kViewport.width, kViewport.y + kViewport.height };
@@ -37864,7 +37869,7 @@ static void DrawDirectionsHud(GameState& s, int screenW) {
         if (UOTapped(r)) { g_tracked = TrackHit{}; s.logLine = "You stop tracking."; PlaySfx(SfxId::Click); }
     }
     // a compass under the minimap that turns with the camera (the minimap itself stays north-up)
-    if (wild && g_hudCamZone == 0 && s.minimapOpen && !s.worldMapOpen) {
+    if (wild && !g_landscapeWorld && g_hudCamZone == 0 && s.minimapOpen && !s.worldMapOpen) {
         Rectangle mm = MinimapRect();
         Vector2 c = { mm.x - 24.0f, mm.y + 24.0f };
         DrawCircleV(c, 21.0f, Fade(Color{ 20, 14, 10, 255 }, 0.75f));

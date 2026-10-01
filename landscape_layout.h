@@ -25,10 +25,21 @@ static std::vector<LandscapeNotice> g_landscapeNotices;
 struct LandscapeWorldLabel {std::string text;Vector2 point;int size;Color color;float alpha;};
 static std::vector<LandscapeWorldLabel> g_landscapeLabels;
 static std::vector<Rectangle> g_landscapeHitRects;
+static bool g_presentedMap=false,g_landscapeMap=false;
+static Rectangle g_presentedMapSource{},g_presentedMapDest{},g_landscapeMapSource{},g_landscapeMapDest{};
+static RenderTexture2D g_landscapeMapTarget{};
+static tflayout::Point LandscapePointerMap(Vector2 raw,tflayout::Region region) {
+    if(region==tflayout::Region::Map) {
+        return {g_presentedMapSource.x+(raw.x-g_presentedMapDest.x)*g_presentedMapSource.width/g_presentedMapDest.width,
+                g_presentedMapSource.y+(raw.y-g_presentedMapDest.y)*g_presentedMapSource.height/g_presentedMapDest.height};
+    }
+    return tflayout::Map({raw.x,raw.y},region,g_landscapeScroll);
+}
 static tflayout::Region g_landscapePointerRegion=tflayout::Region::Panel;
 static bool g_landscapePointerHeld=false;
 static double g_landscapePressTime=-1;
 static tflayout::Region LandscapeRegion(Vector2 raw) {
+    if(g_presentedMap && CheckCollisionPointRec(raw,g_presentedMapDest))return tflayout::Region::Map;
     auto region=tflayout::RegionAt({raw.x,raw.y},g_presentedWorld,g_presentedDialog);
     if(region==tflayout::Region::Panel)return region;
     if(region==tflayout::Region::Left && raw.y>=370)return region; // stick
@@ -64,7 +75,7 @@ static Vector2 LandscapeMouse() {
     if(freshPress || !g_landscapePointerHeld)g_landscapePointerRegion=LandscapeRegion(raw);
     if(freshPress)g_landscapePressTime=now;
     g_landscapePointerHeld=held;
-    auto p=tflayout::Map({raw.x,raw.y},g_landscapePointerRegion,g_landscapeScroll);return {p.x,p.y};
+    auto p=LandscapePointerMap(raw,g_landscapePointerRegion);return {p.x,p.y};
 }
 static Vector2 LandscapeTouch(int index) {
     // These positions feed pinch zoom, so never switch scales over HUD regions.
@@ -86,6 +97,22 @@ static void LandscapeTextureEnd() {
         if(!g_landscapeTargets.empty())LandscapeTextureBegin(g_landscapeTargets.back());
     }
 }
+// Isolate a complete map widget before compositing. It must never be sliced
+// across the portrait HUD bands; its picking uses the same source/destination.
+struct LandscapeMapWidget {
+    bool active;
+    LandscapeMapWidget(Rectangle source):active(g_landscapeActive && g_landscapeWorld && !g_landscapeDialog) {
+        if(!active)return;
+        if(!g_landscapeMapTarget.id) {
+            g_landscapeMapTarget=::LoadRenderTexture(540,900);
+            ::SetTextureFilter(g_landscapeMapTarget.texture,TEXTURE_FILTER_BILINEAR);
+        }
+        g_landscapeMap=true;g_landscapeMapSource=source;
+        g_landscapeMapDest={944-source.width,92,source.width,source.height};
+        LandscapeTextureBegin(g_landscapeMapTarget);::ClearBackground(BLANK);
+    }
+    ~LandscapeMapWidget(){if(active)LandscapeTextureEnd();}
+};
 static void Landscape3DBegin(Camera3D camera) {
     g_landscapeRedirect=false;
     if(g_landscapeActive && g_landscapeWorld && !g_landscapeTargets.empty()) {
@@ -136,7 +163,7 @@ static void LandscapeBeginFrame(bool world,bool dialog,int screen) {
 #endif
     static int previousScreen=-1;
     if(previousScreen!=screen){g_landscapeScroll=0;previousScreen=screen;}
-    g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();g_landscapeNotices.clear();g_landscapeLabels.clear();
+    g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeMap=false;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();g_landscapeNotices.clear();g_landscapeLabels.clear();
     ::BeginTextureMode(g_landscapeScene);::ClearBackground(Color{22,33,42,255});::EndTextureMode();
     ::BeginTextureMode(g_landscapeUI);g_landscapeTargets.push_back(g_landscapeUI);g_landscapeActive=true;
 }
@@ -213,8 +240,22 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
         }
     }
     if(g_landscapeWorld && !g_landscapeDialog)g_landscapeScroll=0;
+    g_presentedMap=g_landscapeMap && g_landscapeWorld && !g_landscapeDialog;
+    if(g_presentedMap) {
+        blit(g_landscapeMapTarget.texture,g_landscapeMapSource,g_landscapeMapDest);
+        g_presentedMapSource=g_landscapeMapSource;g_presentedMapDest=g_landscapeMapDest;
+    }
     g_presentedWorld=g_landscapeWorld;g_presentedDialog=g_landscapeDialog;
     g_landscapeHitRects=controls;
+    if(g_presentedMap) {
+        // Its source-space control is now displayed only in the native widget.
+        auto src=g_presentedMapSource;
+        for(auto it=g_landscapeHitRects.begin();it!=g_landscapeHitRects.end();) {
+            auto r=*it;
+            if(r.x>=src.x && r.y>=src.y && r.x+r.width<=src.x+src.width && r.y+r.height<=src.y+src.height)it=g_landscapeHitRects.erase(it);
+            else ++it;
+        }
+    }
 }
 #define GetMousePosition LandscapeMouse
 #define GetTouchPosition LandscapeTouch
