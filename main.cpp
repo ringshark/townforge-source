@@ -15843,17 +15843,26 @@ static void Town3DGroundRoadPath(Image* img, const std::vector<Vector2>& pts, Co
 }
 
 // The full network as polylines (also feeds the worn-grass edge pass below).
-static void Town3DStreetPolylines(std::vector<std::vector<Vector2>>& out) {
+static void Town3DStreetPolylines(std::vector<std::vector<Vector2>>& out, int town) {
     // Layout units scaled by kTS; each lane keeps its doorstep offset (+74)
     // from its building row so it still runs right past the doors.
     const float S = kTS;
-    out.push_back({ { 500 * S, 100 * S }, { 500 * S, 900 * S } }); // main street, north edge to the gate
+    if(town==0) {
+        // The old straight axis crossed the carpenter, hall and bank. An east
+        // boulevard connects their frontage lanes without running under roofs.
+        out.push_back({TS(500,100),TS(620,100),TS(620,800),
+                       {620*S,800*S+76},{500*S,800*S+76},TS(500,900)});
+        // Short walks tie the workshop yard, market court and garden to town.
+        out.push_back({{400*S,200*S+70},TS(400,330)});
+        out.push_back({TS(620,620),TS(750,620)});
+        out.push_back({{340*S,500*S+74},TS(340,710)});
+    } else out.push_back({ { 500 * S, 100 * S }, { 500 * S, 900 * S } });
     { // north lane: gentle bow past smith/carpenter/tailor's doors
         std::vector<Vector2> p;
         for (int i = 0; i <= 24; i++) {
             float t = (float)i / 24.0f, u = 1.0f - t;
             p.push_back({ (u * u * 140 + 2 * u * t * 500 + t * t * 860) * S,
-                          200 * S + u * u * 74 + 2 * u * t * 66 + t * t * 74 });
+                          200 * S + u * u * 74 + 2 * u * t * 66 + t * t * 74 + (town==0?6.0f:0.0f) });
         }
         out.push_back(p);
     }
@@ -15922,10 +15931,21 @@ static void Town3DEnsureGround(const GameState& s) {
     // Street network (see Town3DStreetPolylines), then the paved plaza circle
     // on top so lane/plaza overlaps read as streets joining the plaza.
     std::vector<std::vector<Vector2>> streets;
-    Town3DStreetPolylines(streets);
+    Town3DStreetPolylines(streets,s.selectedTown);
     for (auto& pl : streets) Town3DGroundRoadPath(&ground, pl, roadCol);
     ImageDrawCircle(&ground, (int)(pcx * k), (int)(pcz * k), (int)(pRim * k), plazaRim);
     ImageDrawCircle(&ground, (int)(pcx * k), (int)(pcz * k), (int)(pR * k), plazaCol);
+    if(s.selectedTown==0) {
+        // District surfaces are baked into the same map and grass mask.
+        auto court=[&](float x,float z,float w,float h,Color c) {
+            ImageDrawRectangle(&ground,(int)(x*kTS*k),(int)(z*kTS*k),
+                               (int)(w*kTS*k),(int)(h*kTS*k),c);
+        };
+        court(265,230,215,82,Color{151,136,111,128}); // workshop apron
+        court(640,580,180,95,Color{177,164,138,0});  // market flags
+        court(300,625,80,88,Color{174,161,128,128}); // quiet garden gravel
+    }
+
 
     // Detail pass: worn-grass tint feathering out from every road edge and
     // around the plaza rim, plus subtle stone mottling inside the plaza.
@@ -17457,7 +17477,18 @@ static void Town3DDrawGatehouse(float x, float z, int town) {
         Color st = { 162, 156, 146, 255 }, stDk = { 124, 118, 110, 255 }, wood = { 110, 76, 46, 255 }, iron = { 60, 60, 66, 255 };
         for (int s = -1; s <= 1; s += 2) {
             float tx = s * 52.0f;
-            T3CBox(b, tx, 42, 0, 36, 84, 40, st);                 // tower
+            // Recessed core with individually laid face stones, rather than
+            // a single featureless tower cuboid. Built once into the mesh.
+            T3CBox(b, tx, 42, 0, 34, 84, 38, stDk);
+            for(int row=0;row<7;row++) {
+                for(int col=0;col<3;col++) {
+                    Color stone=ColorBrightness(st,((row+col+s+3)%3-1)*.045f);
+                    float bx=tx-12+col*12;
+                    for(int face:{-1,1})T3CBox(b,bx,6+row*12,face*19.5f,11.2f,11,1.5f,stone);
+                }
+                for(int col=0;col<3;col++)
+                    for(int face:{-1,1})T3CBox(b,tx+face*17.5f,6+row*12,-13+col*13,1.5f,11,12,st);
+            }
             T3CBox(b, tx, 3, 0, 42, 6, 46, stDk);                 // plinth
             T3CBox(b, tx, 86, 0, 40, 4, 44, stDk);                // parapet ledge
             for (int i = 0; i < 3; i++)                            // merlons
@@ -17468,13 +17499,23 @@ static void Town3DDrawGatehouse(float x, float z, int town) {
             T3CBox(b, tx - s * 18.5f, 40, 12, 1, 18, 8, Color{ 50, 44, 40, 255 }); // arrow slit
             T3CBox(b, tx, 48, 20.5f, 5, 12, 1, Color{ 50, 44, 40, 255 });
             // open door leaf against the passage wall
-            T3CBox(b, s * 31.0f, 26, 16, 3, 50, 26, wood);
+            for(int plank=0;plank<5;plank++)
+                T3CBox(b,s*31.0f,26,5+plank*5.5f,3,50,5,ColorBrightness(wood,(plank%2)*.08f));
             T3CBox(b, s * 31.0f, 14, 16, 3.6f, 3, 26, iron);
             T3CBox(b, s * 31.0f, 38, 16, 3.6f, 3, 26, iron);
         }
-        T3CBox(b, 0, 70, 0, 72, 18, 40, st);                       // wall over the arch
-        T3CBox(b, 0, 60, 0, 68, 4, 42, stDk);                      // arch lintel
-        for (int i = 0; i < 4; i++) T3CBox(b, -24 + i * 16, 83, 17, 8, 8, 5, st);
+        // Stepped stone voussoirs leave real sky and passage visible beneath
+        // the arch; a narrow timber walkway ties the two towers together.
+        for(int i=-3;i<=3;i++) {
+            float y=79-std::abs(i)*4.5f;
+            T3CBox(b,i*9.0f,y,0,8.4f,12,30,i==0?Color{190,179,157,255}:st);
+        }
+        for(int face:{-1,1}) {
+            T3CBox(b,0,89,face*14.5f,74,4,4,wood);
+            for(int i=-2;i<=2;i++)T3CBox(b,i*13.0f,93,face*14.5f,2,8,2,wood);
+            T3CBox(b,0,97,face*14.5f,74,2,2,wood);
+        }
+        for(int i=-3;i<=3;i++)T3CBox(b,i*10.0f,86,0,9,2,29,wood);
         gh = T3CFinish(b);
         Town3DApplyLitShader(gh);
     }
@@ -17482,8 +17523,12 @@ static void Town3DDrawGatehouse(float x, float z, int town) {
     DrawModelEx(gh, { x, 0, z }, { 0, 1, 0 }, 0.0f, { 1, 1, 1 }, tint);
     // banners on the towers
     Color ban = (town == 1) ? Color{ 50, 90, 150, 255 } : (town == 2) ? Color{ 120, 170, 210, 255 } : Color{ 160, 40, 40, 255 };
-    DrawCube({ x - 52, 60, z + 20.5f }, 14, 26, 1.0f, ban);
-    DrawCube({ x + 52, 60, z + 20.5f }, 14, 26, 1.0f, ban);
+    for(int side:{-1,1})for(int face:{-1,1}) {
+        float bx=x+side*52,bz=z+face*21.0f;
+        DrawCube({bx,61,bz},14,28,1,ban);
+        DrawCube({bx,48,bz+face*.6f},14,2,1,Color{217,177,93,255});
+        DrawCube({bx,61,bz+face*.6f},3,15,1,Color{217,177,93,255});
+    }
 }
 
 static void Town3DDrawGreenery(int town, const Town3DCam* cull); // with the wilderness dressing
@@ -19349,6 +19394,13 @@ static float TownEnvBuildingDist(int town, float x, float z) {
 }
 // Open lawn: clear of streets, buildings, the plaza and the town's props.
 static bool TownEnvOpen(const TownEnv& E, int town, float x, float z, float streetPad, float buildPad) {
+    if(town==0) {
+        // Reserve views into the gathering places; tall random groves belong
+        // beyond their edges, not between the camera and the stalls/benches.
+        if(x>250*kTS && x<490*kTS && z>220*kTS && z<345*kTS)return false;
+        if(x>625*kTS && x<835*kTS && z>565*kTS && z<695*kTS)return false;
+        if(x>285*kTS && x<395*kTS && z>610*kTS && z<730*kTS)return false;
+    }
     if (TownEnvStreetDist(E, x, z) < streetPad) return false;
     if (TownEnvBuildingDist(town, x, z) < buildPad) return false;
     float pcx = kTownPlaza.x + kTownPlaza.width * 0.5f, pcz = kTownPlaza.y + kTownPlaza.height * 0.5f;
@@ -19370,7 +19422,7 @@ static void TownEnvBuild(int town) {
     if (E.town == town) return;
     E = TownEnv{};
     E.town = town;
-    Town3DStreetPolylines(E.streets);
+    Town3DStreetPolylines(E.streets,town);
     const float W = kTownWorldSize;
     bool snowy = town == 2, rocky = town == 3;
     auto treeKind = [&](float h) {
@@ -19716,6 +19768,22 @@ static void TownDressBuild(TownEnv& E, std::vector<TownDressItem>& out, int town
         out.push_back({ kTPBench, pcx + cosf(a) * (pr - 20), pcz + sinf(a) * (pr - 20), -a * RAD2DEG - 90.0f, 1.0f });
     }
     put(kTPWell, pcx + pr + 70, pcz - pr - 40, 0, 1.0f);
+    if(town==0) {
+        // Low garden edges frame a shared sitting area, leaving its central
+        // north/south walk and the routes toward the healer unobstructed.
+        put(kTPBench,310*kTS,665*kTS,90,1);
+        put(kTPBench,370*kTS,665*kTS,270,1);
+        for(float z:{637.0f,697.0f}) {
+            put(kTPPlanter,309*kTS,z*kTS,0,1);
+            put(kTPPlanter,371*kTS,z*kTS,0,1);
+        }
+        // Paired lamps make the boulevard legible without tall tree canopies.
+        for(float z:{400.0f,680.0f,750.0f})
+            for(float x:{596.0f,644.0f})put(kTPLamp,x*kTS,z*kTS,0,1);
+        put(kTDKayKit+kWPFlagRed,590*kTS,840*kTS,0,kWPScaleProp);
+        put(kTDKayKit+kWPFlagRed,650*kTS,840*kTS,180,kWPScaleProp);
+    }
+
 }
 
 // The old kTownProps (shared with the 2D view), drawn with the new models.
@@ -19724,6 +19792,11 @@ static void TownDressFromLegacy(std::vector<TownDressItem>& out, int town) {
     for (const TownProp& p : kTownProps) {
         float x = p.pos.x, z = p.pos.y, r = Town3DHash01(x, z) * 360.0f;
         Town3DApplyPropFix(p.kind, x, z);
+        // Consolidate the three existing stalls beside the square instead of
+        // leaving the market stranded beyond the south edge of the town.
+        if(town==0 && p.kind>=3 && p.kind<=5) {
+            x=(665+(p.kind-3)*65)*kTS;z=650*kTS;
+        }
         switch (p.kind) {
             case 0: out.push_back({ kTPFountain, x, z, 0, 1.0f }); break;
             case 3: out.push_back({ kTPStallRed, x, z, 0, 1.0f }); break;
@@ -20402,10 +20475,15 @@ static void Wild3DDrawGate(float x, float z, Color post, Color beam, Vector2 fac
             DrawSphere({ sx * 34.0f, 49.5f, 12 }, 1.8f * fl, Color{ 255, 240, 190, 255 });
         }
     }
-    StoneBox({ 0, 70, -4 }, { 60, 26, 26 }, wall);        // over the arch
-    StoneBox({ 0, 84, -4 }, { 64, 4, 30 }, dark);
-    for (int k = -1; k <= 1; k++) StoneBox({ k * 22.0f, 91, -4 }, { 11, 11, 26 }, wall);
-    StoneBox({ 0, 58, 8 }, { 50, 3, 3 }, dark);            // the arch's keystone lintel
+    // Match the town-side open arch: separate blocks and timber rails,
+    // instead of the solid rectangular bridge that hid the passage.
+    for(int i=-3;i<=3;i++)
+        StoneBox({i*8.0f,79-std::abs(i)*4.5f,-4},{7.5f,12,26},i==0?ColorBrightness(wall,.12f):wall);
+    for(int face:{-1,1}) {
+        DrawCube({0,88,-4+face*13.0f},64,4,4,Color{105,75,49,255});
+        DrawCube({0,97,-4+face*13.0f},64,2,2,Color{105,75,49,255});
+        for(int i=-2;i<=2;i++)DrawCube({i*12.0f,93,-4+face*13.0f},2,8,2,Color{105,75,49,255});
+    }
     // the portcullis, raised into the arch
     for (int k = -3; k <= 3; k++) DrawCube({ k * 6.0f, 64, 2 }, 1.2f, 20, 1.2f, Color{ 48, 46, 50, 255 });
     DrawCube({ 0, 55, 2 }, 40, 1.4f, 1.4f, Color{ 48, 46, 50, 255 });
@@ -37028,6 +37106,9 @@ static void UpdateDrawLevelUps(GameState& s, int screenW, int screenH, bool play
         if (!play) continue;
         float a = std::clamp(1.6f - d.t, 0.0f, 1.0f);
         const char* tx = TextFormat("+%s %s XP", FmtNum(d.xp).c_str(), SkillKeyLabel(d.key));
+        if(g_landscapeWorld && !g_landscapeDialog) {
+            g_landscapeSkills.push_back({tx,Color{235,218,151,255},a,false});continue;
+        }
         int w = MeasureUIText(tx, 13);
         float yb = 330.0f + (float)(g_xpDrops.size() - 1 - i) * -18.0f - d.t * 22.0f;
         DrawUIText(tx, screenW - 14 - w + 1, (int)yb + 1, 13, Fade(BLACK, 0.7f * a));
@@ -37053,6 +37134,12 @@ static void UpdateDrawLevelUps(GameState& s, int screenW, int screenH, bool play
     const float dur = cur.level >= 99 ? 5.0f : 3.4f;
     if (bannerT > dur) { bannerT = -1.0f; return; }
     float a = std::min(1.0f, bannerT / 0.2f) * std::clamp((dur - bannerT) / 0.5f, 0.0f, 1.0f);
+    if(play && g_landscapeWorld && !g_landscapeDialog) {
+        std::string text=std::string(SkillKeyLabel(cur.key))+" level "+std::to_string(cur.level);
+        if(cur.level>=99)text+=" - Mastered!";
+        g_landscapeSkills.push_back({text,Color{255,218,128,255},a,true});
+        return;
+    }
     // fireworks over the hero (the follow camera keeps them near the middle of the view)
     if (play) {
         Vector2 c = { screenW * 0.5f, 430.0f };
@@ -38036,7 +38123,12 @@ static void UpdateDrawToasts(GameState& s, int screenW, int screenH, bool play) 
             while(!lines[1].empty() && MeasureUIText((lines[1]+"...").c_str(),fs)>maxW-24)lines[1].pop_back();
             lines[1] += "...";
         }
-        if(nativeLandscape){g_landscapeNotices.push_back({lines,t.col,a});continue;}
+        if(nativeLandscape) {
+            if(t.text.rfind("Your ",0)==0 && t.text.find(" increases!")!=std::string::npos)
+                g_landscapeSkills.push_back({t.text,t.col,a,true});
+            else g_landscapeNotices.push_back({lines,t.col,a});
+            continue;
+        }
         float w = 0; for (auto& l : lines) w = std::max(w, (float)MeasureUIText(l.c_str(), fs));
         float h = lines.size() * (fs + 4.0f) + 12.0f;
         Rectangle r = { (screenW - w) / 2.0f - 14.0f, y - h, w + 28.0f, h };

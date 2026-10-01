@@ -35,6 +35,8 @@ struct LandscapeCaption {std::string text;int size;Color color;bool prompt;};
 static std::vector<LandscapeCaption> g_landscapeCaptions;
 struct LandscapeNotice {std::vector<std::string> lines;Color color;float alpha;};
 static std::vector<LandscapeNotice> g_landscapeNotices;
+struct LandscapeSkillMessage {std::string text;Color color;float alpha;bool major;};
+static std::vector<LandscapeSkillMessage> g_landscapeSkills;
 struct LandscapeWorldLabel {std::string text;Vector2 point;int size;Color color;float alpha;bool plain=false;};
 static std::vector<LandscapeWorldLabel> g_landscapeLabels;
 static std::vector<Rectangle> g_landscapeHitRects;
@@ -179,7 +181,7 @@ static void LandscapeBeginFrame(bool world,bool dialog,int screen,bool gear=fals
 #endif
     static int previousScreen=-1;
     if(previousScreen!=screen){g_landscapeScroll=0;previousScreen=screen;}
-    g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeGear=gear;g_landscapeMap=false;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();g_landscapeNotices.clear();g_landscapeLabels.clear();
+    g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeGear=gear;g_landscapeMap=false;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();g_landscapeNotices.clear();g_landscapeSkills.clear();g_landscapeLabels.clear();
     ::BeginTextureMode(g_landscapeScene);::ClearBackground(Color{22,33,42,255});::EndTextureMode();
     ::BeginTextureMode(g_landscapeUI);g_landscapeTargets.push_back(g_landscapeUI);g_landscapeActive=true;
 }
@@ -324,6 +326,24 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
         LandscapePlate({r.x-3,r.y-3,r.width+6,r.height+6},Color{163,132,82,255});
         blit(g_landscapeMapTarget.texture,g_landscapeMapSource,g_landscapeMapDest);
         g_presentedMapSource=g_landscapeMapSource;g_presentedMapDest=g_landscapeMapDest;
+    }
+    if(g_landscapeWorld && !g_landscapeDialog) {
+        float sy=g_presentedMap ? g_landscapeMapDest.y+g_landscapeMapDest.height+8:132;
+        // Compact progress feed beneath the map, outside the central action.
+        // Level-ups lead; XP ticks fill the remaining space without growing down
+        // over the action buttons. Full unlock descriptions stay in the journal.
+        for(int major=1;major>=0;--major)for(const auto& msg:g_landscapeSkills) {
+            if(msg.major!=(major!=0))continue;
+            auto lines=LandscapeWrap(font,msg.text,12,198);
+            float h=lines.size()*15+10;
+            if(sy+h>356)continue;
+            LandscapePlate({730,sy,214,h},msg.color,msg.alpha*.85f);
+            float ty=sy+5;
+            for(const auto& line:lines) {
+                ::DrawTextEx(font,line.c_str(),{738,ty},12,1,Fade(msg.color,msg.alpha));ty+=15;
+            }
+            sy+=h+4;
+        }
     }
     g_presentedWorld=g_landscapeWorld;g_presentedDialog=g_landscapeDialog;
     g_presentedGear=g_landscapeGear;
