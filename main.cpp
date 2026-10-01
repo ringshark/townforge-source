@@ -25519,7 +25519,10 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
     IntPushLamplight(night);
     if (g_t3dLit.ready) SetShaderValue(g_t3dLit.shader, g_t3dLit.viewPosLoc, &cam3d.position, SHADER_UNIFORM_VEC3);
     T3CKitUseSunShader();
-    DrawRectangle((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height, Color{ 18, 14, 12, 255 });
+    // Landscape renders the room into its own world target. An opaque legacy
+    // viewport here would be copied into every HUD region and hide the room.
+    if (!g_landscapeWorld)
+        DrawRectangle((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height, Color{ 18, 14, 12, 255 });
     BeginMode3D(cam3d);
     DrawInteriorShell3D(cam3d.position, g_intCamT, night, day);
     for (auto& p : props) Interior3DDrawProp(p);
