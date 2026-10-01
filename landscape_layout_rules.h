@@ -7,7 +7,7 @@ inline void DisplayAspect(float w,float h) {
     if(w>0 && h>0)aspectFactor=(w/h)/(legacyWidth/legacyHeight);
 }
 struct Point {float x,y;};
-enum class Region {World,Panel,Menu,Hud,Left,Right};
+enum class Region {World,Panel,Menu,Hud,Left,Right,Field};
 inline Region RegionAt(Point p,bool world,bool dialog) {
     if(!world || dialog)return Region::Panel;
     if(p.x<140 && p.y<110)return Region::Menu;

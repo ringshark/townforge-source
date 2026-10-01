@@ -33,7 +33,14 @@ static tflayout::Region LandscapeRegion(Vector2 raw) {
     if(region==tflayout::Region::Panel)return region;
     if(region==tflayout::Region::Left && raw.y>=370)return region; // stick
     auto p=tflayout::Map({raw.x,raw.y},region,g_landscapeScroll);
-    for(auto r:g_landscapeHitRects)if(CheckCollisionPointRec({p.x,p.y},r))return region;
+    if(region!=tflayout::Region::World)
+        for(auto r:g_landscapeHitRects)if(CheckCollisionPointRec({p.x,p.y},r))return region;
+    // The middle HUD strip uses the world scale but contains real controls.
+    // Keep those taps distinct from unclaimed ground gestures.
+    if(raw.y>=138 && raw.y<360) {
+        p=tflayout::Map({raw.x,raw.y},tflayout::Region::Field);
+        for(auto r:g_landscapeHitRects)if(CheckCollisionPointRec({p.x,p.y},r))return tflayout::Region::Field;
+    }
     return tflayout::Region::World;
 }
 static bool LandscapeUIAllowed() {
@@ -60,7 +67,8 @@ static Vector2 LandscapeMouse() {
     auto p=tflayout::Map({raw.x,raw.y},g_landscapePointerRegion,g_landscapeScroll);return {p.x,p.y};
 }
 static Vector2 LandscapeTouch(int index) {
-    Vector2 raw=::GetTouchPosition(index);auto p=tflayout::Input({raw.x,raw.y},g_presentedWorld,g_presentedDialog,g_landscapeScroll);return {p.x,p.y};
+    // These positions feed pinch zoom, so never switch scales over HUD regions.
+    Vector2 raw=::GetTouchPosition(index);auto p=tflayout::Map({raw.x,raw.y},tflayout::Region::World);return {p.x,p.y};
 }
 static void LandscapeTextureBegin(RenderTexture2D target) {
     if(g_landscapeActive && (g_landscapeTargets.empty() || g_landscapeTargets.back().id!=target.id))g_landscapeTargets.push_back(target);

@@ -38046,6 +38046,14 @@ static const float kZoom = 1.125f;
 // build grew past some threshold) - emscripten_set_main_loop is the robust, standard
 // pattern raylib's own web examples use instead, with the browser's requestAnimationFrame
 // driving each call rather than a C++-side blocking sleep.
+static bool LandscapeDialogOpen(const GameState& s) {
+    return IsMenuScreen(s.screen) || s.exploreMenuOpen || s.dungeonMenuOpen ||
+        s.worldMapOpen || s.guideOpen || s.selectedTile.has_value() ||
+        s.greetedNPC.has_value() || s.interiorGreeted || s.journalOpen ||
+        s.recallPickerOpen || s.hotbarPickerSlot.has_value() || s.houseDesignerOpen ||
+        s.houseChestOpen || s.houseCraftModule>=0 || s.openCorpseId>=0 ||
+        g_trackOpen || (s.screen==Screen::Blackwake && g_denPanel!=0);
+}
 static void UpdateDrawFrame() {
     UIFrameReset(); // (2026-09-28) buttons drawn last frame guard this frame's world taps
 #ifdef __EMSCRIPTEN__
@@ -38286,7 +38294,7 @@ static void UpdateDrawFrame() {
 
         // --- Draw ---
         bool wideWorld=!IsMenuScreen(state.screen) && (ExploreHeaderCollapsed(state) || (state.screen==Screen::Hunt && state.selectedDungeon.has_value() && state.hunt3DView)) && !state.ambush.has_value() && !state.innocentEncounter.has_value();
-        LandscapeBeginFrame(wideWorld,state.exploreMenuOpen || state.worldMapOpen || state.guideOpen,(int)state.screen);
+        LandscapeBeginFrame(wideWorld,LandscapeDialogOpen(state),(int)state.screen);
         ClearBackground(wideWorld ? BLANK:kColorPageBg);
 
         // Inside a dungeon (2026-09-25), and in the 3D town/wilderness/interior
@@ -38500,7 +38508,9 @@ static void UpdateDrawFrame() {
         UpdateDrawLevelUps(state, screenW, screenH, IsPlayScreen(state.screen)); // (2026-09-29) RuneScape-style level-ups
         DrawNotorietyFooter(state, screenW, screenH);
 
-        for(const Rectangle& r:g_uiRects)if(r.width>=350 && (r.height>=260 || (r.y>=230 && r.height>=90)))g_landscapeDialog=true;
+        // A button may have opened or closed a panel during this frame. Present
+        // the final state, rather than guessing from the size of HUD controls.
+        g_landscapeDialog=LandscapeDialogOpen(state);
         LandscapePresent(UiFont(),g_uiRects);
         EndDrawing();
     }

@@ -32,6 +32,12 @@ frame({400,420},false,false,true);LandscapeMouse();
 frame({400,420},true,true,false);p=LandscapeMouse();assert(near(p.x,225)&&near(p.y,700));assert(!LandscapeUIAllowed());
 frame({900,260},false,false,true);LandscapeMouse();
 frame({900,260},true,true,false);p=LandscapeMouse();assert(near(p.x,506.25)&&near(p.y,433.3333));assert(!LandscapeUIAllowed()); // empty HUD space remains walkable
+frame({900,260},false,false,true);LandscapeMouse();
+g_landscapeHitRects.push_back({200,300,100,50});
+frame({400,195},true,true,false);p=LandscapeMouse();assert(near(p.x,225)&&near(p.y,325));assert(LandscapeUIAllowed()); // visible middle-strip control
+frame({400,195},false,false,true);LandscapeMouse();
+g_presentedDialog=true;
+frame({480,195},true,true,false);p=LandscapeMouse();assert(near(p.x,270)&&near(p.y,195));assert(LandscapeUIAllowed()); // modal uses one centered mapping
 }
 '''
 with tempfile.TemporaryDirectory() as tmp:
@@ -39,3 +45,38 @@ with tempfile.TemporaryDirectory() as tmp:
     subprocess.run(['g++','-std=c++17',str(cpp),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
 print('PASS production landscape pointer capture, fresh gestures, and ground routing')
+
+# Exercise the production modal selector rather than inferring dialogs from
+# control dimensions (which missed menus and mistook broad HUD bars for panels).
+main=Path('main.cpp').read_text()
+start=main.index('static bool LandscapeDialogOpen(')
+selector=main[start:main.index('static void UpdateDrawFrame()',start)]
+modal='''#include <optional>
+#include <cassert>
+enum class Screen {Town,Blackwake,Character};
+bool IsMenuScreen(Screen s){return s==Screen::Character;}
+bool g_trackOpen=false;int g_denPanel=0;
+struct GameState {
+ Screen screen=Screen::Town;
+ bool exploreMenuOpen=false,dungeonMenuOpen=false,worldMapOpen=false,guideOpen=false;
+ bool interiorGreeted=false,journalOpen=false,recallPickerOpen=false,houseDesignerOpen=false,houseChestOpen=false;
+ std::optional<int> selectedTile,greetedNPC,hotbarPickerSlot;
+ int houseCraftModule=-1,openCorpseId=-1;
+};
+'''+selector+'''int main(){
+GameState s;assert(!LandscapeDialogOpen(s));
+'''
+for flag in ['exploreMenuOpen','dungeonMenuOpen','worldMapOpen','guideOpen','interiorGreeted','journalOpen','recallPickerOpen','houseDesignerOpen','houseChestOpen']:
+    modal+=f's=GameState{{}};s.{flag}=true;assert(LandscapeDialogOpen(s));\n'
+for flag in ['selectedTile','greetedNPC','hotbarPickerSlot','houseCraftModule','openCorpseId']:
+    modal+=f's=GameState{{}};s.{flag}=0;assert(LandscapeDialogOpen(s));\n'
+modal+='''s=GameState{};s.screen=Screen::Character;assert(LandscapeDialogOpen(s));
+s=GameState{};g_trackOpen=true;assert(LandscapeDialogOpen(s));g_trackOpen=false;
+s.screen=Screen::Blackwake;g_denPanel=1;assert(LandscapeDialogOpen(s));
+g_denPanel=0;assert(!LandscapeDialogOpen(s));
+}'''
+with tempfile.TemporaryDirectory() as tmp:
+    cpp=Path(tmp)/'dialogs.cpp';exe=Path(tmp)/'dialogs';cpp.write_text(modal)
+    subprocess.run(['g++','-std=c++17',str(cpp),'-o',str(exe)],check=True)
+    subprocess.run([str(exe)],check=True)
+print('PASS production landscape menu and popup selection')
