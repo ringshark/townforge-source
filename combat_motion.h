@@ -5,6 +5,23 @@
 // Small, render-independent rules shared by live wilderness and dungeon combat.
 namespace tfmotion {
 constexpr float swingDuration = 0.32f;
+// Arena visuals have their own duration; server damage/cooldowns stay authoritative.
+constexpr float arenaSwingDuration = 0.65f;
+inline float ArenaSwingPhase(float elapsed) {
+    return elapsed >= 0.0f && elapsed < arenaSwingDuration ? elapsed / arenaSwingDuration : -1.0f;
+}
+// Distance prevents standing footsteps; the time gate prevents rapid sound bursts.
+struct FootstepCadence {
+    float walked = 0.0f;
+    double lastSound = -100.0;
+    bool Step(float distance, double now) {
+        if (!std::isfinite(distance) || distance < 0.01f || distance > 40.0f) { walked = 0.0f; return false; }
+        walked += distance;
+        if (walked < 72.0f || now - lastSound < 0.42) return false;
+        walked = 0.0f; lastSound = now;
+        return true;
+    }
+};
 enum class Strike { None, Started, Impact, Whiff };
 template<class Monster>
 Strike StepStrike(Monster& m, bool alive, bool inRange, float dt, float cooldown, float contactPhase) {

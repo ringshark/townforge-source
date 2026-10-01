@@ -46,5 +46,20 @@ int main() {
         }
         assert(starts>=5 && impacts>=starts-1 && impacts<=starts);
     }
-    std::cout << "PASS movement response, reversal, stop, wrapped turning, delayed strikes, range/death cancellation and DEX cadence\n";
+    // Arena actors complete the same slower swing, then return to idle.
+    assert(ArenaSwingPhase(-1)==-1 && ArenaSwingPhase(0)==0);
+    assert(ArenaSwingPhase(.35f) > .5f && ArenaSwingPhase(.35f) < .6f);
+    assert(ArenaSwingPhase(.64f) > .98f && ArenaSwingPhase(.65f)==-1);
+    for(float fps : {30.f,60.f,120.f}) {
+        FootstepCadence cadence; int count=0; double last=-100;
+        for(int i=1;i<=int(fps*4);++i) {
+            double now=i/double(fps);
+            if(cadence.Step(220/fps,now)){assert(now-last>=.42);last=now;count++;}
+        }
+        assert(count>=8 && count<=10); // about two footsteps/sec, not six
+        for(int i=0;i<60;++i)assert(!cadence.Step(0,5+i*.02)); // no residual idle sound
+        assert(!cadence.Step(600,7)); // zone travel never produces a step
+        assert(!cadence.Step(1,7.1)); // no retained distance after a teleport
+    }
+    std::cout << "PASS movement response, reversal, stop, wrapped turning, delayed strikes, range/death cancellation, DEX cadence, slower arena swings and bounded footsteps\n";
 }

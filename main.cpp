@@ -1245,17 +1245,15 @@ static void MusicTick(int want, float dt) { // want: 0 town, 1 wilds, 2 dungeon,
         } else if (IsMusicStreamPlaying(ms.m)) PauseMusicStream(ms.m);
     }
 }
-// Footsteps (2026-09-28): a step every ~36 units walked, on whatever is underfoot.
+// Footsteps: spaced strides, capped at about 2.4 sounds/sec even at full speed.
 static double g_lastMoveTime = -100.0; // when the player last moved (meditation breaks on it)
 static void FootstepTick(Vector2 pos, SfxId surface) {
     static Vector2 last{ -1e9f, -1e9f };
-    static float walked = 0.0f;
+    static tfmotion::FootstepCadence cadence;
     float d = hypotf(pos.x - last.x, pos.y - last.y);
     last = pos;
     if (d > 0.5f && d <= 40.0f) g_lastMoveTime = GetTime();
-    if (d > 40.0f) { walked = 0.0f; return; } // a teleport or a zone change, not a step
-    walked += d;
-    if (walked >= 36.0f) { walked = 0.0f; PlaySfx(surface); }
+    if (cadence.Step(d, GetTime())) PlaySfx(surface);
 }
 
 enum class CombatPhase { PlayerTurn, Won, Lost };
@@ -14774,7 +14772,7 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
     else turn.yaw = tfmotion::Turn(turn.yaw, yawRad, GameDt(), atk >= 0.0f || cast >= 0.0f);
     turn.last = realNow; yawRad = turn.yaw;
     HumanPose hp = HumanPlayerPose(s, move, atk, cast);
-    if(arenaEngaged) {hp.engaged=true;hp.attackDuration=.35f;}
+    if(arenaEngaged) {hp.engaged=true;hp.attackDuration=tfmotion::arenaSwingDuration;}
     Color tint = WHITE;
     if (s.playerIsGhost) {
         tint = Fade(Color{ 170, 205, 255, 255 }, 0.45f);
@@ -15214,7 +15212,7 @@ static void MpDraw3D(const std::string& zoneKey, bool shadowPass, const Town3DCa
         sp.style = held.style;
         if(zoneKey=="den" && !g_den.id.empty() && (p.id==g_den.a || p.id==g_den.b)) {
             float phase=p.id==g_den.a ? g_den.swingA:g_den.swingB;
-            sp.attackT=phase>=0 && phase<.35f ? phase/.35f:-1.0f;sp.attackDuration=.35f;sp.engaged=true;sp.blocking=p.id==g_den.a ? g_den.guardA:g_den.guardB;
+            sp.attackT=tfmotion::ArenaSwingPhase(phase);sp.attackDuration=tfmotion::arenaSwingDuration;sp.engaged=true;sp.blocking=p.id==g_den.a ? g_den.guardA:g_den.guardB;
             sp.castT=(p.id==g_den.a ? g_den.castA:g_den.castB)>0 ? .2f:-1.0f;
             // The trainer's packet used to say moving even when it stood still.
             // Use its interpolated ground speed for the visible stride.
@@ -37601,7 +37599,7 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
     T3CKitUseSunShader();
     rlPushMatrix();rlTranslatef(0,8,0);
     if(!DrawPlayerHuman(s,kT3CTrackPlayerTown,s.townPlayerPos.x,s.townPlayerPos.y,atan2f(s.playerFacing.y,s.playerFacing.x),animation.move,fighting ? &opponent:nullptr,false,
-        fighting && phase>=0 && phase<.35f ? phase/.35f:-1.0f,fighting,fighting && castLeft>0 ? .2f:-1.0f,fighting && (sideA ? g_den.guardA:g_den.guardB)))
+        fighting ? tfmotion::ArenaSwingPhase(phase):-1.0f,fighting,fighting && castLeft>0 ? .2f:-1.0f,fighting && (sideA ? g_den.guardA:g_den.guardB)))
         T3CDrawHumanoid(g_t3cHumans[2].parts,s.townPlayerPos.x,s.townPlayerPos.y,atan2f(s.playerFacing.y,s.playerFacing.x),1.0f,Color{70,130,220,255},Color{50,55,70,255},Color{240,210,180,255},animation,false);
     MpDraw3D("den",false,nullptr);rlPopMatrix();
     if(!g_den.id.empty()) {
