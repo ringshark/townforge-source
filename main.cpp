@@ -10401,6 +10401,7 @@ static void DrawPromptLabel(const std::string& prompt, int screenW, int screenH)
 }
 // A HUD line over the 3D world: dark pill, light text.
 static void DrawHudLine(const char* text, int x, int y, int fs = 13, Color c = Color{ 240, 230, 206, 255 }) {
+    if(g_landscapeWorld && g_landscapeCombat && y<230)return;
     if(g_landscapeActive && g_landscapeWorld && !g_landscapeDialog && y==196) {
         g_landscapeCaptions.push_back({"Drag to turn. Pinch or wheel to zoom.",12,c,false});return;
     }
@@ -10478,16 +10479,21 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
     // cooldown sweep with the seconds left, a gold rim when it's ready to fire,
     // and a cold blue cast when you can't afford it. Tap/keys behave as before.
     int tapped = -1;
+    const bool compact=inCombat && g_landscapeWorld && !g_landscapeDialog;
+    if(compact){x=300;y=770;}
     Vector2 mouse = GetMousePosition();
     const int n = (int)s.combatHotbar.size();
-    const float slotW = 72.0f;
+    const float slotW = compact?48.0f:72.0f;
     const int cols=std::min(n,4), rows=(n+3)/4;
     Rectangle bar={x-9,y-8,cols*84.0f+6,rows*98.0f-2};
-    UIRegister(bar);
-    UODrawGump(bar, kUoDarkWood);
+    if(!compact){UIRegister(bar);UODrawGump(bar,kUoDarkWood);}
+    else bar={x-4,y-4,214,108};
     float t = (float)GetTime();
+    int visible=0;
     for (int i = 0; i < n; i++) {
-        Rectangle r=CombatHotbarSlotRect(i,x,y);
+        if(compact && (s.combatHotbar[i]<0 || s.combatHotbar[i]>=(int)kSpells.size()))continue;
+        Rectangle r=compact ? Rectangle{x+(visible%4)*54.0f,y+(visible/4)*54.0f,48,48}:CombatHotbarSlotRect(i,x,y);
+        visible++;
         Rectangle big = { r.x - 3.0f, r.y - 3.0f, r.width + 6.0f, r.height + 6.0f };
         int spellIdx = s.combatHotbar[i];
         bool has = spellIdx >= 0 && spellIdx < (int)kSpells.size();
@@ -10553,7 +10559,7 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
             size_t maxNm = slotW > 50.0f ? 10 : 7;
             std::string nm = sp.name.size() > maxNm ? sp.name.substr(0, maxNm - 1) + "." : sp.name;
             int nw = MeasureUIText(nm.c_str(), 10);
-            DrawUIText(nm.c_str(), (int)(r.x + r.width / 2 - nw / 2), (int)(r.y + r.height + 5), 10, Color{ 220, 205, 170, 255 });
+            if(!compact)DrawUIText(nm.c_str(), (int)(r.x + r.width / 2 - nw / 2), (int)(r.y + r.height + 5), 10, Color{ 220, 205, 170, 255 });
         } else {
             DrawUIText("+", (int)(r.x + r.width / 2 - 6), (int)(r.y + r.height / 2 - 14), 26, Fade(kUoBronzeHi, inCombat ? 0.3f : 0.7f));
         }
@@ -10705,6 +10711,8 @@ static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppre
 // branch literally logs "no stamina system in this scaffold"), confirmed and explicitly
 // deferred rather than guessed at.
 static void DrawLiveCombatHud(const GameState& s, float x, float y) {
+    if(g_landscapeWorld)return; // permanent HP/mana panel already supplies this
+
     DrawRectangleRounded({ x - 6, y - 4, 286, 36 }, 0.25f, 6, Fade(Color{ 20, 14, 10, 255 }, 0.72f)); // (2026-09-27) readable plate
     DrawUIText(TextFormat("HP: %d / %d", s.hp, s.maxHp), (int)x, (int)y, 13, Color{ 246, 236, 212, 255 });
     Rectangle hpBg = { x, y + 18, 140, 9 };
@@ -16574,7 +16582,9 @@ static const float kTown3DBuildingHalf = 55.0f; // 110-unit footprint, ~kNodeRad
 // True when the point hits a HUD control that must win over orbit/pick input.
 // Rects mirror the ones drawn later in DrawTownScreen's HUD section.
 static bool g_touchSeen = false; // latched on first touch input - desktop never sees the TARGET button
-static Rectangle TargetFrameRect() { return { 20.0f, 208.0f, 230.0f, 58.0f }; }
+static Rectangle TargetFrameRect() {
+    return g_landscapeWorld ? Rectangle{150,136,230,58}:Rectangle{20,208,230,58};
+}
 static Rectangle TargetButtonRect() {
     return { kViewport.x+20.0f,kViewport.y+kViewport.height-280.0f,140.0f,64.0f };
 }
@@ -32320,6 +32330,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     auto enterTown = [&](int t) { // through a gate into a town (2026-09-27: shared + arrival fade)
         CancelEscort(s, "parts ways at the gate - the escort is broken.");
         s.selectedTown = t;
+        WalkTargetClear();
         s.screen = Screen::Town;
         s.townPlayerPos = TS(450, 830); // same relative spawn every town uses, just inside its own gate
         if (s.wild3DView) s.town3DView = true; // stay in 3D across the gate (view state only)
@@ -32485,7 +32496,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     for (int ti = 0; ti < (int)kTownGates.size(); ti++) // the walled towns (2026-09-28)
         if (Dist(s.wildernessPlayerPos, kTownGates[(size_t)ti].wildernessPos) < 800.0f) {
             float D = TownCompoundDepth(s, ti);
-            if (D > 0.0f && TownCompoundContains(s.wildernessPlayerPos, ti, D, -4.0f)) { s.wildernessPlayerPos = TownWildernessSpawn(ti); WalkTargetClear(); } // old saves / knockback: out the gate
+            // Do not eject the player before the gate-crossing check below.
+            // That rollback made the open passage behave like an invisible wall.
             TownCompoundCollide(s.wildernessPlayerPos, ti, D);
         }
     // Walk in (2026-09-27): stepping into a doorway or through a town's archway takes
@@ -32520,9 +32532,10 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     OrcFortResolve(s.wildernessPlayerPos, kPlayerRadius);     // Grimtusk Hold's walls
     SettleResolve(s, s.wildernessPlayerPos, kPlayerRadius);    // your settlement's buildings and palisade (2026-09-27)
     WyrmLairResolve(s.wildernessPlayerPos, kPlayerRadius);     // the Cinder Caldera's crags
-    ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessReturnGatePos, kNodeRadius);
-    ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown2GatePos, kNodeRadius);
-    ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, kWildernessTown3GatePos, kNodeRadius); // Phase 3
+    if(!s.wild3DView) { // 3D uses the open passage in GateCollide, not a solid portal disc
+        for(const auto& gate:kTownGates)
+            ResolveCircleCollision(s.wildernessPlayerPos,kPlayerRadius,gate.wildernessPos,kNodeRadius);
+    }
     s.wildernessPlayerPos = ClampToWorld(s.wildernessPlayerPos, kPlayerEdgeMargin, kWildernessWorldSize);
     // Trees, rocks, mountains and camp props (3D view; ghosts pass through).
     if (s.wild3DView && !s.playerIsGhost) {
@@ -37761,7 +37774,20 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
     float phase=sideA ? g_den.swingA:g_den.swingB;
     float castLeft=sideA ? g_den.castA:g_den.castB;
     Vector2 opponent=s.townPlayerPos;
-    for(const MpPlayer& p:g_mp) if(p.id==(sideA ? g_den.b:g_den.a))opponent=p.pos;
+    bool opponentPresent=false;
+    for(const MpPlayer& p:g_mp) if(p.id==(sideA ? g_den.b:g_den.a)){opponent=p.pos;opponentPresent=true;}
+    // UO-style melee engagement: movement and spell choices are manual, while
+    // the server-authoritative weapon swing repeats when in range and ready.
+    static double nextArenaSwing=0;
+    static std::string swingDuel;
+    if(swingDuel!=g_den.id){swingDuel=g_den.id;nextArenaSwing=0;}
+    if(fighting && opponentPresent && g_den.countdown<=0 && g_mpStatus==2 &&
+       castLeft<=0 && phase>=.95f && (sideA?g_den.staminaA:g_den.staminaB)>=10 &&
+       !IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !IsKeyPressed(KEY_ONE) &&
+       !IsKeyPressed(KEY_TWO) && !IsKeyPressed(KEY_THREE) && !IsKeyPressed(KEY_FOUR) &&
+       Dist(s.townPlayerPos,opponent)<=110 && GetTime()>=nextArenaSwing) {
+        JS_DenAction("strike","",0);nextArenaSwing=GetTime()+1.0;
+    }
     T3CAnim animation=T3CMakeAnim(kT3CTrackPlayerTown,s.townPlayerPos.x,s.townPlayerPos.y,true);
     T3CKitUseSunShader();
     rlPushMatrix();rlTranslatef(0,8,0);
@@ -37820,13 +37846,9 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
                 if(fabsf(ray.direction.y)>.001f) {float t=-ray.position.y/ray.direction.y;if(t>0) WalkTargetSet(s.townPlayerPos,{std::clamp(ray.position.x+ray.direction.x*t,120.0f,1380.0f),std::clamp(ray.position.z+ray.direction.z*t,120.0f,1380.0f)},0);}
             }
         } else {
-            DrawRectangleRounded({182,645,344,255},.07f,5,Color{20,30,39,245});
-            DrawRectangleRoundedLines({182,645,344,255},.07f,5,Color{120,111,90,255});
-            DrawUIText("MELEE  /  Space: strike   Q: lunge   R: guard",194,682,10,Color{162,182,192,255});
+            DrawRectangleRounded({182,733,344,167},.07f,5,Color{20,30,39,225});
+            DrawRectangleRoundedLines({182,733,344,167},.07f,5,Color{120,111,90,255});
             bool go=g_den.countdown<=0 && g_mpStatus==2 && castLeft<=0;
-            if(Button({190,704,98,56},"Strike",go) || (go && IsKeyPressed(KEY_SPACE))) JS_DenAction("strike","",0);
-            if(Button({302,704,98,56},"Lunge",go) || (go && IsKeyPressed(KEY_Q))) JS_DenAction("lunge","",0);
-            if(Button({414,704,98,56},"Guard",go) || (go && IsKeyPressed(KEY_R))) JS_DenAction("guard","",0);
             // Equal arena spell access, independent of wilderness skills/reagents.
             static int spellPage=0;
             static const int spells[]={0,1,8,31,7,9,10,5,11,12,13,14,17,21,27,29};
@@ -37841,8 +37863,8 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
                 DrawUIText(TextFormat("Spells %d/4",spellPage+1),239,878,12,kUoGoldText);
                 if(Button({310,870,40,28},"X >",true) || IsKeyPressed(KEY_X))spellPage=(spellPage+1)%4;
                 int spellId=sideA ? g_den.spellA:g_den.spellB;
-                if(castLeft>0 && spellId>=0 && spellId<(int)kSpells.size())DrawUIText(TextFormat("Casting %s: %.1fs",kSpells[spellId].name.c_str(),castLeft),194,654,12,kUoGoldText);
-                else DrawUIText((sideA ? g_den.poisonA:g_den.poisonB) ? "POISONED / Cure: page 1, key 4":"SPELLS  /  1-4: cast   Z-X: pages",194,654,11,kUoGoldText);
+                if(castLeft>0 && spellId>=0 && spellId<(int)kSpells.size())DrawUIText(TextFormat("Casting %s: %.1fs",kSpells[spellId].name.c_str(),castLeft),194,742,12,kUoGoldText);
+                else DrawUIText((sideA ? g_den.poisonA:g_den.poisonB) ? "POISONED / Cure: page 1, key 4":"Auto melee / 1-4: spells   Z-X: pages",194,742,11,kUoGoldText);
             } else DrawUIText("Arena spells update pending",190,780,13,kUoGoldText);
             if(Button({374,870,140,28},"Surrender duel",true)) JS_DenAction("surrender","",0);
         }
@@ -37940,7 +37962,7 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
             DrawUIText("A harbor for outlaws, duellists and fortune-seekers.",40,(int)y,14,ink);y+=30;
             DrawUIText("500 test gold starts your browser's separate Den purse.",40,(int)y,13,ink);y+=26;
             DrawUIText("Duel stakes and casino gold never take character gold.",40,(int)y,13,ink);y+=26;
-            DrawUIText("Strike: 10 damage / Lunge: 16 damage / Guard: half damage.",40,(int)y,12,ink);y+=30;
+            DrawUIText("Melee swings automatically in range. Move and cast to control the fight.",40,(int)y,12,ink);y+=30;
             DrawUIText("A live disconnect forfeits. Countdown stops refund stakes.",40,(int)y,12,ink);y+=42;
             if(Button({40,y,460,52},"Open personal bank",!fighting)) {MenuGoScreen(s,Screen::Bank);g_denPanel=0;}
             y+=64;
@@ -37967,6 +37989,7 @@ static float ScreenAngleOf(Vector2 d) {
     return atan2f(d.y, d.x);
 }
 static void DrawDirectionsHud(GameState& s, int screenW) {
+    if(g_landscapeWorld && g_landscapeCombat)return;
     bool wild = s.screen == Screen::Wilderness;
     // The remote boss banner should not stretch across town, interiors or duels.
     if(g_landscapeWorld && !wild)return;
@@ -38442,6 +38465,7 @@ static void UpdateDrawFrame() {
         // --- Draw ---
         bool wideWorld=!IsMenuScreen(state.screen) && (ExploreHeaderCollapsed(state) || (state.screen==Screen::Hunt && state.selectedDungeon.has_value() && state.hunt3DView)) && !state.ambush.has_value() && !state.innocentEncounter.has_value();
         const Screen frameScreen=state.screen;
+        g_landscapeCombat=state.wildEngaged.has_value() || state.dungeonEngaged.has_value();
         LandscapeBeginFrame(wideWorld,LandscapeDialogOpen(state),(int)state.screen,state.screen==Screen::Character && !g_characterPack);
         ClearBackground(wideWorld ? BLANK:kColorPageBg);
 

@@ -10,6 +10,7 @@
 #include <emscripten/emscripten.h>
 #endif
 static float g_landscapeScroll=0;
+static bool g_landscapeCombat=false;
 static bool g_landscapeActive=false,g_landscapeWorld=false,g_landscapeDialog=false;
 static bool g_presentedWorld=false,g_presentedDialog=true,g_landscapeRedirect=false;
 static RenderTexture2D g_landscapeUI{},g_landscapeScene{},g_zoomTarget{};
@@ -285,7 +286,7 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
         blit(g_landscapeUI.texture,{170,600,370,300},{590,240,370,300});
         float noticeBottom=368;
         // Newest messages take priority, and the stack cannot cover the top HUD.
-        for(auto it=g_landscapeNotices.rbegin();it!=g_landscapeNotices.rend();++it) {
+        for(auto it=g_landscapeNotices.begin();it!=g_landscapeNotices.end();++it) {
             const auto& notice=*it;
             std::vector<std::string> lines;
             for(const auto& line:notice.lines) {
@@ -300,9 +301,11 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
                 ::DrawTextEx(font,lines[i].c_str(),{380-w*.5f,top+7+i*19},15,1,Fade(notice.color,notice.alpha));
             }
             noticeBottom=top-8;
+            break; // newest message only; the journal retains the full history
         }
         int y=394;bool promptDrawn=false;
         for(const auto& caption:g_landscapeCaptions) {
+            if(g_landscapeCombat)continue;
             if(caption.prompt && promptDrawn)continue;
             auto lines=LandscapeWrap(font,caption.text,caption.size,380);
             int cy=caption.prompt ? 465:y;
