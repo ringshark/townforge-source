@@ -44,7 +44,7 @@ static tflayout::Region LandscapeRegion(Vector2 raw) {
         raw.x<480 ? tflayout::Region::GearLeft:tflayout::Region::GearRight;
     if(g_presentedMap && CheckCollisionPointRec(raw,g_presentedMapDest))return tflayout::Region::Map;
     auto region=tflayout::RegionAt({raw.x,raw.y},g_presentedWorld,g_presentedDialog);
-    if(region==tflayout::Region::Panel)return region;
+    if(region==tflayout::Region::Panel)return raw.y<110 ? tflayout::Region::PanelHeader:region;
     if(region==tflayout::Region::Left && raw.y>=370)return region; // stick
     auto p=tflayout::Map({raw.x,raw.y},region,g_landscapeScroll);
     if(region!=tflayout::Region::World)

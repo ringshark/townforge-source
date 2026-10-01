@@ -31,7 +31,8 @@ int main(){
  DisplayAspect(844,390);assert(near((540.f/900)*aspectFactor,844.f/390));
  float phoneAspect=aspectFactor;DisplayAspect(0,0);assert(near(aspectFactor,phoneAspect));
  DisplayAspect(960,540);assert(near(aspectFactor,baseAspectFactor));
- auto nav=Map({480,76},Region::Panel,360);assert(near(nav.x,270)&&near(nav.y,76));
+ auto nav=Map({480,76},Region::PanelHeader,360);assert(near(nav.x,270)&&near(nav.y,76));
+ auto bodyDrag=Map({480,76},Region::Panel,360);assert(near(bodyDrag.y,436));
  auto gear=Map({24+98*gearScale,122+(134-110)*gearScale},Region::GearLeft);
  assert(near(gear.x,98)&&near(gear.y,134));
  auto details=Map({496+270*gearScale,122+(850-562)*gearScale},Region::GearRight);
