@@ -27,4 +27,8 @@ int main(){
  auto chat=Input({70,28},true,false);assert(near(chat.x,70)&&near(chat.y,28));
  auto drag=Map({195,455},Region::Left);assert(near(drag.x,195)&&near(drag.y,815));
  auto ground=Map({700,420},Region::World);assert(near(ground.x,393.75f)&&near(ground.y,700));
+ // A full-phone camera uses the displayed aspect, preserving world proportions.
+ DisplayAspect(844,390);assert(near((540.f/900)*aspectFactor,844.f/390));
+ float phoneAspect=aspectFactor;DisplayAspect(0,0);assert(near(aspectFactor,phoneAspect));
+ DisplayAspect(960,540);assert(near(aspectFactor,baseAspectFactor));
 }

@@ -3,8 +3,8 @@
   function fit(width, height, touch) {
     const rotated = touch && height > width;
     const w = rotated ? height : width, h = rotated ? width : height;
-    const canvasWidth = Math.min(w, h * 16 / 9);
-    return { rotated, width: w, height: h, canvasWidth, canvasHeight: canvasWidth * 9 / 16 };
+    const canvasWidth = touch ? w : Math.min(w, h * 16 / 9);
+    return { rotated, width: w, height: h, canvasWidth, canvasHeight: touch ? h : canvasWidth * 9 / 16 };
   }
   function point(x, y, rect, rotated) {
     const u = (x - rect.left) / rect.width, v = (y - rect.top) / rect.height;
@@ -28,8 +28,8 @@
     stage.style.position = 'fixed'; stage.style.left = '50%'; stage.style.top = '50%';
     stage.style.width = f.width + 'px'; stage.style.height = f.height + 'px';
     stage.style.transform = 'translate(-50%, -50%)' + (rotated ? ' rotate(90deg)' : '');
-    // The rotated canvas has its own letterbox, keeping the home indicator clear.
-    stage.style.padding = rotated ? '0' : '';
+    // The world fills the phone, including the area around the system insets.
+    stage.style.padding = touch ? '0' : '';
     canvas.style.width = f.canvasWidth + 'px'; canvas.style.height = f.canvasHeight + 'px';
   }
   function lock() {
@@ -64,6 +64,8 @@
   }
   for (const type of ['mousedown', 'mousemove', 'mouseup', 'touchstart', 'touchmove', 'touchend', 'touchcancel']) window.addEventListener(type, remap, { capture: true, passive: false });
   addEventListener('resize', layout); addEventListener('orientationchange', layout);
+  addEventListener('fullscreenchange', layout);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', layout);
   addEventListener('pointerup', function () {
     if (!touch) return;
     if (document.documentElement.requestFullscreen && !document.fullscreenElement) document.documentElement.requestFullscreen().then(lock).catch(lock);

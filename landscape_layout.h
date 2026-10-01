@@ -6,6 +6,9 @@
 #include <cmath>
 #include <map>
 #include <string>
+#ifdef PLATFORM_WEB
+#include <emscripten/emscripten.h>
+#endif
 static float g_landscapeScroll=0;
 static bool g_landscapeActive=false,g_landscapeWorld=false,g_landscapeDialog=false;
 static bool g_presentedWorld=false,g_presentedDialog=true,g_landscapeRedirect=false;
@@ -37,7 +40,7 @@ static bool LandscapeUIAllowed() {
     return !g_presentedWorld || g_presentedDialog || g_landscapePointerRegion!=tflayout::Region::World;
 }
 static RenderTexture2D LandscapeLoadScene(int width,int height) {
-    RenderTexture2D target=::LoadRenderTexture((int)std::round(width*tflayout::aspectFactor),height);
+    RenderTexture2D target=::LoadRenderTexture((int)std::round(width*tflayout::baseAspectFactor),height);
     g_landscapeSceneSizes[target.texture.id]={(float)width,(float)height};
     return target;
 }
@@ -114,6 +117,15 @@ static Ray LandscapeRay(Vector2 pos,Camera camera,int w,int h) {
     return ::GetScreenToWorldRayEx(pos,camera,w,h);
 }
 static void LandscapeBeginFrame(bool world,bool dialog,int screen) {
+#ifdef PLATFORM_WEB
+    // Use the displayed landscape aspect for both projection and picking.
+    // CSS fills the phone; a wider camera keeps characters from stretching.
+    double aspect=EM_ASM_DOUBLE({
+        var canvas=document.getElementById('canvas');
+        return canvas && canvas.clientHeight ? canvas.clientWidth/canvas.clientHeight : 960/540;
+    });
+    tflayout::DisplayAspect((float)aspect,1);
+#endif
     static int previousScreen=-1;
     if(previousScreen!=screen){g_landscapeScroll=0;previousScreen=screen;}
     g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();g_landscapeNotices.clear();g_landscapeLabels.clear();

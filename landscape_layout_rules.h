@@ -1,7 +1,11 @@
 #pragma once
 namespace tflayout {
 constexpr float width=960, height=540, legacyWidth=540, legacyHeight=900;
-constexpr float aspectFactor=(width/height)/(legacyWidth/legacyHeight);
+constexpr float baseAspectFactor=(width/height)/(legacyWidth/legacyHeight);
+inline float aspectFactor=baseAspectFactor;
+inline void DisplayAspect(float w,float h) {
+    if(w>0 && h>0)aspectFactor=(w/h)/(legacyWidth/legacyHeight);
+}
 struct Point {float x,y;};
 enum class Region {World,Panel,Menu,Hud,Left,Right};
 inline Region RegionAt(Point p,bool world,bool dialog) {
