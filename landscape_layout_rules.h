@@ -3,6 +3,10 @@ namespace tflayout {
 constexpr float width=960, height=540, legacyWidth=540, legacyHeight=900;
 constexpr float aspectFactor=(width/height)/(legacyWidth/legacyHeight);
 struct Point {float x,y;};
+inline Point WorldPoint(Point p) {return {p.x*width/legacyWidth,p.y*height/legacyHeight};}
+// A wide viewport has 60% of the portrait height. Keep actors readable rather
+// than preserving the portrait camera distance and shrinking the whole scene.
+inline float CameraDistance(float distance) {return distance*.65f;}
 constexpr float maxScroll=legacyHeight-height;
 inline float Scroll(float value) {return value<0 ? 0:value>maxScroll ? maxScroll:value;}
 inline Point Input(Point p,bool world,bool dialog,float scroll=0) {

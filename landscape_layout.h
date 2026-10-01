@@ -19,6 +19,8 @@ struct LandscapeCaption {std::string text;int size;Color color;bool prompt;};
 static std::vector<LandscapeCaption> g_landscapeCaptions;
 struct LandscapeNotice {std::vector<std::string> lines;Color color;float alpha;};
 static std::vector<LandscapeNotice> g_landscapeNotices;
+struct LandscapeWorldLabel {std::string text;Vector2 point;int size;Color color;float alpha;};
+static std::vector<LandscapeWorldLabel> g_landscapeLabels;
 static RenderTexture2D LandscapeLoadScene(int width,int height) {
     RenderTexture2D target=::LoadRenderTexture((int)std::round(width*tflayout::aspectFactor),height);
     g_landscapeSceneSizes[target.texture.id]={(float)width,(float)height};
@@ -92,7 +94,7 @@ static Ray LandscapeRay(Vector2 pos,Camera camera,int w,int h) {
 static void LandscapeBeginFrame(bool world,bool dialog,int screen) {
     static int previousScreen=-1;
     if(previousScreen!=screen){g_landscapeScroll=0;previousScreen=screen;}
-    g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();g_landscapeNotices.clear();
+    g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();g_landscapeNotices.clear();g_landscapeLabels.clear();
     ::BeginTextureMode(g_landscapeScene);::ClearBackground(Color{22,33,42,255});::EndTextureMode();
     ::BeginTextureMode(g_landscapeUI);g_landscapeTargets.push_back(g_landscapeUI);g_landscapeActive=true;
 }
@@ -104,6 +106,13 @@ static void LandscapePresent(Font font) {
         blit(g_landscapeScene.texture,{0,0,(float)g_landscapeScene.texture.width,900},{0,0,960,540});
         ::DrawRectangleGradientV(0,0,960,100,Color{7,13,19,75},BLANK);
         ::DrawRectangleGradientV(0,440,960,100,BLANK,Color{7,13,19,95});
+        if(!g_landscapeDialog)for(const auto& label:g_landscapeLabels) {
+            float w=::MeasureTextEx(font,label.text.c_str(),label.size,1).x;
+            float x=label.point.x-w*.5f,y=label.point.y-label.size;
+            if(x<4 || x+w>956 || y<8 || y+label.size>532)continue;
+            ::DrawRectangleRounded({x-6,y-3,w+12,(float)label.size+8},.2f,4,Fade(Color{12,21,27,255},label.alpha*.8f));
+            ::DrawTextEx(font,label.text.c_str(),{x,y},label.size,1,label.color);
+        }
     }
     if(!g_landscapeWorld || g_landscapeDialog) {
         if(g_landscapeWorld && !g_presentedDialog)g_landscapeScroll=0;

@@ -18,4 +18,11 @@ int main(){
  // Status is above the resting stick and still follows the control transform.
  auto status=Input({85,275},true,false);assert(near(status.x,85)&&near(status.y,635));
  assert(near((540.f/790)*aspectFactor,960.f/(790*.6f)));
+ // Native nameplates stay centered on the projected building across the frame.
+ auto center=WorldPoint({270,450});assert(near(center.x,480)&&near(center.y,270));
+ auto corner=WorldPoint({540,900});assert(near(corner.x,960)&&near(corner.y,540));
+ // At default zoom, landscape restores >90% of portrait actor height.
+ float portraitHeight=900/650.f,wideHeight=540/CameraDistance(650);
+ assert(wideHeight/portraitHeight>.9f && wideHeight/portraitHeight<1.0f);
+ auto chat=Input({70,28},true,false);assert(near(chat.x,70)&&near(chat.y,28));
 }

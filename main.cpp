@@ -2895,6 +2895,15 @@ static inline void DrawUIText(const char* text, int posX, int posY, int fontSize
 static inline int MeasureUIText(const char* text, int fontSize) {
     return (int)MeasureTextEx(UiFont(), text, (float)fontSize, 1.0f).x;
 }
+static void DrawWorldLabel(const std::string& text,Vector2 point,int size,Color color,float alpha=1) {
+    if(g_landscapeActive && g_landscapeWorld && !g_landscapeDialog) {
+        auto p=tflayout::WorldPoint({point.x,point.y});
+        g_landscapeLabels.push_back({text,{p.x,p.y},size,color,alpha});return;
+    }
+    int w=MeasureUIText(text.c_str(),size),x=(int)(point.x-w*.5f),y=(int)(point.y-size);
+    DrawRectangle(x-4,y-2,w+8,size+5,Fade(BLACK,.55f*alpha));
+    DrawUIText(text.c_str(),x,y,size,color);
+}
 
 static Texture2D TryLoadTexture(const std::string& path, bool& okOut) {
     Texture2D t = LoadTexture(path.c_str());
@@ -10389,6 +10398,9 @@ static void DrawPromptLabel(const std::string& prompt, int screenW, int screenH)
 }
 // A HUD line over the 3D world: dark pill, light text.
 static void DrawHudLine(const char* text, int x, int y, int fs = 13, Color c = Color{ 240, 230, 206, 255 }) {
+    if(g_landscapeActive && g_landscapeWorld && !g_landscapeDialog && y==196) {
+        g_landscapeCaptions.push_back({"Drag to turn. Pinch or wheel to zoom.",12,c,false});return;
+    }
     if(g_landscapeActive && g_landscapeWorld && !g_landscapeDialog && y>=600) {
         g_landscapeCaptions.push_back({"Tap ground to walk. Approach a door to enter.",12,c,false});return;
     }
@@ -15135,9 +15147,10 @@ static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, in
     Town3DCam c;
     c.target = g_t3dTargetSm;
     float cp = cosf(g_t3dPitchSm), sp = sinf(g_t3dPitchSm);
-    c.pos = { c.target.x + cp * sinf(g_t3dYawSm) * g_t3dDistSm,
-              c.target.y + sp * g_t3dDistSm,
-              c.target.z + cp * cosf(g_t3dYawSm) * g_t3dDistSm };
+    float framedDistance=g_landscapeWorld ? tflayout::CameraDistance(g_t3dDistSm):g_t3dDistSm;
+    c.pos = { c.target.x + cp * sinf(g_t3dYawSm) * framedDistance,
+              c.target.y + sp * framedDistance,
+              c.target.z + cp * cosf(g_t3dYawSm) * framedDistance };
     if (screenId == 1) { // wilds: never inside a hill or the mountains beyond the map (2026-09-28)
         float need = 0.0f;
         for (float t = 0.35f; t <= 1.0f; t += 0.13f) { // along the sight line, camera end
@@ -15264,9 +15277,7 @@ static void MpDrawLabels(const GameState& s, const Town3DCam& c, bool wild, int 
         Vector2 sp;
         if (!Town3DProject(c, { p.pos.x, (wild ? GroundY(p.pos.x, p.pos.y) : 0.0f) + 84.0f, p.pos.y }, &sp)) continue;
         if (sp.x < -60 || sp.x > screenW + 60 || sp.y < 90 || sp.y > screenH) continue;
-        int tw = MeasureUIText(p.name.c_str(), 12);
-        DrawRectangle((int)sp.x - tw / 2 - 4, (int)sp.y - 14, tw + 8, 16, Fade(BLACK, 0.45f));
-        DrawUIText(p.name.c_str(), (int)sp.x - tw / 2, (int)sp.y - 13, 12, Color{ 110, 170, 255, 255 });
+        DrawWorldLabel(p.name,sp,12,Color{110,170,255,255});
         if (p.sayT > 0.0f && !p.say.empty()) bubble(p.pos, p.say, p.sayT);
     }
     if (g_mpMySayT > 0.0f && !g_mpMySay.empty()) bubble(wild ? s.wildernessPlayerPos : s.townPlayerPos, g_mpMySay, g_mpMySayT);
@@ -17905,10 +17916,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
         if (a < 0.03f) continue;
         int fsz = (int)(11.0f + 3.0f * a); // 14 close, 11 far
         std::string name = TileNameFor(node.key);
-        int w = MeasureUIText(name.c_str(), fsz);
-        int sx = (int)(sp.x - w / 2), sy = (int)(sp.y - fsz);
-        DrawRectangle(sx - 4, sy - 2, w + 8, fsz + 5, Fade(BLACK, 0.55f * a));
-        DrawUIText(name.c_str(), sx, sy, fsz, Fade(WHITE, a));
+        DrawWorldLabel(name.c_str(),sp,fsz,Fade(WHITE,a),a);
     }
     {
         Vector2 sp;
@@ -17920,10 +17928,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
             if (a >= 0.03f) {
                 int fsz = (int)(11.0f + 3.0f * a);
                 const char* name = "Wilderness Gate";
-                int w = MeasureUIText(name, fsz);
-                int sx = (int)(sp.x - w / 2), sy = (int)(sp.y - fsz);
-                DrawRectangle(sx - 4, sy - 2, w + 8, fsz + 5, Fade(BLACK, 0.55f * a));
-                DrawUIText(name, sx, sy, fsz, Fade(WHITE, a));
+                DrawWorldLabel(name,sp,fsz,Fade(WHITE,a),a);
             }
         }
     }
@@ -22907,10 +22912,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
             float a = std::clamp((fadeFar - bd) / (fadeFar - fadeNear), 0.0f, 1.0f);
             if (a < 0.03f) return;
             int fsz = (int)(11.0f + 3.0f * a);
-            int w = MeasureUIText(text.c_str(), fsz);
-            int sx = (int)(sp.x - w / 2), sy = (int)(sp.y - fsz);
-            DrawRectangle(sx - 4, sy - 2, w + 8, fsz + 5, Fade(BLACK, 0.55f * a));
-            DrawUIText(text.c_str(), sx, sy, fsz, Fade(WHITE, a));
+            DrawWorldLabel(text.c_str(),sp,fsz,Fade(WHITE,a),a);
         };
         label3D(kWildernessReturnGatePos.x, 110, kWildernessReturnGatePos.y, "Emberhold Gate");
         label3D(kWildernessTown2GatePos.x, 110, kWildernessTown2GatePos.y, kTown2Name);
@@ -23880,10 +23882,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
             float a = std::clamp((fadeFar - bd) / (fadeFar - fadeNear), 0.0f, 1.0f);
             if (a < 0.03f) return;
             int fsz = (int)(11.0f + 3.0f * a);
-            int w = MeasureUIText(text.c_str(), fsz);
-            int sx = (int)(sp.x - w / 2), sy = (int)(sp.y - fsz);
-            DrawRectangle(sx - 4, sy - 2, w + 8, fsz + 5, Fade(BLACK, 0.55f * a));
-            DrawUIText(text.c_str(), sx, sy, fsz, Fade(WHITE, a));
+            DrawWorldLabel(text.c_str(),sp,fsz,Fade(WHITE,a),a);
         };
         label3D(kDung3DExitPos.x, 96, kDung3DExitPos.y - 40, "Stairs up - walk up to leave");
         if (s.dungeonXP[di] >= kDungeons[di].bossUnlockXp) {
@@ -25499,7 +25498,7 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
     if (g_intCamT.x > 1e8f) g_intCamT = want;
     float k = std::min(1.0f, GetFrameTime() * 6.0f);
     g_intCamT.x += (want.x - g_intCamT.x) * k; g_intCamT.z += (want.z - g_intCamT.z) * k; g_intCamT.y = want.y;
-    float yaw = g_t3dFollowMode ? 0.0f : g_intYaw, pitch = 0.86f, dist = g_t3dDist;
+    float yaw = g_t3dFollowMode ? 0.0f : g_intYaw, pitch = 0.86f, dist = g_landscapeWorld ? tflayout::CameraDistance(g_t3dDist):g_t3dDist;
     Camera3D cam3d = { 0 };
     cam3d.target = g_intCamT;
     cam3d.position = { g_intCamT.x + sinf(yaw) * cosf(pitch) * dist, g_intCamT.y + sinf(pitch) * dist,
@@ -25509,7 +25508,7 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
         Vector3 f = T3VNorm(T3VSub(cam3d.target, cam3d.position));
         Vector3 r = T3VNorm({ -f.z, 0, f.x });
         Vector3 u = { r.y * f.z - r.z * f.y, r.z * f.x - r.x * f.z, r.x * f.y - r.y * f.x };
-        g_intTCam = { cam3d.position, cam3d.target, f, r, u, 46.0f, (float)screenW / (float)screenH, (float)screenW, (float)screenH };
+        g_intTCam = { cam3d.position, cam3d.target, f, r, u, 46.0f, (float)screenW / (float)screenH*(g_landscapeWorld ? tflayout::aspectFactor:1), (float)screenW, (float)screenH };
     }
 
     T3DUpdateDayNight(0.0f, false); // the real clock, for the windows
@@ -37654,9 +37653,7 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
     if(!fighting)for(const auto& b:landmarks) {
         Vector2 at=GetWorldToScreenEx({b.pos.x,110,b.pos.y},cam,540,790);at.y+=view.y;
         if(at.x<30 || at.x>510 || at.y<210 || at.y>700) continue;
-        int w=MeasureUIText(b.name,13)+20;
-        DrawRectangleRounded({at.x-w*.5f,at.y-10,(float)w,28},.25f,4,Fade(Color{30,20,12,255},.9f));
-        DrawUIText(b.name,(int)(at.x-w*.5f+10),(int)at.y-4,13,kUoGoldText);
+        DrawWorldLabel(b.name,at,13,kUoGoldText);
     }
     if(!fighting)for(const MpPlayer& p:g_mp) {
         Vector2 at=GetWorldToScreenEx({p.pos.x,88,p.pos.y},cam,540,790);at.y+=view.y;
@@ -37841,6 +37838,8 @@ static float ScreenAngleOf(Vector2 d) {
 }
 static void DrawDirectionsHud(GameState& s, int screenW) {
     bool wild = s.screen == Screen::Wilderness;
+    // The remote boss banner should not stretch across town, interiors or duels.
+    if(g_landscapeWorld && !wild)return;
     Vector2 tp;
     if (wild && g_tracked.kind >= 0 && !s.worldMapOpen && TrackPos(s, g_tracked, &tp)) { // (2026-09-29) Tracking's pointer
         Vector2 d = { tp.x - s.wildernessPlayerPos.x, tp.y - s.wildernessPlayerPos.y };
@@ -37848,7 +37847,7 @@ static void DrawDirectionsHud(GameState& s, int screenW) {
         std::string line = "Tracking: " + g_tracked.name;
         std::string sub = TextFormat("%s, %d paces", CompassWord(d), (int)(dist / 10.0f) * 10);
         int w = std::max(MeasureUIText(line.c_str(), 14), MeasureUIText(sub.c_str(), 12)) + 52;
-        Rectangle r = { (float)screenW - 10 - w, 370, (float)w, 42 };
+        Rectangle r = { (float)screenW - 10 - w, g_landscapeWorld ? 174.0f:370.0f, (float)w, 42 };
         UIRegister(r);
         Color c = g_tracked.kind >= 2 ? Color{ 230, 70, 60, 255 } : Color{ 255, 214, 110, 255 };
         DrawRectangleRounded(r, 0.3f, 8, Fade(Color{ 30, 20, 10, 255 }, 0.85f));
@@ -37875,6 +37874,7 @@ static void DrawDirectionsHud(GameState& s, int screenW) {
         }
     }
     // the world boss: a countdown while it stirs, a pointer while it's awake
+    if(g_landscapeWorld && (g_tracked.kind>=0 || s.gatheringResource.has_value()))return;
     bool stirring = s.wyrmRespawnT > 0.0f && s.wyrmRespawnT <= 180.0f;
     bool awake = s.wyrmRespawnT <= 0.0f;
     // (2026-09-28) the X hides this stage's alert only: it comes back when the wyrm wakes (or next time it stirs)
@@ -37892,7 +37892,7 @@ static void DrawDirectionsHud(GameState& s, int screenW) {
     std::string sub = wild ? TextFormat("Cinder Caldera - %s, %d paces", CompassWord(d), (int)(dist / 10.0f) * 10)
                            : std::string("Cinder Caldera - far south-east of Emberhold");
     int w = std::max(MeasureUIText(line.c_str(), 15), MeasureUIText(sub.c_str(), 12)) + (wild ? 52 : 20);
-    Rectangle r = { (float)screenW - 10 - w, 318, (float)w, 44 };
+    Rectangle r = { (float)screenW - 10 - w, g_landscapeWorld ? 174.0f:318.0f, (float)w, 44 };
     float pulse = 0.55f + 0.45f * sinf((float)GetTime() * (stirring && t < 30 ? 9.0f : 4.0f));
     DrawRectangleRounded(r, 0.3f, 8, Fade(Color{ 30, 14, 8, 255 }, 0.88f));
     DrawRectangleRoundedLinesEx(r, 0.3f, 8, 2.0f, Fade(Color{ 255, 120, 40, 255 }, 0.5f + 0.5f * pulse));
@@ -37915,8 +37915,9 @@ static void MpSay(GameState& s, const std::string& name, const std::string& text
 // A Chat button beside MENU on the world screens while you're online, with how many are here.
 static void MpDrawChatButton(GameState& s) {
     if (g_mpZone.empty() || !(s.screen == Screen::Wilderness || s.screen == Screen::Town) || s.worldMapOpen || s.guideOpen) return;
-    const char* lbl = g_mpStatus == 2 ? TextFormat("Chat (%d here)", g_mpCount) : "Connecting...";
-    if (Button({ 134, 58, 132, 36 }, lbl, g_mpStatus == 2)) {
+    const char* lbl = g_mpStatus == 2 ? TextFormat("Chat (%d)", g_mpCount) : "Connecting...";
+    Rectangle chat=g_landscapeWorld ? Rectangle{12,12,110,32}:Rectangle{134,58,132,36};
+    if (Button(chat, lbl, g_mpStatus == 2)) {
         PlaySfx(SfxId::Click);
 #ifdef __EMSCRIPTEN__
         static char buf[512];
