@@ -114,6 +114,7 @@
       else if(action==='practice') send({t:'den_practice'});
       else if(action==='challenge') send({t:'den_challenge',target:target,stake:value});
       else if(action==='accept' || action==='decline') send({t:'den_answer',offer:target,accept:action==='accept'});
+      else if(action==='cast') {if(den.spellsVersion===1)send({t:'den_cast',spell:value});else denText='Arena spells are updating. Reconnect shortly.';}
       else if(action==='strike' || action==='lunge' || action==='guard' || action==='surrender') send({t:'den_fight',action:action});
       else if(action==='roll') {
         var p=pendingRoll();
@@ -138,12 +139,12 @@
           (ladder.stages||[]).forEach((s,i)=>out.push('ladderstage='+[i+1,clean(s.name),clean(s.style),s.hp].join('|')));
           (ladder.leaders||[]).forEach(s=>out.push('ladderleader='+[clean(s.name),s.cleared,Math.round(s.clearMs/1000)].join('|')));
         }
-        out.push('den='+[den.version,den.gold,den.rollSeq,clean(denText),pendingRoll() ? 1:0].join('|'));
+        out.push('den='+[den.version,den.gold,den.rollSeq,clean(denText),pendingRoll() ? 1:0,den.spellsVersion || 0].join('|'));
         if(denPos) out.push('denpos='+[denPos.serial,denPos.x,denPos.z].join('|'));
         (den.offers||[]).forEach(o=>out.push('offer='+[o.id,o.a,o.b,clean(o.nameA),clean(o.nameB),o.stake,Math.max(0,(o.expires-now)/1000)].join('|')));
         var d=den.duel;
         if(d && d.npc) {var bot=d.npc;out.push('p='+[bot.id,clean(bot.name),'hero,2,2,-1,0,0',bot.x,bot.z,bot.yaw,1].join('|'));}
-        if(d) out.push('duel='+[d.id,d.a,d.b,clean(d.nameA),clean(d.nameB),d.hpA,d.hpB,Math.round(d.staminaA),Math.round(d.staminaB),Math.max(0,(d.starts-now)/1000),Math.max(0,(d.ends-now)/1000),d.stake,d.guardA>now ? 1:0,d.guardB>now ? 1:0,(now-d.swingA)/1000,(now-d.swingB)/1000,d.npc && d.npc.stage>0 ? 1:0].join('|'));
+        if(d) out.push('duel='+[d.id,d.a,d.b,clean(d.nameA),clean(d.nameB),d.hpA,d.hpB,Math.round(d.staminaA),Math.round(d.staminaB),Math.max(0,(d.starts-now)/1000),Math.max(0,(d.ends-now)/1000),d.stake,d.guardA>now ? 1:0,d.guardB>now ? 1:0,(now-d.swingA)/1000,(now-d.swingB)/1000,d.npc && d.npc.stage>0 ? 1:0,Math.round(d.manaA ?? 100),Math.round(d.manaB ?? 100),d.castA ? Math.max(0,(d.castA.ends-now)/1000):0,d.castB ? Math.max(0,(d.castB.ends-now)/1000):0,d.castA ? d.castA.spell:-1,d.castB ? d.castB.spell:-1,d.poisonA>now ? 1:0,d.poisonB>now ? 1:0].join('|'));
         (den.results||[]).forEach(r=>out.push('denresult='+[r.id,clean(r.name),clean(r.reason),r.stake].join('|')));
       }
       return 'st=' + status + '|' + (status === 2 ? n : 0) + '|' + clean(myId) + '|' + clean(zone) + '\n' + out.join('\n');

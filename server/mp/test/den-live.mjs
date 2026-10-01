@@ -11,7 +11,11 @@ a.send({t:'den_fight',action:'strike'});await until(()=>a.inbox.some(x=>x.t==='d
 for(let z=1200;z>=750;z-=50){a.send({t:'pos',x:650,z,yaw:0,mv:1});b.send({t:'pos',x:850,z,yaw:0,mv:1});await sleep(240)}
 a.send({t:'den_challenge',target:b.id,stake:50});const offer=await until(()=>b.state().offers?.[0],'offer');assert.equal(a.state().gold,500);
 b.send({t:'den_answer',offer:offer.id,accept:true});await until(()=>a.state().duel,'accepted');assert.equal(a.state().gold,450);assert.equal(b.state().gold,450);
-await sleep(3200);a.send({t:'den_fight',action:'surrender'});await until(()=>!b.state().duel&&b.state().gold===550,'payout');assert.equal(a.state().gold,450);
+await sleep(3200);assert.equal(a.state().spellsVersion,1);
+a.send({t:'den_cast',spell:0});await until(()=>a.state().duel?.castA?.spell===0,'casting');assert.ok(a.state().duel.manaA<100);
+await until(()=>b.state().duel?.hpB===96,'server spell damage');assert.equal(b.state().duel.castA,null);
+b.send({t:'den_cast',spell:1});await until(()=>b.state().duel?.hpB===100,'server healing');
+a.send({t:'den_fight',action:'surrender'});await until(()=>!b.state().duel&&b.state().gold===550,'payout');assert.equal(a.state().gold,450);
 for(let i=1;i<=8;++i){b.send({t:'pos',x:850+Math.min(300,i*40),z:750-Math.min(100,i*15),yaw:0,mv:1});await sleep(240)}
 const request={t:'den_roll',request:crypto.randomUUID(),stake:10,face:1,sequence:1};b.send(request);const roll=await until(()=>b.inbox.find(x=>x.t==='den_roll'),'roll');assert.equal(roll.gold,550-10+roll.payout);b.send(request);await until(()=>b.inbox.filter(x=>x.t==='den_roll').length===2,'replay');assert.equal(b.inbox.filter(x=>x.t==='den_roll').at(-1).gold,roll.gold);
 a.send({t:'den_practice'});await until(()=>a.state().duel?.npc,'NPC practice');await until(()=>a.state().duel?.hpA<100,'NPC attacks');a.send({t:'den_fight',action:'surrender'});await until(()=>!a.state().duel,'practice end');assert.equal(a.state().gold,450);

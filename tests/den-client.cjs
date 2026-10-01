@@ -30,3 +30,10 @@ console.log('PASS obsolete sockets ignored, self identity excluded and NPC pract
   client.denAction('ladder','',0);await new Promise(setImmediate);assert.match(client.state(),/Sign in using Cloud save/);
   console.log('PASS ladder session token, sign-out, capability and ranked UI state');
 })().catch(e=>{console.error(e);process.exitCode=1});
+
+client.denAction('cast','',0);assert.match(client.state(),/spells are updating/);
+ws.message({t:'den_state',version:1,spellsVersion:1,gold:500,offers:[],duel:{id:'d',a:'a2',b:'b',nameA:'Alice',nameB:'Bob',hpA:95,hpB:90,staminaA:100,staminaB:80,manaA:76,manaB:88,starts:Date.now()-5000,ends:Date.now()+60000,stake:0,guardA:0,guardB:0,swingA:0,swingB:0,castA:{spell:12,ends:Date.now()+1000},castB:null,poisonA:Date.now()+5000,poisonB:0},results:[]});
+client.denAction('cast','',12);assert.deepEqual(ws.sent.at(-1),{t:'den_cast',spell:12});
+const duelFields=client.state().split('\n').find(x=>x.startsWith('duel=')).slice(5).split('|');
+assert.equal(duelFields[17],'76');assert.equal(duelFields[21],'12');assert.equal(duelFields[23],'1');assert.match(client.state(),/den=1\|500\|.*\|1/);
+console.log('PASS arena spells capability, cast transport, mana, cast timer and poison state');

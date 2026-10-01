@@ -10,6 +10,25 @@ export function ladderWeek(now) {
   const date=new Date(now),day=(date.getUTCDay()+6)%7;
   return Date.UTC(date.getUTCFullYear(),date.getUTCMonth(),date.getUTCDate()-day);
 }
+// IDs match the character spellbook. Arena effects/costs are server-owned.
+export const DEN_SPELLS = {
+  0:{name:'Spark Dart',mana:4,damage:4,circle:1},
+  1:{name:'Mending Word',mana:4,heal:4,circle:1},
+  5:{name:'Wounding Touch',mana:6,damage:8,circle:2},
+  7:{name:'Ember Burst',mana:9,damage:12,circle:3},
+  8:{name:'Venom Sting',mana:9,damage:8,poison:true,circle:3},
+  9:{name:'Greater Mending',mana:11,heal:16,circle:4},
+  10:{name:'Storm Lance',mana:11,damage:16,circle:4},
+  11:{name:'Psychic Shatter',mana:14,damage:20,circle:5},
+  12:{name:'Arc Bolt',mana:20,damage:24,circle:6},
+  13:{name:'Detonation',mana:20,damage:24,circle:6},
+  14:{name:'Inferno Strike',mana:40,damage:28,circle:7},
+  17:{name:'Grave Chill',mana:4,damage:5,circle:1},
+  21:{name:"Sorrow's Lance",mana:12,damage:16,circle:4},
+  27:{name:'Close Wounds',mana:8,heal:14,circle:1},
+  29:{name:'Holy Light',mana:14,damage:18,circle:3},
+  31:{name:'Cure',mana:6,cure:true,circle:2}
+};
 export const PIT = { x: 750, z: 750, half: 250 };
 export function secureRoll(sides) {
   const limit = Math.floor(4294967296 / sides) * sides;
@@ -30,9 +49,9 @@ export class DenEngine {
   inPit(p) {return Math.abs(p.x-PIT.x)<=PIT.half+100 && Math.abs(p.z-PIT.z)<=PIT.half+100;}
   snapshot(id) {
     const p=this.peer(id),d=this.state.duel;
-    return {t:'den_state',version:1,gold:this.wallet(p.key),offers:this.state.offers.filter(o=>o.a===id || o.b===id),
+    return {t:'den_state',version:1,spellsVersion:1,gold:this.wallet(p.key),offers:this.state.offers.filter(o=>o.a===id || o.b===id),
       duel:d ? {id:d.id,a:d.a,b:d.b,nameA:d.nameA,nameB:d.nameB,hpA:d.hpA,hpB:d.hpB,staminaA:d.staminaA,staminaB:d.staminaB,
-        starts:d.starts,ends:d.ends,stake:d.stake,guardA:d.guardA,guardB:d.guardB,swingA:d.swingA,swingB:d.swingB,npc:d.npc || null} : null,
+        manaA:d.manaA ?? 100,manaB:d.manaB ?? 100,castA:d.castA || null,castB:d.castB || null,poisonA:d.poisonA || 0,poisonB:d.poisonB || 0,starts:d.starts,ends:d.ends,stake:d.stake,guardA:d.guardA,guardB:d.guardB,swingA:d.swingA,swingB:d.swingB,npc:d.npc || null} : null,
       ladder:this.ladderSnapshot(p),
       rollSeq:this.state.casino?.[p.key]?.sequence || 0,results:this.state.results.slice(-5)};
   }
@@ -101,7 +120,7 @@ export class DenEngine {
     if(this.state.duel || !this.inPit(a) || !this.inPit(b)) throw Error('Both players must remain near the empty pit.');
     if(this.wallet(a.key)<o.stake || this.wallet(b.key)<o.stake) throw Error('The agreed stake is no longer available.');
     this.state.wallets[a.key]-=o.stake;this.state.wallets[b.key]-=o.stake;
-    this.state.duel={...o,keyA:a.key,keyB:b.key,hpA:100,hpB:100,staminaA:100,staminaB:100,
+    this.state.duel={...o,keyA:a.key,keyB:b.key,hpA:100,hpB:100,staminaA:100,staminaB:100,manaA:100,manaB:100,castA:null,castB:null,poisonA:0,poisonB:0,
       starts:this.clock()+3000,ends:this.clock()+183000,lastTick:this.clock(),lastA:0,lastB:0,
       guardA:0,guardB:0,swingA:0,swingB:0,readyA:0,readyB:0};
     a.x=650;a.z=750;b.x=850;b.z=750;
@@ -112,7 +131,25 @@ export class DenEngine {
     const d=this.state.duel;if(!d) return;
     const dt=Math.max(0,Math.min(10,(now-d.lastTick)/1000));d.lastTick=now;
     d.staminaA=Math.min(100,d.staminaA+dt*12);d.staminaB=Math.min(100,d.staminaB+dt*12);
-    if(now>=d.ends) this.finish(null,'Time limit: stakes refunded.');
+    if(now>=d.ends) {this.finish(null,'Time limit: stakes refunded.');return;}
+    for(const side of ['A','B']) {
+      d['mana'+side]=Math.min(100,(d['mana'+side] ?? 100)+dt*3);
+      const cast=d['cast'+side];
+      if(cast && now>=cast.ends) {
+        d['cast'+side]=null;
+        this.resolveSpell(side,cast.spell);
+        if(!this.state.duel)return;
+      }
+      if(d['poison'+side]>0 && now>=(d['poisonNext'+side] || Infinity)) {
+        // At most four ticks, including when a persisted duel wakes late.
+        const until=Math.min(now,d['poison'+side]);
+        const ticks=Math.max(0,Math.floor((until-d['poisonNext'+side])/2000)+1);
+        d['poisonNext'+side]+=ticks*2000;
+        d['hp'+side]=Math.max(0,d['hp'+side]-ticks*2);
+        if(d['hp'+side]===0){this.finish(side==='A' ? d.b:d.a,'Poison');return;}
+        if(now>=d['poison'+side])d['poison'+side]=0;
+      }
+    }
   }
   move(id,x,z,elapsed) {
     const p=this.peer(id);if(!Number.isFinite(x) || !Number.isFinite(z)) return {x:p.x,z:p.z};
@@ -133,6 +170,7 @@ export class DenEngine {
     if(!['strike','lunge','guard'].includes(action)) throw Error('Unknown arena action.');
     const side=id===d.a ? 'A':'B',other=side==='A' ? 'B':'A';
     const cooldown=action==='lunge' ? 1600:900,cost=action==='lunge' ? 30:action==='guard' ? 20:10;
+    if(d['cast'+side]) throw Error('Finish casting before your next action.');
     if(now<(d['ready'+side] || 0)) throw Error('Recover before your next action.');
     if(d['stamina'+side]<cost) throw Error('Not enough stamina.');
     const a=this.peer(id),b=this.peer(side==='A' ? d.b:d.a);
@@ -143,8 +181,36 @@ export class DenEngine {
     let damage=action==='lunge' ? 16:10;
     if(d.npc && side==='B')damage=action==='lunge' ? Math.ceil((d.npc.damage || 10)*1.6):(d.npc.damage || 10);
     if(d['guard'+other]>now) {damage=Math.ceil(damage/2);d['guard'+other]=0;}
+    d['cast'+other]=null; // A landed melee hit interrupts the opponent's cast.
     d['hp'+other]=Math.max(0,d['hp'+other]-damage);
     if(d['hp'+other]===0) this.finish(id,'Knockout');
+  }
+  cast(id,spellId) {
+    this.tick();const d=this.state.duel;
+    if(!d || !this.busy(id))throw Error('Accept a duel before casting.');
+    const now=this.clock();if(now<d.starts)throw Error('Wait for the countdown.');
+    const spell=Number.isSafeInteger(spellId) ? DEN_SPELLS[spellId]:null;
+    if(!spell)throw Error('That spell is not available in the arena.');
+    const side=id===d.a ? 'A':'B',other=side==='A' ? 'B':'A';
+    if(d['cast'+side] || now<(d['ready'+side] || 0))throw Error('Recover before your next cast.');
+    if(d['mana'+side]<spell.mana)throw Error('Not enough arena mana.');
+    if(spell.damage && distance(this.peer(id),this.peer(d[other.toLowerCase()]))>400)throw Error('Opponent is out of spell range.');
+    d['mana'+side]-=spell.mana;d['guard'+side]=0;
+    const ends=now+450+spell.circle*180;
+    d['cast'+side]={spell:spellId,starts:now,ends};d['ready'+side]=ends+350;
+  }
+  resolveSpell(side,spellId) {
+    const d=this.state.duel,spell=DEN_SPELLS[spellId];if(!d || !spell)return;
+    const other=side==='A' ? 'B':'A',now=this.clock();
+    if(spell.heal)d['hp'+side]=Math.min(side==='B' && d.npc ? d.npc.hp:100,d['hp'+side]+spell.heal);
+    if(spell.cure){d['poison'+side]=0;d['poisonNext'+side]=0;}
+    if(spell.damage) {
+      if(distance(this.peer(d[side.toLowerCase()]),this.peer(d[other.toLowerCase()]))>400)return;
+      d['hp'+other]=Math.max(0,d['hp'+other]-spell.damage);
+      d['cast'+other]=null;
+      if(spell.poison){d['poison'+other]=now+8000;d['poisonNext'+other]=now+2000;}
+      if(d['hp'+other]===0)this.finish(d[side.toLowerCase()],'Spell knockout');
+    }
   }
   finish(winner,reason) {
     const d=this.state.duel;if(!d) return;

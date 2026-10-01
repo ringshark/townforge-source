@@ -14758,11 +14758,11 @@ static bool DrawEquippedHero(int track, float x, float z, float yaw, Color tint,
 // timers the kit poses did; red flash + knockback on a hit, translucent blue
 // as a ghost. enemy (optional) is what the knockback pushes away from.
 static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, float yawRad, float move,
-                            const Vector2* enemy, bool shadowPass, float arenaAttack=-1.0f, bool arenaEngaged=false) {
+                            const Vector2* enemy, bool shadowPass, float arenaAttack=-1.0f, bool arenaEngaged=false, float arenaCast=-1.0f, bool arenaGuard=false) {
     if (shadowPass) return true;
     float atk = -1.0f, cast = -1.0f;
     PlayerCombatPhases3D(s, &atk, &cast);
-    if(arenaAttack>=0) atk=arenaAttack;
+    if(arenaEngaged) {atk=arenaAttack;cast=arenaCast;}
     struct TurnState { float yaw = 0.0f; double last = -99.0; };
     static std::map<int, TurnState> turns;
     TurnState& turn = turns[trackId];
@@ -14811,7 +14811,7 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
         }
     }
     if (s.hidden) tint = Color{ (unsigned char)(tint.r * 0.35f), (unsigned char)(tint.g * 0.35f), (unsigned char)(tint.b * 0.45f), tint.a }; // in the shadows (2026-09-28)
-    return DrawEquippedHero(trackId, x, z, yawRad, tint, s.equipped, hp, shadowPass, s.hidden, s.playerBlockT >= 0.0f);
+    return DrawEquippedHero(trackId, x, z, yawRad, tint, s.equipped, hp, shadowPass, s.hidden, arenaGuard || s.playerBlockT >= 0.0f);
 }
 
 // ---- Multiplayer, phase 1 (2026-09-29): presence + chat ------------------------------
@@ -14841,9 +14841,10 @@ static int JS_MpState(char*, int) { return 0; }
 #endif
 struct DenOffer {std::string id,a,b,nameA,nameB;int stake=0;float left=0;};
 static struct {
-    bool ready=false,pending=false,ranked=false;int gold=0,sequence=0;
+    bool ready=false,pending=false,ranked=false,spells=false;int gold=0,sequence=0;
     std::string message,id,a,b,nameA,nameB;int hpA=100,hpB=100,staminaA=100,staminaB=100,stake=0;
-    float countdown=0,left=0,swingA=99,swingB=99;bool guardA=false,guardB=false;
+    float countdown=0,left=0,swingA=99,swingB=99,castA=0,castB=0;bool guardA=false,guardB=false,poisonA=false,poisonB=false;
+    int manaA=100,manaB=100,spellA=-1,spellB=-1;
     std::vector<DenOffer> offers;std::vector<std::string> results;
 } g_den;
 struct DenLadderStage {std::string name,style;int hp=100;};
@@ -14928,7 +14929,7 @@ static void MpTick(GameState& s) {
             MpSplit(ln.substr(3), '|', f);
             if (f.size() >= 3) { g_mpStatus = std::atoi(f[0].c_str()); g_mpCount = std::atoi(f[1].c_str()); g_mpMyId = f[2]; }
         } else if(ln.rfind("den=",0)==0) {
-            MpSplit(ln.substr(4),'|',f);if(f.size()>=5) {g_den.ready=f[0]=="1";g_den.gold=std::atoi(f[1].c_str());g_den.sequence=std::atoi(f[2].c_str());g_den.message=f[3];g_den.pending=f[4]=="1";}
+            MpSplit(ln.substr(4),'|',f);if(f.size()>=5) {g_den.ready=f[0]=="1";g_den.gold=std::atoi(f[1].c_str());g_den.sequence=std::atoi(f[2].c_str());g_den.message=f[3];g_den.pending=f[4]=="1";g_den.spells=f.size()>5 && f[5]=="1";}
         } else if(ln.rfind("ladder=",0)==0) {
             MpSplit(ln.substr(7),'|',f);if(f.size()>=7){g_ladder.ready=f[0]=="1";g_ladder.verified=f[1]=="1";g_ladder.cleared=std::atoi(f[2].c_str());g_ladder.reset=std::atof(f[3].c_str());g_ladder.title=f[4];g_ladder.wins=std::atoi(f[5].c_str());g_ladder.losses=std::atoi(f[6].c_str());}
         } else if(ln.rfind("ladderstage=",0)==0) {
@@ -14945,6 +14946,8 @@ static void MpTick(GameState& s) {
                 g_den.id=f[0];g_den.a=f[1];g_den.b=f[2];g_den.nameA=f[3];g_den.nameB=f[4];
                 g_den.hpA=std::atoi(f[5].c_str());g_den.hpB=std::atoi(f[6].c_str());g_den.staminaA=std::atoi(f[7].c_str());g_den.staminaB=std::atoi(f[8].c_str());
                 g_den.countdown=std::atof(f[9].c_str());g_den.left=std::atof(f[10].c_str());g_den.stake=std::atoi(f[11].c_str());g_den.guardA=f[12]=="1";g_den.guardB=f[13]=="1";g_den.swingA=std::atof(f[14].c_str());g_den.swingB=std::atof(f[15].c_str());g_den.ranked=f.size()>16 && f[16]=="1";
+                if(f.size()>=25) {g_den.manaA=std::atoi(f[17].c_str());g_den.manaB=std::atoi(f[18].c_str());g_den.castA=std::atof(f[19].c_str());g_den.castB=std::atof(f[20].c_str());g_den.spellA=std::atoi(f[21].c_str());g_den.spellB=std::atoi(f[22].c_str());g_den.poisonA=f[23]=="1";g_den.poisonB=f[24]=="1";}
+                else {g_den.castA=g_den.castB=0;g_den.spellA=g_den.spellB=-1;g_den.manaA=g_den.manaB=100;g_den.poisonA=g_den.poisonB=false;}
             }
         } else if(ln.rfind("denresult=",0)==0) {
             MpSplit(ln.substr(10),'|',f);if(f.size()>=4) g_den.results.push_back(f[1]+": "+f[2]+" / stake "+f[3]);
@@ -15212,6 +15215,7 @@ static void MpDraw3D(const std::string& zoneKey, bool shadowPass, const Town3DCa
         if(zoneKey=="den" && !g_den.id.empty() && (p.id==g_den.a || p.id==g_den.b)) {
             float phase=p.id==g_den.a ? g_den.swingA:g_den.swingB;
             sp.attackT=phase>=0 && phase<.35f ? phase/.35f:-1.0f;sp.attackDuration=.35f;sp.engaged=true;sp.blocking=p.id==g_den.a ? g_den.guardA:g_den.guardB;
+            sp.castT=(p.id==g_den.a ? g_den.castA:g_den.castB)>0 ? .2f:-1.0f;
         }
         SkinDye dye; bool ok;
         for (int k = 0; k < 3; k++) { Color c = MpHex(f[6 + k], &ok); if (ok) dye.c[1 + k] = c; }
@@ -37517,11 +37521,14 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
         DrawCylinder({p.x,0,p.y},3,3,45,6,Color{55,43,28,255});DrawSphere({p.x,50,p.y},6,Color{245,163,70,255});
     }
     float phase=sideA ? g_den.swingA:g_den.swingB;
+    float castLeft=sideA ? g_den.castA:g_den.castB;
+    Vector2 opponent=s.townPlayerPos;
+    for(const MpPlayer& p:g_mp) if(p.id==(sideA ? g_den.b:g_den.a))opponent=p.pos;
     T3CAnim animation=T3CMakeAnim(kT3CTrackPlayerTown,s.townPlayerPos.x,s.townPlayerPos.y,true);
     T3CKitUseSunShader();
     rlPushMatrix();rlTranslatef(0,8,0);
-    if(!DrawPlayerHuman(s,kT3CTrackPlayerTown,s.townPlayerPos.x,s.townPlayerPos.y,atan2f(s.playerFacing.y,s.playerFacing.x),animation.move,nullptr,false,
-        fighting && phase>=0 && phase<.35f ? phase/.35f:-1.0f,fighting))
+    if(!DrawPlayerHuman(s,kT3CTrackPlayerTown,s.townPlayerPos.x,s.townPlayerPos.y,atan2f(s.playerFacing.y,s.playerFacing.x),animation.move,fighting ? &opponent:nullptr,false,
+        fighting && phase>=0 && phase<.35f ? phase/.35f:-1.0f,fighting,fighting && castLeft>0 ? .2f:-1.0f,fighting && (sideA ? g_den.guardA:g_den.guardB)))
         T3CDrawHumanoid(g_t3cHumans[2].parts,s.townPlayerPos.x,s.townPlayerPos.y,atan2f(s.playerFacing.y,s.playerFacing.x),1.0f,Color{70,130,220,255},Color{50,55,70,255},Color{240,210,180,255},animation,false);
     MpDraw3D("den",false,nullptr);rlPopMatrix();
     EndMode3D();EndTextureMode();
@@ -37561,17 +37568,35 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
             }
         } else {
             DrawUIText("Space: strike  Q: lunge  R: guard",190,678,12,kUoGoldText);
-            bool go=g_den.countdown<=0 && g_mpStatus==2;
-            if(Button({190,704,98,84},"Strike",go) || (go && IsKeyPressed(KEY_SPACE))) JS_DenAction("strike","",0);
-            if(Button({302,704,98,84},"Lunge",go) || (go && IsKeyPressed(KEY_Q))) JS_DenAction("lunge","",0);
-            if(Button({414,704,98,84},"Guard",go) || (go && IsKeyPressed(KEY_R))) JS_DenAction("guard","",0);
-            if(Button({330,820,188,56},"Surrender duel",true)) JS_DenAction("surrender","",0);
+            bool go=g_den.countdown<=0 && g_mpStatus==2 && castLeft<=0;
+            if(Button({190,704,98,56},"Strike",go) || (go && IsKeyPressed(KEY_SPACE))) JS_DenAction("strike","",0);
+            if(Button({302,704,98,56},"Lunge",go) || (go && IsKeyPressed(KEY_Q))) JS_DenAction("lunge","",0);
+            if(Button({414,704,98,56},"Guard",go) || (go && IsKeyPressed(KEY_R))) JS_DenAction("guard","",0);
+            // Equal arena spell access, independent of wilderness skills/reagents.
+            static int spellPage=0;
+            static const int spells[]={0,1,8,31,7,9,10,5,11,12,13,14,17,21,27,29};
+            int mana=sideA ? g_den.manaA:g_den.manaB;
+            if(g_den.spells) {
+                for(int i=0;i<4;++i) {
+                    int idx=spells[spellPage*4+i];const Spell& spell=kSpells[idx];
+                    std::string label=std::to_string(i+1)+" "+spell.name+" ("+std::to_string(spell.manaCost)+")";
+                    bool canCast=go && mana>=spell.manaCost;
+                    if(Button({190+(i%2)*164.0f,772+(i/2)*46.0f,154,38},label,canCast) || (canCast && IsKeyPressed(KEY_ONE+i))) JS_DenAction("cast","",idx);
+                }
+                if(Button({190,870,40,28},"< Z",true) || IsKeyPressed(KEY_Z))spellPage=(spellPage+3)%4;
+                DrawUIText(TextFormat("Spells %d/4",spellPage+1),239,878,12,kUoGoldText);
+                if(Button({310,870,40,28},"X >",true) || IsKeyPressed(KEY_X))spellPage=(spellPage+1)%4;
+                int spellId=sideA ? g_den.spellA:g_den.spellB;
+                if(castLeft>0 && spellId>=0 && spellId<(int)kSpells.size())DrawUIText(TextFormat("Casting %s: %.1fs",kSpells[spellId].name.c_str(),castLeft),190,654,13,kUoGoldText);
+                else DrawUIText((sideA ? g_den.poisonA:g_den.poisonB) ? "Poisoned! Cure: page 1, key 4.":"1-4: cast / Z-X: spell pages",190,654,12,kUoGoldText);
+            } else DrawUIText("Arena spells update pending",190,780,13,kUoGoldText);
+            if(Button({374,870,140,28},"Surrender duel",true)) JS_DenAction("surrender","",0);
         }
     }
     Rectangle top={12,116,516,82};UODrawGump(top,kUoDarkWood);UIRegister(top);
     if(!g_den.id.empty()) {
-        DrawUIText(TextFormat("%s: %d HP / %d stamina",g_den.nameA.c_str(),g_den.hpA,g_den.staminaA),24,126,14,kUoGoldText);
-        DrawUIText(TextFormat("%s: %d HP / %d stamina",g_den.nameB.c_str(),g_den.hpB,g_den.staminaB),24,150,14,kUoGoldText);
+        DrawUIText(TextFormat("%s: %d HP / %d stamina / %d mana",g_den.nameA.c_str(),g_den.hpA,g_den.staminaA,g_den.manaA),24,126,12,kUoGoldText);
+        DrawUIText(TextFormat("%s: %d HP / %d stamina / %d mana",g_den.nameB.c_str(),g_den.hpB,g_den.staminaB,g_den.manaB),24,150,12,kUoGoldText);
         DrawUIText(g_den.countdown>0 ? TextFormat("Starts in %.0f / stake %d each",ceilf(g_den.countdown),g_den.stake) : TextFormat("%.0fs remaining / stake %d each",g_den.left,g_den.stake),24,174,12,kUoGoldText);
     } else {
         DrawUIText("BLACKWAKE DEN",24,128,18,kUoGoldText);
@@ -37584,7 +37609,7 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
         if(UOCloseButton(panel) || IsKeyPressed(KEY_ESCAPE)) g_denPanel=0;
         const Color ink={45,27,15,255};float y=panel.y+38;
         if(g_denPanel==1) {
-            DrawUIText("Equal arena stats. First to 0 HP loses; equipment is kept.",40,(int)y,13,ink);y+=24;
+            DrawUIText("Equal stats + 100 mana. Arena spells cost no reagents.",40,(int)y,13,ink);y+=24;
             DrawUIText("Both agree to the stake. Winner receives the whole pot.",40,(int)y,13,ink);y+=28;
             const int stakes[]={0,10,50,100};
             for(int i=0;i<4;++i) if(MenuGroupTab({40+i*116.0f,y,108,44},i==0 ? "Practice":TextFormat("%d gold",stakes[i]),g_denStake==stakes[i],g_den.ready)) g_denStake=stakes[i];

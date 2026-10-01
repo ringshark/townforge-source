@@ -154,6 +154,7 @@ export class Zone extends DurableObject {
         else if(m.t==="den_practice") placement=this.den.practice(a.id);
         else if(m.t==="den_challenge") this.den.challenge(a.id,String(m.target),m.stake);
         else if(m.t==="den_answer") placement=this.den.answer(a.id,String(m.offer),m.accept===true);
+        else if(m.t==="den_cast") this.den.cast(a.id,m.spell);
         else if(m.t==="den_fight") this.den.fight(a.id,String(m.action));
         else if(m.t==="den_roll") {const result=this.den.casino(a.id,String(m.request),m.stake,m.face,m.sequence);applied=true;await this.saveDen();ws.send(JSON.stringify(result));}
         else if(m.t!=="den_poll") return;
