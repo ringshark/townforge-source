@@ -47,6 +47,12 @@ frame({750,166},false,true,false);p=LandscapeMouse();assert(near(p.x,342)&&near(
 frame({750,166},false,false,true);LandscapeMouse();
 g_presentedMap=false;
 frame({870,166},true,true,false);p=LandscapeMouse();assert(near(p.x,489.375)&&near(p.y,276.6667));assert(!LandscapeUIAllowed()); // transition removes the map hit area
+frame({870,166},false,false,true);LandscapeMouse();
+g_presentedGear=true;g_presentedWorld=false;
+frame({244,285},true,true,false);p=LandscapeMouse();assert(near(p.x,270)&&near(p.y,310.045));
+frame({600,285},false,true,false);p=LandscapeMouse();assert(near(p.x,706.909)); // paperdoll drag retains its column
+frame({600,285},false,false,true);LandscapeMouse();
+frame({716,285},true,true,false);p=LandscapeMouse();assert(near(p.x,270)&&near(p.y,762.045));assert(LandscapeUIAllowed());
 }
 '''
 with tempfile.TemporaryDirectory() as tmp:

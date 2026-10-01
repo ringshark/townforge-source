@@ -38299,7 +38299,7 @@ static void UpdateDrawFrame() {
 
         // --- Draw ---
         bool wideWorld=!IsMenuScreen(state.screen) && (ExploreHeaderCollapsed(state) || (state.screen==Screen::Hunt && state.selectedDungeon.has_value() && state.hunt3DView)) && !state.ambush.has_value() && !state.innocentEncounter.has_value();
-        LandscapeBeginFrame(wideWorld,LandscapeDialogOpen(state),(int)state.screen);
+        LandscapeBeginFrame(wideWorld,LandscapeDialogOpen(state),(int)state.screen,state.screen==Screen::Character && !g_characterPack);
         ClearBackground(wideWorld ? BLANK:kColorPageBg);
 
         // Inside a dungeon (2026-09-25), and in the 3D town/wilderness/interior

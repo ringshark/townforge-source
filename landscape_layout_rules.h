@@ -7,7 +7,8 @@ inline void DisplayAspect(float w,float h) {
     if(w>0 && h>0)aspectFactor=(w/h)/(legacyWidth/legacyHeight);
 }
 struct Point {float x,y;};
-enum class Region {World,Panel,Menu,Hud,Left,Right,Field,Map};
+enum class Region {World,Panel,Menu,Hud,Left,Right,Field,Map,GearHeader,GearLeft,GearRight};
+constexpr float gearScale=440.0f/540.0f;
 inline Region RegionAt(Point p,bool world,bool dialog) {
     if(!world || dialog)return Region::Panel;
     if(p.x<140 && p.y<110)return Region::Menu;
@@ -18,7 +19,10 @@ inline Region RegionAt(Point p,bool world,bool dialog) {
 }
 inline Point Map(Point p,Region region,float scroll=0) {
     switch(region) {
-        case Region::Panel:return {p.x-210,p.y+scroll};
+        case Region::Panel:return {p.x-210,p.y+(p.y<110 ? 0:scroll)};
+        case Region::GearHeader:return {p.x-210,p.y};
+        case Region::GearLeft:return {(p.x-24)/gearScale,(p.y-122)/gearScale+110};
+        case Region::GearRight:return {(p.x-496)/gearScale,(p.y-122)/gearScale+562};
         case Region::Menu:return p;
         case Region::Hud:return {p.x-210,p.y+98};
         case Region::Left:return {p.x,p.y+360};
@@ -33,7 +37,7 @@ inline float CameraDistance(float distance) {return distance*.65f;}
 constexpr float maxScroll=legacyHeight-height;
 inline float Scroll(float value) {return value<0 ? 0:value>maxScroll ? maxScroll:value;}
 inline Point Input(Point p,bool world,bool dialog,float scroll=0) {
-    if(!world || dialog)return {p.x-(width-legacyWidth)*.5f,p.y+scroll};
+    if(!world || dialog)return Map(p,Region::Panel,scroll);
     if(p.x<140 && p.y<110)return p; // menu
     if(p.x>=210 && p.x<=750 && p.y>=12 && p.y<132)return {p.x-210,p.y+98};
     if(p.x>=590 && p.y>=240)return {p.x-420,p.y+360}; // combat controls

@@ -26,6 +26,7 @@ struct LandscapeWorldLabel {std::string text;Vector2 point;int size;Color color;
 static std::vector<LandscapeWorldLabel> g_landscapeLabels;
 static std::vector<Rectangle> g_landscapeHitRects;
 static bool g_presentedMap=false,g_landscapeMap=false;
+static bool g_landscapeGear=false,g_presentedGear=false;
 static Rectangle g_presentedMapSource{},g_presentedMapDest{},g_landscapeMapSource{},g_landscapeMapDest{};
 static RenderTexture2D g_landscapeMapTarget{};
 static tflayout::Point LandscapePointerMap(Vector2 raw,tflayout::Region region) {
@@ -39,6 +40,8 @@ static tflayout::Region g_landscapePointerRegion=tflayout::Region::Panel;
 static bool g_landscapePointerHeld=false;
 static double g_landscapePressTime=-1;
 static tflayout::Region LandscapeRegion(Vector2 raw) {
+    if(g_presentedGear)return raw.y<110 ? tflayout::Region::GearHeader:
+        raw.x<480 ? tflayout::Region::GearLeft:tflayout::Region::GearRight;
     if(g_presentedMap && CheckCollisionPointRec(raw,g_presentedMapDest))return tflayout::Region::Map;
     auto region=tflayout::RegionAt({raw.x,raw.y},g_presentedWorld,g_presentedDialog);
     if(region==tflayout::Region::Panel)return region;
@@ -151,7 +154,7 @@ static Ray LandscapeRay(Vector2 pos,Camera camera,int w,int h) {
     if(g_landscapeActive && g_landscapeWorld){pos.x*=tflayout::aspectFactor;return ::GetScreenToWorldRayEx(pos,camera,(int)(w*tflayout::aspectFactor),h);}
     return ::GetScreenToWorldRayEx(pos,camera,w,h);
 }
-static void LandscapeBeginFrame(bool world,bool dialog,int screen) {
+static void LandscapeBeginFrame(bool world,bool dialog,int screen,bool gear=false) {
 #ifdef PLATFORM_WEB
     // Use the displayed landscape aspect for both projection and picking.
     // CSS fills the phone; a wider camera keeps characters from stretching.
@@ -163,7 +166,7 @@ static void LandscapeBeginFrame(bool world,bool dialog,int screen) {
 #endif
     static int previousScreen=-1;
     if(previousScreen!=screen){g_landscapeScroll=0;previousScreen=screen;}
-    g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeMap=false;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();g_landscapeNotices.clear();g_landscapeLabels.clear();
+    g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeGear=gear;g_landscapeMap=false;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();g_landscapeNotices.clear();g_landscapeLabels.clear();
     ::BeginTextureMode(g_landscapeScene);::ClearBackground(Color{22,33,42,255});::EndTextureMode();
     ::BeginTextureMode(g_landscapeUI);g_landscapeTargets.push_back(g_landscapeUI);g_landscapeActive=true;
 }
@@ -183,7 +186,15 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
             ::DrawTextEx(font,label.text.c_str(),{x,y},label.size,1,label.color);
         }
     }
-    if(!g_landscapeWorld || g_landscapeDialog) {
+    if(g_landscapeGear) {
+        // Keep the whole gear gump together, then place the character details
+        // beside it. Both columns share one scale and matching touch transforms.
+        blit(g_landscapeUI.texture,{0,0,540,110},{210,0,540,110});
+        blit(g_landscapeUI.texture,{0,110,540,452},{24,122,440,452*tflayout::gearScale});
+        blit(g_landscapeUI.texture,{0,562,540,338},{496,122,440,338*tflayout::gearScale});
+        g_landscapeScroll=0;
+    }
+    else if(!g_landscapeWorld || g_landscapeDialog) {
         if(g_landscapeWorld && !g_presentedDialog)g_landscapeScroll=0;
         Vector2 mouse=::GetMousePosition();
         Rectangle top={786,34,140,48},more={786,458,140,48};
@@ -203,7 +214,9 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
         ::DrawLine(208,24,208,516,Color{141,114,71,255});::DrawLine(752,24,752,516,Color{141,114,71,255});
         ::DrawTextEx(font,"TOWN",{48,224},26,1,Color{230,211,174,255});::DrawTextEx(font,"FORGE",{48,257},26,1,Color{230,211,174,255});
         ::DrawLine(48,302,149,302,Color{141,114,71,255});
-        blit(g_landscapeUI.texture,{0,g_landscapeScroll,540,540},{210,0,540,540});
+        // Navigation stays visible while only the page body scrolls.
+        blit(g_landscapeUI.texture,{0,0,540,110},{210,0,540,110});
+        blit(g_landscapeUI.texture,{0,110+g_landscapeScroll,540,430},{210,110,540,430});
         for(auto r:{top,more}) {::DrawRectangleRounded(r,.15f,4,Color{37,48,54,255});::DrawRectangleRoundedLines(r,.15f,4,Color{163,132,82,255});}
         ::DrawText("Top",833,49,18,Color{238,220,183,255});::DrawText("More",824,473,18,Color{238,220,183,255});
         ::DrawRectangleRounded({848,104,16,332},.6f,6,Color{9,17,23,255});
@@ -246,6 +259,7 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
         g_presentedMapSource=g_landscapeMapSource;g_presentedMapDest=g_landscapeMapDest;
     }
     g_presentedWorld=g_landscapeWorld;g_presentedDialog=g_landscapeDialog;
+    g_presentedGear=g_landscapeGear;
     g_landscapeHitRects=controls;
     if(g_presentedMap) {
         // Its source-space control is now displayed only in the native widget.
