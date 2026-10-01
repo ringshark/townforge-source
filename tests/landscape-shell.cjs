@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict');
-const {fit,point}=require('../web/landscape.js');
+const {fit,point,coordinates}=require('../web/landscape.js');
 const portrait=fit(390,844,true);assert.equal(portrait.rotated,true);
 assert(portrait.canvasWidth<=844 && portrait.canvasHeight<=390);
 const rect={left:0,top:75,width:390,height:693.333333};
@@ -9,4 +9,12 @@ p=point(0,768.333333,rect,true);near(p.x,960);near(p.y,540);
 p=point(195,421.6666665,rect,true);near(p.x,480);near(p.y,270);
 assert.equal(fit(844,390,true).rotated,false);
 assert.equal(fit(390,844,false).rotated,false);
+// Emscripten GLFW uses pageX/pageY for touch events, including scroll offsets.
+for (const [x,y] of [[390,75],[0,768.333333],[195,421.6666665]]) {
+  const t=coordinates({clientX:x,clientY:y},rect,7,19);
+  const native=point(x,y,rect,true);
+  near((t.pageX-7-rect.left)*960/rect.width,native.x);
+  near((t.pageY-19-rect.top)*540/rect.height,native.y);
+  near(t.pageX,t.clientX+7);near(t.pageY,t.clientY+19);
+}
 console.log('PASS landscape startup and inverse touch rotation');

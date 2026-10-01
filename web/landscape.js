@@ -10,7 +10,13 @@
     const u = (x - rect.left) / rect.width, v = (y - rect.top) / rect.height;
     return rotated ? { x: v * 960, y: (1 - u) * 540 } : { x: u * 960, y: v * 540 };
   }
-  if (typeof module !== 'undefined') module.exports = { fit, point };
+  function coordinates(t, rect, scrollX, scrollY) {
+    const p = point(t.clientX, t.clientY, rect, true);
+    const clientX = rect.left + p.x / 960 * rect.width;
+    const clientY = rect.top + p.y / 540 * rect.height;
+    return { clientX, clientY, pageX: clientX + scrollX, pageY: clientY + scrollY };
+  }
+  if (typeof module !== 'undefined') module.exports = { fit, point, coordinates };
   if (typeof document === 'undefined') return;
   const canvas = document.getElementById('canvas'), stage = canvas.parentElement;
   const touch = navigator.maxTouchPoints > 0 || matchMedia('(pointer:coarse)').matches;
@@ -31,12 +37,6 @@
       if (touch && screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(function () {});
     } catch (_) {}
   }
-  function coordinates(t, rect) {
-    const p = point(t.clientX, t.clientY, rect, true);
-    // GLFW uses the bounding box to scale client coordinates. Feed it the
-    // inverse rotation so the visible button and its hit area stay aligned.
-    return { clientX: rect.left + p.x / 960 * rect.width, clientY: rect.top + p.y / 540 * rect.height };
-  }
   function remap(event) {
     if (!rotated || synthetic.has(event)) return;
     const start = event.type === 'mousedown' || event.type === 'touchstart';
@@ -48,12 +48,14 @@
       replacement = new Event(event.type, { bubbles: true, cancelable: true });
       for (const key of ['touches', 'changedTouches', 'targetTouches']) {
         const list = Array.from(event[key] || [], function (t) {
-          return Object.assign({ identifier: t.identifier, target: t.target, screenX: t.screenX, screenY: t.screenY }, coordinates(t, rect));
+          // GLFW reads page coordinates for touches, while raylib also reads
+          // client coordinates. Keep both in the inverse-rotated space.
+          return Object.assign({ identifier: t.identifier, target: t.target, screenX: t.screenX, screenY: t.screenY }, coordinates(t, rect, window.scrollX || 0, window.scrollY || 0));
         });
         Object.defineProperty(replacement, key, { value: list });
       }
     } else {
-      replacement = new MouseEvent(event.type, Object.assign({ bubbles: true, cancelable: true, button: event.button, buttons: event.buttons }, coordinates(event, rect)));
+      replacement = new MouseEvent(event.type, Object.assign({ bubbles: true, cancelable: true, button: event.button, buttons: event.buttons }, coordinates(event, rect, window.scrollX || 0, window.scrollY || 0)));
     }
     synthetic.add(replacement);
     event.preventDefault(); event.stopImmediatePropagation();
