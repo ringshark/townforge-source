@@ -151,6 +151,7 @@
 #include <cstdlib>
 #include <ctime>
 #include "combat_motion.h"
+#include "landscape_layout.h"
 #include <cmath>
 #include <fstream>
 #include <sstream>
@@ -2877,7 +2878,10 @@ static GameAssets g_assets;
 // same argument order, just backed by uiFont instead of GetFontDefault().
 static inline Font UiFont() { return g_assets.uiFontOk ? g_assets.uiFont : GetFontDefault(); }
 static inline void DrawUIText(const char* text, int posX, int posY, int fontSize, Color color) {
-    DrawTextEx(UiFont(), text, { (float)posX, (float)posY }, (float)fontSize, 1.0f, color);
+    bool field=g_landscapeActive && g_landscapeWorld && !g_landscapeDialog && posY>=230 && posY<600;
+    if(field){rlPushMatrix();rlTranslatef((float)posX,(float)posY,0);rlScalef(540.0f/960.0f,900.0f/540.0f,1);}
+    DrawTextEx(UiFont(), text, { field ? 0.0f:(float)posX, field ? 0.0f:(float)posY }, (float)fontSize, 1.0f, color);
+    if(field)rlPopMatrix();
 }
 static inline int MeasureUIText(const char* text, int fontSize) {
     return (int)MeasureTextEx(UiFont(), text, (float)fontSize, 1.0f).x;
@@ -10171,6 +10175,7 @@ static const Color kUoBronze = { 150, 112, 58, 255 }, kUoBronzeHi = { 222, 184, 
 static const Color kUoGoldText = { 236, 208, 140, 255 };
 // Restrained bronze frame: preserve parchment contrast and existing hit areas.
 static void UODrawGump(Rectangle r, int surface, Color tint = WHITE) {
+    if(g_landscapeActive && r.width>=350 && (r.height>=260 || (r.y>=230 && r.height>=90)))g_landscapeDialog=true;
     DrawRectangleRec({ r.x + 3, r.y + 6, r.width, r.height }, Fade(BLACK, 0.28f));
     UOFill(r, surface, tint);
     DrawRectangleLinesEx(r, 1.0f, Color{ 24, 20, 18, 255 });
@@ -15133,7 +15138,7 @@ static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, in
     c.fovY = 45.0f;
     c.vw = (float)screenW;
     c.vh = (float)screenH;
-    c.aspect = c.vw / c.vh; // render-texture framebuffer aspect (see kZoom's comment)
+    c.aspect = c.vw / c.vh * (g_landscapeWorld ? tflayout::aspectFactor:1.0f); // render-texture framebuffer aspect (see kZoom's comment)
     return c;
 }
 static Town3DCam Town3DGetCam(const GameState& s, int screenW, int screenH) {
@@ -37984,9 +37989,6 @@ static float g_autosaveTimer = 0.0f;
 // way that's hard to verify without a real device. Web's equivalent zoom is a separate
 // CSS change in shell.html instead (see its comment).
 static const float kZoom = 1.125f;
-#ifndef __EMSCRIPTEN__
-static RenderTexture2D g_zoomTarget;
-#endif
 
 // One frame's worth of update+draw. Split out of main() so it can be handed to
 // emscripten_set_main_loop on web - a blocking `while(!WindowShouldClose())` loop only
@@ -38234,12 +38236,9 @@ static void UpdateDrawFrame() {
         }
 
         // --- Draw ---
-#ifndef __EMSCRIPTEN__
-        BeginTextureMode(g_zoomTarget); // desktop: draw at the original 540x900, upscaled below
-#else
-        BeginDrawing();
-#endif
-        ClearBackground(kColorPageBg); // parchment background
+        bool wideWorld=!IsMenuScreen(state.screen) && (ExploreHeaderCollapsed(state) || (state.screen==Screen::Hunt && state.selectedDungeon.has_value() && state.hunt3DView)) && !state.ambush.has_value() && !state.innocentEncounter.has_value();
+        LandscapeBeginFrame(wideWorld,state.exploreMenuOpen || state.worldMapOpen || state.guideOpen);
+        ClearBackground(wideWorld ? BLANK:kColorPageBg);
 
         // Inside a dungeon (2026-09-25), and in the 3D town/wilderness/interior
         // views (2026-09-26): the header - title, Reset, resource HUD, tab bar -
@@ -38452,17 +38451,8 @@ static void UpdateDrawFrame() {
         UpdateDrawLevelUps(state, screenW, screenH, IsPlayScreen(state.screen)); // (2026-09-29) RuneScape-style level-ups
         DrawNotorietyFooter(state, screenW, screenH);
 
-#ifndef __EMSCRIPTEN__
-        EndTextureMode();
-        BeginDrawing();
-        ClearBackground(BLACK); // letterbox color; shouldn't actually show since the aspect ratio matches exactly
-        // RenderTexture2D textures are Y-flipped relative to a normal draw - negative
-        // source height corrects it (the standard raylib render-to-texture pattern).
-        DrawTexturePro(g_zoomTarget.texture,
-                         { 0, 0, (float)kScreenW, -(float)kScreenH },
-                         { 0, 0, (float)GetScreenWidth(), (float)GetScreenHeight() },
-                         { 0, 0 }, 0.0f, WHITE);
-#endif
+        for(const Rectangle& r:g_uiRects)if(r.width>=350 && (r.height>=260 || (r.y>=230 && r.height>=90)))g_landscapeDialog=true;
+        LandscapePresent();
         EndDrawing();
     }
 }
@@ -38474,13 +38464,12 @@ int main() {
 #endif
     g_skillOwner = &g_state; // the skill loadout cap (2026-09-27)
     std::srand((unsigned)std::time(nullptr));
-#ifndef __EMSCRIPTEN__
-    InitWindow((int)(kScreenW * kZoom), (int)(kScreenH * kZoom), "Town Forge");
-    SetMouseScale(1.0f / kZoom, 1.0f / kZoom); // see kZoom's comment
-    g_zoomTarget = LoadRenderTexture(kScreenW, kScreenH);
-#else
-    InitWindow(kScreenW, kScreenH, "Town Forge");
-#endif
+    InitWindow((int)tflayout::width,(int)tflayout::height,"Town Forge");
+    g_landscapeUI=LoadRenderTexture(kScreenW,kScreenH);
+    g_landscapeScene=LoadRenderTexture(kScreenW,kScreenH);
+    SetTextureFilter(g_landscapeUI.texture,TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(g_landscapeScene.texture,TEXTURE_FILTER_BILINEAR);
+    g_zoomTarget=g_landscapeUI;
     SetTargetFPS(60);
     // 2026-09-24: raylib's desktop build (RL_CULL_DISTANCE_FAR=4000) and the
     // web/em++ build (raylib-src default 1000) disagreed on the far clip

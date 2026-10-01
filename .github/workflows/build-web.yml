@@ -28,6 +28,8 @@ jobs:
         run: |
           g++ -std=c++17 tests/combat-motion.cpp -o /tmp/tf-combat-test
           /tmp/tf-combat-test
+          g++ -std=c++17 tests/landscape-layout.cpp -o /tmp/tf-layout-test
+          /tmp/tf-layout-test
           python tests/player-movement.py
           python tests/ui-input.py
           python tests/mobile-combat.py
