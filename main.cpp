@@ -14844,7 +14844,7 @@ static struct {
     bool ready=false,pending=false,ranked=false,spells=false;int gold=0,sequence=0;
     std::string message,id,a,b,nameA,nameB;int hpA=100,hpB=100,staminaA=100,staminaB=100,stake=0;
     float countdown=0,left=0,swingA=99,swingB=99,castA=0,castB=0;bool guardA=false,guardB=false,poisonA=false,poisonB=false;
-    int manaA=100,manaB=100,spellA=-1,spellB=-1;
+    int manaA=100,manaB=100,spellA=-1,spellB=-1,maxHpA=100,maxHpB=100;
     std::vector<DenOffer> offers;std::vector<std::string> results;
 } g_den;
 struct DenLadderStage {std::string name,style;int hp=100;};
@@ -14946,7 +14946,7 @@ static void MpTick(GameState& s) {
                 g_den.id=f[0];g_den.a=f[1];g_den.b=f[2];g_den.nameA=f[3];g_den.nameB=f[4];
                 g_den.hpA=std::atoi(f[5].c_str());g_den.hpB=std::atoi(f[6].c_str());g_den.staminaA=std::atoi(f[7].c_str());g_den.staminaB=std::atoi(f[8].c_str());
                 g_den.countdown=std::atof(f[9].c_str());g_den.left=std::atof(f[10].c_str());g_den.stake=std::atoi(f[11].c_str());g_den.guardA=f[12]=="1";g_den.guardB=f[13]=="1";g_den.swingA=std::atof(f[14].c_str());g_den.swingB=std::atof(f[15].c_str());g_den.ranked=f.size()>16 && f[16]=="1";
-                if(f.size()>=25) {g_den.manaA=std::atoi(f[17].c_str());g_den.manaB=std::atoi(f[18].c_str());g_den.castA=std::atof(f[19].c_str());g_den.castB=std::atof(f[20].c_str());g_den.spellA=std::atoi(f[21].c_str());g_den.spellB=std::atoi(f[22].c_str());g_den.poisonA=f[23]=="1";g_den.poisonB=f[24]=="1";}
+                if(f.size()>=25) {g_den.manaA=std::atoi(f[17].c_str());g_den.manaB=std::atoi(f[18].c_str());g_den.castA=std::atof(f[19].c_str());g_den.castB=std::atof(f[20].c_str());g_den.spellA=std::atoi(f[21].c_str());g_den.spellB=std::atoi(f[22].c_str());g_den.poisonA=f[23]=="1";g_den.poisonB=f[24]=="1";g_den.maxHpA=f.size()>25 ? std::max(1,std::atoi(f[25].c_str())):100;g_den.maxHpB=f.size()>26 ? std::max(1,std::atoi(f[26].c_str())):100;}
                 else {g_den.castA=g_den.castB=0;g_den.spellA=g_den.spellB=-1;g_den.manaA=g_den.manaB=100;g_den.poisonA=g_den.poisonB=false;}
             }
         } else if(ln.rfind("denresult=",0)==0) {
@@ -15216,6 +15216,9 @@ static void MpDraw3D(const std::string& zoneKey, bool shadowPass, const Town3DCa
             float phase=p.id==g_den.a ? g_den.swingA:g_den.swingB;
             sp.attackT=phase>=0 && phase<.35f ? phase/.35f:-1.0f;sp.attackDuration=.35f;sp.engaged=true;sp.blocking=p.id==g_den.a ? g_den.guardA:g_den.guardB;
             sp.castT=(p.id==g_den.a ? g_den.castA:g_den.castB)>0 ? .2f:-1.0f;
+            // The trainer's packet used to say moving even when it stood still.
+            // Use its interpolated ground speed for the visible stride.
+            if(p.id=="pit-trainer")sp.move=sp.speed>20.0f ? std::min(1.0f,sp.speed/140.0f):0.0f;
         }
         SkinDye dye; bool ok;
         for (int k = 0; k < 3; k++) { Color c = MpHex(f[6 + k], &ok); if (ok) dye.c[1 + k] = c; }
@@ -37447,6 +37450,50 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     g_uiShieldBypass = false; g_uiShield = oldShield; g_uiShieldOn = oldShieldOn;
 }
 
+// Den visuals follow received arena health; they never apply combat damage.
+struct DenVisualState {
+    std::string duel;int hp[2]={100,100},delta[2]={0,0};float pulse[2]={0,0};
+    void Update(const std::string& id,int a,int b,float dt) {
+        if(id!=duel){duel=id;hp[0]=a;hp[1]=b;pulse[0]=pulse[1]=0;delta[0]=delta[1]=0;return;}
+        const int values[]={a,b};
+        for(int i=0;i<2;++i){pulse[i]=std::max(0.0f,pulse[i]-dt);if(values[i]!=hp[i]){delta[i]=values[i]-hp[i];hp[i]=values[i];pulse[i]=.75f;}}
+    }
+};
+static void DenBar(Rectangle r,float value,float maximum,Color color) {
+    DrawRectangleRounded(r,.3f,4,Color{13,20,25,255});
+    float fill=std::clamp(value/std::max(1.0f,maximum),0.0f,1.0f);
+    if(fill>0)DrawRectangleRounded({r.x,r.y,r.width*fill,r.height},.3f,4,color);
+}
+static bool DenSpellButton(Rectangle r,int idx,int key,bool enabled,bool casting) {
+    const Spell& spell=kSpells[idx];Color color=spell.type==SpellType::Utility ? Color{135,220,166,255}:SpellFXFor(idx).proj;
+    bool hover=CheckCollisionPointRec(GetMousePosition(),r);
+    DrawRectangleRounded(r,.15f,4,enabled ? Color{30,43,51,250}:Color{26,31,37,250});
+    DrawRectangleRoundedLines(r,.15f,4,casting ? color:hover && enabled ? Color{230,195,126,255}:Color{91,103,112,255});
+    Rectangle icon={r.x+5,r.y+6,30,30};
+    if(const Texture2D* tex=SpellIcon(idx))DrawTexturePro(*tex,{0,0,(float)tex->width,(float)tex->height},icon,{0,0},0,enabled ? WHITE:Fade(WHITE,.4f));
+    PaperdollText(spell.name,{r.x+40,r.y+6,r.width-44,17},11,enabled ? Color{237,234,223,255}:Color{139,147,150,255});
+    DrawUIText(TextFormat("%d  /  %d mana",key,spell.manaCost),(int)r.x+40,(int)r.y+25,10,enabled ? color:Color{112,122,128,255});
+    return UIClick(r,enabled);
+}
+static void DrawDenAura(Vector2 pos,float castLeft,int spell,bool guard,bool poison,const DenVisualState& visual,int side,const Camera3D& cam) {
+    const float t=(float)g_gameClock;
+    rlDrawRenderBatchActive();rlDisableDepthMask();
+    if(castLeft>0 && spell>=0 && spell<(int)kSpells.size()) {
+        Color c=kSpells[spell].type==SpellType::Utility ? Color{120,235,165,255}:SpellFXFor(spell).proj;
+        Town3DDrawGroundRing(pos.x,pos.y,10,27,29,40,Fade(c,.85f));
+        Town3DDrawGroundRing(pos.x,pos.y,10,33,34,40,Fade(c,.4f));
+        for(int i=0;i<6;++i){float a=t*2+i*PI/3;Vector3 at={pos.x+cosf(a)*29,14+sinf(t*4+i)*3,pos.y+sinf(a)*29};DrawSphereEx(at,2.2f,6,4,c);}
+        DrawBillboard(cam,GlowTex(),{pos.x,61,pos.y},27+3*sinf(t*8),Fade(c,.75f));
+    }
+    if(guard) {Town3DDrawGroundRing(pos.x,pos.y,11,30,33,40,Color{102,181,235,220});DrawBillboard(cam,GlowTex(),{pos.x,36,pos.y},38,Color{85,151,215,80});}
+    if(poison)for(int i=0;i<4;++i){float a=t*1.6f+i*PI/2;DrawBillboard(cam,GlowTex(),{pos.x+cosf(a)*18,18+fmodf(t*14+i*9,40),pos.y+sinf(a)*18},11,Color{126,216,105,170});}
+    if(visual.pulse[side]>0) {
+        float f=1-visual.pulse[side]/.75f;bool heal=visual.delta[side]>0;Color c=heal ? Color{114,230,163,255}:Color{255,201,125,255};
+        Town3DDrawGroundRing(pos.x,pos.y,11,18+f*35,21+f*35,40,Fade(c,1-f));
+        for(int i=0;i<7;++i){float a=i*2*PI/7;DrawBillboard(cam,GlowTex(),{pos.x+cosf(a)*f*29,35+f*(heal ? 44:18),pos.y+sinf(a)*f*29},8*(1-f),Fade(c,1-f));}
+    }
+    rlDrawRenderBatchActive();rlEnableDepthMask();
+}
 struct DenGroundGesture {
     Vector2 press={};bool held=false,dragged=false;
     bool Update(Vector2 p,bool pressed,bool down,bool released,bool eligible) {
@@ -37470,6 +37517,9 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
     const Rectangle view=kViewport;
     if(!scene.id) {scene=LoadRenderTexture((int)view.width,(int)view.height);SetTextureFilter(scene.texture,TEXTURE_FILTER_BILINEAR);}
     bool fighting=DenFighting(),sideA=g_den.a==g_mpMyId;
+    static DenVisualState visual;visual.Update(g_den.id,g_den.hpA,g_den.hpB,GameDt());
+    Vector2 fighter[2]={s.townPlayerPos,s.townPlayerPos};fighter[sideA ? 0:1]=s.townPlayerPos;
+    for(const MpPlayer& p:g_mp) {if(p.id==g_den.a)fighter[0]=p.pos;if(p.id==g_den.b)fighter[1]=p.pos;}
     if(!s.exploreMenuOpen && !g_denPanel && (!fighting || g_den.countdown<=0)) {
         UpdatePlayerMovement(s.townPlayerPos,s.playerFacing,GameDt(),1500,-atan2f(500.0f,600.0f));
         for(Vector2 b:std::vector<Vector2>{{1150,650},{1150,1000},{350,350},{1100,350}}) ResolveCircleCollision(s.townPlayerPos,kPlayerRadius,b,100);
@@ -37477,8 +37527,14 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
         s.townPlayerPos.y=std::clamp(s.townPlayerPos.y,fighting ? 535.0f:120.0f,fighting ? 965.0f:1380.0f);
     }
     Town3DLoadModels();Town3DEnsureLit();T3DUpdateDayNight(s.worldTime,true);
-    Vector3 focus=fighting ? Vector3{750,0,750}:Vector3{s.townPlayerPos.x,0,s.townPlayerPos.y};
-    Camera3D cam={{focus.x+500,780,focus.z+600},focus,{0,1,0},48,CAMERA_PERSPECTIVE};
+    static Vector2 duelFocus={750,750};static std::string cameraDuel;
+    Vector2 midpoint={(fighter[0].x+fighter[1].x)*.5f,(fighter[0].y+fighter[1].y)*.5f};
+    if(cameraDuel!=g_den.id){cameraDuel=g_den.id;duelFocus=midpoint;}
+    else {float follow=1-expf(-GameDt()*5);duelFocus.x+=(midpoint.x-duelFocus.x)*follow;duelFocus.y+=(midpoint.y-duelFocus.y)*follow;}
+    float framing=std::clamp(Dist(fighter[0],fighter[1])/260.0f,1.0f,1.9f);
+    Vector3 focus=fighting ? Vector3{duelFocus.x,-35,duelFocus.y}:Vector3{s.townPlayerPos.x,0,s.townPlayerPos.y};
+    Camera3D cam=fighting ? Camera3D{{focus.x+420*framing,600*framing,focus.z+504*framing},focus,{0,1,0},43,CAMERA_PERSPECTIVE}:
+        Camera3D{{focus.x+500,780,focus.z+600},focus,{0,1,0},48,CAMERA_PERSPECTIVE};
     if(g_t3dLit.ready) {
         SetShaderValue(g_t3dLit.shader,g_t3dLit.viewPosLoc,&cam.position,SHADER_UNIFORM_VEC3);
         float fog[2]={2500,4000};SetShaderValue(g_t3dLit.shader,g_t3dLit.fogRangeLoc,fog,SHADER_UNIFORM_VEC2);T3DGroundShaderSync(&cam.position,fog);
@@ -37489,21 +37545,38 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
     DrawPlane({750,0,750},{1320,1320},Color{128,119,92,255});
     DrawCube({750,1,1040},100,2,780,Color{141,133,112,255});
     DrawCube({860,1,650},650,2,80,Color{141,133,112,255});
-    DrawCube({750,2,750},510,4,510,Color{58,48,36,255});
-    DrawCube({750,5,750},480,3,480,Color{170,135,84,255});
-    // Symmetric court: unobstructed center and clear distance markers.
-    for(int row=0;row<8;++row) for(int col=0;col<8;++col)
-        DrawCube({540+col*60.0f,7,540+row*60.0f},58,1,58,
-            (row+col)%2 ? Color{155,148,126,255}:Color{171,162,139,255});
-    DrawCube({750,8,750},4,1,420,Color{115,105,83,255});
-    DrawCube({750,8,750},420,1,4,Color{115,105,83,255});
-    DrawCylinder({625,9,750},26,26,1,24,Color{70,121,169,255});
-    DrawCylinder({875,9,750},26,26,1,24,Color{177,73,56,255});
+    DrawCube({750,2,750},516,4,516,Color{40,47,51,255});
+    DrawCube({750,5,750},498,3,498,Color{169,142,88,255});
+    // Weathered slate, brass inlay and an eight-point harbor compass.
+    for(int row=0;row<8;++row) for(int col=0;col<8;++col) {
+        int shade=(row*13+col*7)%17;
+        DrawCube({540+col*60.0f,7,540+row*60.0f},58,1,58,Color{(unsigned char)(91+shade),(unsigned char)(104+shade),(unsigned char)(111+shade),255});
+    }
+    Town3DDrawGroundRing(750,750,8.5f,102,104,64,Color{170,145,97,255});
+    Town3DDrawGroundRing(750,750,8.5f,115,117,64,Color{133,123,99,255});
+    for(int i=0;i<8;++i) {
+        float a=i*PI/4;float r=i%2 ? 70:95;
+        Vector3 tip={750+cosf(a)*r,8.6f,750+sinf(a)*r};
+        Vector3 left={750+cosf(a-.18f)*22,8.6f,750+sinf(a-.18f)*22},right={750+cosf(a+.18f)*22,8.6f,750+sinf(a+.18f)*22};
+        DrawTriangle3D(tip,left,right,Color{169,146,101,255});DrawTriangle3D(tip,right,left,Color{169,146,101,255});
+    }
+    Town3DDrawGroundRing(650,750,8.8f,24,27,40,Color{105,172,201,255});
+    Town3DDrawGroundRing(850,750,8.8f,24,27,40,Color{201,115,100,255});
     for(int i=0;i<=10;++i) for(int side:{-1,1}) {
         float along=500+i*50.0f;
         if(i==4 || i==5 || i==6) continue;
-        DrawCylinder({along,0,750+side*250.0f},4,4,35,6,Color{72,50,30,255});
-        DrawCylinder({750+side*250.0f,0,along},4,4,35,6,Color{72,50,30,255});
+        DrawCube({along,13,750+side*250.0f},15,26,15,Color{69,78,84,255});
+        DrawCube({750+side*250.0f,13,along},15,26,15,Color{69,78,84,255});
+        DrawCube({along,28,750+side*250.0f},18,4,18,Color{154,130,82,255});
+        DrawCube({750+side*250.0f,28,along},18,4,18,Color{154,130,82,255});
+    }
+    for(int dx:{-1,1})for(int dz:{-1,1}) {
+        Vector3 p={750+dx*250.0f,0,750+dz*250.0f};
+        DrawCube({p.x,26,p.z},24,52,24,Color{57,68,75,255});
+        DrawCube({p.x,56,p.z},30,8,30,Color{141,117,74,255});
+        DrawCylinder({p.x,63,p.z},9,6,7,10,Color{51,43,35,255});
+        DrawBillboard(cam,GlowTex(),{p.x,77,p.z},38,Color{244,164,74,145});
+        DrawSphereEx({p.x,72+2*sinf((float)g_gameClock*6+dx+dz),p.z},5,8,6,Color{255,193,99,255});
     }
     // Raised benches face the open pit; low posts keep fighters visible.
     for(int i=0;i<5;++i) {DrawCube({560+i*90.0f,18,450},72,8,30,Color{76,53,35,255});DrawCube({450,18,560+i*90.0f},30,8,72,Color{76,53,35,255});}
@@ -37531,6 +37604,10 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
         fighting && phase>=0 && phase<.35f ? phase/.35f:-1.0f,fighting,fighting && castLeft>0 ? .2f:-1.0f,fighting && (sideA ? g_den.guardA:g_den.guardB)))
         T3CDrawHumanoid(g_t3cHumans[2].parts,s.townPlayerPos.x,s.townPlayerPos.y,atan2f(s.playerFacing.y,s.playerFacing.x),1.0f,Color{70,130,220,255},Color{50,55,70,255},Color{240,210,180,255},animation,false);
     MpDraw3D("den",false,nullptr);rlPopMatrix();
+    if(!g_den.id.empty()) {
+        DrawDenAura(fighter[0],g_den.castA,g_den.spellA,g_den.guardA,g_den.poisonA,visual,0,cam);
+        DrawDenAura(fighter[1],g_den.castB,g_den.spellB,g_den.guardB,g_den.poisonB,visual,1,cam);
+    }
     EndMode3D();EndTextureMode();
 #ifndef __EMSCRIPTEN__
     BeginTextureMode(g_zoomTarget);
@@ -37538,21 +37615,31 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
     DrawTexturePro(scene.texture,{0,0,view.width,-view.height},view,{0,0},0,WHITE);
     struct Landmark {const char* name;Vector2 pos;int panel;};
     const Landmark landmarks[]={{"Dueling Pit",{750,750},1},{"The Loaded Die",{1150,650},2},{"Harbor bank",{1150,1000},3},{"Dock / ferry",{750,1250},4},{"The Blackwake Inn",{350,350},3}};
-    for(const auto& b:landmarks) {
+    if(!fighting)for(const auto& b:landmarks) {
         Vector2 at=GetWorldToScreenEx({b.pos.x,110,b.pos.y},cam,540,790);at.y+=view.y;
         if(at.x<30 || at.x>510 || at.y<210 || at.y>700) continue;
         int w=MeasureUIText(b.name,13)+20;
         DrawRectangleRounded({at.x-w*.5f,at.y-10,(float)w,28},.25f,4,Fade(Color{30,20,12,255},.9f));
         DrawUIText(b.name,(int)(at.x-w*.5f+10),(int)at.y-4,13,kUoGoldText);
     }
-    for(const MpPlayer& p:g_mp) {
+    if(!fighting)for(const MpPlayer& p:g_mp) {
         Vector2 at=GetWorldToScreenEx({p.pos.x,88,p.pos.y},cam,540,790);at.y+=view.y;
         if(at.y>210 && at.y<720) {DrawUIText(p.name.c_str(),(int)at.x-MeasureUIText(p.name.c_str(),12)/2,(int)at.y,12,kUoGoldText);}
     }
-    if(!g_ladder.title.empty()) {
+    if(!fighting && !g_ladder.title.empty()) {
         Vector2 badge=GetWorldToScreenEx({s.townPlayerPos.x,104,s.townPlayerPos.y},cam,540,790);badge.y+=view.y;
         DrawUIText(g_ladder.title.c_str(),(int)badge.x-MeasureUIText(g_ladder.title.c_str(),12)/2,(int)badge.y,12,kUoGoldText);
     }
+    if(!g_den.id.empty())for(int i=0;i<2;++i) {
+        Vector2 head=GetWorldToScreenEx({fighter[i].x,94,fighter[i].y},cam,(int)view.width,(int)view.height);head.y+=view.y;
+        if(visual.pulse[i]>0){float f=1-visual.pulse[i]/.75f;const char* text=TextFormat("%+d",visual.delta[i]);int w=MeasureUIText(text,19);DrawUIText(text,(int)head.x-w/2+1,(int)(head.y-20-f*28)+1,19,Fade(BLACK,1-f));DrawUIText(text,(int)head.x-w/2,(int)(head.y-20-f*28),19,Fade(visual.delta[i]>0 ? Color{135,245,175,255}:Color{255,216,147,255},1-f));}
+        bool guard=i==0 ? g_den.guardA:g_den.guardB,poison=i==0 ? g_den.poisonA:g_den.poisonB;
+        if(guard || poison)DrawUIText(guard ? "GUARD":"POISON",(int)head.x-20,(int)head.y,10,guard ? Color{154,211,247,255}:Color{167,229,131,255});
+    }
+    DrawRectangle(0,0,540,110,Color{22,33,42,255});
+    DrawRectangle(0,108,540,2,Color{176,142,86,255});
+    DrawUIText("BLACKWAKE",148,47,24,Color{228,208,164,255});
+    DrawUIText(fighting ? "DUELING GROUNDS":"THE OUTLAW HARBOR",150,78,11,Color{145,168,179,255});
     if(!s.exploreMenuOpen && !g_denPanel) {
         DrawVirtualJoystick();
         if(!fighting) {
@@ -37567,7 +37654,9 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
                 if(fabsf(ray.direction.y)>.001f) {float t=-ray.position.y/ray.direction.y;if(t>0) WalkTargetSet(s.townPlayerPos,{std::clamp(ray.position.x+ray.direction.x*t,120.0f,1380.0f),std::clamp(ray.position.z+ray.direction.z*t,120.0f,1380.0f)},0);}
             }
         } else {
-            DrawUIText("Space: strike  Q: lunge  R: guard",190,678,12,kUoGoldText);
+            DrawRectangleRounded({182,645,344,255},.07f,5,Color{20,30,39,245});
+            DrawRectangleRoundedLines({182,645,344,255},.07f,5,Color{120,111,90,255});
+            DrawUIText("MELEE  /  Space: strike   Q: lunge   R: guard",194,682,10,Color{162,182,192,255});
             bool go=g_den.countdown<=0 && g_mpStatus==2 && castLeft<=0;
             if(Button({190,704,98,56},"Strike",go) || (go && IsKeyPressed(KEY_SPACE))) JS_DenAction("strike","",0);
             if(Button({302,704,98,56},"Lunge",go) || (go && IsKeyPressed(KEY_Q))) JS_DenAction("lunge","",0);
@@ -37579,25 +37668,34 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
             if(g_den.spells) {
                 for(int i=0;i<4;++i) {
                     int idx=spells[spellPage*4+i];const Spell& spell=kSpells[idx];
-                    std::string label=std::to_string(i+1)+" "+spell.name+" ("+std::to_string(spell.manaCost)+")";
                     bool canCast=go && mana>=spell.manaCost;
-                    if(Button({190+(i%2)*164.0f,772+(i/2)*46.0f,154,38},label,canCast) || (canCast && IsKeyPressed(KEY_ONE+i))) JS_DenAction("cast","",idx);
+                    if(DenSpellButton({190+(i%2)*164.0f,768+(i/2)*48.0f,154,44},idx,i+1,canCast,castLeft>0 && (sideA ? g_den.spellA:g_den.spellB)==idx) || (canCast && IsKeyPressed(KEY_ONE+i))) JS_DenAction("cast","",idx);
                 }
                 if(Button({190,870,40,28},"< Z",true) || IsKeyPressed(KEY_Z))spellPage=(spellPage+3)%4;
                 DrawUIText(TextFormat("Spells %d/4",spellPage+1),239,878,12,kUoGoldText);
                 if(Button({310,870,40,28},"X >",true) || IsKeyPressed(KEY_X))spellPage=(spellPage+1)%4;
                 int spellId=sideA ? g_den.spellA:g_den.spellB;
-                if(castLeft>0 && spellId>=0 && spellId<(int)kSpells.size())DrawUIText(TextFormat("Casting %s: %.1fs",kSpells[spellId].name.c_str(),castLeft),190,654,13,kUoGoldText);
-                else DrawUIText((sideA ? g_den.poisonA:g_den.poisonB) ? "Poisoned! Cure: page 1, key 4.":"1-4: cast / Z-X: spell pages",190,654,12,kUoGoldText);
+                if(castLeft>0 && spellId>=0 && spellId<(int)kSpells.size())DrawUIText(TextFormat("Casting %s: %.1fs",kSpells[spellId].name.c_str(),castLeft),194,654,12,kUoGoldText);
+                else DrawUIText((sideA ? g_den.poisonA:g_den.poisonB) ? "POISONED / Cure: page 1, key 4":"SPELLS  /  1-4: cast   Z-X: pages",194,654,11,kUoGoldText);
             } else DrawUIText("Arena spells update pending",190,780,13,kUoGoldText);
             if(Button({374,870,140,28},"Surrender duel",true)) JS_DenAction("surrender","",0);
         }
     }
-    Rectangle top={12,116,516,82};UODrawGump(top,kUoDarkWood);UIRegister(top);
+    Rectangle top={12,116,516,g_den.id.empty() ? 82.0f:104.0f};
+    DrawRectangleRounded(top,.08f,5,Color{22,33,42,250});DrawRectangleRoundedLines(top,.08f,5,Color{141,120,82,255});UIRegister(top);
     if(!g_den.id.empty()) {
-        DrawUIText(TextFormat("%s: %d HP / %d stamina / %d mana",g_den.nameA.c_str(),g_den.hpA,g_den.staminaA,g_den.manaA),24,126,12,kUoGoldText);
-        DrawUIText(TextFormat("%s: %d HP / %d stamina / %d mana",g_den.nameB.c_str(),g_den.hpB,g_den.staminaB,g_den.manaB),24,150,12,kUoGoldText);
-        DrawUIText(g_den.countdown>0 ? TextFormat("Starts in %.0f / stake %d each",ceilf(g_den.countdown),g_den.stake) : TextFormat("%.0fs remaining / stake %d each",g_den.left,g_den.stake),24,174,12,kUoGoldText);
+        DrawUIText(g_den.countdown>0 ? TextFormat("STARTS IN %.0f",ceilf(g_den.countdown)):TextFormat("DUEL / %.0fs",g_den.left),24,124,11,kUoGoldText);
+        DrawUIText(TextFormat("STAKE %d",g_den.stake),433,124,10,Color{166,178,183,255});
+        for(int i=0;i<2;++i) {
+            float x=24+i*252.0f;bool a=i==0;Color side=a ? Color{104,177,213,255}:Color{211,128,108,255};
+            PaperdollText(a ? g_den.nameA:g_den.nameB,{x,143,236,16},12,Color{235,230,214,255});
+            DenBar({x,161,236,10},(float)(a ? g_den.hpA:g_den.hpB),(float)(a ? g_den.maxHpA:g_den.maxHpB),side);
+            DrawUIText(TextFormat("%d / %d HP",a ? g_den.hpA:g_den.hpB,a ? g_den.maxHpA:g_den.maxHpB),(int)x,174,11,Color{220,225,224,255});
+            DrawUIText(TextFormat("STA %d",a ? g_den.staminaA:g_den.staminaB),(int)x,191,10,Color{173,188,146,255});
+            DrawUIText(TextFormat("MANA %d",a ? g_den.manaA:g_den.manaB),(int)x+124,191,10,Color{151,185,222,255});
+            DenBar({x,207,110,4},(float)(a ? g_den.staminaA:g_den.staminaB),100,Color{145,170,109,255});
+            DenBar({x+124,207,112,4},(float)(a ? g_den.manaA:g_den.manaB),100,Color{109,152,201,255});
+        }
     } else {
         DrawUIText("BLACKWAKE DEN",24,128,18,kUoGoldText);
         DrawUIText("Consent-only duels / no gear loss / casino",24,154,13,kUoGoldText);
@@ -37684,9 +37782,9 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
         }
     }
     if(!g_den.message.empty() && !s.exploreMenuOpen) {
-        Rectangle msg={20,860,500,34};DrawRectangleRounded(msg,.2f,4,Fade(BLACK,.85f));
+        Rectangle msg={20,fighting ? 230.0f:860.0f,500,34};DrawRectangleRounded(msg,.2f,4,Fade(BLACK,.85f));
         std::string text=g_den.message;while(MeasureUIText(text.c_str(),12)>474 && !text.empty()) text.pop_back();
-        DrawUIText(text.c_str(),32,870,12,kUoGoldText);UIRegister(msg);
+        DrawUIText(text.c_str(),32,(int)msg.y+10,12,kUoGoldText);UIRegister(msg);
     }
     (void)screenW;(void)screenH;
 }

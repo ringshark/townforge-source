@@ -144,7 +144,7 @@
         (den.offers||[]).forEach(o=>out.push('offer='+[o.id,o.a,o.b,clean(o.nameA),clean(o.nameB),o.stake,Math.max(0,(o.expires-now)/1000)].join('|')));
         var d=den.duel;
         if(d && d.npc) {var bot=d.npc;out.push('p='+[bot.id,clean(bot.name),'hero,2,2,-1,0,0',bot.x,bot.z,bot.yaw,1].join('|'));}
-        if(d) out.push('duel='+[d.id,d.a,d.b,clean(d.nameA),clean(d.nameB),d.hpA,d.hpB,Math.round(d.staminaA),Math.round(d.staminaB),Math.max(0,(d.starts-now)/1000),Math.max(0,(d.ends-now)/1000),d.stake,d.guardA>now ? 1:0,d.guardB>now ? 1:0,(now-d.swingA)/1000,(now-d.swingB)/1000,d.npc && d.npc.stage>0 ? 1:0,Math.round(d.manaA ?? 100),Math.round(d.manaB ?? 100),d.castA ? Math.max(0,(d.castA.ends-now)/1000):0,d.castB ? Math.max(0,(d.castB.ends-now)/1000):0,d.castA ? d.castA.spell:-1,d.castB ? d.castB.spell:-1,d.poisonA>now ? 1:0,d.poisonB>now ? 1:0].join('|'));
+        if(d) out.push('duel='+[d.id,d.a,d.b,clean(d.nameA),clean(d.nameB),d.hpA,d.hpB,Math.round(d.staminaA),Math.round(d.staminaB),Math.max(0,(d.starts-now)/1000),Math.max(0,(d.ends-now)/1000),d.stake,d.guardA>now ? 1:0,d.guardB>now ? 1:0,(now-d.swingA)/1000,(now-d.swingB)/1000,d.npc && d.npc.stage>0 ? 1:0,Math.round(d.manaA ?? 100),Math.round(d.manaB ?? 100),d.castA ? Math.max(0,(d.castA.ends-now)/1000):0,d.castB ? Math.max(0,(d.castB.ends-now)/1000):0,d.castA ? d.castA.spell:-1,d.castB ? d.castB.spell:-1,d.poisonA>now ? 1:0,d.poisonB>now ? 1:0,100,d.npc ? d.npc.hp:100].join('|'));
         (den.results||[]).forEach(r=>out.push('denresult='+[r.id,clean(r.name),clean(r.reason),r.stake].join('|')));
       }
       return 'st=' + status + '|' + (status === 2 ? n : 0) + '|' + clean(myId) + '|' + clean(zone) + '\n' + out.join('\n');
