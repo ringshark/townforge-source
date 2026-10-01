@@ -4,7 +4,7 @@ set -euo pipefail
 src=${1:?build directory required}; dst=${2:?site directory required}; here=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$dst"
 cp "$src"/index.html "$src"/townforge.js "$src"/townforge.wasm "$src"/townforge.data "$dst"/
-cp "$here"/manifest.webmanifest "$here"/cloud.js "$here"/guildnet.js "$here"/mpnet.js "$dst"/
+cp "$here"/manifest.webmanifest "$here"/cloud.js "$here"/guildnet.js "$here"/mpnet.js "$here"/landscape.js "$dst"/
 # Multiplayer (2026-09-29): the zone server's address from TF_MP_URL (wss://...workers.dev).
 if [ -n "${TF_MP_URL:-}" ]; then
   printf "window.TF_MP_URL = '%s';\n" "${TF_MP_URL:-}" > "$dst"/mp-config.js

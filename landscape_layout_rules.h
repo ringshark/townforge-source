@@ -3,6 +3,25 @@ namespace tflayout {
 constexpr float width=960, height=540, legacyWidth=540, legacyHeight=900;
 constexpr float aspectFactor=(width/height)/(legacyWidth/legacyHeight);
 struct Point {float x,y;};
+enum class Region {World,Panel,Menu,Hud,Left,Right};
+inline Region RegionAt(Point p,bool world,bool dialog) {
+    if(!world || dialog)return Region::Panel;
+    if(p.x<140 && p.y<110)return Region::Menu;
+    if(p.x>=210 && p.x<=750 && p.y>=12 && p.y<132)return Region::Hud;
+    if(p.x>=590 && p.y>=240)return Region::Right;
+    if(p.x<170 && p.y>=240)return Region::Left;
+    return Region::World;
+}
+inline Point Map(Point p,Region region,float scroll=0) {
+    switch(region) {
+        case Region::Panel:return {p.x-210,p.y+scroll};
+        case Region::Menu:return p;
+        case Region::Hud:return {p.x-210,p.y+98};
+        case Region::Left:return {p.x,p.y+360};
+        case Region::Right:return {p.x-420,p.y+360};
+        default:return {p.x*legacyWidth/width,p.y*legacyHeight/height};
+    }
+}
 inline Point WorldPoint(Point p) {return {p.x*width/legacyWidth,p.y*height/legacyHeight};}
 // A wide viewport has 60% of the portrait height. Keep actors readable rather
 // than preserving the portrait camera distance and shrinking the whole scene.

@@ -1,0 +1,12 @@
+const assert=require('node:assert/strict');
+const {fit,point}=require('../web/landscape.js');
+const portrait=fit(390,844,true);assert.equal(portrait.rotated,true);
+assert(portrait.canvasWidth<=844 && portrait.canvasHeight<=390);
+const rect={left:0,top:75,width:390,height:693.333333};
+const near=(a,b)=>assert(Math.abs(a-b)<.01);
+let p=point(390,75,rect,true);near(p.x,0);near(p.y,0);
+p=point(0,768.333333,rect,true);near(p.x,960);near(p.y,540);
+p=point(195,421.6666665,rect,true);near(p.x,480);near(p.y,270);
+assert.equal(fit(844,390,true).rotated,false);
+assert.equal(fit(390,844,false).rotated,false);
+console.log('PASS landscape startup and inverse touch rotation');

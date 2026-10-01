@@ -25,4 +25,6 @@ int main(){
  float portraitHeight=900/650.f,wideHeight=540/CameraDistance(650);
  assert(wideHeight/portraitHeight>.9f && wideHeight/portraitHeight<1.0f);
  auto chat=Input({70,28},true,false);assert(near(chat.x,70)&&near(chat.y,28));
+ auto drag=Map({195,455},Region::Left);assert(near(drag.x,195)&&near(drag.y,815));
+ auto ground=Map({700,420},Region::World);assert(near(ground.x,393.75f)&&near(ground.y,700));
 }

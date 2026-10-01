@@ -21,6 +21,21 @@ struct LandscapeNotice {std::vector<std::string> lines;Color color;float alpha;}
 static std::vector<LandscapeNotice> g_landscapeNotices;
 struct LandscapeWorldLabel {std::string text;Vector2 point;int size;Color color;float alpha;};
 static std::vector<LandscapeWorldLabel> g_landscapeLabels;
+static std::vector<Rectangle> g_landscapeHitRects;
+static tflayout::Region g_landscapePointerRegion=tflayout::Region::Panel;
+static bool g_landscapePointerHeld=false;
+static double g_landscapePressTime=-1;
+static tflayout::Region LandscapeRegion(Vector2 raw) {
+    auto region=tflayout::RegionAt({raw.x,raw.y},g_presentedWorld,g_presentedDialog);
+    if(region==tflayout::Region::Panel)return region;
+    if(region==tflayout::Region::Left && raw.y>=370)return region; // stick
+    auto p=tflayout::Map({raw.x,raw.y},region,g_landscapeScroll);
+    for(auto r:g_landscapeHitRects)if(CheckCollisionPointRec({p.x,p.y},r))return region;
+    return tflayout::Region::World;
+}
+static bool LandscapeUIAllowed() {
+    return !g_presentedWorld || g_presentedDialog || g_landscapePointerRegion!=tflayout::Region::World;
+}
 static RenderTexture2D LandscapeLoadScene(int width,int height) {
     RenderTexture2D target=::LoadRenderTexture((int)std::round(width*tflayout::aspectFactor),height);
     g_landscapeSceneSizes[target.texture.id]={(float)width,(float)height};
@@ -32,7 +47,14 @@ static void LandscapeRestoreViewport() {
     }
 }
 static Vector2 LandscapeMouse() {
-    Vector2 raw=::GetMousePosition();auto p=tflayout::Input({raw.x,raw.y},g_presentedWorld,g_presentedDialog,g_landscapeScroll);return {p.x,p.y};
+    Vector2 raw=::GetMousePosition();
+    bool held=::IsMouseButtonDown(MOUSE_BUTTON_LEFT) || ::IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
+    double now=::GetTime();
+    bool freshPress=::IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && g_landscapePressTime!=now;
+    if(freshPress || !g_landscapePointerHeld)g_landscapePointerRegion=LandscapeRegion(raw);
+    if(freshPress)g_landscapePressTime=now;
+    g_landscapePointerHeld=held;
+    auto p=tflayout::Map({raw.x,raw.y},g_landscapePointerRegion,g_landscapeScroll);return {p.x,p.y};
 }
 static Vector2 LandscapeTouch(int index) {
     Vector2 raw=::GetTouchPosition(index);auto p=tflayout::Input({raw.x,raw.y},g_presentedWorld,g_presentedDialog,g_landscapeScroll);return {p.x,p.y};
@@ -98,7 +120,7 @@ static void LandscapeBeginFrame(bool world,bool dialog,int screen) {
     ::BeginTextureMode(g_landscapeScene);::ClearBackground(Color{22,33,42,255});::EndTextureMode();
     ::BeginTextureMode(g_landscapeUI);g_landscapeTargets.push_back(g_landscapeUI);g_landscapeActive=true;
 }
-static void LandscapePresent(Font font) {
+static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
     g_landscapeActive=false;::EndTextureMode();g_landscapeTargets.clear();
     ::BeginDrawing();::ClearBackground(Color{22,33,42,255});
     auto blit=[](Texture2D texture,Rectangle s,Rectangle d){s.y=texture.height-s.y-s.height;s.height=-s.height;::DrawTexturePro(texture,s,d,{0,0},0,WHITE);};
@@ -172,6 +194,7 @@ static void LandscapePresent(Font font) {
     }
     if(g_landscapeWorld && !g_landscapeDialog)g_landscapeScroll=0;
     g_presentedWorld=g_landscapeWorld;g_presentedDialog=g_landscapeDialog;
+    g_landscapeHitRects=controls;
 }
 #define GetMousePosition LandscapeMouse
 #define GetTouchPosition LandscapeTouch

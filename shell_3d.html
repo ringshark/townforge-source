@@ -97,13 +97,10 @@
         padding: 7px 11px;
       }
       #install .x { background: none; border: none; font-size: 20px; padding: 0 4px; color: #c9ab76; }
-      #rotate-hint {display:none;position:fixed;inset:0;z-index:30;background:#16212a;color:#ead9b4;align-items:center;justify-content:center;text-align:center;padding:32px;font:20px Arial,sans-serif;}
-      @media (orientation:portrait) and (pointer:coarse) {#rotate-hint {display:flex;}}
     </style>
   </head>
   <body>
     <div class="emscripten_border">
-      <div id="rotate-hint">Rotate your phone to play Town Forge in landscape.</div>
       <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex=-1></canvas>
     </div>
     <div id="loading">Loading...</div>
@@ -114,6 +111,7 @@
       <button class="x" id="install-x" aria-label="Close">&times;</button>
     </div>
 
+    <script src="landscape.js"></script>
     <script type='text/javascript'>
         var loadingEl = document.querySelector('#loading');
         var Module = {
@@ -169,7 +167,10 @@
         // --- Installable app (2026-09-27) ---
         // Offline cache + instant start once installed (service workers need https).
         if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-            window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () {}); });
+            window.addEventListener('load', function () {
+                navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
+                    .then(function (registration) { return registration.update(); }).catch(function () {});
+            });
         }
         // Ask the browser to keep saves even when storage runs low.
         if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () {});

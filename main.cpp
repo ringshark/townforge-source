@@ -10074,6 +10074,7 @@ static Rectangle UIClipped(Rectangle r) {
     return r;
 }
 static bool UIContains(Vector2 p, Rectangle r) {
+    if(!LandscapeUIAllowed())return false;
     r = UIClipped(r);
     return r.width > 0 && r.height > 0 && CheckCollisionPointRec(p, r);
 }
@@ -10091,10 +10092,12 @@ static void UIRegister(Rectangle r) {
     r = UIClipped(r);
     if (r.width <= 0 || r.height <= 0) return;
     if (g_uiRects.size() < 256) g_uiRects.push_back(r);
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), r)) g_uiGestureOwned = true;
+    Vector2 pointer=GetMousePosition();
+    if (LandscapeUIAllowed() && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(pointer, r)) g_uiGestureOwned = true;
 }
 static bool UIHit(Vector2 m) {
     if (g_uiGestureOwned || g_uiClickTaken) return true;
+    if(!LandscapeUIAllowed())return false;
     if (g_uiShieldOn && CheckCollisionPointRec(m, g_uiShield)) return true;
     // A control protects its visible bounds. Extra world-only padding is small
     // enough that adjacent controls and open ground keep their intended meaning.
@@ -38495,7 +38498,7 @@ static void UpdateDrawFrame() {
         DrawNotorietyFooter(state, screenW, screenH);
 
         for(const Rectangle& r:g_uiRects)if(r.width>=350 && (r.height>=260 || (r.y>=230 && r.height>=90)))g_landscapeDialog=true;
-        LandscapePresent(UiFont());
+        LandscapePresent(UiFont(),g_uiRects);
         EndDrawing();
     }
 }

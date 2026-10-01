@@ -12,6 +12,7 @@ code='''#include <vector>
 struct Vector2 {float x,y;}; struct Rectangle {float x,y,width,height;};
 enum {MOUSE_BUTTON_LEFT};
 Vector2 mouse{}; bool pressed=false,down=false,released=false;
+bool landscapeAllowed=true;bool LandscapeUIAllowed(){return landscapeAllowed;}
 Vector2 GetMousePosition(){return mouse;}
 bool IsMouseButtonPressed(int){return pressed;} bool IsMouseButtonDown(int){return down;}
 bool IsMouseButtonReleased(int){return released;}
@@ -26,6 +27,9 @@ code+='constexpr Rectangle kViewport={0,110,540,790};\n'
 code+=section('static Rectangle TargetButtonRect()', '// ---------------------------------------------------------------------')
 code+='''void frame(Vector2 p,bool press,bool hold,bool release){mouse=p;pressed=press;down=hold;released=release;UIFrameReset();}
 int main(){
+landscapeAllowed=false;frame({200,800},true,true,false);
+assert(!UIClick({180,760,160,80}));assert(!UIHit(mouse));
+landscapeAllowed=true;frame({0,0},false,false,false);
 Rectangle target=TargetButtonRect();assert(target.y+target.height<748);assert(target.x>=0 && target.x+target.width<=540);
 Rectangle play{130,56,92,40},chat{134,58,132,36};
 frame({170,75},true,true,false);assert(UIClick(play));assert(!UIClick(chat));
