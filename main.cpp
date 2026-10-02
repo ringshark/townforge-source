@@ -10404,7 +10404,7 @@ static void DrawPromptLabel(const std::string& prompt, int screenW, int screenH)
 static void DrawHudLine(const char* text, int x, int y, int fs = 13, Color c = Color{ 240, 230, 206, 255 }) {
     if(g_landscapeWorld && g_landscapeCombat && y<230)return;
     if(g_landscapeActive && g_landscapeWorld && !g_landscapeDialog && y==196) {
-        g_landscapeCaptions.push_back({"Drag to turn. Pinch or wheel to zoom.",12,c,false});return;
+        g_landscapeCaptions.push_back({text,12,c,false});return;
     }
     if(g_landscapeActive && g_landscapeWorld && !g_landscapeDialog && y>=600) {
         g_landscapeCaptions.push_back({"Tap ground to walk. Approach a door to enter.",12,c,false});return;
@@ -15052,9 +15052,8 @@ static const float kT3DDistMax = 1100.0f; // farthest zoom: whole town in frame 
 static const float kT3DCamDamp = 9.0f;   // orbit smoothing speed (per second; higher = snappier)
 static const float kT3DZoomDamp = 7.0f;  // zoom smoothing speed (per second)
 static const float kT3DTargetDamp = 6.0f;// how fast the camera follows the walking player
-// Follow + orbit: drag to choose an angle, retain it while walking, and
-// track the player with movement lookahead. Default ON. C / the camera
-// button toggles the fixed-angle alternative.
+// Follow keeps a stable angle and tracks walking with lookahead (default).
+// Float lets the player orbit freely. Both modes retain pinch/wheel zoom.
 static bool g_t3dFollowMode = true;
 static const float kT3DFollowYaw = 0.7f;   // fixed yaw (matches the old default view)
 static const float kT3DFollowPitch = 0.96f;// fixed pitch: ~55 deg down, Diablo-style (dungeons + interiors)
@@ -15062,7 +15061,7 @@ static const float kT3DFollowPitch = 0.96f;// fixed pitch: ~55 deg down, Diablo-
 // camera: at 69 deg the town read as roofs and hat-tops, while 55 deg shows the
 // building fronts (plaster, timber, doors) and more of each character, and gives
 // the whole game one consistent Diablo-style camera.
-static const float kT3DOverheadFollowPitch = 0.96f;// ~55 deg down, town + wilderness
+static const float kT3DOverheadFollowPitch = 0.85f;// close landscape view showing building fronts, town + wilderness
 static const float kT3DLookTime = 0.35f;   // lookahead = smoothed velocity * this (seconds of travel)
 static const float kT3DLookMax = 130.0f;   // max lookahead offset (world units)
 static const float kT3DVelDamp = 8.0f;      // velocity smoothing speed (per second)
@@ -15137,8 +15136,6 @@ static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, in
             look.x = g_t3dVelSm.x / speed * want;
             look.y = g_t3dVelSm.y / speed * want;
         }
-        // Follow retains the player's chosen orbit angle while tracking motion.
-    } else {
         g_t3dYaw = kT3DFollowYaw;
         g_t3dPitch = followPitch;
     }
@@ -17892,7 +17889,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
     Vector2 mouse = GetMousePosition();
     bool panelOpen = s.selectedTile.has_value() || s.greetedNPC.has_value();
 
-    // Follow allows orbit drags while tracking the player. Fixed locks the angle.
+    // Follow keeps the angle stable; Float allows orbit drags.
     // C or the camera button toggles; pinch/wheel zoom works in either mode.
     if (IsKeyPressed(KEY_C)) g_t3dFollowMode = !g_t3dFollowMode;
     Town3DPinchZoom(kT3DDistMin, kT3DDistMax);
@@ -17907,7 +17904,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
         Vector2 d = { mouse.x - g_t3dLastMouse.x, mouse.y - g_t3dLastMouse.y };
         g_t3dLastMouse = mouse;
         g_t3dDragDist += fabsf(d.x) + fabsf(d.y);
-        if (g_t3dFollowMode) {
+        if (!g_t3dFollowMode) {
             g_t3dYaw -= d.x * 0.006f; // unbounded; the smoothed yaw follows continuously
             g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
         }
@@ -18042,7 +18039,7 @@ static void DrawTown3DWorld(GameState& s, int screenW, int screenH) {
             DrawPromptLabel(prompt, screenW, screenH); // (2026-09-27) readability
         }
     }
-    if (GetTime() < 120.0) DrawHudLine("Drag to turn the view, pinch or wheel to zoom", 20, 196, 12); // (2026-09-27) early hint only
+    if (GetTime() < 120.0) DrawHudLine(g_t3dFollowMode ? "Pinch or wheel to zoom" : "Drag to turn the view, pinch or wheel to zoom", 20, 196, 12); // (2026-09-27) early hint only
 }
 
 // ---------------------------------------------------------------------
@@ -22857,7 +22854,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
         Vector2 d = { mouse.x - g_t3dLastMouse.x, mouse.y - g_t3dLastMouse.y };
         g_t3dLastMouse = mouse;
         g_t3dDragDist += fabsf(d.x) + fabsf(d.y);
-        if (g_t3dFollowMode) {
+        if (!g_t3dFollowMode) {
             g_t3dYaw -= d.x * 0.006f; // unbounded; the smoothed yaw follows continuously
             g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
         }
@@ -23060,7 +23057,7 @@ static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const 
     }
     DrawFloatTexts3D(s, c, 0, screenW, screenH); // combat feel: damage numbers / MISS
     DrawGuildTags3D(s, c, screenW, screenH);     // rival/Murder Inc. names, activity, speech
-    if (s.worldTime < 120.0f) DrawHudLine("Drag to turn the view, pinch or wheel to zoom", 20, 196, 12); // (2026-09-27) early hint only
+    if (s.worldTime < 120.0f) DrawHudLine(g_t3dFollowMode ? "Pinch or wheel to zoom" : "Drag to turn the view, pinch or wheel to zoom", 20, 196, 12); // (2026-09-27) early hint only
     // Phase 0: HUD region label (3D view) - same top-center pill as the 2D view,
     // computed live from the player position so it flips at boundaries.
     {
@@ -23780,7 +23777,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
         Vector2 d = { mouse.x - g_t3dLastMouse.x, mouse.y - g_t3dLastMouse.y };
         g_t3dLastMouse = mouse;
         g_t3dDragDist += fabsf(d.x) + fabsf(d.y);
-        if (g_t3dFollowMode) {
+        if (!g_t3dFollowMode) {
             g_t3dYaw -= d.x * 0.006f;
             g_t3dPitch = std::clamp(g_t3dPitch + d.y * 0.005f, kT3DPitchMin, kT3DPitchMax);
         }
@@ -25604,7 +25601,7 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
     if (g_t3dOrbiting && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
         Vector2 d = { mouse.x - g_t3dLastMouse.x, mouse.y - g_t3dLastMouse.y };
         g_t3dLastMouse = mouse;
-        if (g_t3dFollowMode) g_intYaw -= d.x * 0.006f;
+        if (!g_t3dFollowMode) g_intYaw -= d.x * 0.006f;
     }
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_t3dOrbiting = false;
     float wheel = GetMouseWheelMove();
@@ -25620,7 +25617,7 @@ static void DrawInterior3DWorld(GameState& s, const InteriorRoomDef& room,
     if (g_intCamT.x > 1e8f) g_intCamT = want;
     float k = std::min(1.0f, GetFrameTime() * 6.0f);
     g_intCamT.x += (want.x - g_intCamT.x) * k; g_intCamT.z += (want.z - g_intCamT.z) * k; g_intCamT.y = want.y;
-    float yaw = g_t3dFollowMode ? g_intYaw : 0.0f, pitch = 0.86f, dist = g_landscapeWorld ? tflayout::CameraDistance(g_t3dDist):g_t3dDist;
+    float yaw = g_t3dFollowMode ? 0.0f : g_intYaw, pitch = 0.86f, dist = g_landscapeWorld ? tflayout::CameraDistance(g_t3dDist):g_t3dDist;
     Camera3D cam3d = { 0 };
     cam3d.target = g_intCamT;
     cam3d.position = { g_intCamT.x + sinf(yaw) * cosf(pitch) * dist, g_intCamT.y + sinf(pitch) * dist,
@@ -26356,7 +26353,7 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
     if (inRange) prompt = "[E] " + label;
 
     if (!uiOpen) {
-        UpdatePlayerMovement(s.interiorPlayerPos, s.playerFacing, GameDt(), 100000.0f, s.interior3DView && g_t3dFollowMode ? -g_intYaw : 0.0f);
+        UpdatePlayerMovement(s.interiorPlayerPos, s.playerFacing, GameDt(), 100000.0f, s.interior3DView && !g_t3dFollowMode ? -g_intYaw : 0.0f);
         for (auto& p : props) {
             if (p.bw <= 0 || p.bh <= 0) continue;
             ResolveCircleRectCollision(s.interiorPlayerPos, kPlayerRadius, { p.x - p.bw / 2, p.y - p.bh / 2, p.bw, p.bh });
@@ -26377,7 +26374,7 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
 
     // Title + view/camera buttons (same placement language as the town HUD).
     DrawInfoLine(TileNameFor(s.interiorKey).c_str(), 20, 118, 14);
-    if (s.interior3DView && Button({ 452, 120, 78, 30 }, g_t3dFollowMode ? "Follow" : "Fixed", true))
+    if (s.interior3DView && Button({ 452, 120, 78, 30 }, g_t3dFollowMode ? "Follow" : "Float", true))
         g_t3dFollowMode = !g_t3dFollowMode;
 
     // Signature furniture opens the building's detail panel (the same panel the
@@ -26559,7 +26556,8 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     // 3D view toggle (2026-09-24 milestone) - same view switch as the V key below.
     // Camera mode button (2026-09-24): Diablo-style follow is the 3D default;
     // C key or this button switches back to the old free-orbit camera.
-    // (2026-09-27) the camera-mode button hung off the screen edge; the C key still switches it
+    if (s.town3DView && !s.selectedTile && !s.greetedNPC && Button({452, 120, 78, 30}, g_t3dFollowMode ? "Follow" : "Float", true))
+        g_t3dFollowMode = !g_t3dFollowMode;
     // Solid-backed (DrawInfoLine, not bare DrawUIText) and split across two short lines
     // instead of one concatenated one - 2026-09-22 fix: this text sits directly on the
     // tiled ground with nothing else guaranteeing contrast (same class of bug already
@@ -32693,7 +32691,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // 3D view toggle (2026-09-24, Phase 1) - same view switch as the V key below.
     // Camera mode button (2026-09-24): Diablo-style follow is the 3D default;
     // C key or this button switches back to the old free-orbit camera.
-    if (s.wild3DView && Button({ 452, 120, 78, 30 }, g_t3dFollowMode ? "Follow" : "Fixed", true))
+    if (s.wild3DView && Button({ 452, 120, 78, 30 }, g_t3dFollowMode ? "Follow" : "Float", true))
         g_t3dFollowMode = !g_t3dFollowMode;
 
     // UO-red banner (2026-09-24): unmissable center-screen hunt/stalk warning. Drawn
@@ -33303,7 +33301,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // picker tabs, combat panel, and HUD stay 2D.
     // Camera mode button (2026-09-24): Diablo-style follow is the 3D default;
     // C key or this button switches back to the old free-orbit camera.
-    if (s.hunt3DView && Button({ 528, 116, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Fixed [C]", true))
+    if (s.hunt3DView && Button({ 528, 116, 96, 30 }, g_t3dFollowMode ? "Follow [C]" : "Float [C]", true))
         g_t3dFollowMode = !g_t3dFollowMode;
 
     // Mana bar - only while actually engaged in a live fight; HP is already always
