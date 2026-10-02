@@ -60,7 +60,10 @@ static tflayout::Region LandscapeRegion(Vector2 raw) {
         raw.x<480 ? tflayout::Region::GearLeft:tflayout::Region::GearRight;
     if(g_presentedMap && CheckCollisionPointRec(raw,g_presentedMapDest))return tflayout::Region::Map;
     auto region=tflayout::RegionAt({raw.x,raw.y},g_presentedWorld,g_presentedDialog);
-    if(region==tflayout::Region::Panel)return raw.y<110 ? tflayout::Region::PanelHeader:region;
+    if(region==tflayout::Region::Panel) {
+        if(raw.x<tflayout::panelX || raw.x>tflayout::panelX+720)return tflayout::Region::PanelChrome;
+        return raw.y<tflayout::panelHeader ? tflayout::Region::PanelHeader:region;
+    }
     if(region==tflayout::Region::Left && raw.y>=370)return region; // stick
     auto p=tflayout::Map({raw.x,raw.y},region,g_landscapeScroll);
     if(region!=tflayout::Region::World)
@@ -74,6 +77,7 @@ static tflayout::Region LandscapeRegion(Vector2 raw) {
     return tflayout::Region::World;
 }
 static bool LandscapeUIAllowed() {
+    if(g_landscapePointerRegion==tflayout::Region::PanelChrome)return false;
     return !g_presentedWorld || g_presentedDialog || g_landscapePointerRegion!=tflayout::Region::World;
 }
 static RenderTexture2D LandscapeLoadScene(int width,int height) {
@@ -170,6 +174,28 @@ static Ray LandscapeRay(Vector2 pos,Camera camera,int w,int h) {
     if(g_landscapeActive && g_landscapeWorld){pos.x*=tflayout::aspectFactor;return ::GetScreenToWorldRayEx(pos,camera,(int)(w*tflayout::aspectFactor),h);}
     return ::GetScreenToWorldRayEx(pos,camera,w,h);
 }
+static Rectangle LandscapePanelTop(){return {852,28,96,48};}
+static Rectangle LandscapePanelBottom(){return {852,464,96,48};}
+static Rectangle LandscapePanelRail(){return {852,96,96,344};}
+// Handle native menu controls before drawing the page, so the displayed slice
+// and every content hit test use the same scroll offset for this frame.
+static void LandscapePanelInput() {
+    static bool held=false,dragging=false;
+    Vector2 mouse=::GetMousePosition();
+    bool down=::IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    bool press=::IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || (down && !held);
+    Rectangle rail=LandscapePanelRail();
+    if(press) {
+        dragging=CheckCollisionPointRec(mouse,rail);
+        if(CheckCollisionPointRec(mouse,LandscapePanelTop()))g_landscapeScroll=0;
+        if(CheckCollisionPointRec(mouse,LandscapePanelBottom()))g_landscapeScroll=tflayout::maxScroll;
+    }
+    if(dragging && down)g_landscapeScroll=tflayout::Scroll((mouse.y-rail.y-30)/(rail.height-60)*tflayout::maxScroll);
+    if(!down)dragging=false;
+    if(mouse.x>=tflayout::panelX && mouse.y>=tflayout::panelHeader)
+        g_landscapeScroll=tflayout::Scroll(g_landscapeScroll-::GetMouseWheelMove()*48);
+    held=down;
+}
 static void LandscapeBeginFrame(bool world,bool dialog,int screen,bool gear=false) {
 #ifdef PLATFORM_WEB
     // Use the displayed landscape aspect for both projection and picking.
@@ -182,6 +208,7 @@ static void LandscapeBeginFrame(bool world,bool dialog,int screen,bool gear=fals
 #endif
     static int previousScreen=-1;
     if(previousScreen!=screen){g_landscapeScroll=0;previousScreen=screen;}
+    if((!world || dialog) && !gear)LandscapePanelInput();
     g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeGear=gear;g_landscapeMap=false;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();g_landscapeNotices.clear();g_landscapeSkills.clear();g_landscapeLabels.clear();
     ::BeginTextureMode(g_landscapeScene);::ClearBackground(Color{22,33,42,255});::EndTextureMode();
     ::BeginTextureMode(g_landscapeUI);g_landscapeTargets.push_back(g_landscapeUI);g_landscapeActive=true;
@@ -249,33 +276,24 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
     }
     else if(!g_landscapeWorld || g_landscapeDialog) {
         if(g_landscapeWorld && !g_presentedDialog)g_landscapeScroll=0;
-        Vector2 mouse=::GetMousePosition();
-        Rectangle top={786,34,140,48},more={786,458,140,48};
-        Rectangle rail={786,104,140,332};
-        static bool dragging=false;
-        if(::IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            dragging=CheckCollisionPointRec(mouse,rail);
-            if(CheckCollisionPointRec(mouse,top))g_landscapeScroll=0;
-            if(CheckCollisionPointRec(mouse,more))g_landscapeScroll=tflayout::maxScroll;
-        }
-        if(!::IsMouseButtonDown(MOUSE_BUTTON_LEFT))dragging=false;
-        if(dragging)g_landscapeScroll=tflayout::Scroll((mouse.y-rail.y-30)/(rail.height-60)*tflayout::maxScroll);
-        if(CheckCollisionPointRec(mouse,rail))g_landscapeScroll=tflayout::Scroll(g_landscapeScroll-::GetMouseWheelMove()*48);
+        Rectangle top=LandscapePanelTop(),more=LandscapePanelBottom();
         if(g_landscapeWorld)::DrawRectangle(0,0,960,540,Color{6,12,18,155});
-        ::DrawRectangleGradientH(0,0,210,540,Color{12,21,28,255},Color{28,38,44,255});
-        ::DrawRectangleGradientH(750,0,210,540,Color{28,38,44,255},Color{12,21,28,255});
-        ::DrawLine(208,24,208,516,Color{141,114,71,255});::DrawLine(752,24,752,516,Color{141,114,71,255});
-        ::DrawTextEx(font,"TOWN",{48,224},26,1,Color{230,211,174,255});::DrawTextEx(font,"FORGE",{48,257},26,1,Color{230,211,174,255});
-        ::DrawLine(48,302,149,302,Color{141,114,71,255});
-        // Navigation stays visible while only the page body scrolls.
-        blit(g_landscapeUI.texture,{0,0,540,110},{210,0,540,110});
-        blit(g_landscapeUI.texture,{0,110+g_landscapeScroll,540,430},{210,110,540,430});
-        for(auto r:{top,more}) {::DrawRectangleRounded(r,.15f,4,Color{37,48,54,255});::DrawRectangleRoundedLines(r,.15f,4,Color{163,132,82,255});}
-        ::DrawTextEx(font,"Top",{833,49},18,1,Color{238,220,183,255});
-        ::DrawTextEx(font,"More",{824,473},18,1,Color{238,220,183,255});
-        ::DrawRectangleRounded({848,104,16,332},.6f,6,Color{9,17,23,255});
-        ::DrawRectangleRounded({850,108+g_landscapeScroll/tflayout::maxScroll*264,12,60},.6f,6,Color{177,145,91,255});
-        ::DrawTextEx(font,"Drag to scroll",{798,418},13,1,Color{160,177,182,255});
+        ::DrawRectangleGradientH(0,0,120,540,Color{12,21,28,255},Color{28,38,44,255});
+        ::DrawRectangleGradientH(840,0,120,540,Color{28,38,44,255},Color{12,21,28,255});
+        ::DrawLine(118,24,118,516,Color{141,114,71,255});
+        ::DrawLine(842,24,842,516,Color{141,114,71,255});
+        ::DrawTextEx(font,"TOWN",{20,234},20,1,Color{230,211,174,255});
+        ::DrawTextEx(font,"FORGE",{20,260},20,1,Color{230,211,174,255});
+        // Scale uniformly for legible text; the entire header remains pinned.
+        blit(g_landscapeUI.texture,{0,0,540,110},{120,0,720,tflayout::panelHeader});
+        blit(g_landscapeUI.texture,{0,110+g_landscapeScroll,540,tflayout::panelBody},
+             {120,tflayout::panelHeader,720,540-tflayout::panelHeader});
+        for(auto r:{top,more})LandscapePlate(r,Color{163,132,82,255});
+        ::DrawTextEx(font,"Top",{885,44},16,1,Color{238,220,183,255});
+        ::DrawTextEx(font,"Bottom",{867,480},16,1,Color{238,220,183,255});
+        ::DrawRectangleRounded({892,96,16,344},.6f,6,Color{9,17,23,255});
+        ::DrawRectangleRounded({894,100+g_landscapeScroll/tflayout::maxScroll*276,12,60},.6f,6,Color{177,145,91,255});
+        ::DrawTextEx(font,"Drag",{881,444},12,1,Color{160,177,182,255});
     }
     else {
         // Field labels follow the wider projection. HUD and touch controls keep native sizes.

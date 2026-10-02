@@ -7,8 +7,10 @@ inline void DisplayAspect(float w,float h) {
     if(w>0 && h>0)aspectFactor=(w/h)/(legacyWidth/legacyHeight);
 }
 struct Point {float x,y;};
-enum class Region {World,Panel,Menu,Hud,Left,Right,Field,Map,GearHeader,GearLeft,GearRight,PanelHeader};
+enum class Region {World,Panel,Menu,Hud,Left,Right,Field,Map,GearHeader,GearLeft,GearRight,PanelHeader,PanelChrome};
 constexpr float gearScale=440.0f/540.0f;
+constexpr float panelX=120,panelScale=720.0f/540.0f,panelHeader=110*panelScale;
+constexpr float panelBody=(height-panelHeader)/panelScale;
 inline Region RegionAt(Point p,bool world,bool dialog) {
     if(!world || dialog)return Region::Panel;
     if(p.x<140 && p.y<110)return Region::Menu;
@@ -19,8 +21,9 @@ inline Region RegionAt(Point p,bool world,bool dialog) {
 }
 inline Point Map(Point p,Region region,float scroll=0) {
     switch(region) {
-        case Region::Panel:return {p.x-210,p.y+scroll};
-        case Region::PanelHeader:return {p.x-210,p.y};
+        case Region::Panel:return {(p.x-panelX)/panelScale,p.y/panelScale+scroll};
+        case Region::PanelHeader:return {(p.x-panelX)/panelScale,p.y/panelScale};
+        case Region::PanelChrome:return {-10000,-10000};
         case Region::GearHeader:return {p.x-210,p.y};
         case Region::GearLeft:return {(p.x-24)/gearScale,(p.y-122)/gearScale+110};
         case Region::GearRight:return {(p.x-496)/gearScale,(p.y-122)/gearScale+562};
@@ -35,10 +38,10 @@ inline Point WorldPoint(Point p) {return {p.x*width/legacyWidth,p.y*height/legac
 // A wide viewport has 60% of the portrait height. Keep actors readable rather
 // than preserving the portrait camera distance and shrinking the whole scene.
 inline float CameraDistance(float distance) {return distance*.65f;}
-constexpr float maxScroll=legacyHeight-height;
+constexpr float maxScroll=legacyHeight-110-panelBody;
 inline float Scroll(float value) {return value<0 ? 0:value>maxScroll ? maxScroll:value;}
 inline Point Input(Point p,bool world,bool dialog,float scroll=0) {
-    if(!world || dialog)return Map(p,p.y<110 ? Region::PanelHeader:Region::Panel,scroll);
+    if(!world || dialog)return Map(p,p.x<panelX || p.x>panelX+720 ? Region::PanelChrome:p.y<panelHeader ? Region::PanelHeader:Region::Panel,scroll);
     if(p.x<140 && p.y<110)return p; // menu
     if(p.x>=210 && p.x<=750 && p.y>=12 && p.y<132)return {p.x-210,p.y+98};
     if(p.x>=590 && p.y>=240)return {p.x-420,p.y+360}; // combat controls

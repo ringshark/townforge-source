@@ -38,7 +38,7 @@ g_landscapeHitRects.push_back({200,300,100,50});
 frame({400,195},true,true,false);p=LandscapeMouse();assert(near(p.x,225)&&near(p.y,325));assert(LandscapeUIAllowed()); // visible middle-strip control
 frame({400,195},false,false,true);LandscapeMouse();
 g_presentedDialog=true;
-frame({480,195},true,true,false);p=LandscapeMouse();assert(near(p.x,270)&&near(p.y,195));assert(LandscapeUIAllowed()); // modal uses one centered mapping
+frame({480,195},true,true,false);p=LandscapeMouse();assert(near(p.x,270)&&near(p.y,146.25));assert(LandscapeUIAllowed()); // modal uses one centered mapping
 frame({480,195},false,false,true);LandscapeMouse();
 g_presentedDialog=false;g_presentedMap=true;
 g_presentedMapSource={388,152,148,148};g_presentedMapDest={796,92,148,148};
@@ -60,6 +60,35 @@ with tempfile.TemporaryDirectory() as tmp:
     subprocess.run(['g++','-std=c++17',str(cpp),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
 print('PASS production landscape pointer capture, fresh gestures, and ground routing')
+
+# Native page controls must change the offset before content is rendered.
+panel=r"""#include <cassert>
+#include <cmath>
+struct Vector2{float x,y;};struct Rectangle{float x,y,width,height;};
+enum{MOUSE_BUTTON_LEFT};Vector2 raw{};bool pressed=false,down=false;float wheel=0,g_landscapeScroll=0;
+Vector2 GetMousePosition(){return raw;}
+bool IsMouseButtonPressed(int){return pressed;}bool IsMouseButtonDown(int){return down;}
+float GetMouseWheelMove(){return wheel;}
+bool CheckCollisionPointRec(Vector2 p,Rectangle r){return p.x>=r.x && p.x<=r.x+r.width && p.y>=r.y && p.y<=r.y+r.height;}
+"""+f'#include "{rules}"\n'+section('static Rectangle LandscapePanelTop()', 'static void LandscapeBeginFrame(')
+panel+=r"""int main(){
+auto near=[](float a,float b){return std::fabs(a-b)<.01;};
+raw={900,488};pressed=down=true;LandscapePanelInput();assert(near(g_landscapeScroll,tflayout::maxScroll));
+pressed=down=false;LandscapePanelInput();
+raw={900,52};down=true; // touch-down fallback when the one-frame press was missed
+LandscapePanelInput();assert(g_landscapeScroll==0);
+down=false;LandscapePanelInput();
+raw={900,268};pressed=down=true;LandscapePanelInput();assert(near(g_landscapeScroll,tflayout::maxScroll*.5f));
+pressed=false;raw.y=430;LandscapePanelInput();assert(g_landscapeScroll>tflayout::maxScroll*.9f);
+down=false;LandscapePanelInput();
+raw={480,300};wheel=1;float before=g_landscapeScroll;LandscapePanelInput();assert(near(g_landscapeScroll,before-48));
+assert(tflayout::Map({900,488},tflayout::Region::PanelChrome).x<0);
+} """
+with tempfile.TemporaryDirectory() as tmp:
+    cpp=Path(tmp)/'panel.cpp';exe=Path(tmp)/'panel';cpp.write_text(panel)
+    subprocess.run(['g++','-std=c++17',str(cpp),'-o',str(exe)],check=True)
+    subprocess.run([str(exe)],check=True)
+print('PASS production Top/Bottom, missed-press touch fallback, rail drag, wheel and sidebar isolation')
 
 # Exercise the production modal selector rather than inferring dialogs from
 # control dimensions (which missed menus and mistook broad HUD bars for panels).
