@@ -7,7 +7,7 @@ inline void DisplayAspect(float w,float h) {
     if(w>0 && h>0)aspectFactor=(w/h)/(legacyWidth/legacyHeight);
 }
 struct Point {float x,y;};
-enum class Region {World,Panel,Menu,Hud,Left,Right,Field,Map,GearHeader,GearLeft,GearRight,PanelHeader,PanelChrome};
+enum class Region {World,Panel,Menu,Hud,Left,Right,Field,Map,GearHeader,GearLeft,GearRight,PanelHeader,PanelChrome,NativeMenu};
 constexpr float gearScale=440.0f/540.0f;
 constexpr float panelX=120,panelScale=720.0f/540.0f,panelHeader=110*panelScale;
 constexpr float panelBody=(height-panelHeader)/panelScale;
@@ -21,6 +21,7 @@ inline Region RegionAt(Point p,bool world,bool dialog) {
 }
 inline Point Map(Point p,Region region,float scroll=0) {
     switch(region) {
+        case Region::NativeMenu:return p;
         case Region::Panel:return {(p.x-panelX)/panelScale,p.y/panelScale+scroll};
         case Region::PanelHeader:return {(p.x-panelX)/panelScale,p.y/panelScale};
         case Region::PanelChrome:return {-10000,-10000};

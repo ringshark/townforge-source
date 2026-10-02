@@ -43,6 +43,9 @@ static std::vector<LandscapeWorldLabel> g_landscapeLabels;
 static std::vector<Rectangle> g_landscapeHitRects;
 static bool g_presentedMap=false,g_landscapeMap=false;
 static bool g_landscapeGear=false,g_presentedGear=false;
+static bool g_landscapeNativeMenu=false,g_presentedNativeMenu=false,g_landscapeNativeMenuDrawing=false;
+static RenderTexture2D g_landscapeNativeMenuTarget{};
+static bool LandscapeMenuBlocksWorld(){return (g_presentedNativeMenu || g_landscapeNativeMenu) && !g_landscapeNativeMenuDrawing;}
 static Rectangle g_presentedMapSource{},g_presentedMapDest{},g_landscapeMapSource{},g_landscapeMapDest{};
 static RenderTexture2D g_landscapeMapTarget{};
 static tflayout::Point LandscapePointerMap(Vector2 raw,tflayout::Region region) {
@@ -56,6 +59,7 @@ static tflayout::Region g_landscapePointerRegion=tflayout::Region::Panel;
 static bool g_landscapePointerHeld=false;
 static double g_landscapePressTime=-1;
 static tflayout::Region LandscapeRegion(Vector2 raw) {
+    if(g_presentedNativeMenu)return tflayout::Region::NativeMenu;
     if(g_presentedGear)return raw.y<110 ? tflayout::Region::GearHeader:
         raw.x<480 ? tflayout::Region::GearLeft:tflayout::Region::GearRight;
     if(g_presentedMap && CheckCollisionPointRec(raw,g_presentedMapDest))return tflayout::Region::Map;
@@ -77,6 +81,7 @@ static tflayout::Region LandscapeRegion(Vector2 raw) {
     return tflayout::Region::World;
 }
 static bool LandscapeUIAllowed() {
+    if(LandscapeMenuBlocksWorld())return false;
     if(g_landscapePointerRegion==tflayout::Region::PanelChrome)return false;
     return !g_presentedWorld || g_presentedDialog || g_landscapePointerRegion!=tflayout::Region::World;
 }
@@ -214,7 +219,8 @@ static void LandscapeBeginFrame(bool world,bool dialog,int screen,bool gear=fals
     static int previousScreen=-1;
     if(previousScreen!=screen || (dialog && !g_presentedDialog) || gear!=g_presentedGear)g_landscapeScroll=0;
     previousScreen=screen;
-    if((!world || dialog) && !gear)LandscapePanelInput();
+    if((!world || dialog) && !gear && !g_presentedNativeMenu)LandscapePanelInput();
+    g_landscapeNativeMenu=false;g_landscapeNativeMenuDrawing=false;
     g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeGear=gear;g_landscapeMap=false;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();g_landscapeNotices.clear();g_landscapeSkills.clear();g_landscapeLabels.clear();
     ::BeginTextureMode(g_landscapeScene);::ClearBackground(Color{22,33,42,255});::EndTextureMode();
     ::BeginTextureMode(g_landscapeUI);g_landscapeTargets.push_back(g_landscapeUI);g_landscapeActive=true;
@@ -269,7 +275,10 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
             ::DrawTextEx(font,label.text.c_str(),{x,y},size,1,label.color);
         }
     }
-    if(g_landscapeGear) {
+    if(g_landscapeNativeMenu) {
+        blit(g_landscapeNativeMenuTarget.texture,{0,0,960,540},{0,0,960,540});
+    }
+    else if(g_landscapeGear) {
         // Keep the whole gear gump together, then place the character details
         // beside it. Both columns share one scale and matching touch transforms.
         ::DrawRectangleGradientV(0,0,960,540,Color{29,40,46,255},Color{10,18,24,255});
@@ -377,7 +386,8 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
         }
     }
     g_presentedWorld=g_landscapeWorld;g_presentedDialog=g_landscapeDialog;
-    g_presentedGear=g_landscapeGear;
+    g_presentedGear=g_landscapeGear && !g_landscapeNativeMenu;
+    g_presentedNativeMenu=g_landscapeNativeMenu;
     g_landscapeHitRects=controls;
     if(g_presentedMap) {
         // Its source-space control is now displayed only in the native widget.

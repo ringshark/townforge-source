@@ -10,6 +10,7 @@ code = '''#include <algorithm>
 #include "combat_motion.h"
 struct Vector2 { float x=0,y=0; };
 enum {KEY_W,KEY_UP,KEY_S,KEY_DOWN,KEY_A,KEY_LEFT,KEY_D,KEY_RIGHT};
+bool menuBlocked=false;bool LandscapeMenuBlocksWorld(){return menuBlocked;}
 bool keys[8]={}; double now=0; Vector2 stick{};
 bool IsKeyDown(int k){return keys[k];} double GetTime(){return now;}
 Vector2 VirtualJoystickDir(){return stick;}
@@ -61,6 +62,11 @@ for(float yaw : {0.f,.7f,1.5707963f,3.1415927f,4.712389f,6.1f}) {
     }
 }
 stick={};tick(.016f);
+// An open menu stops keyboard, stick and an existing tap route.
+menuBlocked=true;stick={1,0};keys[KEY_D]=true;
+g_walkOn=true;g_walkFor=&pos;g_walkTarget={pos.x+100,pos.y};
+Vector2 menuPos=pos;assert(!tick(.1f));assert(pos.x==menuPos.x && pos.y==menuPos.y && !g_walkOn);
+menuBlocked=false;stick={};keys[KEY_D]=false;tick(.016f);
 // Switching zones starts fresh, so velocity cannot carry between position owners.
 Vector2 town{600,600};keys[KEY_D]=true;
 UpdatePlayerMovement(town,face,.016f);assert(town.x-600<1.0f);

@@ -53,6 +53,12 @@ frame({244,285},true,true,false);p=LandscapeMouse();assert(near(p.x,270)&&near(p
 frame({600,285},false,true,false);p=LandscapeMouse();assert(near(p.x,706.909)); // paperdoll drag retains its column
 frame({600,285},false,false,true);LandscapeMouse();
 frame({716,285},true,true,false);p=LandscapeMouse();assert(near(p.x,270)&&near(p.y,762.045));assert(LandscapeUIAllowed());
+frame({716,285},false,false,true);LandscapeMouse();
+g_presentedGear=false;g_presentedNativeMenu=true;g_presentedWorld=true;
+frame({718,254},true,true,false);p=LandscapeMouse();assert(near(p.x,718)&&near(p.y,254));
+assert(!LandscapeUIAllowed() && LandscapeMenuBlocksWorld());
+g_landscapeNativeMenuDrawing=true;assert(LandscapeUIAllowed() && !LandscapeMenuBlocksWorld());
+g_landscapeNativeMenuDrawing=false;
 }
 '''
 with tempfile.TemporaryDirectory() as tmp:

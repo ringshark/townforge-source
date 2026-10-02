@@ -2397,6 +2397,7 @@ static bool UpdatePlayerMovement(Vector2& pos, Vector2& facing, float dt, float 
     if (g_moveOwner != &pos || now - g_moveLastInputT > 0.25) g_moveVelocity = {};
     g_moveOwner = &pos; g_moveLastInputT = now;
     auto stop = [&]() { g_moveVelocity = {}; return false; };
+    if(LandscapeMenuBlocksWorld()){WalkTargetClear();return stop();}
     Vector2 dir = {0, 0};
     if (IsKeyDown(KEY_W) || IsKeyDown(KEY_UP)) dir.y -= 1;
     if (IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN)) dir.y += 1;
@@ -10101,6 +10102,7 @@ static void UIRegister(Rectangle r) {
     if (LandscapeUIAllowed() && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(pointer, r)) g_uiGestureOwned = true;
 }
 static bool UIHit(Vector2 m) {
+    if(LandscapeMenuBlocksWorld())return true;
     if (g_uiGestureOwned || g_uiClickTaken) return true;
     if(!LandscapeUIAllowed())return false;
     if (g_uiShieldOn && CheckCollisionPointRec(m, g_uiShield)) return true;
@@ -32927,8 +32929,56 @@ static void DrawMenuGroupTabs(GameState& s) {
         }
     }
 }
+// Main navigation uses a single native landscape canvas and identity picking.
+static bool LandscapeMenuCard(Rectangle r, const std::string& title, const std::string& detail, bool enabled=true) {
+    Color edge=enabled ? Color{173,141,86,255}:Color{77,86,91,255};
+    LandscapePlate(r,edge);
+    DrawUIText(title.c_str(),(int)r.x+16,(int)r.y+14,20,enabled ? Color{245,229,195,255}:Color{133,142,147,255});
+    if(!detail.empty())DrawUIText(detail.c_str(),(int)r.x+16,(int)r.y+43,12,Color{170,186,192,255});
+    bool tapped=UIClick(r,enabled);if(tapped)PlaySfx(SfxId::Click);return tapped;
+}
+static void DrawLandscapeMainMenu(GameState& s,bool& open,bool inDungeon) {
+    if(!g_landscapeNativeMenuTarget.id) {
+        g_landscapeNativeMenuTarget=LoadRenderTexture(960,540);
+        SetTextureFilter(g_landscapeNativeMenuTarget.texture,TEXTURE_FILTER_BILINEAR);
+    }
+    g_landscapeNativeMenu=true;g_landscapeNativeMenuDrawing=true;g_landscapeDialog=true;g_landscapeScroll=0;
+    BeginTextureMode(g_landscapeNativeMenuTarget);ClearBackground(Color{12,21,28,255});
+    DrawRectangleGradientV(0,0,960,540,Color{31,43,48,255},Color{9,17,23,255});
+    DrawUIText("MENU",160,28,26,Color{243,221,180,255});
+    DrawUIText(TextFormat("Gold %d   Wood %d   Ore %d   Leather %d",s.gold,s.wood,s.ore,s.leather),160,72,14,Color{175,191,197,255});
+    if(LandscapeMenuCard({20,56,104,48},"Close",""))open=false;
+    bool enabled=!DenFighting() && !s.combat && !s.playerIsGhost && s.playerDeathAnimT<=0;
+    auto card=[&](int slot,const std::string& label,const std::string& detail,bool en=true) {
+        return LandscapeMenuCard({28.f+(slot%4)*230.f,132.f+(slot/4)*86.f,214,72},label,detail,en);
+    };
+    auto page=[&](Screen sc){MenuGoScreen(s,sc);open=false;};
+    if(card(0,"Gear","Equipment & character",enabled)){g_characterPack=false;g_pdSel=-1;page(Screen::Character);}
+    if(card(1,"Backpack","Items & supplies",enabled)){g_characterPack=true;g_pdSel=-1;s.backpackScroll=0;page(Screen::Character);}
+    if(card(2,"Skills","Training & progression",enabled))page(Screen::Skills);
+    if(card(3,"Spells","Spellbook & magic",enabled))page(Screen::Magic);
+    if(card(4,"Crafting","Make gear & supplies",enabled))page(Screen::Craft);
+    if(card(5,"Pets","Companions & followers",enabled))page(Screen::Pets);
+    if(card(6,"Bank","Stored items & gold",enabled))page(Screen::Bank);
+    if(card(7,"Home","House & settlement",enabled))page(Screen::House);
+    if(card(8,"Guild",GuildAttentionLabel(),enabled)){page(Screen::House);OpenWarWeek(s);g_guildTab=1;}
+    if(card(9,"Journal",JournalAttentionLabel(s),enabled)){page(Screen::House);g_questOpen=true;g_questTab=0;}
+    if(card(10,"Settings","Options & saves",!DenFighting())){page(Screen::House);g_optOpen=true;}
+    if(card(11,"Help","How to play",enabled)){page(Screen::Guide);s.guidePage=0;}
+    if(LandscapeMenuCard({28,430,282,64},"Resume game","Return to the world")){s.screen=g_playScreen;open=false;}
+    bool ferry=enabled && (s.screen==Screen::Town || s.screen==Screen::Blackwake);
+    if(LandscapeMenuCard({326,430,282,64},s.screen==Screen::Blackwake ? "Return to Saltmere":"Blackwake Den",ferry ? "Travel by ferry":"Visit the ferry from town",ferry)) {
+        if(s.screen==Screen::Blackwake){s.screen=Screen::Town;s.selectedTown=1;s.townPlayerPos=TS(450,830);}
+        else{s.screen=Screen::Blackwake;s.townPlayerPos={750,1250};}
+        g_denPanel=0;open=false;WalkTargetClear();
+    }
+    if(inDungeon && LandscapeMenuCard({624,430,308,64},"Leave dungeon","Magery recall",!s.playerIsGhost && s.playerDeathAnimT<=0 && s.leaveDungT<0)) {TryStartLeaveDungeon(s);open=false;}
+    if(!enabled)DrawUIText("Finish combat to open character and activity pages.",28,510,13,Color{230,183,119,255});
+    EndTextureMode();g_landscapeNativeMenuDrawing=false;
+}
 static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
     g_uiShieldBypass = true; // this panel's own buttons sit inside the shield
+    if(g_landscapeActive && open){DrawLandscapeMainMenu(s,open,inDungeon);g_uiShieldBypass=false;return;}
     if (IsPlayScreen(s.screen) && s.screen!=Screen::Blackwake) { // HP and mana (2026-09-28, #58): down beside the hotbar, where your eyes are in a fight
         const float px = 8, py = g_landscapeWorld && !open ? 610.0f:kViewport.y + kViewport.height - 88, pw = 152, ph = 78;
         UIRegister({ px, py, pw, ph }); // a tap on it never walks
@@ -38673,7 +38723,7 @@ static void UpdateDrawFrame() {
         // screens above the belt and spell bar, on menus at the bottom - colored by
         // what it means. The old faint line at the very bottom hid under the spell bar.
         MpTick(state);           // (2026-09-29) multiplayer: send where you are, hear everyone else
-        if (state.screen == renderedScreen) MpDrawChatButton(state); // never reuse a navigation tap on newly shown Chat
+        if (state.screen == renderedScreen && !g_landscapeNativeMenu) MpDrawChatButton(state); // never reuse a navigation tap on newly shown Chat
         UpdateDrawToasts(state, screenW, screenH, IsPlayScreen(state.screen));
         UpdateDrawLevelUps(state, screenW, screenH, IsPlayScreen(state.screen)); // (2026-09-29) RuneScape-style level-ups
         DrawNotorietyFooter(state, screenW, screenH);
