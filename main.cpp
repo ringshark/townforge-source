@@ -2429,6 +2429,7 @@ static bool UpdatePlayerMovement(Vector2& pos, Vector2& facing, float dt, float 
         WalkTargetClear();
     }
     if (dt <= 0.0f) return stop();
+    // Manual input is screen-relative; tap destinations already use world coordinates.
     if(!g_walkOn && viewYaw!=0.0f) {
         const float cs=cosf(viewYaw),sn=sinf(viewYaw);
         dir={dir.x*cs-dir.y*sn,dir.x*sn+dir.y*cs};
@@ -26355,7 +26356,7 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
     if (inRange) prompt = "[E] " + label;
 
     if (!uiOpen) {
-        UpdatePlayerMovement(s.interiorPlayerPos, s.playerFacing, GameDt(), 100000.0f);
+        UpdatePlayerMovement(s.interiorPlayerPos, s.playerFacing, GameDt(), 100000.0f, s.interior3DView && g_t3dFollowMode ? -g_intYaw : 0.0f);
         for (auto& p : props) {
             if (p.bw <= 0 || p.bh <= 0) continue;
             ResolveCircleRectCollision(s.interiorPlayerPos, kPlayerRadius, { p.x - p.bw / 2, p.y - p.bh / 2, p.bw, p.bh });
@@ -26438,7 +26439,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
                                   : gateIsNearest ? "Wilderness" : "Enter " + TileNameFor(nearestKey);
 
     if (!s.selectedTile.has_value()) {
-        bool townMoved = UpdatePlayerMovement(s.townPlayerPos, s.playerFacing, GameDt(), kTownWorldSize);
+        bool townMoved = UpdatePlayerMovement(s.townPlayerPos, s.playerFacing, GameDt(), kTownWorldSize, s.town3DView ? -g_t3dYawSm : 0.0f);
         for (auto& node : ActiveTownNodes(s.selectedTown))
             ResolveCircleCollision(s.townPlayerPos, kPlayerRadius, node.pos, kNodeRadius);
         ResolveCircleCollision(s.townPlayerPos, kPlayerRadius, kWildernessGatePos, kNodeRadius);
@@ -32430,7 +32431,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // No movement during the death animation - the body isn't going anywhere.
     const Vector2 wildPrevPos = s.wildernessPlayerPos; // for the terrain check below (2026-09-26)
     if (s.playerDeathAnimT <= 0.0f) {
-        bool moved = UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GameDt() * SettleTravelMult(s), kWildernessWorldSize); // Stable (2026-09-27)
+        bool moved = UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GameDt() * SettleTravelMult(s), kWildernessWorldSize, s.wild3DView ? -g_t3dYawSm : 0.0f); // Stable (2026-09-27)
         StealthTick(s, GameDt(), moved); // Hiding & Stealth (2026-09-28)
         TreasureTick(s, GameDt(), moved); // digging and lock picking (2026-09-28)
         // UO-style attack flagging (2026-09-24): when the player isn't driving,
@@ -33658,7 +33659,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     Vector2 prevDungeonPos = s.dungeonPlayerPos; // wall-slide against this if the move ends in a wall
     // No movement during the death animation - the body isn't going anywhere.
     if (s.playerDeathAnimT <= 0.0f) {
-        bool moved = UpdatePlayerMovement(s.dungeonPlayerPos, s.playerFacing, GameDt(), kDungeonWorldSize);
+        bool moved = UpdatePlayerMovement(s.dungeonPlayerPos, s.playerFacing, GameDt(), kDungeonWorldSize, s.hunt3DView ? -g_t3dYawSm : 0.0f);
         StealthTick(s, GameDt(), moved); // Hiding & Stealth (2026-09-28)
         // Flag steering, same as Wilderness - the wall-slide below still applies.
         if (!moved) SteerTowardFlag(s, s.dungeonPlayerPos, s.playerFacing, GameDt(), kDungeonWorldSize, 1);

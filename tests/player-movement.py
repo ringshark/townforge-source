@@ -46,6 +46,21 @@ keys[KEY_D]=false;tick(.016f);
 g_walkOn=true;g_walkFor=&pos;g_walkTarget={pos.x+100,pos.y};g_walkLastPos=pos;
 float tapY=pos.y;UpdatePlayerMovement(pos,face,.1f,2000,-.694738f);
 assert(pos.y==tapY);WalkTargetClear();tick(.016f);
+// Orbiting through a full turn preserves screen-relative stick directions.
+for(float yaw : {0.f,.7f,1.5707963f,3.1415927f,4.712389f,6.1f}) {
+    for(Vector2 input : {Vector2{0,-1},Vector2{1,0},Vector2{0,1},Vector2{-1,0},Vector2{.3f,-.4f}}) {
+        stick={};tick(.016f);pos={500,500};stick=input;
+        for(int i=0;i<60;i++){now+=1.f/60;UpdatePlayerMovement(pos,face,1.f/60,2000,-yaw);}
+        Vector2 delta{pos.x-500,pos.y-500};
+        float screenRight=delta.x*cosf(yaw)-delta.y*sinf(yaw);
+        float screenDown=delta.x*sinf(yaw)+delta.y*cosf(yaw);
+        float scale=(screenRight*input.x+screenDown*input.y)/(input.x*input.x+input.y*input.y);
+        assert(scale>210 && scale<=220.01f);
+        assert(std::abs(screenRight-scale*input.x)<.03f);
+        assert(std::abs(screenDown-scale*input.y)<.03f);
+    }
+}
+stick={};tick(.016f);
 // Switching zones starts fresh, so velocity cannot carry between position owners.
 Vector2 town{600,600};keys[KEY_D]=true;
 UpdatePlayerMovement(town,face,.016f);assert(town.x-600<1.0f);
