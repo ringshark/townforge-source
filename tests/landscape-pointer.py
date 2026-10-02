@@ -116,12 +116,14 @@ main=Path('main.cpp').read_text()
 start=main.index('static bool LandscapeDialogOpen(')
 selector=main[start:main.index('static void WarmWildernessCache(',start)]
 modal='''#include <optional>
+#include <string>
 #include <cassert>
-enum class Screen {Town,Blackwake,Character};
+enum class Screen {Town,Wilderness,Hunt,Interior,Blackwake,Character};
 bool IsMenuScreen(Screen s){return s==Screen::Character;}
 bool g_trackOpen=false;int g_denPanel=0;
 struct GameState {
  Screen screen=Screen::Town;
+ std::string interiorKey="wildhouse";
  bool exploreMenuOpen=false,dungeonMenuOpen=false,worldMapOpen=false,guideOpen=false;
  bool interiorGreeted=false,journalOpen=false,recallPickerOpen=false,houseDesignerOpen=false,houseChestOpen=false;
  std::optional<int> selectedTile,greetedNPC,hotbarPickerSlot;
@@ -130,12 +132,12 @@ struct GameState {
 '''+selector+'''int main(){
 GameState s;assert(!LandscapeDialogOpen(s));
 '''
-for flag in ['exploreMenuOpen','dungeonMenuOpen','worldMapOpen','guideOpen','interiorGreeted','journalOpen','recallPickerOpen','houseDesignerOpen','houseChestOpen']:
-    modal+=f's=GameState{{}};s.{flag}=true;assert(LandscapeDialogOpen(s));\n'
-for flag in ['selectedTile','greetedNPC','hotbarPickerSlot','houseCraftModule','openCorpseId']:
-    modal+=f's=GameState{{}};s.{flag}=0;assert(LandscapeDialogOpen(s));\n'
+for flag,screen in [('exploreMenuOpen','Town'),('dungeonMenuOpen','Hunt'),('worldMapOpen','Wilderness'),('guideOpen','Town'),('interiorGreeted','Interior'),('journalOpen','Wilderness'),('recallPickerOpen','Hunt'),('houseDesignerOpen','Wilderness'),('houseChestOpen','Interior')]:
+    modal+=f's=GameState{{}};s.{flag}=true;s.screen=Screen::{screen};assert(LandscapeDialogOpen(s));\n'
+for flag,screen in [('selectedTile','Town'),('greetedNPC','Town'),('hotbarPickerSlot','Wilderness'),('houseCraftModule','Interior'),('openCorpseId','Hunt')]:
+    modal+=f's=GameState{{}};s.{flag}=0;s.screen=Screen::{screen};assert(LandscapeDialogOpen(s));\n'
 modal+='''s=GameState{};s.screen=Screen::Character;assert(LandscapeDialogOpen(s));
-s=GameState{};g_trackOpen=true;assert(LandscapeDialogOpen(s));g_trackOpen=false;
+s=GameState{};s.screen=Screen::Wilderness;g_trackOpen=true;assert(LandscapeDialogOpen(s));s.screen=Screen::Interior;assert(!LandscapeDialogOpen(s));g_trackOpen=false;
 s.screen=Screen::Blackwake;g_denPanel=1;assert(LandscapeDialogOpen(s));
 g_denPanel=0;assert(!LandscapeDialogOpen(s));
 }'''

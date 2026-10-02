@@ -64,6 +64,25 @@ reset();DrawFurTraderScreen(s,960,540);check("fur trader");
 reset();DrawMinersGuildScreen(s,960,540);check("miners guild");
 reset();DrawRefugeScreen(s,960,540);check("refuge");
 for(int page=0;page<kGuidePageCount;page++){reset();s.guidePage=page;DrawGuideScreen(s,960);check("help");}
+// Invisible panels from other screens must not shrink a playable interior.
+GameState room;room.screen=Screen::Town;room.greetedNPC=0;
+EnterInterior(room,"stable");assert(!room.greetedNPC && !LandscapeDialogOpen(room));
+room.journalOpen=room.recallPickerOpen=room.worldMapOpen=room.guideOpen=true;
+room.dungeonMenuOpen=room.houseDesignerOpen=room.houseChestOpen=true;
+room.hotbarPickerSlot=0;room.houseCraftModule=0;room.openCorpseId=42;g_trackOpen=true;
+assert(!LandscapeDialogOpen(room));
+room.selectedTile="stable";assert(LandscapeDialogOpen(room));room.selectedTile.reset();
+room.interiorGreeted=true;assert(LandscapeDialogOpen(room));room.interiorGreeted=false;
+room.exploreMenuOpen=true;assert(LandscapeDialogOpen(room));room.exploreMenuOpen=false;
+EnterInterior(room,"wildhouse");assert(!room.houseChestOpen && room.houseCraftModule<0);
+room.houseChestOpen=true;assert(LandscapeDialogOpen(room));room.houseChestOpen=false;
+room.houseCraftModule=0;assert(LandscapeDialogOpen(room));
+room.housePlotIdx=0;room.selectedTile="wildhouse";room.interiorGreeted=true;
+ExitInterior(room);assert(room.screen==Screen::Wilderness && !room.selectedTile && !room.interiorGreeted && !room.houseChestOpen && room.houseCraftModule<0);
+room=GameState{};EnterInterior(room,"stable");room.interiorGreeted=true;room.selectedTile="stable";ExitInterior(room);
+assert(room.screen==Screen::Town && !LandscapeDialogOpen(room));
+g_trackOpen=false;
+std::cout<<"PASS interior layout: stale panels ignored, real panels retained, town and homestead exits clear interior locks"<<std::endl;
 // Opening progression uses actual gameplay events, not timeouts or arbitrary gold changes.
 GameState o;int gold=o.gold,bandages=o.bandages;
 UpdateStarterProgress(o);o.townPlayerPos.x+=300;UpdateStarterProgress(o);assert(o.starterStep==kStWalk);

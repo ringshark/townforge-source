@@ -25222,6 +25222,10 @@ static void HouseDecorDraw3D(const GameState& s); // Housing 2.0 decorate overla
 static void EnterInterior(GameState& s, const std::string& key) {
     if (!InteriorRoomFor(key)) return; // unknown key: stay outside
     s.interiorKey = key;
+    s.exploreMenuOpen = false;
+    s.guideOpen = false;
+    s.greetedNPC.reset();
+    s.houseCraftModule = -1;
     s.screen = Screen::Interior;
     s.interiorFromWild = (key == "wildhouse");
     s.interior3DView = s.interiorFromWild ? s.wild3DView : s.town3DView;
@@ -25239,6 +25243,11 @@ static void EnterInterior(GameState& s, const std::string& key) {
 static void ExitInterior(GameState& s) {
     std::string key = s.interiorKey;
     s.interiorKey.clear();
+    s.selectedTile.reset();
+    s.interiorGreeted = false;
+    s.houseChestOpen = false;
+    s.houseCraftModule = -1;
+    s.exploreMenuOpen = false;
     if (s.interiorFromWild && s.housePlotIdx >= 0 && s.housePlotIdx < (int)kHousePlots.size()) {
         // Leaving the wilderness homestead: back to the wilderness, just south of the door.
         s.screen = Screen::Wilderness;
@@ -38557,12 +38566,25 @@ static const float kZoom = 1.125f;
 // pattern raylib's own web examples use instead, with the browser's requestAnimationFrame
 // driving each call rather than a C++-side blocking sleep.
 static bool LandscapeDialogOpen(const GameState& s) {
-    return IsMenuScreen(s.screen) || s.exploreMenuOpen || s.dungeonMenuOpen ||
-        s.worldMapOpen || s.guideOpen || s.selectedTile.has_value() ||
-        s.greetedNPC.has_value() || s.interiorGreeted || s.journalOpen ||
-        s.recallPickerOpen || s.hotbarPickerSlot.has_value() || s.houseDesignerOpen ||
-        s.houseChestOpen || s.houseCraftModule>=0 || s.openCorpseId>=0 ||
-        g_trackOpen || (s.screen==Screen::Blackwake && g_denPanel!=0);
+    // Only panels rendered by this screen may switch the world into a scroll page.
+    // A remembered journal, town greeting or home workshop is invisible elsewhere.
+    if (IsMenuScreen(s.screen)) return true;
+    const bool town = s.screen == Screen::Town;
+    const bool wild = s.screen == Screen::Wilderness;
+    const bool hunt = s.screen == Screen::Hunt;
+    const bool interior = s.screen == Screen::Interior;
+    const bool den = s.screen == Screen::Blackwake;
+    return ((town || wild || interior || den) && s.exploreMenuOpen) ||
+        (hunt && s.dungeonMenuOpen) || (wild && s.worldMapOpen) ||
+        ((town || wild) && s.guideOpen) ||
+        ((town || interior) && s.selectedTile.has_value()) ||
+        (town && s.greetedNPC.has_value()) || (interior && s.interiorGreeted) ||
+        ((wild || hunt) && (s.journalOpen || s.recallPickerOpen ||
+            s.hotbarPickerSlot.has_value() || s.openCorpseId >= 0)) ||
+        (wild && (s.houseDesignerOpen || g_trackOpen)) ||
+        (interior && s.interiorKey == "wildhouse" &&
+            (s.houseChestOpen || s.houseCraftModule >= 0)) ||
+        (den && g_denPanel != 0);
 }
 static void WarmWildernessCache(const GameState& s) {
     // Spread independent cache preparation over quiet town frames. The complete
