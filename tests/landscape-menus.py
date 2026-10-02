@@ -55,6 +55,7 @@ reset();DrawOptions(s,960,540);check("settings");
 for(int i=0;i<20;i++){GameState::TreasureMap m{};m.tier=i%5;m.decoded=i%2;s.tmaps.push_back(m);}
 reset();DrawTreasureMaps(s,960,540);check("treasure maps");
 reset();g_questOpen=g_optOpen=g_warOpen=g_tmapOpen=g_settleOpen=false;DrawHouseScreen(s,960,540);check("home");
+reset();GameState noHome;DrawSettlement(noHome,960,540);check("settlement first visit");
 reset();g_settleOpen=true;MenuGoScreen(s,Screen::House);assert(!g_settleOpen);DrawSettlement(s,960,540);check("settlement");
 for(int tab=0;tab<8;tab++){reset();g_guildTab=tab;DrawWarWeek(s,960,540);check("guild");}
 for(int book=0;book<4;book++)for(int mode=0;mode<6;mode++){reset();s.craftBuildingTab=book;s.craftModeTab=mode;DrawCraftScreen(s,960,540);check("craft");}

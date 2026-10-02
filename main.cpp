@@ -35545,7 +35545,14 @@ static void DrawSettlement(GameState& s, int screenW, int screenH) {
     if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_settleOpen = false; return; }
     float x = G.x + 18, y = G.y + 22, w = G.width - 36;
     if (!SettleOwned(s)) {
-        DrawUIText("Buy a house plot in the wilds first - your settlement grows around it.", (int)x, (int)y + 10, 13, ink);
+        DrawUIText("Your next building goal", (int)x, (int)y + 10, 20, ink);
+        DrawUIText("1. Explore the wilderness for plots with for-sale signs.", (int)x, (int)y + 54, 14, ink);
+        DrawUIText("2. Approach a plot to see its price. Earn gold from loot", (int)x, (int)y + 82, 14, ink);
+        DrawUIText("   and trading, then buy the plot when you can afford it.", (int)x, (int)y + 102, 14, ink);
+        DrawUIText("3. Return here to build a Great Hall and grow your settlement.", (int)x, (int)y + 130, 14, ink);
+        DrawUIText("Gathered wood and ore help pay for your buildings.", (int)x, (int)y + 164, 13, soft);
+        if(Button({x,y+200,220,48},"View home options",true)) g_settleOpen=false;
+        if(Button({x+(g_landscapePage ? 242.f:0.f),y+(g_landscapePage ? 200.f:258.f),220,48},"Resume exploring",true)) {g_settleOpen=false;s.screen=g_playScreen;}
         return;
     }
     int hall = SettleHall(s);
