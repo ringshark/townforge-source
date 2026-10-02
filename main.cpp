@@ -5374,20 +5374,9 @@ static int BackpackCap(const GameState& s);
 // (just below) multiplies it for murder, and UpdateInnocentSpots uses it too.
 static const float kInnocentRespawnSeconds = 45.0f;
 
-static bool TryTriggerInnocentEncounter(GameState& s, const std::string& source) {
-    if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) return false; // the dead meet no one
-    if (s.ambush.has_value() || s.innocentEncounter.has_value() || s.combat.has_value() ||
-        s.wildEngaged.has_value() || s.dungeonEngaged.has_value()) return false;
-    if (RandUnit() >= kInnocentEncounterChance) return false;
-    int id = std::rand() % 4;
-    int gold = 10 + (std::rand() % 41);
-    GameState::InnocentEncounter enc;
-    enc.identity = id; enc.gold = gold; enc.source = source; enc.spotIdx = -1;
-    s.innocentEncounter = enc;
-    s.innocentMem[id].met++;
-    MaybeOfferRequest(s, id);
-    s.logLine = InnocentName(id) + " passes by, unaware of you.";
-    return true;
+// Road encounters must never interrupt movement with a portrait dialogue page.
+static bool TryTriggerInnocentEncounter(GameState&, const std::string&) {
+    return false;
 }
 // JS endMurdererWin(): direct gold reward (no corpse/skinning step), notoriety eases,
 // Fame and Karma both rise.
@@ -6006,6 +5995,21 @@ static void SpareInnocent(GameState& s) {
                  (reduced ? " Your conscience eases slightly." : "");
     std::string line = s.logLine;
     if (RandUnit() < 0.25f && SettleGainSettler(s, "saw your mercy on the road")) s.logLine = line + " " + s.logLine; // (2026-09-27)
+}
+// Finish an explicit world greeting without leaving a modal gameplay lock.
+// Previously resolved rewards are retained; resuming never grants them twice.
+static void FinishInnocentGreeting(GameState& s, bool greeting = false) {
+    if (!s.innocentEncounter) return;
+    int id = std::clamp(s.innocentEncounter->identity, 0, 3);
+    if (greeting && !s.innocentEncounter->resolved) {
+        CompleteFetchRequest(s, id);
+        if (!s.innocentEncounter->resolved) SpareInnocent(s);
+    }
+    std::string message = s.innocentEncounter->resolved ? s.innocentEncounter->farewell
+        : InnocentName(id) + " continues down the road.";
+    s.innocentEncounter.reset();
+    s.logLine = message;
+    Journal(s, message);
 }
 static void MurderInnocent(GameState& s) {
     if (!s.innocentEncounter.has_value() || s.innocentEncounter->resolved) return;
@@ -31725,12 +31729,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (s.blades[bi].mind.cornered) GuildSay(s, bi, 12, true);
         s.logLine = "The " + BladeName(bi) + " turns to face you!";
     };
-    // Walking up to a roaming Innocent NPC and pressing E opens the exact same
-    // DrawInnocentPanel (Murder/Steal/Snoop/Spare) the old random popup already used -
-    // only the trigger is new, see kWildernessInnocentSpots' comment. The spot goes
-    // empty and starts its respawn countdown immediately; which choice the player makes
-    // in the panel doesn't change that (all four already call innocentEncounter.reset()
-    // on their own, this just handles the world-spot side of it).
+    // Roaming NPCs greet in the world; no interruption or portrait choice page.
     auto tryEngageInnocentSpot = [&](int idx) {
         if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
         if (s.ambush.has_value() || s.innocentEncounter.has_value() || s.combat.has_value() ||
@@ -31741,10 +31740,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         enc.identity = id; enc.gold = spot.gold; enc.source = "wilderness_npc"; enc.spotIdx = idx;
         s.innocentEncounter = enc;
         s.innocentMem[id].met++;
-        MaybeOfferRequest(s, id);
-        s.logLine = InnocentName(id) + " notices you approaching.";
         spot.present = false;
         spot.respawnTimer = kInnocentRespawnSeconds;
+        FinishInnocentGreeting(s, true);
     };
     // A hunt that closed to catch range converts into a real fight - but only if
     // you're still right there, not already fighting something else, and not
@@ -38397,7 +38395,9 @@ static void UpdateDrawFrame() {
             }
         }
 
-        bool encounterPending = state.ambush.has_value() || state.innocentEncounter.has_value();
+        // Release any old encounter, including a farewell already open on update.
+        FinishInnocentGreeting(state);
+        bool encounterPending = state.ambush.has_value();
 
         // --- Input: keyboard shortcuts for gathering (1/2/3) and closing the building
         // panel (ESC); movement (WASD/arrows) and interaction (E) are handled inside
@@ -38574,8 +38574,7 @@ static void UpdateDrawFrame() {
         Screen renderedScreen = state.screen;
         if (state.ambush.has_value()) {
             DrawAmbushPanel(state, screenW);
-        } else if (state.innocentEncounter.has_value()) {
-            DrawInnocentPanel(state, screenW);
+
         } else if (state.screen == Screen::Character) {
             DrawCharacterScreen(state, screenW, screenH);
         } else if (state.screen == Screen::Blackwake) {

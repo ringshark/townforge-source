@@ -49,3 +49,35 @@ hold=main.index('if(state.screen!=frameScreen)')
 assert main.index('LandscapeHoldFrame();EndDrawing();return;',hold)<main.index('LandscapePresent(UiFont()',hold)
 assert 'Fade(BLACK, std::min(1.0f, g_screenFadeT' not in main
 print('PASS retained transition frames, input advancement, and one-time idle caches')
+
+# NPC greetings cannot leave a dialogue lock or duplicate a completed reward.
+npc='''#include <optional>
+#include <string>
+#include <cassert>
+#include <algorithm>
+struct Encounter {int identity=0;bool resolved=false;std::string farewell;};
+struct GameState {std::optional<Encounter> innocentEncounter;std::string logLine;bool fetchReady=false;int rewards=0,journalCount=0;};
+std::string InnocentName(int){return "Garran Moss";}
+void Journal(GameState& s,const std::string& text){++s.journalCount;assert(text==s.logLine);}
+void CompleteFetchRequest(GameState& s,int){if(s.fetchReady){++s.rewards;s.innocentEncounter->resolved=true;s.innocentEncounter->farewell="Fetch paid";}}
+void SpareInnocent(GameState& s){++s.rewards;s.innocentEncounter->resolved=true;s.innocentEncounter->farewell="Thanks";}
+'''+extract(main,'static bool TryTriggerInnocentEncounter(', '// JS endMurdererWin()')
+npc+=extract(main,'static void FinishInnocentGreeting(', 'static void MurderInnocent(')
+npc+='''int main(){
+GameState s;assert(!TryTriggerInnocentEncounter(s,"gather") && !s.innocentEncounter);
+s.innocentEncounter=Encounter{};FinishInnocentGreeting(s,true);
+assert(!s.innocentEncounter && s.rewards==1 && s.logLine=="Thanks");
+FinishInnocentGreeting(s,true);assert(s.rewards==1 && s.journalCount==1);
+s.innocentEncounter=Encounter{0,true,"Already paid"};FinishInnocentGreeting(s);
+assert(!s.innocentEncounter && s.rewards==1 && s.logLine=="Already paid");
+s.innocentEncounter=Encounter{};FinishInnocentGreeting(s);
+assert(!s.innocentEncounter && s.rewards==1);
+s.innocentEncounter=Encounter{};s.fetchReady=true;FinishInnocentGreeting(s,true);
+assert(!s.innocentEncounter && s.rewards==2 && s.logLine=="Fetch paid");
+}'''
+with tempfile.TemporaryDirectory() as tmp:
+    cpp=Path(tmp)/'npc.cpp';exe=Path(tmp)/'npc';cpp.write_text(npc)
+    subprocess.run(['g++','-std=c++17',str(cpp),'-o',str(exe)],check=True)
+    subprocess.run([str(exe)],check=True)
+assert 'DrawInnocentPanel(state, screenW)' not in main
+print('PASS nonblocking NPC greetings, disabled random interruptions, recovery and one-time rewards')
