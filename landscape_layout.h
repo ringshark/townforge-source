@@ -410,7 +410,7 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
             sy+=h+4;
         }
     }
-    g_presentedOpening=g_landscapeOpening.visible && g_landscapeWorld && !g_landscapeDialog && !g_landscapeNativeMenu && !g_landscapePage && !g_presentedMap;
+    g_presentedOpening=g_landscapeOpening.visible && g_landscapeWorld && !g_landscapeDialog && !g_landscapeNativeMenu && !g_landscapePage;
     if(g_presentedOpening) {
         const auto& card=g_landscapeOpening;auto r=card.rect;
         g_presentedOpeningRect=r;

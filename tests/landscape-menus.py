@@ -94,6 +94,10 @@ LandscapePresent(UiFont(),g_uiRects);assert(g_presentedOpening && g_presentedOpe
 testPressed=true;testMouse={300,336};g_landscapePointerHeld=false;UIFrameReset();
 assert(g_landscapePointerRegion==tflayout::Region::NativePage && UIHit(GetMousePosition()));
 assert(!UIClick({200,300,200,60}));UpdateDrawStarter(fresh,540,900);assert(fresh.starterAccepted && fresh.starterStep==kStWalk);
+reset();GameState field;field.starterAccepted=true;field.starterStep=kStGather;field.screen=Screen::Wilderness;
+g_landscapeWorld=true;g_landscapeDialog=false;g_landscapePage=false;g_presentedPage=false;g_landscapeMap=true;
+g_landscapeMapDest={796,92,148,148};g_landscapeMapSource={388,152,148,148};
+UpdateDrawStarter(field,540,900);LandscapePresent(UiFont(),g_uiRects);assert(g_presentedMap && g_presentedOpening); // minimap must not hide the objective
 std::cout<<"PASS opening: explicit start, movement, gathering, real kills/loot, missing-corpse recovery, backpack, return, saved progress, one-time reward and native input ownership"<<std::endl;
 
 }
