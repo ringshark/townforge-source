@@ -192,7 +192,7 @@ static void LandscapePanelInput() {
     }
     if(dragging && down)g_landscapeScroll=tflayout::Scroll((mouse.y-rail.y-30)/(rail.height-60)*tflayout::maxScroll);
     if(!down)dragging=false;
-    if(mouse.x>=tflayout::panelX && mouse.y>=tflayout::panelHeader)
+    if(CheckCollisionPointRec(mouse,rail))
         g_landscapeScroll=tflayout::Scroll(g_landscapeScroll-::GetMouseWheelMove()*48);
     held=down;
 }

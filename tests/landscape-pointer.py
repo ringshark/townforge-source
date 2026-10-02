@@ -81,7 +81,7 @@ down=false;LandscapePanelInput();
 raw={900,268};pressed=down=true;LandscapePanelInput();assert(near(g_landscapeScroll,tflayout::maxScroll*.5f));
 pressed=false;raw.y=430;LandscapePanelInput();assert(g_landscapeScroll>tflayout::maxScroll*.9f);
 down=false;LandscapePanelInput();
-raw={480,300};wheel=1;float before=g_landscapeScroll;LandscapePanelInput();assert(near(g_landscapeScroll,before-48));
+raw={900,300};wheel=1;float before=g_landscapeScroll;LandscapePanelInput();assert(near(g_landscapeScroll,before-48));
 assert(tflayout::Map({900,488},tflayout::Region::PanelChrome).x<0);
 } """
 with tempfile.TemporaryDirectory() as tmp:
