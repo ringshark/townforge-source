@@ -4,6 +4,7 @@
 int main(){
  using namespace tflayout;
  auto near=[](float a,float b){return std::fabs(a-b)<.01f;};
+ auto page=Map({830,490},Region::NativePage,360);assert(near(page.x,830)&&near(page.y,490));
  auto menu=Input({72,76},true,false);assert(near(menu.x,72)&&near(menu.y,76));
  auto spell=Input({687,432},true,false);assert(near(spell.x,267)&&near(spell.y,792));
  auto stick=Input({85,455},true,false);assert(near(stick.x,85)&&near(stick.y,815));

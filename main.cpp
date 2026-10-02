@@ -10437,21 +10437,23 @@ static void DrawHudLine(const char* text, int x, int y, int fs = 13, Color c = C
 // completely unchanged.
 static bool g_scrollDragging = false;
 static float g_scrollDragLastY = 0.0f;
+static Rectangle g_scrollOwner{};
 static float ScrollDelta(Rectangle area) {
     Vector2 mouse = GetMousePosition();
     bool overArea = CheckCollisionPointRec(mouse, area);
     float delta = overArea ? GetMouseWheelMove() * 24.0f : 0.0f;
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_scrollDragging = false;
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && overArea) {
         g_scrollDragging = true;
+        g_scrollOwner = area;
         g_scrollDragLastY = mouse.y;
-    } else if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && g_scrollDragging) {
-        // Finger moves up (mouse.y decreases) -> reveal content below -> scroll
-        // increases; matches the `scroll -= ScrollDelta(...)` sign convention every
-        // call site already uses for the wheel term.
-        delta += (mouse.y - g_scrollDragLastY);
+    } else if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && g_scrollDragging &&
+               area.x == g_scrollOwner.x && area.y == g_scrollOwner.y &&
+               area.width == g_scrollOwner.width && area.height == g_scrollOwner.height) {
+        // The viewport where the gesture began owns it until release, even
+        // when another list is drawn first or the finger crosses a column.
+        delta += mouse.y - g_scrollDragLastY;
         g_scrollDragLastY = mouse.y;
-    } else {
-        g_scrollDragging = false;
     }
     return delta;
 }
@@ -10655,12 +10657,12 @@ static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppre
     int slot = *s.hotbarPickerSlot;
     // Spellbook-style picker (2026-09-26): a gump listing every spell you know,
     // icon + name + cost, in the spell bar's look.
-    Rectangle overlay = { 20, 150, (float)screenW - 40, (float)screenH - 270 };
+    Rectangle overlay = g_landscapePage ? Rectangle{80,120,800,406}:Rectangle{20,150,(float)screenW-40,(float)screenH-270};
     DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, 0.35f));
     UODrawGump(overlay, kUoParchment);
     UODrawTitle(overlay, TextFormat("Spell for slot %d", slot + 1));
     if (!suppressPress && UOCloseButton(overlay)) { s.hotbarPickerSlot.reset(); return; }
-    float y = overlay.y + 26;
+    float y = overlay.y + 40;
     // suppressPress: the tap that opened the picker is still "pressed" this frame -
     // ignore it here so it can't instantly fire a picker button under the finger.
     std::vector<int> known;
@@ -10674,13 +10676,20 @@ static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppre
             if ((sp.necro || sp.chiv || sp.type == SpellType::Offensive || sp.type == SpellType::Utility) && SpellSkill(s, sp) >= sp.minSkill)
                 known.push_back((int)i);
         }
-    float listBottom = overlay.y + overlay.height - 52;
+    float listBottom = overlay.y + overlay.height - 64;
+    static float scroll=0;static int previousSlot=-1;
+    if(previousSlot!=slot){scroll=0;previousSlot=slot;}
+    int cols=g_landscapePage ? 2:1;float rowH=g_landscapePage ? 58.f:48.f;
+    Rectangle area={overlay.x+16,y,overlay.width-32,listBottom-y};
+    scroll=std::clamp(scroll-ScrollDelta(area),0.f,std::max(0.f,((known.size()+cols-1)/cols)*rowH-area.height));
+    UIBeginScissorMode((int)area.x,(int)area.y,(int)area.width,(int)area.height);
+    int entry=0;
     if (known.empty()) DrawUIText("No spells known yet - practice below to learn some.", (int)overlay.x + 20, (int)y + 8, 13, Color{ 90, 60, 34, 255 });
     Vector2 m = GetMousePosition();
     for (int idx : known) {
-        if (y + 44 > listBottom) break; // a long known-spell list just truncates
+        float ry=area.y+(entry/cols)*rowH-scroll;float rx=area.x+(entry%cols)*(area.width/cols);++entry;
         const Spell& sp = kSpells[idx];
-        Rectangle row = { overlay.x + 16, y, overlay.width - 32, 42 };
+        Rectangle row = {rx,ry,area.width/cols-8,rowH-6};
         bool hover = CheckCollisionPointRec(m, row);
         bool current = s.combatHotbar[slot] == idx;
         DrawRectangleRec(row, Fade(current ? Color{ 255, 214, 110, 255 } : Color{ 90, 60, 34, 255 }, hover ? 0.28f : (current ? 0.22f : 0.10f)));
@@ -10702,13 +10711,13 @@ static void DrawHotbarPicker(GameState& s, int screenW, int screenH, bool suppre
             PlaySfx(SfxId::Click);
             s.combatHotbar[slot] = idx;
             s.hotbarPickerSlot.reset();
-            return;
+            UIEndScissorMode();return;
         }
-        y += 48;
     }
-    float by = overlay.y + overlay.height - 44;
-    if (!suppressPress && UOButton({ overlay.x + 16, by, 160, 30 }, "Clear slot")) { s.combatHotbar[slot] = -1; s.hotbarPickerSlot.reset(); return; }
-    if (!suppressPress && UOButton({ overlay.x + overlay.width - 176, by, 160, 30 }, "Cancel")) s.hotbarPickerSlot.reset();
+    UIEndScissorMode();
+    float by = overlay.y + overlay.height - 56;
+    if (!suppressPress && UOButton({ overlay.x + 16, by, 160, 44 }, "Clear slot")) { s.combatHotbar[slot] = -1; s.hotbarPickerSlot.reset(); return; }
+    if (!suppressPress && UOButton({ overlay.x + overlay.width - 176, by, 160, 44 }, "Cancel")) s.hotbarPickerSlot.reset();
 }
 
 // Persistent HP/Mana readout for live combat (2026-09-22) - Wilderness has no player
@@ -28162,7 +28171,7 @@ static void Journal(GameState& s, const std::string& text) {
 // ---------------------------------------------------------------------
 // UO-style travel (2026-09-25): town marking + Recall + leave-dungeon.
 // ---------------------------------------------------------------------
-static Rectangle RecallPickerRect() { return { 70, 190, 400, 340 }; }
+static Rectangle RecallPickerRect() { return g_landscapePage ? Rectangle{250,154,460,372}:Rectangle{70,190,400,340}; }
 
 // The actual town arrival - mirrors walking through a town gate (same spawn,
 // same 3D-view carry, escort cancelled). Engagement state never crosses zones.
@@ -31126,16 +31135,17 @@ static void DrawGuideOverlay(GameState& s) {
 
 // Guide tab: the same pages, browsable anytime.
 static void DrawGuideScreen(GameState& s, int screenW) {
-    float cx = 30.0f, cw = (float)screenW - 60.0f, cy = 130.0f;
+    float cx = 30.0f, cw = g_landscapePage ? 650.f:(float)screenW - 60.0f, cy = 130.0f;
     DrawGuidePageContent(s, cx, cy, cw);
     int page = s.guidePage;
-    float btnY = 640.0f;
+    float btnY = g_landscapePage ? 350.f:640.0f;
+    if(g_landscapePage)cx=730.f,cw=200.f;
     if (page > 0 && Button({ cx, btnY, 140, 56 }, "Back", true)) s.guidePage--;
-    if (page < kGuidePageCount - 1 && Button({ cx + cw - 140, btnY, 140, 56 }, "Next", true)) s.guidePage++;
-    DrawUIText("This is the same walkthrough from your first visit.", (int)cx, (int)btnY + 70, 13,
+    if (page < kGuidePageCount - 1 && Button({ g_landscapePage ? cx:cx + cw - 140, g_landscapePage ? btnY+66:btnY, 140, 56 }, "Next", true)) s.guidePage++;
+    DrawUIText(g_landscapePage ? "Swipe pages with Next / Back":"This is the same walkthrough from your first visit.", (int)cx, (int)btnY + (g_landscapePage ? 140:70), g_landscapePage ? 11:13,
                Fade(kColorText, 0.7f));
 #ifdef __EMSCRIPTEN__
-    if (Button({ cx, btnY + 100, cw, 48 }, "Open the player wiki (full guide)", true)) JS_OpenWiki(); // (2026-09-27)
+    if (Button({ cx, g_landscapePage ? 180.f:btnY + 100, cw, 48 }, "Open the player wiki (full guide)", true)) JS_OpenWiki(); // (2026-09-27)
 #endif
 }
 
@@ -32745,6 +32755,7 @@ static float g_resetArmedTimer = 0.0f; // >0 while the Reset button is armed, wa
 static bool g_warOpen = false;         // the War Week screen (over the House screen)
 static int g_guildTab = 0; // the Guild screen's tab: 0 Overview, 1 Hall, 2 Research, 3 Help, 4 Shop, 5 Wars, 6 Members, 7 Warband (2026-09-29)
 static bool g_tmapOpen = false;        // the Treasure maps screen (over the House screen, 2026-09-28)
+static bool g_settleOpen = false;
 static bool g_optOpen = false;         // the Options screen (over the House screen, 2026-09-28)
 static void OpenWarWeek(GameState& s); // (2026-09-27) defined with the Guildstone
 // Tap to walk (2026-09-27): a pulsing gold ring on the ground where you're headed.
@@ -32857,7 +32868,7 @@ static void MenuGoScreen(GameState& s, Screen t) {
     g_pdTryOn.reset();
     if (t == Screen::Craft) GuardZoneConfiscateIfMurderer(s, t);
     s.screen = t;
-    if (t == Screen::House) { g_warOpen = false; g_tmapOpen = false; g_optOpen = false; g_questOpen = false; }
+    if (t == Screen::House) { g_settleOpen = false; g_warOpen = false; g_tmapOpen = false; g_optOpen = false; g_questOpen = false; }
     int g = MenuGroupOf(t);
     if (g >= 0 && g < 3 && MenuGroupOf(s.screen) == g) g_menuGroupLast[g] = s.screen;
 }
@@ -32976,9 +32987,59 @@ static void DrawLandscapeMainMenu(GameState& s,bool& open,bool inDungeon) {
     if(!enabled)DrawUIText("Finish combat to open character and activity pages.",28,510,13,Color{230,183,119,255});
     EndTextureMode();g_landscapeNativeMenuDrawing=false;
 }
+static const char* LandscapePageTitle(const GameState& s) {
+    switch(s.screen){
+        case Screen::Character:return g_characterPack ? "Backpack":"Character & equipment";
+        case Screen::Craft:return "Crafting";case Screen::Magic:return "Spellbook";
+        case Screen::Skills:return "Skills";case Screen::Pets:return "Pets & taming";
+        case Screen::Bank:return "Bank";case Screen::Guide:return "Help";
+        case Screen::Provisioner:return "Provisioner";case Screen::FurTrader:return "Fur trader";
+        case Screen::MinersGuild:return "Miners' Guild";case Screen::Refuge:return "Outlaw refuge";
+        case Screen::House:return g_optOpen ? "Settings":g_questOpen ? "Journal":g_warOpen ? "Guild":g_tmapOpen ? "Treasure maps":g_settleOpen ? "Settlement":"Home";
+        default:return "Town Forge";
+    }
+}
+static void DrawLandscapePageHeader(GameState& s,bool& open) {
+    DrawRectangle(0,0,960,110,Color{16,26,33,255});
+    DrawLine(20,109,940,109,Color{148,118,74,255});
+    DrawUIText(LandscapePageTitle(s),160,22,24,Color{243,225,192,255});
+    DrawUIText(TextFormat("Gold %d   Bank %d",s.gold,s.bankGold),160,53,13,Color{170,187,194,255});
+    if(Button({20,20,112,48},"MENU",true))open=true;
+    if(Button({804,20,136,48},"Resume",true))s.screen=g_playScreen;
+    if(s.screen==Screen::House && g_optOpen) {
+#ifdef __EMSCRIPTEN__
+        if(Button({524,20,126,44},"Cloud save",JS_CloudState()>0))JS_CloudOpen();
+#endif
+        bool armed=g_resetArmedTimer>0;
+        if(Button({660,20,126,44},armed ? "Confirm reset":"Reset",!s.combat && !DenFighting())) {
+            if(armed){ResetGame(s);g_resetArmedTimer=0;
+#ifdef __EMSCRIPTEN__
+                JS_CloudOnReset();
+#endif
+            }else g_resetArmedTimer=3;
+        }
+    }
+
+    struct Tab{const char* name;Screen screen;int view;};std::vector<Tab> tabs;
+    if(MenuGroupOf(s.screen)==0)tabs={{"Gear",Screen::Character,0},{"Backpack",Screen::Character,1},{"Skills",Screen::Skills,0},{"Spells",Screen::Magic,0},{"Pets",Screen::Pets,0}};
+    else if(s.screen==Screen::House || s.screen==Screen::Bank)tabs={{"Home",Screen::House,0},{"Bank",Screen::Bank,0},{"Guild",Screen::House,1},{"Journal",Screen::House,2},{"Settings",Screen::House,3}};
+    else if(s.screen==Screen::Guide)tabs={{"Help",Screen::Guide,0},{"Settings",Screen::House,3}};
+    float w=tabs.empty()?0:std::min(148.f,(780.f-8*(tabs.size()-1))/tabs.size());
+    for(size_t i=0;i<tabs.size();i++){
+        const auto& t=tabs[i];bool active=s.screen==t.screen;
+        if(t.screen==Screen::Character)active=active && g_characterPack==(t.view==1);
+        if(t.screen==Screen::House)active=active && (t.view==1 ? g_warOpen:t.view==2 ? g_questOpen:t.view==3 ? g_optOpen:!g_warOpen && !g_questOpen && !g_optOpen && !g_settleOpen && !g_tmapOpen);
+        if(MenuGroupTab({160+i*(w+8),66,w,44},t.name,active,true)){
+            MenuGoScreen(s,t.screen);s.exploreMenuOpen=false;g_settleOpen=false;
+            if(t.screen==Screen::Character){g_characterPack=t.view==1;g_pdSel=-1;}
+            if(t.screen==Screen::House){if(t.view==1){OpenWarWeek(s);g_guildTab=0;}if(t.view==2){g_questOpen=true;g_questTab=0;}if(t.view==3)g_optOpen=true;}
+        }
+    }
+}
 static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
     g_uiShieldBypass = true; // this panel's own buttons sit inside the shield
     if(g_landscapeActive && open){DrawLandscapeMainMenu(s,open,inDungeon);g_uiShieldBypass=false;return;}
+    if(g_landscapePage){DrawLandscapePageHeader(s,open);g_uiShieldBypass=false;return;}
     if (IsPlayScreen(s.screen) && s.screen!=Screen::Blackwake) { // HP and mana (2026-09-28, #58): down beside the hotbar, where your eyes are in a fight
         const float px = 8, py = g_landscapeWorld && !open ? 610.0f:kViewport.y + kViewport.height - 88, pw = 152, ph = 78;
         UIRegister({ px, py, pw, ph }); // a tap on it never walks
@@ -33927,12 +33988,12 @@ static void DrawPillTabs(const std::vector<std::string>& labels, int* selected, 
     float tabX = x;
     for (size_t i = 0; i < labels.size(); i++) {
         bool sel = *selected == (int)i;
-        float w = (float)MeasureUIText(labels[i].c_str(), 12) + 20;
+        float w = g_landscapePage ? 156.f:(float)MeasureUIText(labels[i].c_str(),12)+20;
         Rectangle r = { tabX, y, w, height };
         DrawRectangleRounded(r, 0.3f, 6, sel ? kColorSlate : Fade(GRAY, 0.3f));
         DrawRectangleRoundedLines(r, 0.3f, 6, Fade(BLACK, 0.4f));
         int tw = MeasureUIText(labels[i].c_str(), 12);
-        DrawUIText(labels[i].c_str(), (int)(r.x + (r.width - tw) / 2), (int)(r.y + 6), 12, BLACK);
+        DrawUIText(labels[i].c_str(), (int)(r.x + (r.width - tw) / 2), (int)(r.y + (g_landscapePage ? 14:6)), g_landscapePage ? 14:12, BLACK);
         if (UIClick(r)) *selected = (int)i;
         tabX += w + 8;
     }
@@ -33943,7 +34004,17 @@ static void DrawPillTabs(const std::vector<std::string>& labels, int* selected, 
 // take a master's hand: Tailoring 80+.
 static int g_dyeSel = -1;  // 0..6 worn clothing slot (kPdClothSlots order), 100+i backpack item
 static int g_dyeHue = 3;   // index into kDyeHues, -1 = strip back to the natural cloth
+// Content scroll uses the page's own viewport. Destruction also handles early returns.
+struct MenuScrollScope {
+    bool active;float top,offset;float& height;
+    MenuScrollScope(int& y,int screenW,int screenH,float& scroll,float& content):active(g_landscapePage),top((float)y),offset(0),height(content){
+        if(active){Rectangle area={12,top,(float)screenW-24,(float)screenH-top-12};scroll=std::clamp(scroll-ScrollDelta(area),0.f,std::max(0.f,content-area.height));offset=scroll;y-=(int)scroll;UIBeginScissorMode(12,(int)top,screenW-24,(int)area.height);}
+    }
+    void Finish(int y){if(active)height=y+offset-top+80;}
+    ~MenuScrollScope(){if(active)UIEndScissorMode();}
+};
 static void DrawDyeTub(GameState& s, int y, int screenW, int screenH) {
+    static float scroll=0,content=1200;MenuScrollScope scope(y,screenW,screenH,scroll,content);
     float tailoring = s.buildingSkill[2];
     DrawInfoLine(TextFormat("Gold: %d    Tailoring: %.1f", s.gold, tailoring), 20, y, 13, kColorAccent);
     y += 22;
@@ -34016,6 +34087,7 @@ static void DrawDyeTub(GameState& s, int y, int screenW, int screenH) {
     }
     DrawUIText(s.rareDyeCharges > 0 ? TextFormat("* rare hues need Tailoring 80+ (or a rare dye: you have %d)", s.rareDyeCharges)
                                     : "* rare hues need Tailoring 80+ (or a rare dye from Commissions)", 20, screenH - 36, 12, Fade(kColorText, 0.8f));
+    scope.Finish(y);
 }
 
 // ---- Commissions (2026-09-27) ----
@@ -34076,6 +34148,7 @@ static int FillCommission(GameState& s, CommissionDeed& d) {
     return added;
 }
 static void DrawCommissions(GameState& s, int y, int screenW, int screenH) {
+    static float scroll=0,content=1200;MenuScrollScope scope(y,screenW,screenH,scroll,content);
     const int b = s.craftBuildingTab;
     const BuildingDef& bd = kCraftBuildings[(size_t)b];
     DrawInfoLine(TextFormat("Gold: %d    Marks: %d    Skill: %.1f", s.gold, s.commissionMarks, s.buildingSkill[b]), 20, y, 13, kColorAccent);
@@ -34157,6 +34230,7 @@ static void DrawCommissions(GameState& s, int y, int screenW, int screenH) {
     y += 44;
     DrawUIText("Craft (or buy) the pieces, hand them in, turn in the finished order.", 20, y, 11, Fade(kColorText, 0.8f));
     (void)screenH;
+    scope.Finish(y);
 }
 
 static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
@@ -34164,7 +34238,7 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
     DrawInteriorBackdrop(g_assets.craftWallThemedOk[s.craftBuildingTab] ? &g_assets.craftWallThemed[s.craftBuildingTab] : nullptr,
         g_assets.craftFloorThemedOk[s.craftBuildingTab] ? &g_assets.craftFloorThemed[s.craftBuildingTab] : nullptr,screenW,screenH,110);
     static const char* workshops[]={"Smith","Carpenter","Tailor","Alchemy"};
-    for(int i=0;i<4;++i) if(MenuGroupTab({20+i*127.0f,116,119,44},workshops[i],s.craftBuildingTab==i,true)) {
+    for(int i=0;i<4;++i) if(MenuGroupTab({20+i*(g_landscapePage ? 230.f:127.f),116,g_landscapePage ? 222.f:119.f,44},workshops[i],s.craftBuildingTab==i,true)) {
         s.craftBuildingTab=i; s.craftScroll=0;
         if(s.craftModeTab==3 && i!=2) s.craftModeTab=0;
     }
@@ -34172,10 +34246,12 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
     bool alchemy=s.craftBuildingTab==3;
     struct Mode {const char* name; int id;};
     const Mode modes[]={{"Craft",0},{"Buy",1},{"Orders",2},{"Sell",4},{"Recycle",5},{"Dye",3}};
-    for(int i=0;i<6;++i) if(MenuGroupTab({20+(i%3)*170.0f,172+(i/3)*52.0f,160,44},i==5 && s.craftBuildingTab!=2 ? "Dye (Tailor)" : modes[i].name,s.craftModeTab==modes[i].id,i!=5 || s.craftBuildingTab==2)) {
+    for(int i=0;i<6;++i) if(MenuGroupTab({20+(g_landscapePage ? i*153.33f:(i%3)*170.f),172+(g_landscapePage ? 0.f:(i/3)*52.f),g_landscapePage ? 145.f:160.f,44},i==5 && s.craftBuildingTab!=2 ? "Dye (Tailor)" : modes[i].name,s.craftModeTab==modes[i].id,i!=5 || s.craftBuildingTab==2)) {
         s.craftModeTab=modes[i].id; s.craftScroll=0; s.backpackScroll=0;
     }
-    int top=286;
+    int top=g_landscapePage ? 230:286;
+    const int cols=g_landscapePage ? 2:1;
+    const float cardW=g_landscapePage ? 454.f:500.f;
     if(s.craftModeTab==3 && s.craftBuildingTab==2) {DrawDyeTub(s,top,screenW,screenH);return;}
     if(s.craftModeTab==2) {DrawCommissions(s,top,screenW,screenH);return;}
     if(s.craftModeTab==4 || s.craftModeTab==5) {
@@ -34186,20 +34262,20 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
         int count=0; for(const Item& it:s.backpack) if(it.type==ItemType::Weapon || it.type==ItemType::Armor) ++count;
         int height=screenH-top-20;
         s.backpackScroll-=ScrollDelta({20,(float)top,(float)screenW-40,(float)height});
-        s.backpackScroll=std::clamp(s.backpackScroll,0.0f,std::max(0.0f,count*88.0f-height));
+        s.backpackScroll=std::clamp(s.backpackScroll,0.0f,std::max(0.0f,((count+cols-1)/cols)*88.0f-height));
         UIBeginScissorMode(20,top,screenW-40,height);
         if(!count) DrawUIText("No spare armor or weapons in your backpack.",24,top+12,14,kColorText);
         int row=0;
         for(size_t i=0;i<s.backpack.size();++i) {
             Item item=s.backpack[i]; if(item.type!=ItemType::Weapon && item.type!=ItemType::Armor) continue;
-            float y=top+row++*88.0f-s.backpackScroll; if(y<top-88 || y>top+height) continue;
-            DrawRectangleRounded({20,y,500,80},.1f,4,Fade(kColorPageBg,.94f));
-            DrawItemIcon(item,30,y+16,42); DrawUIText(item.name.c_str(),84,(int)y+10,14,kColorHeading);
+            float rx=20+(row%cols)*(cardW+12);float y=top+(row/cols)*88.f-s.backpackScroll;++row; if(y<top-88 || y>top+height) continue;
+            DrawRectangleRounded({rx,y,cardW,80},.1f,4,Fade(kColorPageBg,.94f));
+            DrawItemIcon(item,rx+10,y+16,42); DrawUIText(item.name.c_str(),(int)rx+64,(int)y+10,14,kColorHeading);
             int value=std::max(1,(int)std::round(item.power*2.0f))+80*(item.bStr+item.bDex+item.bInt);
             GearRecovery recovery=RecoveryFor(item);
             std::string detail=recycle ? (recovery.amount>0 ? TextFormat("Returns %d %s",recovery.amount,RecoveryMaterial(recovery.resource)) : "No recoverable recipe materials") : TextFormat("Receive %d gold",value);
-            DrawUIText(detail.c_str(),84,(int)y+40,12,kColorText);
-            if(Button({390,y+18,116,44},recycle ? "Recycle" : "Sell",!recycle || recovery.amount>0)) {
+            DrawUIText(detail.c_str(),(int)rx+64,(int)y+40,12,kColorText);
+            if(Button({rx+cardW-130,y+18,116,44},recycle ? "Recycle" : "Sell",!recycle || recovery.amount>0)) {
                 if(recycle) RecycleFromBackpack(s,(int)i); else SellFromBackpack(s,(int)i); break;
             }
         }
@@ -34221,38 +34297,38 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
         if(Button({276,(float)top+26,244,44},pouch ? "Show recipes" : "Potion pouch",true)) {pouch=!pouch;s.craftScroll=0;}
         if(pouch) {
             top+=82; int height=screenH-top-20;
-            s.craftScroll-=ScrollDelta({20,(float)top,500,(float)height});
-            s.craftScroll=std::clamp(s.craftScroll,0.0f,std::max(0.0f,s.potions.size()*72.0f-height));
-            UIBeginScissorMode(20,top,500,height);
+            s.craftScroll-=ScrollDelta({20,(float)top,(float)screenW-40,(float)height});
+            s.craftScroll=std::clamp(s.craftScroll,0.0f,std::max(0.0f,((s.potions.size()+cols-1)/cols)*72.f-height));
+            UIBeginScissorMode(20,top,screenW-40,height);
             for(size_t i=0;i<s.potions.size();++i) {
-                const PotionStack& p=s.potions[i]; float y=top+i*72.0f-s.craftScroll;
-                DrawUIText(TextFormat("%s x%d",p.name.c_str(),p.count),28,(int)y+16,14,kColorText);
-                if(p.effect=="poison") {if(Button({390,y+8,116,44},"Poison weapon",true)) {PoisonWeapon(s,(int)i);break;}}
-                else if(p.effect=="damage") DrawUIText("Throw during combat",28,(int)y+36,12,kColorText);
-                else if(Button({390,y+8,116,44},"Drink",true)) {DrinkPotion(s,(int)i);break;}
+                const PotionStack& p=s.potions[i]; float rx=20+(i%cols)*(cardW+12);float y=top+(i/cols)*72.f-s.craftScroll;
+                DrawUIText(TextFormat("%s x%d",p.name.c_str(),p.count),(int)rx+8,(int)y+16,14,kColorText);
+                if(p.effect=="poison") {if(Button({rx+cardW-130,y+8,116,44},"Poison weapon",true)) {PoisonWeapon(s,(int)i);break;}}
+                else if(p.effect=="damage") DrawUIText("Throw during combat",(int)rx+8,(int)y+36,12,kColorText);
+                else if(Button({rx+cardW-130,y+8,116,44},"Drink",true)) {DrinkPotion(s,(int)i);break;}
             }
             UIEndScissorMode();return;
         }
     }
     top+=82; int height=screenH-top-20;
-    s.craftScroll-=ScrollDelta({20,(float)top,500,(float)height});
-    s.craftScroll=std::clamp(s.craftScroll,0.0f,std::max(0.0f,b.recipes.size()*112.0f-height));
-    UIBeginScissorMode(20,top,500,height);
+    s.craftScroll-=ScrollDelta({20,(float)top,(float)screenW-40,(float)height});
+    s.craftScroll=std::clamp(s.craftScroll,0.0f,std::max(0.0f,((b.recipes.size()+cols-1)/cols)*112.f-height));
+    UIBeginScissorMode(20,top,screenW-40,height);
     for(size_t i=0;i<b.recipes.size();++i) {
-        const Recipe& r=b.recipes[i]; float y=top+i*112.0f-s.craftScroll;
+        const Recipe& r=b.recipes[i]; float rx=20+(i%cols)*(cardW+12);float y=top+(i/cols)*112.f-s.craftScroll;
         if(y<top-112 || y>top+height) continue;
         bool skillOk=std::min(skill,(float)cap)>=r.reqSkill;
         bool room=alchemy || (int)s.backpack.size()<BackpackCap(s);
         int price=VendorPriceFor(r);
         bool enabled=buy ? CanAfford(s,price) && room : skillOk && have>=r.cost && room;
-        DrawRectangleRounded({20,y,500,104},.1f,4,Fade(kColorPageBg,.96f));
+        DrawRectangleRounded({rx,y,cardW,104},.1f,4,Fade(kColorPageBg,.96f));
         std::string recipeName=r.name;
-        if(MeasureUIText(recipeName.c_str(),16)>340) { while(!recipeName.empty() && MeasureUIText((recipeName+"...").c_str(),16)>340) recipeName.pop_back(); recipeName+="..."; }
-        DrawUIText(recipeName.c_str(),32,(int)y+12,16,kColorHeading);
+        if(MeasureUIText(recipeName.c_str(),16)>cardW-160) { while(!recipeName.empty() && MeasureUIText((recipeName+"...").c_str(),16)>cardW-160) recipeName.pop_back(); recipeName+="..."; }
+        DrawUIText(recipeName.c_str(),(int)rx+12,(int)y+12,16,kColorHeading);
         const char* stat=alchemy ? r.category.c_str() : r.type==ItemType::Armor ? "Defense" : r.type==ItemType::Clothing ? r.slot.c_str() : "Weapon power";
-        DrawUIText(r.type==ItemType::Clothing ? stat : TextFormat("%s %d",stat,r.power),32,(int)y+36,12,kColorText);
+        DrawUIText(r.type==ItemType::Clothing ? stat : TextFormat("%s %d",stat,r.power),(int)rx+12,(int)y+36,12,kColorText);
         std::string materials=buy ? TextFormat("Price: %d gold / Standard quality",price) : TextFormat("Materials: %d %s / Skill required: %d",r.cost,material,r.reqSkill);
-        DrawUIText(materials.c_str(),32,(int)y+60,12,kColorText);
+        DrawUIText(materials.c_str(),(int)rx+12,(int)y+60,12,kColorText);
         std::string reason;
         if(!room) reason="Backpack full: equip, sell or recycle spare gear.";
         else if(!buy && cap<r.reqSkill) reason=TextFormat("Upgrade this workshop: need a skill cap of %d.",r.reqSkill);
@@ -34260,8 +34336,8 @@ static void DrawCraftScreen(GameState& s, int screenW, int screenH) {
         else if(!buy && have<r.cost) reason=TextFormat("Need %d more %s.",r.cost-have,material);
         else if(buy && !enabled) reason="Not enough gold, including any bank fee.";
         else reason=buy ? "Ready to buy." : alchemy ? "Ready to brew." : "Ready to craft. Quality follows your skill.";
-        DrawUIText(reason.c_str(),32,(int)y+76,12,enabled ? kColorText : Color{160,55,35,255});
-        if(Button({390,y+12,116,44},buy ? "Buy" : alchemy ? "Brew" : "Craft",enabled)) {
+        DrawUIText(reason.c_str(),(int)rx+12,(int)y+76,12,enabled ? kColorText : Color{160,55,35,255});
+        if(Button({rx+cardW-130,y+12,116,44},buy ? "Buy" : alchemy ? "Brew" : "Craft",enabled)) {
             if(buy) {if(alchemy) TryBuyPremadePotion(s,(int)i);else TryBuyPremadeItem(s,s.craftBuildingTab,(int)i);}
             else if(alchemy) TryCraftPotion(s,(int)i); else TryCraftItem(s,s.craftBuildingTab,(int)i);
             break;
@@ -34302,7 +34378,7 @@ static void DrawThievesGuild(GameState& s, int screenW, int y) {
     if (!s.thievesGuild) {
         DrawInfoLine("\"Join us and our locks and pouches are yours to practise on.\"", 20, y, 12, kColorText);
         y += 30;
-        if (Button({ 20, (float)y, 220, 34 }, "Join the Guild (250g)", CanAfford(s, 250))) {
+        if (Button({ 20, (float)y, 220, g_landscapePage ? 44.f:34.f }, "Join the Guild (250g)", CanAfford(s, 250))) {
             PayGold(s, 250); s.thievesGuild = true;
             s.logLine = "The guildmaster nods. \"Welcome, friend. Touch nothing that isn't practice.\"";
             PlaySfx(SfxId::Coin);
@@ -34319,7 +34395,7 @@ static void DrawThievesGuild(GameState& s, int screenW, int y) {
     const float boxD[3] = { 0.0f, 30.0f, 60.0f };
     for (int k = 0; k < 3; k++) {
         float chance = std::clamp(55.0f + (EffectiveSkill(s, &GameState::lockpicking) - boxD[k]) * 1.2f, 5.0f, 97.0f);
-        Rectangle b = { 20.0f + k * ((screenW - 40) / 3.0f), (float)y, (screenW - 52) / 3.0f, 32 };
+        Rectangle b = { 20.0f + k * ((screenW - 40) / 3.0f), (float)y, (screenW - 52) / 3.0f, g_landscapePage ? 44.f:32.f };
         if (Button(b, TextFormat("%s %d%%", boxN[k], (int)chance), g_thiefCd <= 0.0f && s.lockpicking < kThiefPracticeCap)) {
             g_thiefCd = 1.2f;
             float g = SkillUseGain(s.lockpicking, chance / 100.0f, 0.6f, kThiefPracticeCap);
@@ -34329,12 +34405,12 @@ static void DrawThievesGuild(GameState& s, int screenW, int y) {
                         (g > 0 ? TextFormat(" (Lockpicking +%.1f)", g) : "");
         }
     }
-    y += 44;
+    y += g_landscapePage ? 56:44;
     // Snooping: the pouch-dummy with a bell on it
     skillRow("Snooping", s.snooping);
     {
         float chance = std::clamp(45.0f + EffectiveSkill(s, &GameState::snooping) * 0.6f, 5.0f, 97.0f);
-        if (Button({ 20, (float)y, (float)screenW - 40, 32 }, TextFormat("Lift the dummy's pouch without ringing its bell (%d%%)", (int)chance),
+        if (Button({ 20, (float)y, (float)screenW - 40, g_landscapePage ? 44.f:32.f }, TextFormat("Lift the dummy's pouch without ringing its bell (%d%%)", (int)chance),
                    g_thiefCd <= 0.0f && s.snooping < kThiefPracticeCap)) {
             g_thiefCd = 1.2f;
             float g = SkillUseGain(s.snooping, chance / 100.0f, 0.6f, kThiefPracticeCap);
@@ -34344,7 +34420,7 @@ static void DrawThievesGuild(GameState& s, int screenW, int y) {
                         (g > 0 ? TextFormat(" (Snooping +%.1f)", g) : "");
         }
     }
-    y += 44;
+    y += g_landscapePage ? 56:44;
     DrawInfoLine("Practice teaches up to 30. Past that, only real locks and pockets will do.", 20, y, 12, Fade(kColorText, 0.8f));
 }
 static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
@@ -34358,62 +34434,84 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
 
     {
         int mode = s.provisionerTab;
-        DrawPillTabs({ "Buy", "Sell", "Back room" }, &mode, 20, (float)y, 26);
+        DrawPillTabs({ "Buy", "Sell", "Back room" }, &mode, 20, (float)y, g_landscapePage ? 44.f:26.f);
         s.provisionerTab = mode;
     }
-    y += 34;
+    y += g_landscapePage ? 56:34;
     if (s.provisionerTab == 2) { DrawThievesGuild(s, screenW, y); return; } // (2026-09-28, #69)
 
+    if(g_landscapePage && s.provisionerTab==0) {
+        static float scroll=0;Rectangle area={20,204,920,322};
+        scroll=std::clamp(scroll-ScrollDelta(area),0.f,158.f);
+        UIBeginScissorMode(20,204,920,322);
+        auto card=[&](int n,const std::string& label,const std::string& action,bool enabled) {
+            float x=20+(n%2)*472.f,y=204+(n/2)*96.f-scroll;
+            UODrawGump({x,y,448,86},kUoParchment);
+            DrawUIText(label.c_str(),(int)x+12,(int)y+10,13,kColorText);
+            return Button({x+12,y+34,424,44},action,enabled);
+        };
+        if(card(0,TextFormat("Reagents: %d",s.reagents),"Buy 5 / 5 gold",CanAfford(s,5)))TryBuyReagents(s,5);
+        if(card(1,"Keep reagents stocked in every town",s.autoReagents ? "Auto-restock: ON":"Auto-restock: OFF",true))s.autoReagents=!s.autoReagents;
+        if(card(2,TextFormat("Bandages: %d",s.bandages),"Buy 5 / 40 gold",CanAfford(s,40)))TryBuyBandages(s,5,40);
+        if(card(3,"Heal potion",TextFormat("Buy 1 / %d gold",kProvisionerHealPotionCost),CanAfford(s,kProvisionerHealPotionCost)))TryBuyHealPotion(s);
+        if(card(4,"Cure potion","Buy 1 / 30 gold",CanAfford(s,30))){PayGold(s,30);auto it=std::find_if(s.potions.begin(),s.potions.end(),[](const PotionStack& p){return p.name=="Cure Potion";});if(it==s.potions.end())s.potions.push_back({"Cure Potion","cure",2,1});else it->count++;s.logLine="Bought a Cure Potion.";PlaySfx(SfxId::Buy);}
+        int next=s.instrument+1;
+        if(card(5,s.instrument>0 ? TextFormat("Instrument: %s",kInstrumentName[s.instrument]):"Instrument: none",next<=3 ? TextFormat("Buy %s / %d gold",kInstrumentName[next],kInstrumentCost[next]):"Best instrument owned",next<=3 && CanAfford(s,kInstrumentCost[next]))){PayGold(s,kInstrumentCost[next]);s.instrument=next;PlaySfx(SfxId::Buy);s.logLine="Bought an instrument.";}
+        const char* names[]={"Copper Ring / +2 Strength","Copper Bracelet / +2 Dexterity","Copper Amulet / +2 Intelligence"};
+        for(int k=0;k<3;k++)if(card(6+k,names[k],"Buy / 450 gold",CanAfford(s,450) && (int)s.backpack.size()<BackpackCap(s))){Item it=MakeJewel(s,k,2);it.bStr=k==0 ? 2:0;it.bDex=k==1 ? 2:0;it.bInt=k==2 ? 2:0;PayGold(s,450);s.backpack.push_back(it);s.logLine="Bought "+it.name+".";PlaySfx(SfxId::Buy);}
+        UIEndScissorMode();return;
+    }
     if (s.provisionerTab == 0) {
+        static float scroll=0,content=1100;MenuScrollScope scope(y,screenW,screenH,scroll,content);
         DrawInfoLine(s.bankGold > 0 ? TextFormat("Gold: %d   Bank: %d (short? the rest comes from your bank, +2%% fee)", s.gold, s.bankGold) : TextFormat("Gold: %d", s.gold), 20, y, 13, kColorAccent);
         y += 24;
 
         DrawInfoLine(TextFormat("Reagents: %d", s.reagents), 20, y + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Buy 5 (5g)", CanAfford(s, 5))) TryBuyReagents(s, 5);
-        y += 34;
+        if (Button({ (float)(screenW - 140), (float)y, 120, g_landscapePage ? 44.f:26.f }, "Buy 5 (5g)", CanAfford(s, 5))) TryBuyReagents(s, 5);
+        y += g_landscapePage ? 60:34;
         // (2026-09-27) never walk out dry again
-        if (Button({ 20, (float)y, (float)screenW - 40, 28 }, s.autoReagents ? "Auto-restock reagents: ON (tops up to 30 in any town)"
+        if (Button({ 20, (float)y, (float)screenW - 40, g_landscapePage ? 44.f:28.f }, s.autoReagents ? "Auto-restock reagents: ON (tops up to 30 in any town)"
                                                                                 : "Auto-restock reagents: OFF (tap to turn on)", true)) {
             s.autoReagents = !s.autoReagents;
             s.logLine = s.autoReagents ? "You'll be restocked to 30 reagents whenever you enter a town (1g each)." : "Auto-restock is off.";
         }
-        y += 36;
+        y += g_landscapePage ? 60:36;
 
         DrawInfoLine(TextFormat("Bandages: %d", s.bandages), 20, y + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Buy 5 (40g)", CanAfford(s, 40))) TryBuyBandages(s, 5, 40);
-        y += 34;
+        if (Button({ (float)(screenW - 140), (float)y, 120, g_landscapePage ? 44.f:26.f }, "Buy 5 (40g)", CanAfford(s, 40))) TryBuyBandages(s, 5, 40);
+        y += g_landscapePage ? 60:34;
 
         int healCount = 0;
         auto healStack = std::find_if(s.potions.begin(), s.potions.end(), [](const PotionStack& p) { return p.name == "Heal Potion"; });
         if (healStack != s.potions.end()) healCount = healStack->count;
         DrawInfoLine(TextFormat("Heal Potions: %d", healCount), 20, y + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, TextFormat("Buy 1 (%dg)", kProvisionerHealPotionCost),
+        if (Button({ (float)(screenW - 140), (float)y, 120, g_landscapePage ? 44.f:26.f }, TextFormat("Buy 1 (%dg)", kProvisionerHealPotionCost),
                     CanAfford(s, kProvisionerHealPotionCost))) TryBuyHealPotion(s);
-        y += 34;
+        y += g_landscapePage ? 60:34;
         { // (2026-09-29) cure potions: poison is real now
             auto cs = std::find_if(s.potions.begin(), s.potions.end(), [](const PotionStack& p) { return p.name == "Cure Potion"; });
             DrawInfoLine(TextFormat("Cure Potions: %d", cs != s.potions.end() ? cs->count : 0), 20, y + 6, 12, kColorText);
-            if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Buy 1 (30g)", CanAfford(s, 30))) {
+            if (Button({ (float)(screenW - 140), (float)y, 120, g_landscapePage ? 44.f:26.f }, "Buy 1 (30g)", CanAfford(s, 30))) {
                 PayGold(s, 30);
                 auto it = std::find_if(s.potions.begin(), s.potions.end(), [](const PotionStack& p) { return p.name == "Cure Potion"; });
                 if (it == s.potions.end()) s.potions.push_back({ "Cure Potion", "cure", 2, 1 }); else it->count++;
                 s.logLine = "Bought a Cure Potion.";
                 PlaySfx(SfxId::Buy);
             }
-            y += 34;
+            y += g_landscapePage ? 60:34;
         }
         { // Instruments (2026-09-28, #65): bard songs need one; a better one plays better
             int next = s.instrument + 1;
             DrawInfoLine(s.instrument > 0 ? TextFormat("Instrument: %s", kInstrumentName[s.instrument]) : "Instrument: none (bard songs need one)",
                          20, y + 6, 12, kColorText);
-            if (next <= 3 && Button({ (float)(screenW - 170), (float)y, 150, 26 }, TextFormat("%s (%dg)", kInstrumentName[next], kInstrumentCost[next]),
+            if (next <= 3 && Button({ (float)(screenW - 170), (float)y, 150, g_landscapePage ? 44.f:26.f }, TextFormat("%s (%dg)", kInstrumentName[next], kInstrumentCost[next]),
                                     CanAfford(s, kInstrumentCost[next]))) {
                 PayGold(s, kInstrumentCost[next]); s.instrument = next;
                 PlaySfx(next == 3 ? SfxId::Harp : next == 2 ? SfxId::Lute : SfxId::Drum);
                 s.logLine = std::string("You buy a ") + kInstrumentName[next] + (next == 1 ? " - Peacemaking and Provocation can now be played." : " - your songs will ring truer.");
             }
         }
-        y += 44;
+        y += g_landscapePage ? 60:44;
         // Jewelry (2026-09-27): plain copper pieces; better ones are won, not bought.
         DrawInfoLine("Jewelry - raises a stat past 100 while worn", 20, y, 13, kColorAccent);
         y += 24;
@@ -34422,16 +34520,16 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
         for (int k = 0; k < 3; k++) {
             DrawInfoLine(jn[k], 20, y + 6, 12, kColorText);
             bool room = (int)s.backpack.size() < BackpackCap(s);
-            if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, TextFormat("Buy (%dg)", jewelCost), CanAfford(s, jewelCost) && room)) {
+            if (Button({ (float)(screenW - 140), (float)y, 120, g_landscapePage ? 44.f:26.f }, TextFormat("Buy (%dg)", jewelCost), CanAfford(s, jewelCost) && room)) {
                 Item it = MakeJewel(s, k, 2);
                 it.bStr = k == 0 ? 2 : 0; it.bDex = k == 1 ? 2 : 0; it.bInt = k == 2 ? 2 : 0; // exactly as labelled
                 PayGold(s, jewelCost); s.backpack.push_back(it);
                 s.logLine = "You buy a " + it.name + ". Wear it on your paperdoll's Jewels page.";
                 PlaySfx(SfxId::Buy);
             }
-            y += 34;
+            y += g_landscapePage ? 60:34;
         }
-        return;
+        scope.Finish(y);return;
     }
 
     // --- Sell tab: same backpack-list-with-Sell-button block as DrawCraftScreen ---
@@ -34442,7 +34540,7 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
     int backpackHeight = screenH - backpackTop - 40;
     Rectangle backpackArea = { 0, (float)backpackTop, (float)screenW, (float)backpackHeight };
     s.backpackScroll -= ScrollDelta(backpackArea);
-    float maxBackpackScroll = std::max(0.0f, (float)s.backpack.size() * 28.0f - backpackHeight);
+    float maxBackpackScroll = std::max(0.0f, (float)s.backpack.size() * (g_landscapePage ? 64.f:28.f) - backpackHeight);
     s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, maxBackpackScroll);
 
     UIBeginScissorMode(0, backpackTop, screenW, backpackHeight);
@@ -34451,12 +34549,12 @@ static void DrawProvisionerScreen(GameState& s, int screenW, int screenH) {
     }
     for (size_t i = 0; i < s.backpack.size(); i++) {
         const Item& item = s.backpack[i];
-        float rowY = backpackTop + (float)i * 28 - s.backpackScroll;
+        float rowY = backpackTop + (float)i * (g_landscapePage ? 64.f:28.f) - s.backpackScroll;
         if (rowY < backpackTop - 28 || rowY > backpackTop + backpackHeight) continue;
         DrawItemIcon(item, 20, rowY + 1, 20);
         DrawUIText(item.name.c_str(), 44, (int)rowY + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 180), rowY, 80, 22 }, "Equip", true)) { EquipFromBackpack(s, (int)i); break; }
-        if (Button({ (float)(screenW - 90), rowY, 70, 22 }, "Sell", true)) SellFromBackpack(s, (int)i);
+        if (Button({ (float)(screenW - 180), rowY, 80, g_landscapePage ? 44.f:22.f }, "Equip", true)) { EquipFromBackpack(s, (int)i); break; }
+        if (Button({ (float)(screenW - 90), rowY, 70, g_landscapePage ? 44.f:22.f }, "Sell", true)) {SellFromBackpack(s,(int)i);break;}
     }
     UIEndScissorMode();
 }
@@ -34476,24 +34574,25 @@ static void DrawFurTraderScreen(GameState& s, int screenW, int screenH) {
 
     {
         int mode = s.furTraderTab;
-        DrawPillTabs({ "Buy", "Sell" }, &mode, 20, (float)y, 26);
+        DrawPillTabs({ "Buy", "Sell" }, &mode, 20, (float)y, g_landscapePage ? 44.f:26.f);
         s.furTraderTab = mode;
     }
-    y += 34;
+    y += g_landscapePage ? 56:34;
 
     if (s.furTraderTab == 0) {
+        static float scroll=0,content=1100;MenuScrollScope scope(y,screenW,screenH,scroll,content);
         DrawInfoLine(s.bankGold > 0 ? TextFormat("Gold: %d   Bank: %d (short? the rest comes from your bank, +2%% fee)", s.gold, s.bankGold) : TextFormat("Gold: %d", s.gold), 20, y, 13, kColorAccent);
         y += 24;
         for (const FurGear& gear : kFurTraderGear) {
             DrawInfoLine(TextFormat("%s (power %d, %s)", gear.name, gear.power, gear.slot), 20, y + 6, 12, kColorText);
-            if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, TextFormat("Buy 1 (%dg)", gear.price),
+            if (Button({ (float)(screenW - 140), (float)y, 120, g_landscapePage ? 44.f:26.f }, TextFormat("Buy 1 (%dg)", gear.price),
                         CanAfford(s, gear.price))) TryBuyFurGear(s, gear);
-            y += 34;
+            y += g_landscapePage ? 60:34;
         }
         DrawInfoLine(TextFormat("Furs: %d", s.furs), 20, y + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 140), (float)y, 120, 26 },
+        if (Button({ (float)(screenW - 140), (float)y, 120, g_landscapePage ? 44.f:26.f },
                     TextFormat("Sell all (%dg)", s.furs * 15), s.furs > 0)) TrySellFurs(s);
-        return;
+        scope.Finish(y);return;
     }
 
     // --- Sell tab: same backpack-list-with-Sell-button block as DrawCraftScreen ---
@@ -34504,7 +34603,7 @@ static void DrawFurTraderScreen(GameState& s, int screenW, int screenH) {
     int backpackHeight = screenH - backpackTop - 40;
     Rectangle backpackArea = { 0, (float)backpackTop, (float)screenW, (float)backpackHeight };
     s.backpackScroll -= ScrollDelta(backpackArea);
-    float maxBackpackScroll = std::max(0.0f, (float)s.backpack.size() * 28.0f - backpackHeight);
+    float maxBackpackScroll = std::max(0.0f, (float)s.backpack.size() * (g_landscapePage ? 64.f:28.f) - backpackHeight);
     s.backpackScroll = std::clamp(s.backpackScroll, 0.0f, maxBackpackScroll);
 
     UIBeginScissorMode(0, backpackTop, screenW, backpackHeight);
@@ -34513,12 +34612,12 @@ static void DrawFurTraderScreen(GameState& s, int screenW, int screenH) {
     }
     for (size_t i = 0; i < s.backpack.size(); i++) {
         const Item& item = s.backpack[i];
-        float rowY = backpackTop + (float)i * 28 - s.backpackScroll;
+        float rowY = backpackTop + (float)i * (g_landscapePage ? 64.f:28.f) - s.backpackScroll;
         if (rowY < backpackTop - 28 || rowY > backpackTop + backpackHeight) continue;
         DrawItemIcon(item, 20, rowY + 1, 20);
         DrawUIText(item.name.c_str(), 44, (int)rowY + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 180), rowY, 80, 22 }, "Equip", true)) { EquipFromBackpack(s, (int)i); break; }
-        if (Button({ (float)(screenW - 90), rowY, 70, 22 }, "Sell", true)) SellFromBackpack(s, (int)i);
+        if (Button({ (float)(screenW - 180), rowY, 80, g_landscapePage ? 44.f:22.f }, "Equip", true)) { EquipFromBackpack(s, (int)i); break; }
+        if (Button({ (float)(screenW - 90), rowY, 70, g_landscapePage ? 44.f:22.f }, "Sell", true)) {SellFromBackpack(s,(int)i);break;}
     }
     UIEndScissorMode();
 }
@@ -34563,29 +34662,30 @@ static void DrawMinersGuildScreen(GameState& s, int screenW, int screenH) {
 
     {
         int mode = s.minersGuildTab;
-        DrawPillTabs({ "Buy", "Sell" }, &mode, 20, (float)y, 26);
+        DrawPillTabs({ "Buy", "Sell" }, &mode, 20, (float)y, g_landscapePage ? 44.f:26.f);
         s.minersGuildTab = mode;
     }
-    y += 34;
+    y += g_landscapePage ? 56:34;
 
     if (s.minersGuildTab == 0) {
+        static float scroll=0,content=1100;MenuScrollScope scope(y,screenW,screenH,scroll,content);
         DrawInfoLine(TextFormat("Gold: %d   Ore: %d", s.gold, s.ore), 20, y, 13, kColorAccent);
         y += 26;
         DrawInfoLine("Guild ore (12g each) - for crafters who don't mine", 20, y + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Buy 1 (12g)", CanAfford(s, 12))) TryBuyOreFromGuild(s);
-        y += 36;
+        if (Button({ (float)(screenW - 140), (float)y, 120, g_landscapePage ? 44.f:26.f }, "Buy 1 (12g)", CanAfford(s, 12))) TryBuyOreFromGuild(s);
+        y += g_landscapePage ? 60:36;
         DrawInfoLine("Supervised training (100g) - Mining practice, Guild masters watching", 20, y + 6, 12, kColorText);
-        if (Button({ (float)(screenW - 140), (float)y, 120, 26 }, "Train (100g)", CanAfford(s, 100))) TryGuildMiningTraining(s);
-        y += 36;
+        if (Button({ (float)(screenW - 140), (float)y, 120, g_landscapePage ? 44.f:26.f }, "Train (100g)", CanAfford(s, 100))) TryGuildMiningTraining(s);
+        y += g_landscapePage ? 60:36;
         DrawInfoLine(TextFormat("Mining: %.1f", s.mining), 20, y + 6, 12, kColorText);
-        return;
+        scope.Finish(y);return;
     }
 
     // --- Sell tab: the Guild's bulk ore contract, 8g per ore, all at once ---
     DrawInfoLine(TextFormat("Ore: %d", s.ore), 20, y, 13, kColorAccent);
     y += 24;
     DrawInfoLine("The Guild buys ore in bulk - 8g per ore, no haggling, no questions.", 20, y + 6, 12, kColorText);
-    if (Button({ (float)(screenW - 180), (float)y, 160, 26 },
+    if (Button({ (float)(screenW - 180), (float)y, 160, g_landscapePage ? 44.f:26.f },
                 TextFormat("Sell all (%dg)", s.ore * 8), s.ore > 0)) TrySellOreToGuild(s);
 }
 
@@ -34606,25 +34706,25 @@ static void DrawRefugeScreen(GameState& s, int screenW, int screenH) {
     y += 30;
 
     DrawInfoLine("Forged Pardon (500g) - wipes your notoriety clean, no questions", 20, y + 6, 12, kColorText);
-    if (Button({ (float)(screenW - 150), (float)y, 130, 26 }, "Buy (500g)", CanAfford(s, 500) && s.notoriety > 0)) {
+    if (Button({ (float)(screenW - 150), (float)y, 130, g_landscapePage ? 44.f:26.f }, "Buy (500g)", CanAfford(s, 500) && s.notoriety > 0)) {
         PayGold(s, 500);
         s.notoriety = 0;
         s.logLine = "The broker burns your wanted poster. You're nobody again - for now.";
         PlaySfx(SfxId::Coin);
     }
-    y += 36;
+    y += g_landscapePage ? 60:36;
     DrawInfoLine("Reagents: 5 for 8g (fugitive's markup)", 20, y + 6, 12, kColorText);
-    if (Button({ (float)(screenW - 150), (float)y, 130, 26 }, "Buy 5 (8g)", CanAfford(s, 8))) {
+    if (Button({ (float)(screenW - 150), (float)y, 130, g_landscapePage ? 44.f:26.f }, "Buy 5 (8g)", CanAfford(s, 8))) {
         PayGold(s, 8); s.reagents += 5;
         s.logLine = "Bought 5 reagents for 8 gold.";
         PlaySfx(SfxId::Coin);
     }
-    y += 36;
+    y += g_landscapePage ? 60:36;
     DrawInfoLine("Bandages: 5 for 60g (fugitive's markup)", 20, y + 6, 12, kColorText);
-    if (Button({ (float)(screenW - 150), (float)y, 130, 26 }, "Buy 5 (60g)", CanAfford(s, 60))) TryBuyBandages(s, 5, 60);
-    y += 36;
+    if (Button({ (float)(screenW - 150), (float)y, 130, g_landscapePage ? 44.f:26.f }, "Buy 5 (60g)", CanAfford(s, 60))) TryBuyBandages(s, 5, 60);
+    y += g_landscapePage ? 60:36;
     DrawInfoLine(TextFormat("Heal Potion: 1 for %dg (fugitive's markup)", (kProvisionerHealPotionCost * 3) / 2), 20, y + 6, 12, kColorText);
-    if (Button({ (float)(screenW - 150), (float)y, 130, 26 }, TextFormat("Buy 1 (%dg)", (kProvisionerHealPotionCost * 3) / 2),
+    if (Button({ (float)(screenW - 150), (float)y, 130, g_landscapePage ? 44.f:26.f }, TextFormat("Buy 1 (%dg)", (kProvisionerHealPotionCost * 3) / 2),
                 CanAfford(s, (kProvisionerHealPotionCost * 3) / 2))) {
         int cost = (kProvisionerHealPotionCost * 3) / 2;
         PayGold(s, cost);
@@ -34651,6 +34751,20 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
     // page corners to turn. Your spell bar sits above it; Meditate sits by your mana.
     static int book = 0, spread = 0;
     const Color ink = { 58, 36, 20, 255 }, inkSoft = { 110, 80, 50, 255 };
+    bool pickerSuppress = false;
+    if(g_landscapePage) {
+        UODrawGump({10,116,244,414}, kUoDarkWood);
+        DrawUIText(TextFormat("Mana %.0f / %.0f",s.mana,MaxMana(s)),26,132,16,kUoGoldText);
+        DrawUIText(TextFormat("Reagents: %d",s.reagents),26,158,13,kUoGoldText);
+        if(Button({26,182,212,44},"Meditate",!s.combat && !s.ambush && s.mana<MaxMana(s))) Meditate(s);
+        DrawUIText("Tap a slot to assign a spell",26,240,12,kUoGoldText);
+        for(int i=0;i<8;i++) {
+            Rectangle r={26.f+(i%2)*110.f,264.f+(i/2)*60.f,102,52};
+            int idx=s.combatHotbar[i];
+            if(Button(r,idx>=0 && idx<(int)kSpells.size() ? kSpells[idx].name:TextFormat("Slot %d",i+1),!s.hotbarPickerSlot)) {s.hotbarPickerSlot=i;pickerSuppress=true;}
+        }
+        DrawUIText(TextFormat("Magery %.1f / Necro %.1f",s.magery,s.necromancy),26,510,11,kUoGoldText);
+    } else {
     // --- mana, reagents, skills, Meditate ---
     {
         float mx = MaxMana(s);
@@ -34668,11 +34782,12 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
     }
     // --- the spell bar ---
     DrawUIText("Your spell bar - tap a slot to choose its spell:", 20, 164, 12, kColorAccent);
-    bool pickerSuppress = false;
+
     {
         int tapped = -1;
         if (!s.hotbarPickerSlot.has_value()) tapped = DrawCombatHotbarRow(s, false, nullptr, 0.0f, 30.0f, 184.0f);
         if (tapped >= 0) { s.hotbarPickerSlot = tapped; pickerSuppress = true; }
+    }
     }
     bool pickerOpen = s.hotbarPickerSlot.has_value(); // modal: the book goes inert under it
 
@@ -34682,10 +34797,10 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
         if ((kSpells[i].necro ? 1 : kSpells[i].chiv ? 2 : 0) == book) spells.push_back((int)i); // (2026-09-28) + Chivalry
     // (2026-09-30) in circle order: later additions (Bless, Teleport, Cure) sit with their circle
     std::stable_sort(spells.begin(), spells.end(), [](int a, int b) { return kSpells[(size_t)a].circle < kSpells[(size_t)b].circle; });
-    const int perPage = 4, pages = ((int)spells.size() + perPage - 1) / perPage, spreads = (pages + 1) / 2;
+    const int perPage = g_landscapePage ? 2:4, pages = ((int)spells.size() + perPage - 1) / perPage, spreads = (pages + 1) / 2;
     spread = std::clamp(spread, 0, std::max(0, spreads - 1));
     for (int b = 0; b < 3; b++) { // three tomes on the shelf (2026-09-28: + Chivalry)
-        Rectangle r = { 22.0f + b * 150.0f, 386, 140, 44 };
+        Rectangle r = g_landscapePage ? Rectangle{270.f+b*226.f,116,216,44}:Rectangle{22.f+b*150.f,386,140,44};
         bool on = book == b;
         Color cover = b == 0 ? Color{ 128, 30, 30, 255 } : b == 1 ? Color{ 34, 28, 40, 255 } : Color{ 40, 70, 130, 255 };
         DrawRectangleRounded({ r.x, r.y + (on ? 0 : 6), r.width, r.height }, 0.2f, 6, on ? cover : ColorBrightness(cover, -0.25f));
@@ -34696,7 +34811,7 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
         if (!pickerOpen && !on && UOTapped(r)) { book = b; spread = 0; PlaySfx(SfxId::Click); }
     }
     // --- the open book ---
-    Rectangle cover = { 10, 430, (float)screenW - 20, (float)screenH - 444 };
+    Rectangle cover = g_landscapePage ? Rectangle{270,174,680,352}:Rectangle{10,430,(float)screenW-20,(float)screenH-444};
     Color coverCol = book == 0 ? Color{ 110, 26, 26, 255 } : book == 1 ? Color{ 30, 24, 36, 255 } : Color{ 34, 60, 112, 255 };
     DrawRectangleRounded({ cover.x + 4, cover.y + 6, cover.width, cover.height }, 0.03f, 6, Fade(BLACK, 0.4f));
     DrawRectangleRounded(cover, 0.03f, 6, coverCol);
@@ -34762,7 +34877,7 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
                 DrawUIText(TextFormat("Needs %d %s", sp.minSkill, sp.necro ? "Necromancy" : sp.chiv ? "Chivalry" : "Magery"), (int)tx, (int)y + 40, 11, Color{ 150, 60, 40, 255 });
                 continue;
             }
-            Rectangle btn = { tx, y + 42, std::min(96.0f, pr.width - (tx - pr.x) - 10), 24 };
+            Rectangle btn = { tx, y + 52, std::min(140.0f, pr.width - (tx - pr.x) - 10), g_landscapePage ? 44.f:24.f };
             if (idx == kRecallSpellIdx) {
                 if (UOButton(btn, "Travel", !pickerOpen)) s.recallPickerOpen = true;
             } else if (UOButton(btn, "Practice", !pickerOpen && s.mana >= sp.manaCost)) TryPracticeSpell(s, idx);
@@ -34778,7 +34893,7 @@ static void DrawMagicScreen(GameState& s, int screenW, int screenH) {
         if (left) DrawTriangle(a, b, c, Color{ 196, 168, 120, 255 }); else DrawTriangle(a, c, b, Color{ 196, 168, 120, 255 });
         DrawLineEx(b, c, 1.5f, Fade(ink, 0.6f));
         DrawUIText(left ? "<" : ">", (int)(cx + (left ? 8 : -16)), (int)cy - 22, 14, ink);
-        return !pickerOpen && UOTapped({ cx - 44, cy - 44, 88, 44 });
+        return !pickerOpen && UOTapped(g_landscapePage ? Rectangle{left ? cx:cx-44,cy-44,44,44}:Rectangle{cx-44,cy-44,88,44});
     };
     if (corner(pageR[0], true, spread > 0)) { spread--; PlaySfx(SfxId::Click); }
     if (corner(pageR[1], false, spread < spreads - 1)) { spread++; PlaySfx(SfxId::Click); }
@@ -34825,7 +34940,7 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
     { // (2026-09-28, #74) not a tamer? the stable sells a riding horse
         const int price = 400;
         bool room = (int)s.pets.size() < PetSlotCapacity(s);
-        if (Button({ (float)screenW - 190, (float)y - 3, 170, 22 }, TextFormat("Riding horse (%dg)", price), room && CanAfford(s, price))) {
+        if (Button({ g_landscapePage ? 572.f:(float)screenW-190, (float)y-3, 170, g_landscapePage ? 44.f:22.f }, TextFormat("Riding horse (%dg)", price), room && CanAfford(s, price))) {
             PayGold(s, price);
             Pet pt; pt.id = s.nextPetId++; pt.name = "War Horse"; pt.role = PetRole::Tank;
             pt.str = 40; pt.dex = 24; pt.intStat = 6; pt.maxHp = 90; pt.hp = 90; pt.maxMana = 6; pt.mana = 6;
@@ -34839,14 +34954,14 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
     y += 18;
     if (s.stableBought < kStableMaxBought) {
         int price = StableSlotPrice(s);
-        if (Button({ (float)screenW - 190, (float)y - 3, 170, 22 }, TextFormat("+1 stable slot (%d g)", price), CanAfford(s, price))) {
+        if (Button({ g_landscapePage ? 770.f:(float)screenW-190, g_landscapePage ? 113.f:(float)y-3, 170, g_landscapePage ? 44.f:22.f }, TextFormat("+1 stable slot (%d g)", price), CanAfford(s, price))) {
             PayGold(s, price); s.stableBought++; PlaySfx(SfxId::Buy);
             s.logLine = TextFormat("Your stable now holds %d pets.", PetSlotCapacity(s));
         }
     }
     DrawUIText(TextFormat("Stable: %d / %d pets     Followers: %d / %d slots", (int)s.pets.size(), PetSlotCapacity(s),
                           FollowersUsed(s), kFollowerSlots), 20, y, 13, DARKGRAY);
-    y += 22;
+    y += g_landscapePage ? 42:22;
 
     if (s.tamingAttempt.has_value()) {
         const WildCreature& creature = kWildCreatures[s.tamingAttempt->creatureIdx];
@@ -34860,19 +34975,20 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
 
     // (2026-09-29) Taming happens out in the wilds only - walk up to a creature and tap it.
     // This list is now a field guide: your odds, and where each one roams.
-    DrawUIText("Wild creatures - tame them out in the wilds (walk up and tap one):", 20, y, 13, kColorAccent);
+    DrawUIText(g_landscapePage ? "FIELD GUIDE / Tame creatures in the wilderness":"Wild creatures - tame them out in the wilds (walk up and tap one):", 20, y, 13, kColorAccent);
     y += 20;
     int listTop = y;
-    int listHeight = 160;
-    Rectangle listArea = { 0, (float)listTop, (float)screenW, (float)listHeight };
+    int listHeight = g_landscapePage ? 322:160;
+    int guideW=g_landscapePage ? 452:screenW;
+    Rectangle listArea = { 0, (float)listTop, (float)guideW, (float)listHeight };
     s.creatureScroll -= ScrollDelta(listArea);
-    float maxCreatureScroll = std::max(0.0f, (float)kWildCreatures.size() * 24.0f - listHeight);
+    float maxCreatureScroll = std::max(0.0f, (float)kWildCreatures.size() * (g_landscapePage ? 52.f:24.f) - listHeight);
     s.creatureScroll = std::clamp(s.creatureScroll, 0.0f, maxCreatureScroll);
 
-    UIBeginScissorMode(0, listTop, screenW, listHeight);
+    UIBeginScissorMode(0, listTop, guideW, listHeight);
     for (size_t i = 0; i < kWildCreatures.size(); i++) {
         const WildCreature& creature = kWildCreatures[i];
-        float rowY = listTop + (float)i * 24 - s.creatureScroll;
+        float rowY = listTop + (float)i * (g_landscapePage ? 52.f:24.f) - s.creatureScroll;
         if (rowY < listTop - 24 || rowY > listTop + listHeight) continue;
         float chance = TameChance(s, creature);
         std::string line = TextFormat("%s (diff %d) - %.0f%% to tame", creature.name.c_str(),
@@ -34886,29 +35002,31 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
         }
         if (!where.empty()) {
             int ww = MeasureUIText(where.c_str(), 11);
-            DrawUIText(where.c_str(), screenW - 20 - ww, (int)rowY + 5, 11, DARKGRAY);
+            DrawUIText(where.c_str(), g_landscapePage ? 20:screenW - 20 - ww, (int)rowY + (g_landscapePage ? 25:5), 11, DARKGRAY);
         }
     }
     UIEndScissorMode();
-    y = listTop + listHeight + 8;
+    y = g_landscapePage ? listTop-20:listTop + listHeight + 8;
+    int rosterX=g_landscapePage ? 480:20;
+    float petRowH=g_landscapePage ? 116.f:70.f;
 
     // --- Pet roster ---
-    DrawUIText("Your pets:", 20, y, 14, kColorAccent);
+    DrawUIText("Your pets:", rosterX, y, 14, kColorAccent);
     y += 20;
     int rosterTop = y;
     int rosterHeight = screenH - rosterTop - 40;
-    Rectangle rosterArea = { 0, (float)rosterTop, (float)screenW, (float)rosterHeight };
+    Rectangle rosterArea = { (float)rosterX, (float)rosterTop, (float)screenW-rosterX, (float)rosterHeight };
     s.petsScroll -= ScrollDelta(rosterArea);
-    float maxScroll = std::max(0.0f, (float)s.pets.size() * 70.0f - rosterHeight);
+    float maxScroll = std::max(0.0f, (float)s.pets.size() * petRowH - rosterHeight);
     s.petsScroll = std::clamp(s.petsScroll, 0.0f, maxScroll);
 
-    UIBeginScissorMode(0, rosterTop, screenW, rosterHeight);
+    UIBeginScissorMode(rosterX, rosterTop, screenW-rosterX, rosterHeight);
     if (s.pets.empty()) {
-        DrawUIText("No pets tamed yet.", 20, rosterTop + 4, 12, DARKGRAY);
+        DrawUIText("No pets tamed yet.", rosterX, rosterTop + 4, 12, DARKGRAY);
     }
     for (size_t i = 0; i < s.pets.size(); i++) {
         Pet& pet = s.pets[i];
-        float rowY = rosterTop + (float)i * 70 - s.petsScroll;
+        float rowY = rosterTop + (float)i * petRowH - s.petsScroll;
         if (rowY < rosterTop - 70 || rowY > rosterTop + rosterHeight) continue;
 
         std::string roleName = pet.role == PetRole::Tank ? "Tank" : pet.role == PetRole::Caster ? "Caster" : "Melee";
@@ -34916,31 +35034,32 @@ static void DrawPetsScreen(GameState& s, int screenW, int screenH) {
         bool down = pet.hp <= 0.0f;
         std::string header = pet.name + TextFormat("  Lv %d", pet.level) + (down ? " (knocked out)" : pet.active ? " (following)" : "") +
                              " - " + roleName + TextFormat("  [%d slot%s]", cost, cost == 1 ? "" : "s");
-        DrawUIText(header.c_str(), 20, (int)rowY, 13, down ? Color{ 170, 60, 50, 255 } : kColorText);
+        while(g_landscapePage && MeasureUIText(header.c_str(),13)>460 && header.size()>4)header.pop_back();
+        DrawUIText(header.c_str(), rosterX, (int)rowY, 13, down ? Color{ 170, 60, 50, 255 } : kColorText);
         std::string stats = TextFormat("HP %.0f/%.0f  Str %d Dex %d Int %d", pet.hp, pet.maxHp,
                                          pet.str, pet.dex, pet.intStat);
-        DrawUIText(stats.c_str(), 20, (int)rowY + 16, 13, DARKGRAY);
+        DrawUIText(stats.c_str(), rosterX, (int)rowY + 16, 13, DARKGRAY);
         { // level progress + bond (2026-09-28)
-            Rectangle xb = { (float)screenW - 220, rowY + 20, 90, 6 };
+            Rectangle xb = { (float)screenW - 220, rowY + (g_landscapePage ? 38:20), 90, 6 };
             DrawRectangleRec(xb, Fade(BLACK, 0.18f));
             float xf = pet.level >= kPetMaxLevel ? 1.0f : std::clamp(pet.xp / PetXpToNext(pet.level), 0.0f, 1.0f);
             DrawRectangleRec({ xb.x, xb.y, xb.width * xf, xb.height }, Color{ 200, 160, 60, 255 });
-            DrawUIText(pet.bonded ? "Bonded" : TextFormat("Bond %d/%d", pet.bondKills, kBondKills), (int)(xb.x + xb.width + 8), (int)rowY + 14, 12,
+            DrawUIText(pet.bonded ? "Bonded" : TextFormat("Bond %d/%d", pet.bondKills, kBondKills), (int)(xb.x + xb.width + 8), (int)rowY + (g_landscapePage ? 32:14), 12,
                        pet.bonded ? Color{ 60, 130, 70, 255 } : DARKGRAY);
         }
 
-        if (Button({ 20, rowY + 34, 70, 22 }, pet.active ? "Stay" : "Follow",
+        if (Button({ (float)rosterX, rowY + (g_landscapePage ? 58:34), 76, g_landscapePage ? 44.f:22.f }, pet.active ? "Stay" : "Follow",
                    pet.active || FollowersUsed(s) + cost <= kFollowerSlots)) SetPetActive(s, pet.id);
         bool vetRes = EffectiveSkill(s, &GameState::veterinary) >= 80.0f;
         if (down && !vetRes) {
-            if (Button({ 96, rowY + 34, 156, 22 }, TextFormat("Revive (%d gold)", PetReviveFee(pet)), CanAfford(s, PetReviveFee(pet)))) HealPet(s, pet.id);
+            if (Button({ (float)rosterX+84, rowY + (g_landscapePage ? 58:34), 156, g_landscapePage ? 44.f:22.f }, TextFormat("Revive (%d gold)", PetReviveFee(pet)), CanAfford(s, PetReviveFee(pet)))) HealPet(s, pet.id);
         } else {
-        if (Button({ 96, rowY + 34, 60, 22 }, down ? "Revive" : "Heal", pet.hp < pet.maxHp)) HealPet(s, pet.id);
-        if (Button({ 162, rowY + 34, 90, 22 }, "Train Wrest.", pet.wrestling < kPetTrainTarget && CanAfford(s, 1)))
+        if (Button({ (float)rosterX+84, rowY + (g_landscapePage ? 58:34), 60, g_landscapePage ? 44.f:22.f }, down ? "Revive" : "Heal", pet.hp < pet.maxHp)) HealPet(s, pet.id);
+        if (Button({ (float)rosterX+156, rowY + (g_landscapePage ? 58:34), 90, g_landscapePage ? 44.f:22.f }, "Train Wrest.", pet.wrestling < kPetTrainTarget && CanAfford(s, 1)))
             TrainPetSkillGold(s, pet.id, &Pet::wrestling, "Wrestling");
         }
-        if (Button({ (float)(screenW - 150), rowY + 34, 70, 22 }, "Release", true)) ReleasePet(s, pet.id);
-        if (Button({ (float)(screenW - 74), rowY + 34, 60, 22 }, "Sell", true)) SellPet(s, pet.id);
+        if (Button({ (float)(screenW - 150), rowY + (g_landscapePage ? 58:34), 70, g_landscapePage ? 44.f:22.f }, "Release", true)) {ReleasePet(s, pet.id);break;}
+        if (Button({ (float)(screenW - 74), rowY + (g_landscapePage ? 58:34), 60, g_landscapePage ? 44.f:22.f }, "Sell", true)) {SellPet(s, pet.id);break;}
     }
     UIEndScissorMode();
 }
@@ -35131,6 +35250,35 @@ static void DrawNotorietyFooter(const GameState& s, int screenW, int screenH) {
 // ---------------------------------------------------------------------
 
 static void DrawBankScreen(GameState& s, int screenW, int screenH) {
+    if(g_landscapePage) {
+        DrawUIText(TextFormat("Carried gold: %d     Vault gold: %d",s.gold,s.bankGold),20,120,18,kColorHeading);
+        if(Button({20,152,176,44},"Deposit 10g",s.gold>=10))DepositGold(s,10);
+        if(Button({206,152,176,44},"Deposit 50g",s.gold>=50))DepositGold(s,50);
+        if(Button({392,152,176,44},"Deposit all",s.gold>0))DepositGold(s,s.gold);
+        if(Button({578,152,176,44},"Withdraw 50g",s.bankGold>=50))WithdrawGold(s,50);
+        if(Button({764,152,176,44},"Withdraw all",s.bankGold>0))WithdrawGold(s,s.bankGold);
+        for(int side=0;side<2;side++) {
+            float x=20.f+side*472.f;
+            DrawUIText(side ? "VAULT / Withdraw":"BACKPACK / Deposit",(int)x,212,15,kColorAccent);
+            Rectangle area={x,240,448,282};
+            UODrawGump(area,kUoParchment);
+            auto& items=side ? s.bankItems:s.backpack;
+            float& scroll=side ? s.bankItemsScroll:s.bankScroll;
+            scroll=std::clamp(scroll-ScrollDelta(area),0.f,std::max(0.f,items.size()*64.f-area.height));
+            UIBeginScissorMode((int)x,240,448,282);
+            if(items.empty())DrawUIText("Empty",(int)x+14,254,14,DARKGRAY);
+            for(size_t i=0;i<items.size();i++) {
+                float y=244+i*64.f-scroll;
+                DrawItemIcon(items[i],x+10,y+8,36);
+                std::string name=items[i].name;
+                while(MeasureUIText(name.c_str(),13)>260 && name.size()>4)name.pop_back();
+                DrawUIText(name.c_str(),(int)x+54,(int)y+18,13,kColorText);
+                if(Button({x+330,y+6,108,44},side ? "Withdraw":"Deposit",true)) {if(side)WithdrawItem(s,(int)i);else DepositItem(s,(int)i);break;}
+            }
+            UIEndScissorMode();
+        }
+        return;
+    }
     int y = 116;
     DrawUIText(TextFormat("The Vaultkeep - Bank gold: %d", s.bankGold), 20, y, 15, kColorText);
     y += 22;
@@ -35252,7 +35400,7 @@ static void UpdateTextInput(std::string& text, size_t maxLen) {
 // Found a guild (house owners only), hire guildmates, pick the tabard color,
 // declare or end wars with Murder Inc. and Grimtusk Hold.
 // ---- Settlement gump (House screen, 2026-09-27) ----
-static bool g_settleOpen = false;
+
 static int g_settleTab = 0;
 static float g_settleScroll = 0.0f;
 static std::string SettleClock(float secs) {
@@ -35306,11 +35454,11 @@ static void DrawSettlement(GameState& s, int screenW, int screenH) {
     // tabs
     const char* tabs[3] = { "Buildings", "Settlers", "Raids" };
     for (int t = 0; t < 3; t++) {
-        Rectangle tb = { x + t * (w / 3.0f), y, w / 3.0f - 6, 28 };
+        Rectangle tb = { x + t * (w / 3.0f), y, w / 3.0f - 6, g_landscapePage ? 44.f:28.f };
         if (Button(tb, tabs[t], true)) { g_settleTab = t; g_settleScroll = 0.0f; }
         if (g_settleTab == t) DrawRectangleLinesEx({ tb.x - 2, tb.y - 2, tb.width + 4, tb.height + 4 }, 2.0f, kUoBronzeHi);
     }
-    y += 38;
+    y += g_landscapePage ? 54:38;
     float listTop = y, listH = G.y + G.height - 14 - listTop;
     Rectangle area = { G.x, listTop, G.width, listH };
     g_settleScroll -= ScrollDelta(area);
@@ -35321,7 +35469,7 @@ static void DrawSettlement(GameState& s, int screenW, int screenH) {
     if (g_settleTab == 0) {
         bool anyStored = false;
         for (int k = 0; k < kSbCount; k++) anyStored |= kSettleDefs[k].res && s.settle[(size_t)k].stored >= 1.0f;
-        if (Button({ x, yy, 160, 28 }, "Collect all", anyStored) && anyStored) {
+        if (Button({ x, yy, 160, g_landscapePage ? 44.f:28.f }, "Collect all", anyStored) && anyStored) {
             std::string got;
             for (int k = 0; k < kSbCount; k++)
                 if (int n = SettleCollect(s, k); n > 0) got += (got.empty() ? "" : ", ") + std::to_string(n) + " " + SettleResName(kSettleDefs[k].res);
@@ -35329,14 +35477,14 @@ static void DrawSettlement(GameState& s, int screenW, int screenH) {
             PlaySfx(SfxId::Coin);
         }
         DrawUIText("Buildings work while you're away (up to their storage).", (int)(x + 172), (int)yy + 8, 11, soft);
-        yy += 38;
+        yy += g_landscapePage ? 54:38;
         static const int order[kSbCount] = { kSbHall, kSbLumber, kSbMine, kSbTannery, kSbHerbs, kSbFishery, kSbStore, kSbWalls, kSbBarracks,
                                              kSbForge, kSbYard, kSbChapel, kSbLibrary, kSbStable };
         for (int oi = 0; oi < kSbCount; oi++) {
             int k = order[oi];
             const SettleDef& d = kSettleDefs[k];
             SettleBuilding& B = s.settle[(size_t)k];
-            const float rh = 70.0f;
+            const float rh = g_landscapePage ? 88.f:70.f;
             if (visible(yy, rh)) {
                 Rectangle row = { x, yy, w, rh - 6 };
                 DrawRectangleRec(row, Fade(Color{ 120, 90, 50, 255 }, 0.12f));
@@ -35358,7 +35506,7 @@ static void DrawSettlement(GameState& s, int screenW, int screenH) {
                 if (unlocked && B.damaged) {
                     int rc = SettleRepairCost(s, k);
                     bx -= 110;
-                    if (Button({ bx, row.y + 34, 104, 24 }, TextFormat("Repair %dg", rc), CanAfford(s, rc)) && CanAfford(s, rc)) {
+                    if (Button({ bx, row.y + 34, 104, g_landscapePage ? 44.f:24.f }, TextFormat("Repair %dg", rc), CanAfford(s, rc)) && CanAfford(s, rc)) {
                         PayGold(s, rc); B.damaged = false; s.logLine = std::string(d.name) + " repaired.";
                         PlaySfx(SfxId::Buy);
                     }
@@ -35369,7 +35517,7 @@ static void DrawSettlement(GameState& s, int screenW, int screenH) {
                     DrawUIText(cost.c_str(), (int)row.x + 8, (int)row.y + 44, 11, afford ? ink : bad);
                     bx -= 110;
                     const char* lbl = s.settleUpgrading == k ? "Building..." : (B.level == 0 ? "Build" : "Upgrade");
-                    if (Button({ bx, row.y + 34, 104, 24 }, lbl, afford && free) && afford && free) {
+                    if (Button({ bx, row.y + 34, 104, g_landscapePage ? 44.f:24.f }, lbl, afford && free) && afford && free) {
                         s.gold -= g; s.wood -= wd; s.ore -= o;
                         s.settleUpgrading = k; s.settleUpgradeT = secs;
                         s.logLine = std::string("Builders start on the ") + d.name + " (" + SettleClock(secs) + ").";
@@ -35380,7 +35528,7 @@ static void DrawSettlement(GameState& s, int screenW, int screenH) {
                 } else if (k == kSbHall && B.level >= 10) DrawUIText("At its greatest", (int)row.x + 8, (int)row.y + 44, 11, good);
                 if (d.res && B.level > 0) {
                     bx -= 86;
-                    if (Button({ bx, row.y + 34, 80, 24 }, TextFormat("Take %d", (int)B.stored), B.stored >= 1.0f)) {
+                    if (Button({ bx, row.y + 34, 80, g_landscapePage ? 44.f:24.f }, TextFormat("Take %d", (int)B.stored), B.stored >= 1.0f)) {
                         int n = SettleCollect(s, k);
                         if (n > 0) { s.logLine = TextFormat("Collected %d %s.", n, SettleResName(d.res)); PlaySfx(SfxId::Coin); }
                     }
@@ -35400,10 +35548,10 @@ static void DrawSettlement(GameState& s, int screenW, int screenH) {
             if (visible(yy, 40)) {
                 DrawUIText(st.name.c_str(), (int)x + 4, (int)yy + 4, 14, ink);
                 DrawUIText(TextFormat("natural at the %s", kSettleDefs[std::clamp(st.trait, 0, kSbCount - 1)].name), (int)x + 4, (int)yy + 22, 10, soft);
-                if (Button({ x + w - 190, yy + 4, 150, 28 }, SettleJobName(st.job), true)) st.job = SettleNextJob(s, st.job);
+                if (Button({ x + w - 190, yy + 4, 150, g_landscapePage ? 44.f:28.f }, SettleJobName(st.job), true)) st.job = SettleNextJob(s, st.job);
                 if (st.job == st.trait) DrawUIText("*", (int)(x + w - 30), (int)yy + 8, 16, good);
             }
-            yy += 40;
+            yy += g_landscapePage ? 58:40;
         }
     } else {
         int guards = SettleCountJob(s, kSettlerGuard);
@@ -36243,14 +36391,14 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
     int today = WarDayNow();
     { // the tabs (2026-09-28: one Guild screen for everything guild)
         static const char* kTabs[8] = { "Overview", "City", "Research", "Help", "Shop", "Wars", "Members", "Activities" };
-        float tw = (G.width - 36) / 4.0f;
+        float tw = (G.width - 36) / (g_landscapePage ? 8.f:4.f);
         bool hub = g_gnet.hub;
         bool helpDot = GuildHelpCount()>0;
         bool hallDot = !g_gnet.gifts.empty() || (g_gnet.buildLeft >= 0 && !g_gnet.lent);
         bool activityDot=false; for(const auto& r:g_gnet.cityRuns) if(r.finished && r.success && r.joined && !r.claimed) activityDot=true;
         bool warDot=false; for(const auto& b:g_gnet.cityBattles) if((long long)std::time(nullptr)>=b.ends && b.actions>0 && !b.claimed) warDot=true;
         for (int t = 0; t < 8; t++) {
-            Rectangle tb = { G.x + 18 + (t % 4) * tw, G.y + 34 + (t / 4) * 52, tw - 6, 44 };
+            Rectangle tb = { G.x + 18 + (t % (g_landscapePage ? 8:4)) * tw, G.y + 34 + (t / (g_landscapePage ? 8:4)) * 52, tw - 6, 44 };
             bool on = g_guildTab == t || (t == 1 && (g_guildTab == 9 || g_guildTab >= 10));
             DrawRectangleRounded(tb, 0.3f, 6, on ? Color{ 110, 70, 36, 255 } : Color{ 70, 50, 34, 200 });
             DrawRectangleRoundedLines(tb, 0.3f, 6, on ? kUoBronzeHi : kUoBronze);
@@ -36260,7 +36408,7 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
             if (g_guildTab != t && UOTapped(tb)) { g_guildTab = t; g_warScroll = 0.0f; PlaySfx(SfxId::Click); }
         }
     }
-    Rectangle area = { G.x + 8, G.y + 142, G.width - 16, G.height - 152 };
+    Rectangle area = { G.x + 8, G.y + (g_landscapePage ? 90:142), G.width - 16, G.height - (g_landscapePage ? 100:152) };
     if (g_guildTab == 1) g_warScroll = 0;
     else g_warScroll -= ScrollDelta(area);
     float x = G.x + 18, w = G.width - 36, y = area.y + 4 - g_warScroll;
@@ -36641,23 +36789,27 @@ static void DrawTreasureMaps(GameState& s, int screenW, int screenH, float top =
         return;
     }
     y += 6;
+    static float scroll=0,content=1200;
+    int listY=(int)y;
+    MenuScrollScope scope(listY,screenW,screenH,scroll,content);
+    y=(float)listY;
     int drop = -1;
     for (size_t i = 0; i < s.tmaps.size(); i++) {
         const GameState::TreasureMap& m = s.tmaps[i];
-        Rectangle row = { x - 6, y, w + 12, 58 };
+        Rectangle row = { x - 6, y, w + 12, g_landscapePage ? 76.f:58.f };
         bool tracked = s.tmapTrack == (int)i && m.decoded;
         DrawRectangleRounded(row, 0.15f, 6, tracked ? Color{ 255, 214, 110, 90 } : Fade(BLACK, i % 2 ? 0.04f : 0.08f));
         DrawUIText(TextFormat("%s treasure map", kTmapTierName[m.tier]), (int)x, (int)y + 6, 15, m.tier >= 4 ? gold : ink);
         if (!m.decoded) {
             DrawUIText(TextFormat("Not yet decoded - %d%% chance with your Cartography", (int)TmapDecodeChance(s, m.tier)), (int)x, (int)y + 30, 12, soft);
-            if (UOButton({ x + w - 186, y + 12, 96, 34 }, "Decode", s.tmapCd <= 0.0f)) TreasureDecode(s, (int)i);
+            if (UOButton({ x + w - 186, y + 14, 96, g_landscapePage ? 44.f:34.f }, "Decode", s.tmapCd <= 0.0f)) TreasureDecode(s, (int)i);
         } else {
             float d = Dist(s.wildernessPlayerPos, m.spot);
             DrawUIText(TextFormat("Dig site: %d paces %s of you", (int)(d / 10.0f), CompassWord(s.wildernessPlayerPos, m.spot).c_str()), (int)x, (int)y + 30, 12, soft);
-            if (UOButton({ x + w - 186, y + 12, 96, 34 }, tracked ? "Following" : "Follow", !tracked)) { s.tmapTrack = (int)i; PlaySfx(SfxId::Click); }
+            if (UOButton({ x + w - 186, y + 14, 96, g_landscapePage ? 44.f:34.f }, tracked ? "Following" : "Follow", !tracked)) { s.tmapTrack = (int)i; PlaySfx(SfxId::Click); }
         }
-        if (UOButton({ x + w - 84, y + 12, 84, 34 }, "Discard")) drop = (int)i;
-        y += 64;
+        if (UOButton({ x + w - 84, y + 14, 84, g_landscapePage ? 44.f:34.f }, "Discard")) drop = (int)i;
+        y += g_landscapePage ? 84:64;
     }
     if (drop >= 0) { TreasureRemoveMap(s, drop); s.logLine = "You throw the map away."; }
     y += 6;
@@ -36671,6 +36823,7 @@ static void DrawTreasureMaps(GameState& s, int screenW, int screenH, float top =
         }
         if (!cur.empty()) DrawUIText(cur.c_str(), (int)x, (int)y, 13, gold);
     }
+    scope.Finish((int)y+40);
 }
 // ---- The Town Hall quest board (2026-09-28, #72) ------------------------------
 // Wanted posters for the named Blades of Murder Inc., and town tasks - slay so
@@ -36723,17 +36876,20 @@ static void DrawWeeklyGoalsBody(GameState& s, float x, float y, float w) {
                (int)x, (int)y, 11, soft);
     y += 20;
     if (HasWeeklyBlessing(s)) { DrawUIText("Weekly Blessing active: +10% combat power!", (int)x, (int)y, 13, good); y += 20; }
+    float gridY=y,gridX=x,gridW=w;
     for (int i = 0; i < kCoreWeeklyGoalCount; i++) { // the Bloodstained Road's three are hidden with the Road
+        if(g_landscapePage){w=(gridW-16)/2;x=gridX+(i%2)*(w+16);y=gridY+(i/2)*68;}
         const WeeklyGoalDef& goal = kWeeklyGoals[i];
         int progress = std::min(goal.target, s.weeklyProgress[i]);
-        Rectangle row = { x, y, w, 46 };
+        Rectangle row = { x, y, w, g_landscapePage ? 60.f:46.f };
         DrawRectangleRounded(row, 0.1f, 4, Fade(BLACK, 0.07f));
         DrawUIText(goal.label, (int)x + 10, (int)y + 6, 14, ink);
         DrawUIText(TextFormat("%d / %d   -   %d gold", progress, goal.target, goal.reward), (int)x + 10, (int)y + 25, 12, progress >= goal.target ? good : soft);
         bool ready = s.weeklyProgress[i] >= goal.target && !s.weeklyClaimed[i];
-        if (UOButton({ x + w - 104, y + 7, 96, 32 }, s.weeklyClaimed[i] ? "Claimed" : "Claim", ready)) ClaimWeeklyGoal(s, i);
+        if (UOButton({ x + w - 104, y + 8, 96, g_landscapePage ? 44.f:32.f }, s.weeklyClaimed[i] ? "Claimed" : "Claim", ready)) ClaimWeeklyGoal(s, i);
         y += 52;
     }
+    if(g_landscapePage){x=gridX;y=gridY+((kCoreWeeklyGoalCount+1)/2)*68;}
     y += 8;
     DrawUIText("Crafting commissions are taken at each workshop's Commissions tab.", (int)x, (int)y, 11, soft);
 }
@@ -36780,6 +36936,8 @@ static void DrawQuestBoard(GameState& s, int screenW, int screenH) {
         UIEndScissorMode();return;
     }
     if (g_questTab == 1) { DrawWeeklyGoalsBody(s, x, y, w); return; }
+    float taskTop=y, taskX=x, taskW=w;
+    if(g_landscapePage) w=(w-24)/2;
     DrawUIText("WANTED - by order of the Town Hall", (int)x, (int)y, 16, red); y += 22;
     for (int bi = 0; bi < 3; bi++) {
         Rectangle row = { x, y, w, 64 };
@@ -36788,7 +36946,7 @@ static void DrawQuestBoard(GameState& s, int screenW, int screenH) {
         DrawUIText(BladeName(bi).c_str(), (int)x + 10, (int)y + 6, 15, ink);
         DrawUIText(TextFormat("Murder Inc. - bounty %d gold", BladeBountyGold(s, bi)), (int)x + 10, (int)y + 25, 12, red);
         DrawUIText(BladeLastSeen(s, bi).c_str(), (int)x + 10, (int)y + 42, 11, soft);
-        Rectangle b = { x + w - 132, y + 14, 124, 34 };
+        Rectangle b = { x + w - 132, y + 10, 124, g_landscapePage ? 44.f:34.f };
         if (mine && s.bountyDone) {
             if (UOButton(b, "Collect", true)) {
                 int pay = std::max(100, s.bountyPay);
@@ -36807,10 +36965,11 @@ static void DrawQuestBoard(GameState& s, int screenW, int screenH) {
         y += 70;
     }
     if (s.bountyTarget >= 0 && !s.bountyDone) {
-        if (UOButton({ x, y, 150, 28 }, "Drop the contract", true)) { s.bountyTarget = -1; s.logLine = "You tear up the contract."; }
+        if (UOButton({ x, y, 150, g_landscapePage ? 44.f:28.f }, "Drop the contract", true)) { s.bountyTarget = -1; s.logLine = "You tear up the contract."; }
         y += 34;
     }
     y += 6;
+    if(g_landscapePage){x=taskX+(taskW+24)/2;y=taskTop;}
     DrawUIText("TOWN TASKS", (int)x, (int)y, 16, ink); y += 22;
     if (s.taskKind != 0) {
         bool slay = s.taskKind == 1;
@@ -36819,29 +36978,29 @@ static void DrawQuestBoard(GameState& s, int screenW, int screenH) {
         DrawUIText(slay ? TextFormat("Slay %d %s", s.taskNeed, s.taskWhat.c_str()) : TextFormat("Deliver %d %s", s.taskNeed, s.taskWhat.c_str()), (int)x, (int)y, 15, ink);
         DrawUIText(TextFormat("%d / %d   -   pays %d gold", std::min(have, s.taskNeed), s.taskNeed, s.taskReward), (int)x, (int)y + 20, 13, done ? good : soft);
         y += 44;
-        if (UOButton({ x, y, 160, 36 }, slay ? "Collect pay" : "Hand over", done)) {
+        if (UOButton({ x, y, 160, g_landscapePage ? 44.f:36.f }, slay ? "Collect pay" : "Hand over", done)) {
             if (!slay) TownTaskStock(s, s.taskWhat) -= s.taskNeed;
             s.gold += s.taskReward; GainFame(s, 3.0f);
             s.logLine = TextFormat("Task done - the steward pays you %d gold.", s.taskReward);
             s.taskKind = 0; s.taskHave = 0; s.taskSeed++;
             PlaySfx(SfxId::Coin);
         }
-        if (UOButton({ x + 170, y, 120, 36 }, "Abandon", true)) { s.taskKind = 0; s.taskHave = 0; s.taskSeed++; s.logLine = "You give the task back."; }
+        if (UOButton({ x + 170, y, 120, g_landscapePage ? 44.f:36.f }, "Abandon", true)) { s.taskKind = 0; s.taskHave = 0; s.taskSeed++; s.logLine = "You give the task back."; }
         return;
     }
     for (int k = 0; k < 3; k++) {
         TownTaskOffer o = TownTaskOfferFor(s, k);
-        Rectangle row = { x, y, w, 50 };
+        Rectangle row = { x, y, w, g_landscapePage ? 64.f:50.f };
         DrawRectangleRounded(row, 0.1f, 4, Fade(BLACK, 0.07f));
         DrawUIText(o.kind == 1 ? TextFormat("Slay %d %s", o.need, o.what.c_str()) : TextFormat("Deliver %d %s", o.need, o.what.c_str()), (int)x + 10, (int)y + 7, 14, ink);
         DrawUIText(TextFormat("pays %d gold", o.reward), (int)x + 10, (int)y + 27, 12, soft);
-        if (UOButton({ x + w - 112, y + 8, 104, 34 }, "Accept", true)) {
+        if (UOButton({ x + w - 112, y + 8, 104, g_landscapePage ? 44.f:34.f }, "Accept", true)) {
             s.taskKind = o.kind; s.taskWhat = o.what; s.taskNeed = o.need; s.taskReward = o.reward; s.taskHave = 0;
             s.logLine = o.kind == 1 ? "Task taken: slay " + std::to_string(o.need) + " " + o.what + ". Your progress shows at the top of the screen."
                                     : "Task taken: bring " + std::to_string(o.need) + " " + o.what + " back here.";
             PlaySfx(SfxId::Quest);
         }
-        y += 56;
+        y += g_landscapePage ? 72:56;
     }
 }
 // Options (2026-09-28, #60 #75 #57): switches that are the player's taste, saved with the game.
@@ -36855,17 +37014,22 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     Rectangle area={G.x+12,G.y+36,G.width-24,G.height-50};
     scroll-=ScrollDelta(area);scroll=std::clamp(scroll,0.0f,std::max(0.0f,content-area.height));
     UIBeginScissorMode((int)area.x,(int)area.y,(int)area.width,(int)area.height);
-    float x = G.x + 22, y = area.y-scroll, start=y, w = G.width - 44;
+    float x = G.x + 22, y = area.y-scroll, start=y, w = g_landscapePage ? (G.width-64)/2:G.width-44;
+    int cell=0;
+    auto place=[&](){if(g_landscapePage){x=G.x+22+(cell%2)*(w+20);y=start+(cell/2)*98.f;}};
+    auto advance=[&](float h){if(g_landscapePage){++cell;y=start+((cell+1)/2)*98.f;}else y+=h;};
     auto toggle = [&](const char* title, const char* what, bool& v) {
+        place();
         DrawUIText(title, (int)x, (int)y + 4, 15, ink);
         auto lines=WrapJournalText(what,w-108);
         for(size_t i=0;i<lines.size();++i) DrawUIText(lines[i].c_str(),(int)x,(int)y+26+(int)i*15,12,soft);
         Rectangle b = { x + w - 90, y + 4, 90, 44 };
         if (UOButton(b, v ? "On" : "Off")) { v = !v; PlaySfx(SfxId::Click); }
         if (v) DrawCircleV({ b.x + 14, b.y + 17 }, 5.0f, Color{ 120, 220, 120, 255 });
-        y += std::max(68.0f,42.0f+lines.size()*15);
+        advance(std::max(68.0f,42.0f+lines.size()*15));
     };
     auto slider = [&](const char* title, float& v) { // (2026-09-29) drag or tap along the bar
+        place();
         DrawUIText(title, (int)x, (int)y + 2, 15, ink);
         const char* pct = TextFormat("%d%%", (int)std::round(v * 100.0f));
         DrawUIText(pct, (int)(x + w - MeasureUIText(pct, 15)), (int)y + 2, 15, ink);
@@ -36881,7 +37045,7 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
         if (UIClick(hit)) { dragging = true; who = &v; }
         if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { if (dragging && who == &v) PlaySfx(SfxId::Click); dragging = false; who = nullptr; }
         if (dragging && who == &v) v = std::clamp((m.x - bar.x) / bar.width, 0.0f, 1.0f);
-        y += 62;
+        advance(62);
     };
     bool showWyrm = !s.optHideWyrm, showBoss = !s.optHideDungeonBoss;
     toggle("World boss alerts", "Vyrathax's wake-up warnings, banner and countdown.", showWyrm);
@@ -36897,7 +37061,7 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     // Character appearance follows equipment in both the world and Me screen.
     toggle("Play online", "See other players in town and the wilds, and chat with them.", s.optOnline);
     toggle("Auto-restock reagents", "Top up to 30 reagents whenever you enter a town (1 gold each).", s.autoReagents);
-    y += 6;
+    x=G.x+22;y += 6;
     DrawUIText("Alert history is in Journal > Events.", (int)x, (int)y, 12, soft);
     content=y+26-start;UIEndScissorMode();
 }
@@ -36912,14 +37076,14 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
 
     int y = 116;
     DrawUIText("Your Home", 20, y, 18, kColorHeading); (void)tier;
-    if (Button({ (float)screenW - 150, (float)y - 4, 130, 28 }, s.guildName.empty() ? "Warband" : ("Warband [" + s.guildTag + "]").c_str(), true))
+    if (Button({ (float)screenW - 150, (float)y - 4, 130, g_landscapePage ? 44.f:28.f }, s.guildName.empty() ? "Warband" : ("Warband [" + s.guildTag + "]").c_str(), true))
         { OpenWarWeek(s); g_guildTab = 7; } // (2026-09-28) the Guild screen, on its Guildmates tab
-    if (Button({ (float)screenW - 290, (float)y - 4, 130, 28 }, SettleHall(s) > 0 ? TextFormat("Settlement %d", SettleHall(s)) : "Settlement", true))
+    if (Button({ (float)screenW - 290, (float)y - 4, 130, g_landscapePage ? 44.f:28.f }, SettleHall(s) > 0 ? TextFormat("Settlement %d", SettleHall(s)) : "Settlement", true))
         { g_settleOpen = true; g_settleScroll = 0.0f; } // (2026-09-27)
-    y += 24;
+    y += g_landscapePage ? 58:24;
 
     // Name entry - same always-live pattern as the Character screen's name field.
-    Rectangle nameBox = { 20, (float)y, (float)(screenW - 40), 26 };
+    Rectangle nameBox = { 20, (float)y, (float)(screenW - 40), g_landscapePage ? 44.f:26.f };
     DrawRectangleRec(nameBox, Fade(WHITE, 0.6f));
     DrawRectangleRoundedLines(nameBox, 0.15f, 4, Fade(BLACK, 0.4f));
     TapToEditText(nameBox, "Name your house", s.houseName, 24);
@@ -36930,7 +37094,7 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
         int caretX = (int)nameBox.x + 6 + (s.houseName.empty() ? 0 : MeasureUIText(s.houseName.c_str(), 13));
         DrawRectangle(caretX + 1, (int)nameBox.y + 6, 2, 15, kColorText);
     }
-    y += 32;
+    y += g_landscapePage ? 56:32;
 
     DrawUIText(TextFormat("Backpack capacity: %d (base %d, more from your settlement's Storehouse)",
                             BackpackCap(s), GameState::kBackpackCap), 20, y, 12, kColorText);
@@ -36956,13 +37120,13 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
         y += 20;
         bool ghostBlock = s.playerIsGhost || s.playerDeathAnimT > 0.0f;
         if (!s.hearthBound) {
-            if (Button({ 20, (float)y, 150, 26 }, "Bind Hearth", !ghostBlock)) {
+            if (Button({ 20, (float)y, 150, g_landscapePage ? 44.f:26.f }, "Bind Hearth", !ghostBlock)) {
                 s.hearthBound = true;
                 PlaySfx(SfxId::Cast);
                 s.logLine = "Your hearth is bound to " + std::string(hp.name) + ".";
             }
         } else {
-            if (Button({ 20, (float)y, 170, 26 }, "Recall to Homestead", !ghostBlock)) {
+            if (Button({ 20, (float)y, 170, g_landscapePage ? 44.f:26.f }, "Recall to Homestead", !ghostBlock)) {
                 CancelEscort(s, "parts ways at the hearth - the escort is broken.");
                 s.screen = Screen::Wilderness;
                 s.wildernessPlayerPos = HouseDoorPos(hp, s.houseLayout);
@@ -36978,17 +37142,20 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     // (2026-09-27) The old house tiers, colors and workshop-wing shop are retired: your
     // Settlement's Storehouse adds pack space, and its Forge, Lumber Camp, Tannery and
     // Herb Garden open the matching workshop stations in your house.
-    DrawUIText("Home workshop stations", 20, y, 13, kColorAccent);
+    if(g_landscapePage)y=260;
+    int workshopX=g_landscapePage ? 500:20;
+    DrawUIText("Home workshop stations", workshopX, y, 13, kColorAccent);
     y += 20;
     for (int m = 0; m < 4; m++) {
         int lv = HomeWingLevel(s, m);
         std::string line = lv > 0 ? TextFormat("%s - level %d (works up to skill %d)", kHomeModuleDefs[(size_t)m].label.c_str(), lv, kHomeModuleLevels[(size_t)lv - 1].cap)
                                   : kHomeModuleDefs[(size_t)m].label + " - raise a " + kSettleDefs[kWingSettleKind[m]].name + " in your settlement";
+        if(g_landscapePage){auto lines=WrapJournalText(line,420);for(auto& text:lines){DrawUIText(text.c_str(),workshopX,y,12,lv>0 ? kColorText:Fade(kColorText,.6f));y+=18;}y+=14;continue;}
         DrawUIText(line.c_str(), 20, y, 12, lv > 0 ? kColorText : Fade(kColorText, 0.6f));
         y += 18;
     }
     y += 6;
-    DrawUIText("Use them at their benches inside your house.", 20, y, 12, Fade(kColorText, 0.75f));
+    DrawUIText("Use them at their benches inside your house.", workshopX, y, 12, Fade(kColorText, 0.75f));
     (void)screenH;
 }
 
@@ -37115,11 +37282,13 @@ static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
         const char* gs = TextFormat("%d / %d", gsum, 99 * (int)g.keys.size());
         DrawUIText(gs, screenW - 22 - MeasureUIText(gs, 12), (int)yy + 9, 12, soft);
         yy += 28;
+        int col=0;
         for (int k : g.keys) {
             float val = SkillKeyValue(s, k);
             int lv = SkillLevel(val);
             bool gm = val >= 99.0f;
-            Rectangle row = { 14, yy, (float)screenW - 28, 62 };
+            float rw=g_landscapePage ? 452.f:(float)screenW-28;
+            Rectangle row = {14+(g_landscapePage ? (col%2)*480.f:0), yy, rw, 62};
             if (row.y + row.height >= listTop && row.y <= listTop + listH) {
                 DrawRectangleRounded(row, 0.15f, 6, Fade(Color{ 255, 250, 235, 255 }, 0.55f));
                 DrawRectangleRec({ row.x, row.y + 6, 4, row.height - 12 }, gm ? Color{ 214, 170, 70, 255 } : good);
@@ -37141,10 +37310,13 @@ static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
                 std::string next = nl > 0 ? TextFormat("Next: level %d - %s", nl, SkillUnlocksAt(k, nl).c_str())
                                           : (k < 29 ? std::string(kCappedSkillWhat[k]) : std::string("Keep going - every level makes you better at it."));
                 DrawUIText(info.c_str(), (int)bx, (int)yy + 37, 11, soft);
+                while(MeasureUIText(next.c_str(),11)>row.width-24 && next.size()>4)next.pop_back();
                 DrawUIText(next.c_str(), (int)bx, (int)yy + 49, 11, nl > 0 ? good : soft);
             }
-            yy += 68;
+            if(!g_landscapePage || col%2==1)yy+=68;
+            ++col;
         }
+        if(g_landscapePage && col%2)yy+=68;
         yy += 6;
     }
     float contentH = yy + g_skillsScroll - listTop + 20;
@@ -37254,8 +37426,10 @@ static bool g_dollRTReady = false;
 static float g_dollYaw = 0.35f;
 static bool g_dollDragging = false;
 static float g_dollLastX = 0.0f;
-static const Rectangle kDollGump = { 10, 122, 520, 440 };
-static const Rectangle kDollView = { 98, 134, 344, 352 };
+static Rectangle DollGump(){return g_landscapePage ? Rectangle{10,116,500,414}:Rectangle{10,122,520,440};}
+#define kDollGump DollGump()
+static Rectangle DollView(){return g_landscapePage ? Rectangle{98,128,324,328}:Rectangle{98,134,344,352};}
+#define kDollView DollView()
 static const int kT3CTrackPaperdoll = 160;
 
 static const Item* PaperdollTryOnItem(const GameState& s) {
@@ -37268,7 +37442,7 @@ static const Item* PaperdollTryOnItem(const GameState& s) {
 }
 static Rectangle PaperdollInspectRect(int screenH) {
     // Keep the whole character visible while inspecting boots, legs and weapons.
-    return { 60, std::min((float)screenH - 152, g_characterPack ? (float)screenH - 152 : 636.0f), 420, 140 };
+    return g_landscapePage ? Rectangle{530,380,420,140}:Rectangle{60,std::min((float)screenH-152,g_characterPack ? (float)screenH-152:636.f),420,140};
 }
 static std::string PaperdollShortName(std::string name) {
     for (const auto& quality : kQualityTiersData) {
@@ -37347,7 +37521,7 @@ static const PaperdollSlot kPdSlots[8] = {
 };
 static Rectangle PaperdollSlotRect(int i) {
     float x = i < 4 ? kDollGump.x + 16 : kDollGump.x + kDollGump.width - 16 - 66;
-    return { x, kDollGump.y + 22 + (i % 4) * 87.0f, 66, 66 };
+    return { x, kDollGump.y + 22 + (i % 4) * (g_landscapePage ? 80.f:87.f), 66, 66 };
 }
 // Faint outline of what goes in an empty slot.
 static void PaperdollGlyph(int g, Rectangle r) {
@@ -37523,7 +37697,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
 
     } // equipment view
     // ---- status strip (UO status gump) ----
-    Rectangle st = { 10, G.y + G.height + 10, 520, 52 };
+    Rectangle st = g_landscapePage ? Rectangle{530,116,420,92}:Rectangle{10,G.y+G.height+10,520,52};
     if (!g_characterPack) {
     UODrawGump(st, kUoDarkWood);
     auto bar = [&](float x, float y, float w, float frac, Color c, const std::string& lab) {
@@ -37539,17 +37713,18 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     };
     std::string st1 = statTxt("Str", s.str, EffStr(s)) + "  " + statTxt("Dex", s.dex, EffDex(s)) + "  " + statTxt("Int", s.intStat, EffInt(s));
     std::string st2 = TextFormat("Power %d   Defense %d", CombatPower(s), TotalDefense(s));
-    DrawUIText(st1.c_str(), (int)st.x + 274, (int)st.y + 10, 12, kUoGoldText);
-    DrawUIText(st2.c_str(), (int)st.x + 274, (int)st.y + 27, 12, Color{ 226, 212, 180, 255 });
+    DrawUIText(st1.c_str(), (int)st.x + (g_landscapePage ? 14:274), (int)st.y + (g_landscapePage ? 51:10), 12, kUoGoldText);
+    DrawUIText(st2.c_str(), (int)st.x + (g_landscapePage ? 14:274), (int)st.y + (g_landscapePage ? 70:27), 12, Color{ 226, 212, 180, 255 });
 
     }
     if(g_characterPack) {
         if(Button({20,120,244,44},"Bank storage",true)) MenuGoScreen(s,Screen::Bank);
-        if(Button({276,120,244,44},"Home & settlement",true)) MenuGoScreen(s,Screen::House);
+        if(Button({g_landscapePage ? 280.f:276.f,120,244,44},"Home & settlement",true)) MenuGoScreen(s,Screen::House);
     }
     // ---- the backpack (UO bag gump) ----
     Rectangle bag = { 10, st.y + st.height + 18, 520, (float)screenH - (st.y + st.height + 18) - 8 };
-    if(g_characterPack) bag={10,180,520,(float)screenH-188};
+    if(g_landscapePage)bag={530,220,420,310};
+    if(g_characterPack) bag={10,180,(float)screenW-20,(float)screenH-190};
     UODrawGump(bag, kUoLeather);
     // stitched seam just inside the frame
     for (float x = bag.x + 16; x < bag.x + bag.width - 16; x += 12)
@@ -38037,6 +38212,7 @@ static float ScreenAngleOf(Vector2 d) {
     return atan2f(d.y, d.x);
 }
 static void DrawDirectionsHud(GameState& s, int screenW) {
+    if(g_landscapePage || g_landscapeNativeMenu)return;
     if(g_landscapeWorld && g_landscapeCombat)return;
     bool wild = s.screen == Screen::Wilderness;
     // The remote boss banner should not stretch across town, interiors or duels.
@@ -38180,6 +38356,10 @@ static void UpdateDrawToasts(GameState& s, int screenW, int screenH, bool play) 
         t.t += dt;
         float a = std::min(1.0f, t.t / 0.15f) * std::clamp((t.dur - t.t) / 0.6f, 0.0f, 1.0f);
         if (a <= 0.0f) continue;
+        if(g_landscapePage) {
+            if(i==(int)g_toasts.size()-1){std::string text=t.text;while(MeasureUIText(text.c_str(),11)>620 && text.size()>4)text.pop_back();DrawUIText(text.c_str(),160,3,11,Fade(t.col,a));}
+            continue;
+        }
         // wrap to at most two lines
         std::vector<std::string> lines; std::string cur, word;
         std::istringstream ws(t.text);
@@ -38501,6 +38681,8 @@ static void UpdateDrawFrame() {
         // main 3D pass needs. Must run while the default framebuffer is bound,
         // before BeginTextureMode(g_zoomTarget)/BeginDrawing below. 2D screens
         // are untouched (guarded by town3DView).
+        g_landscapePage=IsMenuScreen(state.screen);
+        screenW=g_landscapePage ? 960:kScreenW;screenH=g_landscapePage ? 540:kScreenH;
         if (state.screen != Screen::Character) g_pdTryOn.reset();
         if (state.screen == Screen::Character) PaperdollRenderPass(state); // the 3D body for the paperdoll
         else if (state.screen == Screen::Town && state.town3DView) Town3DShadowPass(state);
@@ -38516,7 +38698,7 @@ static void UpdateDrawFrame() {
         bool wideWorld=!IsMenuScreen(state.screen) && (ExploreHeaderCollapsed(state) || (state.screen==Screen::Hunt && state.selectedDungeon.has_value() && state.hunt3DView)) && !state.ambush.has_value() && !state.innocentEncounter.has_value();
         const Screen frameScreen=state.screen;
         g_landscapeCombat=state.wildEngaged.has_value() || state.dungeonEngaged.has_value();
-        LandscapeBeginFrame(wideWorld,LandscapeDialogOpen(state),(int)state.screen,state.screen==Screen::Character && !g_characterPack);
+        LandscapeBeginFrame(wideWorld,LandscapeDialogOpen(state),(int)state.screen,false,g_landscapePage);
         ClearBackground(wideWorld ? BLANK:kColorPageBg);
 
         // Inside a dungeon (2026-09-25), and in the 3D town/wilderness/interior
@@ -38532,7 +38714,7 @@ static void UpdateDrawFrame() {
         // buttons, which are drawn before it.
         if (state.screen != Screen::Wilderness) state.worldMapOpen = false;
         g_uiShieldOn = explore3D;
-        g_uiShield = state.exploreMenuOpen ? CompactMenuPanelRect(false) : kCompactMenuBtn;
+        g_uiShield = state.exploreMenuOpen ? CompactMenuPanelRect(false) : g_landscapePage ? Rectangle{20,20,112,48}:kCompactMenuBtn;
         if (state.worldMapOpen || state.guideOpen) { g_uiShieldOn = true; g_uiShield = { 0, 0, (float)screenW, (float)screenH }; }
         if (state.exploreMenuOpen && !state.worldMapOpen && !state.guideOpen) {
             g_uiShield.y = kCompactMenuBtn.y; // cover the toggle too
@@ -38723,10 +38905,10 @@ static void UpdateDrawFrame() {
         // screens above the belt and spell bar, on menus at the bottom - colored by
         // what it means. The old faint line at the very bottom hid under the spell bar.
         MpTick(state);           // (2026-09-29) multiplayer: send where you are, hear everyone else
-        if (state.screen == renderedScreen && !g_landscapeNativeMenu) MpDrawChatButton(state); // never reuse a navigation tap on newly shown Chat
+        if (state.screen == renderedScreen && !g_landscapeNativeMenu && !g_landscapePage) MpDrawChatButton(state); // never reuse a navigation tap on newly shown Chat
         UpdateDrawToasts(state, screenW, screenH, IsPlayScreen(state.screen));
         UpdateDrawLevelUps(state, screenW, screenH, IsPlayScreen(state.screen)); // (2026-09-29) RuneScape-style level-ups
-        DrawNotorietyFooter(state, screenW, screenH);
+        if(!g_landscapePage && !g_landscapeNativeMenu)DrawNotorietyFooter(state, screenW, screenH);
 
         // A button may have opened or closed a panel during this frame. Present
         // the final state, rather than guessing from the size of HUD controls.

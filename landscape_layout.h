@@ -45,6 +45,8 @@ static bool g_presentedMap=false,g_landscapeMap=false;
 static bool g_landscapeGear=false,g_presentedGear=false;
 static bool g_landscapeNativeMenu=false,g_presentedNativeMenu=false,g_landscapeNativeMenuDrawing=false;
 static RenderTexture2D g_landscapeNativeMenuTarget{};
+static bool g_landscapePage=false,g_presentedPage=false;
+static RenderTexture2D g_landscapePageTarget{};
 static bool LandscapeMenuBlocksWorld(){return (g_presentedNativeMenu || g_landscapeNativeMenu) && !g_landscapeNativeMenuDrawing;}
 static Rectangle g_presentedMapSource{},g_presentedMapDest{},g_landscapeMapSource{},g_landscapeMapDest{};
 static RenderTexture2D g_landscapeMapTarget{};
@@ -60,6 +62,7 @@ static bool g_landscapePointerHeld=false;
 static double g_landscapePressTime=-1;
 static tflayout::Region LandscapeRegion(Vector2 raw) {
     if(g_presentedNativeMenu)return tflayout::Region::NativeMenu;
+    if(g_presentedPage)return tflayout::Region::NativePage;
     if(g_presentedGear)return raw.y<110 ? tflayout::Region::GearHeader:
         raw.x<480 ? tflayout::Region::GearLeft:tflayout::Region::GearRight;
     if(g_presentedMap && CheckCollisionPointRec(raw,g_presentedMapDest))return tflayout::Region::Map;
@@ -206,7 +209,7 @@ static void LandscapePanelInput() {
         g_landscapeScroll=tflayout::Scroll(g_landscapeScroll-::GetMouseWheelMove()*48);
     held=down;
 }
-static void LandscapeBeginFrame(bool world,bool dialog,int screen,bool gear=false) {
+static void LandscapeBeginFrame(bool world,bool dialog,int screen,bool gear=false,bool page=false) {
 #ifdef PLATFORM_WEB
     // Use the displayed landscape aspect for both projection and picking.
     // CSS fills the phone; a wider camera keeps characters from stretching.
@@ -219,11 +222,14 @@ static void LandscapeBeginFrame(bool world,bool dialog,int screen,bool gear=fals
     static int previousScreen=-1;
     if(previousScreen!=screen || (dialog && !g_presentedDialog) || gear!=g_presentedGear)g_landscapeScroll=0;
     previousScreen=screen;
-    if((!world || dialog) && !gear && !g_presentedNativeMenu)LandscapePanelInput();
+    if((!world || dialog) && !gear && !page && !g_presentedNativeMenu)LandscapePanelInput();
+    g_landscapePage=page;
+    if(page && !g_landscapePageTarget.id){g_landscapePageTarget=::LoadRenderTexture(960,540);::SetTextureFilter(g_landscapePageTarget.texture,TEXTURE_FILTER_BILINEAR);}
     g_landscapeNativeMenu=false;g_landscapeNativeMenuDrawing=false;
     g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeGear=gear;g_landscapeMap=false;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();g_landscapeNotices.clear();g_landscapeSkills.clear();g_landscapeLabels.clear();
     ::BeginTextureMode(g_landscapeScene);::ClearBackground(Color{22,33,42,255});::EndTextureMode();
-    ::BeginTextureMode(g_landscapeUI);g_landscapeTargets.push_back(g_landscapeUI);g_landscapeActive=true;
+    auto pageTarget=page ? g_landscapePageTarget:g_landscapeUI;
+    ::BeginTextureMode(pageTarget);g_landscapeTargets.push_back(pageTarget);g_landscapeActive=true;
 }
 // Measure at the final landscape resolution: text must never inherit the
 // nonuniform scale of the old portrait HUD bands.
@@ -277,6 +283,9 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
     }
     if(g_landscapeNativeMenu) {
         blit(g_landscapeNativeMenuTarget.texture,{0,0,960,540},{0,0,960,540});
+    }
+    else if(g_landscapePage) {
+        blit(g_landscapePageTarget.texture,{0,0,960,540},{0,0,960,540});
     }
     else if(g_landscapeGear) {
         // Keep the whole gear gump together, then place the character details
@@ -386,7 +395,8 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
         }
     }
     g_presentedWorld=g_landscapeWorld;g_presentedDialog=g_landscapeDialog;
-    g_presentedGear=g_landscapeGear && !g_landscapeNativeMenu;
+    g_presentedGear=g_landscapeGear && !g_landscapeNativeMenu && !g_landscapePage;
+    g_presentedPage=g_landscapePage && !g_landscapeNativeMenu;
     g_presentedNativeMenu=g_landscapeNativeMenu;
     g_landscapeHitRects=controls;
     if(g_presentedMap) {

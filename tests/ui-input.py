@@ -87,14 +87,14 @@ struct GameState{
  Screen screen=Screen::Town;std::optional<int> combat;bool playerIsGhost=false;
  float playerDeathAnimT=0,leaveDungT=-1;int gold=100,wood=0,ore=0,leather=0,backpackScroll=0,selectedTown=0,guidePage=0;Vector2 townPlayerPos{};
 };
-bool g_characterPack=false,g_questOpen=false,g_optOpen=false;int g_pdSel=-1,g_questTab=0,g_guildTab=0,g_denPanel=0;
+bool g_characterPack=false,g_questOpen=false,g_optOpen=false,g_settleOpen=false;int g_pdSel=-1,g_questTab=0,g_guildTab=0,g_denPanel=0;
 Screen g_playScreen=Screen::Town;
 bool DenFighting(){return false;}
 void MenuGoScreen(GameState& s,Screen sc){s.screen=sc;g_questOpen=g_optOpen=false;}
 void OpenWarWeek(GameState&){}std::string GuildAttentionLabel(){return "Guild";}
 std::string JournalAttentionLabel(GameState&){return "Journal";}
 Vector2 TS(float x,float y){return {x,y};}void WalkTargetClear(){}void TryStartLeaveDungeon(GameState& s){s.leaveDungT=1;}
-'''+section('static bool LandscapeMenuCard(', 'static void DrawCompactMenu(')
+'''+section('static bool LandscapeMenuCard(', 'static const char* LandscapePageTitle(')
 native+='''int main(){
 Screen pages[]={Screen::Character,Screen::Character,Screen::Skills,Screen::Magic,Screen::Craft,Screen::Pets,Screen::Bank,Screen::House,Screen::House,Screen::House,Screen::House,Screen::Guide};
 for(int slot=0;slot<12;slot++){
