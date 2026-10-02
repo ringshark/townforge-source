@@ -10070,6 +10070,8 @@ static bool g_uiShieldOn = false, g_uiShieldBypass = false;
 static std::vector<Rectangle> g_uiRects, g_uiRectsPrev;
 static std::vector<Rectangle> g_uiClips;
 static bool g_uiClickTaken = false, g_uiGestureOwned = false;
+static Vector2 g_uiListTapStart{};
+static bool g_uiListTapArmed=false,g_uiListTapMoved=false;
 static Rectangle UIClipped(Rectangle r) {
     for (const Rectangle& clip : g_uiClips) {
         float right = std::min(r.x + r.width, clip.x + clip.width);
@@ -10117,14 +10119,27 @@ static bool UIHit(Vector2 m) {
 static void UIFrameReset() {
     g_uiRectsPrev.swap(g_uiRects); g_uiRects.clear(); g_uiClips.clear();
     g_uiClickTaken = false;
+    if(IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        g_uiListTapStart=GetMousePosition();
+        g_uiListTapArmed=g_landscapePage;
+        g_uiListTapMoved=false;
+    } else if(g_uiListTapArmed && (IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsMouseButtonReleased(MOUSE_BUTTON_LEFT))) {
+        Vector2 p=GetMousePosition();
+        if(std::fabs(p.x-g_uiListTapStart.x)>8 || std::fabs(p.y-g_uiListTapStart.y)>8)g_uiListTapMoved=true;
+    } else if(!IsMouseButtonDown(MOUSE_BUTTON_LEFT))g_uiListTapArmed=false;
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         g_uiGestureOwned = false;
         g_uiGestureOwned = UIHit(GetMousePosition());
     } else if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) g_uiGestureOwned = false;
 }
-static bool UIClick(Rectangle r, bool enabled = true) {
+static bool UIClick(Rectangle r, bool enabled = true, bool onPress = false) {
     UIRegister(r);
-    if (!enabled || g_uiClickTaken || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || !UIContains(GetMousePosition(), r)) return false;
+    // Scrolling lists commit on release; dragging over a shop or bank button
+    // must never buy, sell, deposit or withdraw as a side effect of a swipe.
+    bool listTap=g_landscapePage && !g_uiClips.empty() && !onPress;
+    bool activate=listTap ? IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && g_uiListTapArmed && !g_uiListTapMoved && UIContains(g_uiListTapStart,r)
+                          : IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (!enabled || g_uiClickTaken || !activate || !UIContains(GetMousePosition(), r)) return false;
     if (g_uiShieldOn && !g_uiShieldBypass && CheckCollisionPointRec(GetMousePosition(), g_uiShield)) return false;
     g_uiClickTaken = true; g_uiGestureOwned = true;
     return true;
@@ -37042,7 +37057,7 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
         UIRegister(hit);
         static bool dragging = false; static const float* who = nullptr;
         Vector2 m = GetMousePosition();
-        if (UIClick(hit)) { dragging = true; who = &v; }
+        if (UIClick(hit,true,true)) { dragging = true; who = &v; }
         if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { if (dragging && who == &v) PlaySfx(SfxId::Click); dragging = false; who = nullptr; }
         if (dragging && who == &v) v = std::clamp((m.x - bar.x) / bar.width, 0.0f, 1.0f);
         advance(62);

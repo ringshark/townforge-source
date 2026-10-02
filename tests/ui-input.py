@@ -13,7 +13,8 @@ struct Vector2 {float x,y;}; struct Rectangle {float x,y,width,height;};
 enum {MOUSE_BUTTON_LEFT};
 Vector2 mouse{}; bool pressed=false,down=false,released=false;
 bool menuBlocked=false;bool LandscapeMenuBlocksWorld(){return menuBlocked;}
-bool landscapeAllowed=true;bool LandscapeUIAllowed(){return landscapeAllowed;}
+bool landscapeAllowed=true;bool g_landscapePage=false;
+bool LandscapeUIAllowed(){return landscapeAllowed;}
 Vector2 GetMousePosition(){return mouse;}
 bool IsMouseButtonPressed(int){return pressed;} bool IsMouseButtonDown(int){return down;}
 bool IsMouseButtonReleased(int){return released;}
@@ -67,6 +68,27 @@ with tempfile.TemporaryDirectory() as tmp:
     subprocess.run(['g++','-std=c++17',str(cpp),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
 print('PASS production UI routing: one click per press, release ownership, clipping, nested clips, shields, disabled controls and text-field taps')
+
+release=code[:code.index('int main()')]+r'''int main(){
+g_landscapePage=true;
+Rectangle item{20,240,120,44};
+frame({60,260},true,true,false);UIBeginScissorMode(0,200,960,320);assert(!UIClick(item));UIEndScissorMode();
+frame({60,260},false,false,true);UIBeginScissorMode(0,200,960,320);assert(UIClick(item));assert(!UIClick(item));UIEndScissorMode();
+frame({60,260},false,false,false);
+frame({60,260},true,true,false);UIBeginScissorMode(0,200,960,320);assert(!UIClick(item));UIEndScissorMode();
+frame({60,240},false,true,false);UIBeginScissorMode(0,200,960,320);assert(!UIClick(item));UIEndScissorMode();
+frame({60,260},false,false,true);UIBeginScissorMode(0,200,960,320);assert(!UIClick(item));UIEndScissorMode();
+frame({60,260},false,false,false);
+frame({60,260},true,true,false);assert(UIClick(item)); // fixed navigation stays immediate
+frame({60,260},false,false,false);
+frame({60,260},true,true,false);UIBeginScissorMode(0,200,960,320);assert(UIClick(item,true,true));UIEndScissorMode(); // continuous sliders still begin on press
+}'''
+with tempfile.TemporaryDirectory() as tmp:
+    cpp=Path(tmp)/'release.cpp';exe=Path(tmp)/'release';cpp.write_text(release)
+    subprocess.run(['g++','-std=c++17',str(cpp),'-o',str(exe)],check=True)
+    subprocess.run([str(exe)],check=True)
+print('PASS menu list actions on completed taps; swipes and repeated release callbacks do not activate')
+
 
 # Exercise actual native menu callbacks using the production click router.
 native=code[:code.index('void frame(')]
