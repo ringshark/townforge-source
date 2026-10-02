@@ -3,8 +3,10 @@
   function fit(width, height, touch) {
     const rotated = touch && height > width;
     const w = rotated ? height : width, h = rotated ? width : height;
-    const canvasWidth = touch ? w : Math.min(w, h * 16 / 9);
-    return { rotated, width: w, height: h, canvasWidth, canvasHeight: touch ? h : canvasWidth * 9 / 16 };
+    const tablet = touch && Math.min(w, h) >= 600;
+    const fillPhone = touch && !tablet;
+    const canvasWidth = fillPhone ? w : Math.min(w, h * 16 / 9);
+    return { rotated, width: w, height: h, canvasWidth, canvasHeight: fillPhone ? h : canvasWidth * 9 / 16 };
   }
   function point(x, y, rect, rotated) {
     const u = (x - rect.left) / rect.width, v = (y - rect.top) / rect.height;

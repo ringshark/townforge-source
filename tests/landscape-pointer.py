@@ -70,7 +70,7 @@ Vector2 GetMousePosition(){return raw;}
 bool IsMouseButtonPressed(int){return pressed;}bool IsMouseButtonDown(int){return down;}
 float GetMouseWheelMove(){return wheel;}
 bool CheckCollisionPointRec(Vector2 p,Rectangle r){return p.x>=r.x && p.x<=r.x+r.width && p.y>=r.y && p.y<=r.y+r.height;}
-"""+f'#include "{rules}"\n'+section('static Rectangle LandscapePanelTop()', 'static void LandscapeBeginFrame(')
+"""+f'#include "{rules}"\n'+section('static Rectangle LandscapePanelUp()', 'static void LandscapeBeginFrame(')
 panel+=r"""int main(){
 auto near=[](float a,float b){return std::fabs(a-b)<.01;};
 raw={900,488};pressed=down=true;LandscapePanelInput();assert(near(g_landscapeScroll,tflayout::maxScroll));
@@ -82,6 +82,12 @@ raw={900,268};pressed=down=true;LandscapePanelInput();assert(near(g_landscapeScr
 pressed=false;raw.y=430;LandscapePanelInput();assert(g_landscapeScroll>tflayout::maxScroll*.9f);
 down=false;LandscapePanelInput();
 raw={900,300};wheel=1;float before=g_landscapeScroll;LandscapePanelInput();assert(near(g_landscapeScroll,before-48));
+wheel=0;pressed=down=false;LandscapePanelInput();g_landscapeScroll=0;
+raw={60,326};pressed=down=true;LandscapePanelInput();assert(near(g_landscapeScroll,tflayout::panelBody*.85f));
+pressed=down=false;LandscapePanelInput();
+raw={60,214};pressed=down=true;LandscapePanelInput();assert(g_landscapeScroll==0);
+pressed=down=false;LandscapePanelInput();
+raw={60,214};pressed=down=true;LandscapePanelInput();assert(g_landscapeScroll==0);
 assert(tflayout::Map({900,488},tflayout::Region::PanelChrome).x<0);
 } """
 with tempfile.TemporaryDirectory() as tmp:

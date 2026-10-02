@@ -174,6 +174,8 @@ static Ray LandscapeRay(Vector2 pos,Camera camera,int w,int h) {
     if(g_landscapeActive && g_landscapeWorld){pos.x*=tflayout::aspectFactor;return ::GetScreenToWorldRayEx(pos,camera,(int)(w*tflayout::aspectFactor),h);}
     return ::GetScreenToWorldRayEx(pos,camera,w,h);
 }
+static Rectangle LandscapePanelUp(){return {12,190,96,48};}
+static Rectangle LandscapePanelDown(){return {12,302,96,48};}
 static Rectangle LandscapePanelTop(){return {852,28,96,48};}
 static Rectangle LandscapePanelBottom(){return {852,464,96,48};}
 static Rectangle LandscapePanelRail(){return {852,96,96,344};}
@@ -187,6 +189,9 @@ static void LandscapePanelInput() {
     Rectangle rail=LandscapePanelRail();
     if(press) {
         dragging=CheckCollisionPointRec(mouse,rail);
+        const float page=tflayout::panelBody*.85f;
+        if(CheckCollisionPointRec(mouse,LandscapePanelUp()))g_landscapeScroll=tflayout::Scroll(g_landscapeScroll-page);
+        if(CheckCollisionPointRec(mouse,LandscapePanelDown()))g_landscapeScroll=tflayout::Scroll(g_landscapeScroll+page);
         if(CheckCollisionPointRec(mouse,LandscapePanelTop()))g_landscapeScroll=0;
         if(CheckCollisionPointRec(mouse,LandscapePanelBottom()))g_landscapeScroll=tflayout::maxScroll;
     }
@@ -207,7 +212,8 @@ static void LandscapeBeginFrame(bool world,bool dialog,int screen,bool gear=fals
     tflayout::DisplayAspect((float)aspect,1);
 #endif
     static int previousScreen=-1;
-    if(previousScreen!=screen){g_landscapeScroll=0;previousScreen=screen;}
+    if(previousScreen!=screen || (dialog && !g_presentedDialog) || gear!=g_presentedGear)g_landscapeScroll=0;
+    previousScreen=screen;
     if((!world || dialog) && !gear)LandscapePanelInput();
     g_landscapeWorld=world;g_landscapeDialog=dialog;g_landscapeGear=gear;g_landscapeMap=false;g_landscapeWorldTextures.clear();g_landscapeTargets.clear();g_landscapeCaptions.clear();g_landscapeNotices.clear();g_landscapeSkills.clear();g_landscapeLabels.clear();
     ::BeginTextureMode(g_landscapeScene);::ClearBackground(Color{22,33,42,255});::EndTextureMode();
@@ -275,15 +281,19 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
         g_landscapeScroll=0;
     }
     else if(!g_landscapeWorld || g_landscapeDialog) {
-        if(g_landscapeWorld && !g_presentedDialog)g_landscapeScroll=0;
         Rectangle top=LandscapePanelTop(),more=LandscapePanelBottom();
         if(g_landscapeWorld)::DrawRectangle(0,0,960,540,Color{6,12,18,155});
         ::DrawRectangleGradientH(0,0,120,540,Color{12,21,28,255},Color{28,38,44,255});
         ::DrawRectangleGradientH(840,0,120,540,Color{28,38,44,255},Color{12,21,28,255});
         ::DrawLine(118,24,118,516,Color{141,114,71,255});
         ::DrawLine(842,24,842,516,Color{141,114,71,255});
-        ::DrawTextEx(font,"TOWN",{20,234},20,1,Color{230,211,174,255});
-        ::DrawTextEx(font,"FORGE",{20,260},20,1,Color{230,211,174,255});
+        for(auto r:{LandscapePanelUp(),LandscapePanelDown()})LandscapePlate(r,Color{163,132,82,255});
+        ::DrawTextEx(font,"Page up",{23,206},16,1,Color{238,220,183,255});
+        ::DrawTextEx(font,"Page down",{16,318},15,1,Color{238,220,183,255});
+        int progress=(int)std::round(g_landscapeScroll/tflayout::maxScroll*100);
+        std::string position=std::to_string(progress)+"%";
+        float pw=::MeasureTextEx(font,position.c_str(),16,1).x;
+        ::DrawTextEx(font,position.c_str(),{60-pw*.5f,266},16,1,Color{160,177,182,255});
         // Scale uniformly for legible text; the entire header remains pinned.
         blit(g_landscapeUI.texture,{0,0,540,110},{120,0,720,tflayout::panelHeader});
         blit(g_landscapeUI.texture,{0,110+g_landscapeScroll,540,tflayout::panelBody},

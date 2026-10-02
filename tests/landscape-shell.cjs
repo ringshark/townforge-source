@@ -19,4 +19,16 @@ for (const [x,y] of [[390,0],[0,844],[195,422]]) {
   near((t.pageY-19-rect.top)*540/rect.height,native.y);
   near(t.pageX,t.clientX+7);near(t.pageY,t.clientY+19);
 }
-console.log('PASS landscape startup and inverse touch rotation');
+// Tablets fit a proportionate landscape canvas inside either orientation.
+for(const [width,height] of [[1024,768],[1180,820],[1366,1024],[768,1024],[820,1180],[600,768]]) {
+  const tablet=fit(width,height,true);
+  assert(tablet.canvasWidth<=tablet.width && tablet.canvasHeight<=tablet.height);
+  near(tablet.canvasWidth/tablet.canvasHeight,16/9);
+  assert.equal(tablet.rotated,height>width);
+}
+// Letterboxing offsets belong to the canvas bounds, not the whole tablet.
+let tabletRect={left:0,top:96,width:1024,height:576};
+p=point(512,384,tabletRect,false);near(p.x,480);near(p.y,270);
+tabletRect={left:96,top:0,width:576,height:1024};
+p=point(384,512,tabletRect,true);near(p.x,480);near(p.y,270);
+console.log('PASS phone fullscreen, tablet fit, landscape startup and inverse touch rotation');

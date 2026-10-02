@@ -17276,7 +17276,7 @@ static bool ExploreHeaderCollapsed(const GameState& s) {
            (s.screen == Screen::Wilderness && s.wild3DView) ||
            (s.screen == Screen::Interior && s.interior3DView) || s.screen == Screen::Blackwake || IsMenuScreen(s.screen);
 }
-static const Rectangle kCompactMenuBtn = { 20, 56, 104, 40 };
+static const Rectangle kCompactMenuBtn = { 20, 56, 104, 48 };
 static Rectangle CompactMenuPanelRect(bool inDungeon) {
     return { 12, 104, 516, inDungeon ? 454.0f : 388.0f };
 }
@@ -32877,7 +32877,7 @@ static void DrawMenuGroupTabs(GameState& s) {
     if (s.screen == Screen::House && g_optOpen) g = 3;
     if (g < 3) g_menuGroupLast[g] = s.screen;
     bool en = !s.combat.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f;
-    const float x0 = 300, y = 56, h = 40, right = 540.0f - 8; // kScreenW
+    const float x0 = 300, y = 56, h = 48, right = 540.0f - 8; // kScreenW
     struct T { const char* l; Screen sc; };
     std::vector<T> tabs;
     if (g == 0 && s.screen == Screen::Character) {
@@ -32958,40 +32958,42 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
     }
     if (open) {
         Rectangle panel = CompactMenuPanelRect(inDungeon);
+        const bool wide = g_landscapeActive;
+        if(wide)panel.height=298;
         DrawRectangleRounded(panel, 0.08f, 8, Fade(kColorPageBg, 0.97f));
         DrawRectangleRoundedLines(panel, 0.08f, 8, Fade(BLACK, 0.45f));
         DrawUIText(TextFormat("Gold %d   Wood %d   Ore %d   Leather %d", s.gold, s.wood, s.ore, s.leather), 24, 116, 14, kColorText);
         bool tabsEnabled = !DenFighting() && !s.combat.has_value() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f;
         if (!tabsEnabled) DrawUIText("Finish combat before opening other pages.",24,138,12,kColorText);
         else DrawUIText("Choose what you want to do.",24,138,12,kColorText);
-        const float x0=24,x1=280,w=236,h=52;
+        const float x0=24,x1=wide ? 192.0f:280.0f,w=wide ? 152.0f:236.0f,h=wide ? 48.0f:52.0f;
         float y=160;
         if(Button({x0,y,w,h},"Character",tabsEnabled)) { g_characterPack=false; g_pdSel=-1; MenuGoScreen(s,Screen::Character); open=false; }
         if(Button({x1,y,w,h},"Crafting",tabsEnabled)) { MenuGoScreen(s,Screen::Craft); open=false; }
-        y+=62;
+        if(!wide)y+=62;
         std::string guild=GuildAttentionLabel(), journal=JournalAttentionLabel(s);
-        if(Button({x0,y,w,h},guild,tabsEnabled)) { MenuGoScreen(s,Screen::House); OpenWarWeek(s); g_guildTab=1; open=false; }
-        if(Button({x1,y,w,h},journal,tabsEnabled)) {
+        if(Button({wide ? 360.0f:x0,y,w,h},guild,tabsEnabled)) { MenuGoScreen(s,Screen::House); OpenWarWeek(s); g_guildTab=1; open=false; }
+        if(Button({wide ? x0:x1,wide ? 218.0f:y,w,h},journal,tabsEnabled)) {
             MenuGoScreen(s,Screen::House); g_questOpen=true; g_questTab=0; open=false;
         }
-        y+=62;
-        if(Button({x0,y,w,h},"Settings",!DenFighting())) { MenuGoScreen(s,Screen::House); g_optOpen=true; open=false; }
-        if(Button({x1,y,w,h},"Return to World",true)) { s.screen=g_playScreen; open=false; }
-        DrawUIText("Gear, pack and skills are in Character. Help and saves are in Settings.",24,352,12,kColorText);
+        y=wide ? 218.0f:y+62;
+        if(Button({wide ? x1:x0,y,w,h},"Settings",!DenFighting())) { MenuGoScreen(s,Screen::House); g_optOpen=true; open=false; }
+        if(Button({wide ? 360.0f:x1,y,w,h},"Return to World",true)) { s.screen=g_playScreen; open=false; }
+        DrawUIText("Gear, pack and skills are in Character. Help and saves are in Settings.",24,wide ? 346:352,12,kColorText);
         DrawUIText("Your equipped gear stays visible on your character in the world.",24,373,12,kColorText);
-        if(Button({24,410,492,52},s.screen==Screen::Blackwake ? "Ferry back to Saltmere":"Visit Blackwake Den",tabsEnabled && (s.screen==Screen::Town || s.screen==Screen::Blackwake))) {
+        if(Button({24,wide ? 282.0f:410.0f,wide && inDungeon ? 236.0f:492.0f,wide ? 48.0f:52.0f},s.screen==Screen::Blackwake ? "Ferry back to Saltmere":"Visit Blackwake Den",tabsEnabled && (s.screen==Screen::Town || s.screen==Screen::Blackwake))) {
             if(s.screen==Screen::Blackwake) {s.screen=Screen::Town;s.selectedTown=1;s.townPlayerPos=TS(450,830);}
             else {s.screen=Screen::Blackwake;s.townPlayerPos={750,1250};}
             g_denPanel=0;open=false;WalkTargetClear();
         }
         if(inDungeon) {
             bool canLeave=!s.playerIsGhost && s.playerDeathAnimT<=0.0f && s.leaveDungT<0.0f;
-            if(Button({24,480,492,52},"Leave Dungeon (Magery)",canLeave)) TryStartLeaveDungeon(s);
+            if(Button({wide ? 280.0f:24.0f,wide ? 282.0f:480.0f,wide ? 236.0f:492.0f,wide ? 48.0f:52.0f},"Leave Dungeon (Magery)",canLeave)) TryStartLeaveDungeon(s);
         }
     }
     if (Button(kCompactMenuBtn, open ? "HIDE" : "MENU", true)) open = !open;
     if (!open && IsMenuScreen(s.screen)) { // (2026-09-27) the way back, right beside MENU
-        Rectangle pb = { 130, 56, 160, 40 };
+        Rectangle pb = { 130, 56, 160, 48 };
         DrawRectangleRounded({ pb.x - 3, pb.y - 3, pb.width + 6, pb.height + 6 }, 0.35f, 6,
                              Fade(Color{ 255, 196, 70, 255 }, 0.5f + 0.25f * sinf((float)GetTime() * 3.0f)));
         if (Button(pb, "Return to World", true)) s.screen = g_playScreen;
