@@ -24109,7 +24109,7 @@ static void DrawDungeon3DWorld(GameState& s, int screenW, int screenH, const std
 static void DrawBuildingDetailPanel(GameState& s, int screenW) {
     if (s.selectedTile.has_value()) {
         std::string key = *s.selectedTile;
-        Rectangle panelBg = { 20, 500, (float)(screenW - 40), 220 };
+        Rectangle panelBg = { 20, g_landscapeActive ? 170.0f : 500.0f, (float)(screenW - 40), 220 };
         DrawRectangleRounded(panelBg, 0.06f, 8, Fade(kColorPageBg, 0.97f));
         DrawRectangleRoundedLines(panelBg, 0.06f, 8, Fade(BLACK, 0.4f));
         int panelY = (int)panelBg.y + 16;
@@ -26466,7 +26466,7 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
 
     // Shop NPC greeting popup (town townsfolk treatment, minus their wander).
     if (s.interiorGreeted && npc) {
-        Rectangle greetBg = { 20, 500, (float)(screenW - 40), 100 };
+        Rectangle greetBg = { 20, g_landscapeActive ? 170.0f : 500.0f, (float)(screenW - 40), 100 };
         DrawRectangleRounded(greetBg, 0.06f, 8, Fade(kColorPageBg, 0.97f));
         DrawRectangleRoundedLines(greetBg, 0.06f, 8, Fade(BLACK, 0.4f));
         DrawUIText(npc->name, (int)greetBg.x + 16, (int)greetBg.y + 14, 16, kColorHeading);
@@ -26621,7 +26621,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     // selectedTile's building panels.
     if (s.greetedNPC.has_value()) {
         const TownNPC& npc = activeNPCs[*s.greetedNPC];
-        Rectangle greetBg = { 20, 500, (float)(screenW - 40), 100 };
+        Rectangle greetBg = { 20, g_landscapeActive ? 170.0f : 500.0f, (float)(screenW - 40), 100 };
         DrawRectangleRounded(greetBg, 0.06f, 8, Fade(kColorPageBg, 0.97f));
         DrawRectangleRoundedLines(greetBg, 0.06f, 8, Fade(BLACK, 0.4f));
         DrawUIText(npc.name.c_str(), (int)greetBg.x + 16, (int)greetBg.y + 14, 16, kColorHeading);

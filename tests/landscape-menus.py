@@ -71,7 +71,10 @@ room.journalOpen=room.recallPickerOpen=room.worldMapOpen=room.guideOpen=true;
 room.dungeonMenuOpen=room.houseDesignerOpen=room.houseChestOpen=true;
 room.hotbarPickerSlot=0;room.houseCraftModule=0;room.openCorpseId=42;g_trackOpen=true;
 assert(!LandscapeDialogOpen(room));
-room.selectedTile="stable";assert(LandscapeDialogOpen(room));room.selectedTile.reset();
+room.selectedTile="stable";assert(LandscapeDialogOpen(room));
+reset();DrawBuildingDetailPanel(room,540);assert(!g_uiRects.empty());
+for(auto r:g_uiRects)assert(r.y>=170 && r.y+r.height<110+tflayout::panelBody); // actions and Close visible without scrolling
+room.selectedTile.reset();
 room.interiorGreeted=true;assert(LandscapeDialogOpen(room));room.interiorGreeted=false;
 room.exploreMenuOpen=true;assert(LandscapeDialogOpen(room));room.exploreMenuOpen=false;
 EnterInterior(room,"wildhouse");assert(!room.houseChestOpen && room.houseCraftModule<0);
