@@ -100,6 +100,7 @@ bool g_landscapeNativeMenu=false,g_landscapeNativeMenuDrawing=false,g_landscapeD
 float g_landscapeScroll=0;
 RenderTexture2D LoadRenderTexture(int,int){return {1,1};}
 void SetTextureFilter(int,int){}void BeginTextureMode(RenderTexture2D){}void EndTextureMode(){}
+void DrawRectangleRounded(Rectangle,float,int,Color){}void DrawRectangleLinesEx(Rectangle,float,Color){}
 void ClearBackground(Color){}void DrawRectangleGradientV(int,int,int,int,Color,Color){}
 void DrawUIText(const char*,int,int,int,Color){}void LandscapePlate(Rectangle,Color){}
 const char* TextFormat(const char*,...){return "resources";}
@@ -120,7 +121,7 @@ Vector2 TS(float x,float y){return {x,y};}void WalkTargetClear(){}void TryStartL
 native+='''int main(){
 Screen pages[]={Screen::Character,Screen::Character,Screen::Skills,Screen::Magic,Screen::Craft,Screen::Pets,Screen::Bank,Screen::House,Screen::House,Screen::House,Screen::House,Screen::Guide};
 for(int slot=0;slot<12;slot++){
- GameState s;bool open=true;mouse={28.f+(slot%4)*230.f+100,132.f+(slot/4)*86.f+30};pressed=down=true;UIFrameReset();g_uiShieldBypass=true;
+ GameState s;bool open=true;int col[]={0,0,0,1,1,0,2,2,1,1,2,2},row[]={0,1,2,0,1,3,0,1,2,3,2,3};mouse={28.f+col[slot]*312.f+100,150.f+row[slot]*72.f+30};pressed=down=true;UIFrameReset();g_uiShieldBypass=true;
  DrawLandscapeMainMenu(s,open,false);assert(!open && s.screen==pages[slot]);
  if(slot==1)assert(g_characterPack);if(slot==9)assert(g_questOpen);if(slot==10)assert(g_optOpen);
  for(auto r:g_uiRects)assert(r.x>=0 && r.y>=0 && r.x+r.width<=960 && r.y+r.height<=540 && r.height>=48);

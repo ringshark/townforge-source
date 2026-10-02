@@ -10148,6 +10148,13 @@ static bool Button(Rectangle r, const std::string& label, bool enabled) {
     // A small (1.5px/side) outset on both the visual rect and the click/tap hit-test -
     // enough to feel a bit more generous without crowding neighboring buttons the way
     // a bigger outset plus a drop shadow did (both have been tried and back out).
+    if(g_landscapePage) {
+        bool hover=enabled && CheckCollisionPointRec(GetMousePosition(),r);
+        DrawRectangleRounded(r,.12f,4,enabled ? (hover ? Color{65,83,94,255}:Color{42,57,68,255}):Color{203,207,207,255});
+        int fs=16;while(MeasureUIText(label.c_str(),fs)>r.width-20 && fs>11)--fs;
+        DrawUIText(label.c_str(),(int)(r.x+(r.width-MeasureUIText(label.c_str(),fs))/2),(int)(r.y+(r.height-fs)/2),fs,enabled ? Color{243,243,230,255}:Color{114,123,127,255});
+        bool clicked=UIClick(r,enabled);if(clicked)PlaySfx(SfxId::Click);return clicked;
+    }
     const float kOutset = 1.5f;
     Rectangle big = { r.x - kOutset, r.y - kOutset, r.width + kOutset * 2.0f, r.height + kOutset * 2.0f };
     Vector2 mouse = GetMousePosition();
@@ -10211,6 +10218,10 @@ static void UOEnsureTextures() {
     }
 }
 static void UOFill(Rectangle r, int surface, Color tint = WHITE) {
+    if(g_landscapePage) {
+        Color base=surface==kUoParchment ? Color{237,238,232,255}:surface==kUoStone ? Color{61,72,80,255}:Color{33,44,53,255};
+        DrawRectangleRec(r,base);return;
+    }
     UOEnsureTextures();
     DrawTexturePro(g_uoTex[surface], { r.x * 0.7f, r.y * 0.7f, r.width, r.height }, r, { 0, 0 }, 0.0f, tint);
 }
@@ -10218,6 +10229,7 @@ static const Color kUoBronze = { 150, 112, 58, 255 }, kUoBronzeHi = { 222, 184, 
 static const Color kUoGoldText = { 236, 208, 140, 255 };
 // Restrained bronze frame: preserve parchment contrast and existing hit areas.
 static void UODrawGump(Rectangle r, int surface, Color tint = WHITE) {
+    if(g_landscapePage) {UOFill(r,surface,tint);DrawRectangleLinesEx(r,1,Color{118,129,134,110});return;}
     if(g_landscapeActive && r.width>=350 && (r.height>=260 || (r.y>=230 && r.height>=90)))g_landscapeDialog=true;
     DrawRectangleRec({ r.x + 3, r.y + 6, r.width, r.height }, Fade(BLACK, 0.28f));
     UOFill(r, surface, tint);
@@ -10234,6 +10246,10 @@ static void UODrawGump(Rectangle r, int surface, Color tint = WHITE) {
 }
 // Engraved title plate centered on a gump's top edge.
 static void UODrawTitle(Rectangle gump, const std::string& text, int fsz = 14) {
+    if(g_landscapePage) {
+        if(gump.width<900)DrawUIText(text.c_str(),(int)gump.x+14,(int)gump.y+8,fsz,kUoGoldText);
+        return;
+    }
     int w = MeasureUIText(text.c_str(), fsz);
     Rectangle t = { gump.x + gump.width / 2.0f - w / 2.0f - 16, gump.y - 10, (float)w + 32, (float)fsz + 12 };
     DrawRectangleRec(t, Color{ 40, 26, 16, 255 });
@@ -10243,6 +10259,7 @@ static void UODrawTitle(Rectangle gump, const std::string& text, int fsz = 14) {
 }
 // Recessed square slot (paperdoll slots, bag cells).
 static void UODrawSlot(Rectangle r, bool lit = false) {
+    if(g_landscapePage) {UOFill(r,kUoStone);DrawRectangleLinesEx(r,1,lit ? kUoBronzeHi:Color{98,116,124,255});return;}
     UOFill(r, kUoStone, Color{ 120, 116, 112, 255 });
     DrawRectangleGradientV((int)r.x, (int)r.y, (int)r.width, (int)(r.height * 0.45f), Fade(BLACK, 0.45f), Fade(BLACK, 0.0f));
     DrawRectangleLinesEx(r, 2.0f, lit ? kUoBronzeHi : kUoBronze);
@@ -10251,6 +10268,8 @@ static void UODrawSlot(Rectangle r, bool lit = false) {
 }
 // Close "X" button in a gump's top-right corner.
 static bool UOCloseButton(Rectangle gump) {
+    // Full pages have one consistent Resume control; only popups have an X.
+    if(g_landscapePage && gump.width>=900)return false;
     Rectangle b = { gump.x + gump.width - 30, gump.y + 8, 22, 22 };
     Vector2 m = GetMousePosition();
     bool hover = CheckCollisionPointRec(m, b);
@@ -10265,6 +10284,7 @@ static bool UOCloseButton(Rectangle gump) {
 }
 // Bronze-and-leather action button in the gump style.
 static bool UOButton(Rectangle r, const std::string& label, bool enabled = true) {
+    if(g_landscapePage)return Button(r,label,enabled);
     Vector2 m = GetMousePosition();
     bool hover = enabled && CheckCollisionPointRec(m, r);
     DrawRectangleRec(r, enabled ? (hover ? Color{ 96, 62, 34, 255 } : Color{ 70, 44, 24, 255 }) : Color{ 60, 56, 52, 255 });
@@ -32890,6 +32910,13 @@ static void MenuGoScreen(GameState& s, Screen t) {
 static bool MenuGroupTab(Rectangle r, const char* label, bool active, bool enabled) {
     if (!active) return Button(r, label, enabled);
     UIRegister(r);
+    if(g_landscapePage) {
+        DrawRectangleRounded(r,.08f,4,Color{221,226,225,255});
+        DrawRectangleRec({r.x+12,r.y+r.height-3,r.width-24,3},Color{167,135,78,255});
+        int fs=16;while(MeasureUIText(label,fs)>r.width-16 && fs>11)--fs;
+        DrawUIText(label,(int)(r.x+(r.width-MeasureUIText(label,fs))/2),(int)(r.y+(r.height-fs)/2),fs,Color{34,48,55,255});
+        return false;
+    }
     DrawRectangleRounded(r, 0.3f, 6, Color{ 70, 50, 30, 255 });
     DrawRectangleRoundedLines(r, 0.3f, 6, Color{ 255, 200, 90, 255 });
     DrawRectangle((int)(r.x + 10), (int)(r.y + r.height - 5), (int)(r.width - 20), 3, Color{ 255, 200, 90, 255 });
@@ -32957,10 +32984,10 @@ static void DrawMenuGroupTabs(GameState& s) {
 }
 // Main navigation uses a single native landscape canvas and identity picking.
 static bool LandscapeMenuCard(Rectangle r, const std::string& title, const std::string& detail, bool enabled=true) {
-    Color edge=enabled ? Color{173,141,86,255}:Color{77,86,91,255};
-    LandscapePlate(r,edge);
+    DrawRectangleRounded(r,.12f,4,enabled ? Color{34,49,59,255}:Color{29,38,44,255});
+    DrawRectangleLinesEx(r,1,Color{84,103,114,150});
     DrawUIText(title.c_str(),(int)r.x+16,(int)r.y+14,20,enabled ? Color{245,229,195,255}:Color{133,142,147,255});
-    if(!detail.empty())DrawUIText(detail.c_str(),(int)r.x+16,(int)r.y+43,12,Color{170,186,192,255});
+    if(!detail.empty())DrawUIText(detail.c_str(),(int)r.x+16,(int)r.y+38,13,Color{170,186,192,255});
     bool tapped=UIClick(r,enabled);if(tapped)PlaySfx(SfxId::Click);return tapped;
 }
 static void DrawLandscapeMainMenu(GameState& s,bool& open,bool inDungeon) {
@@ -32972,11 +32999,16 @@ static void DrawLandscapeMainMenu(GameState& s,bool& open,bool inDungeon) {
     BeginTextureMode(g_landscapeNativeMenuTarget);ClearBackground(Color{12,21,28,255});
     DrawRectangleGradientV(0,0,960,540,Color{31,43,48,255},Color{9,17,23,255});
     DrawUIText("MENU",160,28,26,Color{243,221,180,255});
-    DrawUIText(TextFormat("Gold %d   Wood %d   Ore %d   Leather %d",s.gold,s.wood,s.ore,s.leather),160,72,14,Color{175,191,197,255});
+    DrawUIText("Choose what you want to do",160,72,16,Color{175,191,197,255});
+    DrawUIText("CHARACTER",28,124,14,Color{202,182,136,255});
+    DrawUIText("ACTIVITIES",340,124,14,Color{202,182,136,255});
+    DrawUIText("MANAGE",652,124,14,Color{202,182,136,255});
     if(LandscapeMenuCard({20,56,104,48},"Close",""))open=false;
     bool enabled=!DenFighting() && !s.combat && !s.playerIsGhost && s.playerDeathAnimT<=0;
     auto card=[&](int slot,const std::string& label,const std::string& detail,bool en=true) {
-        return LandscapeMenuCard({28.f+(slot%4)*230.f,132.f+(slot/4)*86.f,214,72},label,detail,en);
+        static const int column[]={0,0,0,1,1,0,2,2,1,1,2,2};
+        static const int row[]={0,1,2,0,1,3,0,1,2,3,2,3};
+        return LandscapeMenuCard({28.f+column[slot]*312.f,150.f+row[slot]*72.f,288,62},label,detail,en);
     };
     auto page=[&](Screen sc){MenuGoScreen(s,sc);open=false;};
     if(card(0,"Gear","Equipment & character",enabled)){g_characterPack=false;g_pdSel=-1;page(Screen::Character);}
@@ -32991,15 +33023,15 @@ static void DrawLandscapeMainMenu(GameState& s,bool& open,bool inDungeon) {
     if(card(9,"Journal",JournalAttentionLabel(s),enabled)){page(Screen::House);g_questOpen=true;g_questTab=0;}
     if(card(10,"Settings","Options & saves",!DenFighting())){page(Screen::House);g_optOpen=true;}
     if(card(11,"Help","How to play",enabled)){page(Screen::Guide);s.guidePage=0;}
-    if(LandscapeMenuCard({28,430,282,64},"Resume game","Return to the world")){s.screen=g_playScreen;open=false;}
+    if(LandscapeMenuCard({28,454,282,64},"Resume game","Return to the world")){s.screen=g_playScreen;open=false;}
     bool ferry=enabled && (s.screen==Screen::Town || s.screen==Screen::Blackwake);
-    if(LandscapeMenuCard({326,430,282,64},s.screen==Screen::Blackwake ? "Return to Saltmere":"Blackwake Den",ferry ? "Travel by ferry":"Visit the ferry from town",ferry)) {
+    if(LandscapeMenuCard({326,454,282,64},s.screen==Screen::Blackwake ? "Return to Saltmere":"Blackwake Den",ferry ? "Travel by ferry":"Visit the ferry from town",ferry)) {
         if(s.screen==Screen::Blackwake){s.screen=Screen::Town;s.selectedTown=1;s.townPlayerPos=TS(450,830);}
         else{s.screen=Screen::Blackwake;s.townPlayerPos={750,1250};}
         g_denPanel=0;open=false;WalkTargetClear();
     }
-    if(inDungeon && LandscapeMenuCard({624,430,308,64},"Leave dungeon","Magery recall",!s.playerIsGhost && s.playerDeathAnimT<=0 && s.leaveDungT<0)) {TryStartLeaveDungeon(s);open=false;}
-    if(!enabled)DrawUIText("Finish combat to open character and activity pages.",28,510,13,Color{230,183,119,255});
+    if(inDungeon && LandscapeMenuCard({624,454,308,64},"Leave dungeon","Magery recall",!s.playerIsGhost && s.playerDeathAnimT<=0 && s.leaveDungT<0)) {TryStartLeaveDungeon(s);open=false;}
+    if(!enabled)DrawUIText("Finish combat to open character and activity pages.",28,524,12,Color{230,183,119,255});
     EndTextureMode();g_landscapeNativeMenuDrawing=false;
 }
 static const char* LandscapePageTitle(const GameState& s) {
@@ -33018,15 +33050,15 @@ static void DrawLandscapePageHeader(GameState& s,bool& open) {
     DrawRectangle(0,0,960,110,Color{16,26,33,255});
     DrawLine(20,109,940,109,Color{148,118,74,255});
     DrawUIText(LandscapePageTitle(s),160,22,24,Color{243,225,192,255});
-    DrawUIText(TextFormat("Gold %d   Bank %d",s.gold,s.bankGold),160,53,13,Color{170,187,194,255});
+
     if(Button({20,20,112,48},"MENU",true))open=true;
     if(Button({804,20,136,48},"Resume",true))s.screen=g_playScreen;
     if(s.screen==Screen::House && g_optOpen) {
 #ifdef __EMSCRIPTEN__
-        if(Button({524,20,126,44},"Cloud save",JS_CloudState()>0))JS_CloudOpen();
+        if(Button({660,66,126,40},"Cloud save",JS_CloudState()>0))JS_CloudOpen();
 #endif
         bool armed=g_resetArmedTimer>0;
-        if(Button({660,20,126,44},armed ? "Confirm reset":"Reset",!s.combat && !DenFighting())) {
+        if(Button({804,66,136,40},armed ? "Confirm reset":"Reset",!s.combat && !DenFighting())) {
             if(armed){ResetGame(s);g_resetArmedTimer=0;
 #ifdef __EMSCRIPTEN__
                 JS_CloudOnReset();
@@ -33035,20 +33067,22 @@ static void DrawLandscapePageHeader(GameState& s,bool& open) {
         }
     }
 
-    struct Tab{const char* name;Screen screen;int view;};std::vector<Tab> tabs;
-    if(MenuGroupOf(s.screen)==0)tabs={{"Gear",Screen::Character,0},{"Backpack",Screen::Character,1},{"Skills",Screen::Skills,0},{"Spells",Screen::Magic,0},{"Pets",Screen::Pets,0}};
-    else if(s.screen==Screen::House || s.screen==Screen::Bank)tabs={{"Home",Screen::House,0},{"Bank",Screen::Bank,0},{"Guild",Screen::House,1},{"Journal",Screen::House,2},{"Settings",Screen::House,3}};
-    else if(s.screen==Screen::Guide)tabs={{"Help",Screen::Guide,0},{"Settings",Screen::House,3}};
-    float w=tabs.empty()?0:std::min(148.f,(780.f-8*(tabs.size()-1))/tabs.size());
-    for(size_t i=0;i<tabs.size();i++){
-        const auto& t=tabs[i];bool active=s.screen==t.screen;
-        if(t.screen==Screen::Character)active=active && g_characterPack==(t.view==1);
-        if(t.screen==Screen::House)active=active && (t.view==1 ? g_warOpen:t.view==2 ? g_questOpen:t.view==3 ? g_optOpen:!g_warOpen && !g_questOpen && !g_optOpen && !g_settleOpen && !g_tmapOpen);
-        if(MenuGroupTab({160+i*(w+8),66,w,44},t.name,active,true)){
-            MenuGoScreen(s,t.screen);s.exploreMenuOpen=false;g_settleOpen=false;
-            if(t.screen==Screen::Character){g_characterPack=t.view==1;g_pdSel=-1;}
-            if(t.screen==Screen::House){if(t.view==1){OpenWarWeek(s);g_guildTab=0;}if(t.view==2){g_questOpen=true;g_questTab=0;}if(t.view==3)g_optOpen=true;}
-        }
+    // Page switching lives in MENU. Only the equipment page needs a sibling view.
+    if(s.screen==Screen::Character) {
+        if(MenuGroupTab({160,66,148,44},"Equipment",!g_characterPack,true)) {g_characterPack=false;g_pdSel=-1;}
+        if(MenuGroupTab({320,66,164,44},"Backpack",g_characterPack,true)) {g_characterPack=true;g_pdSel=-1;}
+    } else {
+        const char* hint=s.screen==Screen::Craft ? "Choose a workshop, then an activity."
+                       : s.screen==Screen::Magic ? "Practice spells here. Assign combat spells to the slots."
+                       : s.screen==Screen::Bank ? "Move items between your backpack and vault."
+                       : s.screen==Screen::Skills ? "Progress comes from using your skills."
+                       : s.screen==Screen::Pets ? "Browse creatures on the left. Manage companions on the right."
+                       : s.screen==Screen::House && g_warOpen ? "Choose a guild section from the list."
+                       : s.screen==Screen::House && g_optOpen ? "Your preferences are saved automatically."
+                       : s.screen==Screen::House && g_questOpen ? "Quests, rewards, treasure maps and your adventure history."
+                       : s.screen==Screen::House ? "Your home and settlement."
+                       : "Use Menu to choose another page.";
+        DrawUIText(hint,160,82,14,Color{176,190,198,255});
     }
 }
 static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
@@ -36413,20 +36447,22 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
         bool activityDot=false; for(const auto& r:g_gnet.cityRuns) if(r.finished && r.success && r.joined && !r.claimed) activityDot=true;
         bool warDot=false; for(const auto& b:g_gnet.cityBattles) if((long long)std::time(nullptr)>=b.ends && b.actions>0 && !b.claimed) warDot=true;
         for (int t = 0; t < 8; t++) {
-            Rectangle tb = { G.x + 18 + (t % (g_landscapePage ? 8:4)) * tw, G.y + 34 + (t / (g_landscapePage ? 8:4)) * 52, tw - 6, 44 };
+            Rectangle tb = g_landscapePage ? Rectangle{26,130.f+t*48.f,162,44}:Rectangle{G.x+18+(t%4)*tw,G.y+34+(t/4)*52,tw-6,44};
             bool on = g_guildTab == t || (t == 1 && (g_guildTab == 9 || g_guildTab >= 10));
-            DrawRectangleRounded(tb, 0.3f, 6, on ? Color{ 110, 70, 36, 255 } : Color{ 70, 50, 34, 200 });
-            DrawRectangleRoundedLines(tb, 0.3f, 6, on ? kUoBronzeHi : kUoBronze);
-            int lw = MeasureUIText(kTabs[t], 14);
-            DrawUIText(kTabs[t], (int)(tb.x + (tb.width - lw) / 2), (int)tb.y + 14, 14, on ? kUoGoldText : Color{ 236, 220, 190, 255 });
+            if(g_landscapePage) {
+                if(MenuGroupTab(tb,kTabs[t],on,true)) {g_guildTab=t;g_warScroll=0;PlaySfx(SfxId::Click);}
+            } else {
+                DrawRectangleRounded(tb,.3f,6,on ? Color{110,70,36,255}:Color{70,50,34,200});
+                int lw=MeasureUIText(kTabs[t],14);DrawUIText(kTabs[t],(int)(tb.x+(tb.width-lw)/2),(int)tb.y+14,14,kUoGoldText);
+            }
             if (hub && ((t == 3 && helpDot) || (t == 1 && hallDot) || (t == 7 && activityDot) || (t == 5 && warDot))) DrawCircle((int)(tb.x + tb.width - 8), (int)tb.y + 8, 5, Color{ 210, 40, 30, 255 });
-            if (g_guildTab != t && UOTapped(tb)) { g_guildTab = t; g_warScroll = 0.0f; PlaySfx(SfxId::Click); }
+            if (!g_landscapePage && g_guildTab != t && UOTapped(tb)) { g_guildTab = t; g_warScroll = 0.0f; PlaySfx(SfxId::Click); }
         }
     }
-    Rectangle area = { G.x + 8, G.y + (g_landscapePage ? 90:142), G.width - 16, G.height - (g_landscapePage ? 100:152) };
+    Rectangle area = g_landscapePage ? Rectangle{208,130,726,386}:Rectangle{G.x+8,G.y+142,G.width-16,G.height-152};
     if (g_guildTab == 1) g_warScroll = 0;
     else g_warScroll -= ScrollDelta(area);
-    float x = G.x + 18, w = G.width - 36, y = area.y + 4 - g_warScroll;
+    float x = g_landscapePage ? area.x+16:G.x+18, w = g_landscapePage ? area.width-32:G.width-36, y = area.y + 4 - g_warScroll;
     auto vis = [&](Rectangle r) { return r.y >= area.y && r.y + r.height <= area.y + area.height; };
     UIBeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
     if (g_guildTab >= 10 && g_guildTab <= 13) { y=DrawGuildCityProgress(s,x,y,w,area,g_guildTab); }
@@ -37742,9 +37778,9 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     if(g_characterPack) bag={10,180,(float)screenW-20,(float)screenH-190};
     UODrawGump(bag, kUoLeather);
     // stitched seam just inside the frame
-    for (float x = bag.x + 16; x < bag.x + bag.width - 16; x += 12)
+    if(!g_landscapePage)for (float x = bag.x + 16; x < bag.x + bag.width - 16; x += 12)
         DrawLineEx({ x, bag.y + 12 }, { x + 6, bag.y + 12 }, 1.5f, Fade(Color{ 230, 200, 150, 255 }, 0.45f));
-    UODrawTitle(bag, TextFormat("Backpack  %d/%d", (int)s.backpack.size(), BackpackCap(s)), 13);
+    UODrawTitle(bag, TextFormat("%d / %d items", (int)s.backpack.size(), BackpackCap(s)), 14);
     struct BagEntry { int kind; int idx; int count; int icon; const char* name; };
     std::vector<BagEntry> entries;
     for (size_t i = 0; i < s.backpack.size(); i++) entries.push_back({ 0, (int)i, 1, -1, nullptr });
@@ -37755,7 +37791,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
     };
     for (int k = 0; k < (int)(sizeof(res) / sizeof(res[0])); k++)
         if (*res[k].v > 0) entries.push_back({ 1, k, *res[k].v, res[k].icon, res[k].name });
-    Rectangle inner = { bag.x + 14, bag.y + 20, bag.width - 28, bag.height - 30 };
+    Rectangle inner = { bag.x + 14, bag.y + (g_landscapePage ? 34:20), bag.width - 28, bag.height - (g_landscapePage ? 44:30) };
     const float rowHeight = 88.0f;
     int cols = std::max(1, (int)(inner.width / 116.0f));
     float cellWidth = inner.width / cols;
@@ -38714,7 +38750,7 @@ static void UpdateDrawFrame() {
         const Screen frameScreen=state.screen;
         g_landscapeCombat=state.wildEngaged.has_value() || state.dungeonEngaged.has_value();
         LandscapeBeginFrame(wideWorld,LandscapeDialogOpen(state),(int)state.screen,false,g_landscapePage);
-        ClearBackground(wideWorld ? BLANK:kColorPageBg);
+        ClearBackground(wideWorld ? BLANK:g_landscapePage ? Color{226,231,232,255}:kColorPageBg);
 
         // Inside a dungeon (2026-09-25), and in the 3D town/wilderness/interior
         // views (2026-09-26): the header - title, Reset, resource HUD, tab bar -
