@@ -63,6 +63,38 @@ reset();DrawFurTraderScreen(s,960,540);check("fur trader");
 reset();DrawMinersGuildScreen(s,960,540);check("miners guild");
 reset();DrawRefugeScreen(s,960,540);check("refuge");
 for(int page=0;page<kGuidePageCount;page++){reset();s.guidePage=page;DrawGuideScreen(s,960);check("help");}
+// Opening progression uses actual gameplay events, not timeouts or arbitrary gold changes.
+GameState o;int gold=o.gold,bandages=o.bandages;
+UpdateStarterProgress(o);o.townPlayerPos.x+=300;UpdateStarterProgress(o);assert(o.starterStep==kStWalk);
+o.starterAccepted=true;UpdateStarterProgress(o);
+for(int i=0;i<6;i++){o.townPlayerPos.x+=40;UpdateStarterProgress(o);}assert(o.starterStep==kStGate);
+o.screen=Screen::Wilderness;UpdateStarterProgress(o);assert(o.starterStep==kStGather);
+UpdateStarterProgress(o);assert(o.starterStep==kStGather);o.wood++;UpdateStarterProgress(o);assert(o.starterStep==kStFight);
+GameState::WorldCorpse corpse{};corpse.zone=1;corpse.spotIdx=0;corpse.name="Test bat";
+AddWorldCorpse(o,corpse);UpdateStarterProgress(o);assert(o.starterStep==kStFight);o.worldCorpses.clear();
+corpse.zone=0;corpse.loot.push_back({GameState::kClGold,2,std::nullopt});
+AddWorldCorpse(o,corpse);UpdateStarterProgress(o);assert(o.starterStep==kStLoot);
+o.gold+=100;UpdateStarterProgress(o);assert(o.starterStep==kStLoot);
+o.worldCorpses.clear();UpdateStarterProgress(o);assert(o.starterStep==kStLoot);
+Vector2 target;assert(StarterTarget(o,&target)); // missing/reloaded corpse gives a recovery target
+AddWorldCorpse(o,corpse);assert(TakeCorpseLoot(o,o.worldCorpses.back(),0));UpdateStarterProgress(o);assert(o.starterStep==kStPack);
+o.screen=Screen::Character;g_characterPack=false;UpdateStarterProgress(o);assert(o.starterStep==kStPack);
+g_characterPack=true;UpdateStarterProgress(o);assert(o.starterStep==kStReturn);
+SaveGame(o);GameState restored;assert(LoadGame(restored));assert(restored.starterStep==kStReturn && restored.starterAccepted && restored.starterLooted==1);
+o.screen=Screen::Town;UpdateStarterProgress(o);assert(o.starterStep==kStDone && o.starterRewarded && o.gold==gold+152 && o.bandages==bandages+5);
+int rewardGold=o.gold;StarterComplete(o);assert(o.gold==rewardGold);SaveGame(o);assert(LoadGame(restored));assert(restored.starterRewarded);
+StarterBegin(o,kStWalk);o.screen=Screen::Town;UpdateStarterProgress(o);o.screen=Screen::Wilderness;UpdateStarterProgress(o);assert(o.starterWalked==0); // travel is not walking
+// Fast loot, before the next render, still completes both combat and collecting.
+StarterBegin(o,kStFight);o.starterLooted=0;AddWorldCorpse(o,corpse);assert(TakeCorpseLoot(o,o.worldCorpses.back(),0));UpdateStarterProgress(o);assert(o.starterStep==kStPack);
+// A new card stays in native landscape space and owns its gesture.
+reset();GameState fresh;fresh.screen=Screen::Town;g_landscapeWorld=true;g_landscapeDialog=false;g_landscapePage=false;g_presentedPage=false;
+UpdateDrawStarter(fresh,540,900);assert(g_landscapeOpening.visible && g_landscapeOpening.actions[0]=="Begin expedition");
+LandscapePresent(UiFont(),g_uiRects);assert(g_presentedOpening && g_presentedOpeningRect.x==176);
+testPressed=true;testMouse={300,336};g_landscapePointerHeld=false;UIFrameReset();
+assert(g_landscapePointerRegion==tflayout::Region::NativePage && UIHit(GetMousePosition()));
+assert(!UIClick({200,300,200,60}));UpdateDrawStarter(fresh,540,900);assert(fresh.starterAccepted && fresh.starterStep==kStWalk);
+std::cout<<"PASS opening: explicit start, movement, gathering, real kills/loot, missing-corpse recovery, backpack, return, saved progress, one-time reward and native input ownership"<<std::endl;
+
 }
 '''
 (run_dir/'menu.cpp').write_text(test)
@@ -70,6 +102,6 @@ for(int page=0;page<kGuidePageCount;page++){reset();s.guidePage=page;DrawGuideSc
 try:
     exe=run_dir/'menus'
     subprocess.run(['g++','-std=c++17','-O0','-ffunction-sections','-fdata-sections','-I'+str(raylib),str(run_dir/'menu.cpp'),str(run_dir/'stubs.cpp'),'-Wl,--gc-sections','-o',str(exe)],check=True)
-    subprocess.run([str(exe)],check=True)
+    subprocess.run([str(exe)],check=True,cwd=run_dir)
     print('PASS production landscape pages: full inventories, pets, all craft modes, journal tabs, guild tabs, vendors, help, native navigation and visible control bounds')
 finally:shutil.rmtree(run_dir)

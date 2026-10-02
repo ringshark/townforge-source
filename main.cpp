@@ -1369,6 +1369,9 @@ static bool IsPlayScreen(Screen sc) {
     return sc == Screen::Town || sc == Screen::Wilderness || sc == Screen::Interior || sc == Screen::Hunt || sc == Screen::Blackwake;
 }
 static Screen g_playScreen = Screen::Town;
+static bool g_characterPack = false, g_settleOpen = false;
+// Keep the saved step IDs compatible with the original first-steps guide.
+enum StarterStep { kStWalk = 0, kStPack, kStReturn, kStGate, kStGather, kStFight, kStLoot, kStDone, kStCount };
 static bool g_questOpen = false; // the Town Hall quest board (2026-09-28, #72), over the House screen
 
 struct Corpse {
@@ -1530,6 +1533,9 @@ struct GameState {
     bool guideSeen = false;       // persisted: the walkthrough already showed
     // First steps (2026-09-27): one goal at a time for new players. -1 = done/skipped.
     int starterStep = 0; float starterT = 0.0f, starterWalked = 0.0f; int starterBase = 0;
+    int openingVersion = 2, starterKills = 0, starterLooted = 0;
+    bool starterAccepted = false, starterRewarded = false;
+    Vector2 starterPrevPos{}; Screen starterPrevScreen = Screen::Town; bool starterHasPrev = false;
     // "Young" (2026-09-27, after UO): a new character's first 20 minutes of play (and the
     // whole first-steps guide) are safe from Murder Inc., ambushes and orc war parties.
     float youngT = 1200.0f; // PERSISTED - protected play time left
@@ -7354,6 +7360,8 @@ static void SaveGame(const GameState& s) {
     for (size_t i = 0; i < s.combatHotbar.size(); i++) out << s.combatHotbar[i] << (i + 1 < s.combatHotbar.size() ? "," : "\n");
     out << "guideSeen=" << (s.guideSeen ? 1 : 0) << "\n";
     out << "starterStep=" << s.starterStep << "\nstarterBase=" << s.starterBase << "\n";
+    out << "openingVersion=2\nstarterAccepted=" << s.starterAccepted << "\nstarterRewarded=" << s.starterRewarded
+        << "\nstarterKills=" << s.starterKills << "\nstarterLooted=" << s.starterLooted << "\nstarterWalked=" << s.starterWalked << "\n";
     out << "youngT=" << s.youngT << "\n"; // newbie walkthrough already shown (2026-09-25)
     out << "markedTowns=" << s.markedTowns << "\n"; // UO-style travel: recall destinations bitmask (2026-09-25)
 
@@ -7498,6 +7506,7 @@ static bool LoadGame(GameState& s) {
     float wildSavedScale = 1.0f; // (2026-09-29) the scale the save's wilderness positions were written at
     bool clothesInit = false; // saved before clothing existed: dress them in the starter set
     bool sawMarkedTowns = false; // UO-style travel (2026-09-25): pre-marking saves lack the key
+    s.openingVersion = 0;
     bool sawStarter = false;     // (2026-09-27) saves from before "first steps" are veterans: skip it
     bool sawYoung = false;       // (2026-09-27) ...and they aren't Young either
     std::string line;
@@ -7660,6 +7669,12 @@ static bool LoadGame(GameState& s) {
         else if (key == "guideSeen") { s.guideSeen = (val == "1"); }
         else if (key == "starterStep") { s.starterStep = std::clamp(std::atoi(val.c_str()), -1, 7); sawStarter = true; }
         else if (key == "starterBase") s.starterBase = std::atoi(val.c_str());
+        else if (key == "openingVersion") s.openingVersion = std::atoi(val.c_str());
+        else if (key == "starterAccepted") s.starterAccepted = val == "1";
+        else if (key == "starterRewarded") s.starterRewarded = val == "1";
+        else if (key == "starterKills") s.starterKills = std::max(0, std::atoi(val.c_str()));
+        else if (key == "starterLooted") s.starterLooted = std::max(0, std::atoi(val.c_str()));
+        else if (key == "starterWalked") s.starterWalked = std::clamp((float)std::atof(val.c_str()), 0.0f, 240.0f);
         else if (key == "youngT") { s.youngT = std::max(0.0f, (float)std::atof(val.c_str())); sawYoung = true; }
         else if (key == "markedTowns") { s.markedTowns = std::atoi(val.c_str()); sawMarkedTowns = true; }
         else if (key == "equipped.leftHand") ReadEquipSlot(val, s.equipped.leftHand);
@@ -7809,6 +7824,14 @@ static bool LoadGame(GameState& s) {
     // starts in Emberhold, so mark just it - the other towns mark themselves the
     // next time the player walks through their gates.
     if (!sawMarkedTowns) s.markedTowns = (1 << 0);
+    if (s.openingVersion < 2) {
+        // Existing completed characters stay completed. In-progress old guides
+        // restart with the new invitation instead of interpreting old step IDs.
+        if (sawStarter && s.starterStep >= 0) s.starterStep = kStWalk;
+        s.starterAccepted = false; s.starterWalked = 0; s.starterBase = 0;
+        s.openingVersion = 2;
+    }
+    s.starterHasPrev = false;
     if (!sawStarter) s.starterStep = -1; // an existing adventurer doesn't need the first steps
     if (!sawYoung) s.youngT = 0.0f;
 
@@ -10105,6 +10128,7 @@ static void UIRegister(Rectangle r) {
 }
 static bool UIHit(Vector2 m) {
     if(LandscapeMenuBlocksWorld())return true;
+    if(g_presentedOpening && g_landscapePointerRegion==tflayout::Region::NativePage)return true;
     if (g_uiGestureOwned || g_uiClickTaken) return true;
     if(!LandscapeUIAllowed())return false;
     if (g_uiShieldOn && CheckCollisionPointRec(m, g_uiShield)) return true;
@@ -27819,6 +27843,8 @@ static void BeginDungeonExtraDeath(GameState& s, int dungeonIdx, const GameState
 static const float kCorpseLootTime = 240.0f;
 static GameState::WorldCorpse& AddWorldCorpse(GameState& s, GameState::WorldCorpse c) {
     c.id = s.nextCorpseId++;
+    if (s.starterAccepted && s.starterStep == kStFight && c.zone == 0 && c.spotIdx >= 0 && !c.isRival && c.bladeIdx < 0)
+        ++s.starterKills;
     s.worldCorpses.push_back(std::move(c));
     return s.worldCorpses.back();
 }
@@ -30480,6 +30506,9 @@ static bool TakeCorpseLoot(GameState& s, GameState::WorldCorpse& c, size_t i, bo
             break;
     }
     c.loot.erase(c.loot.begin() + (long)i);
+    // Only a successful take counts. Gold from trading and expired bodies do not.
+    if (s.starterAccepted && (s.starterStep == kStFight || s.starterStep == kStLoot) && c.zone == 0 && c.spotIdx >= 0 && !c.isRival && c.bladeIdx < 0)
+        ++s.starterLooted;
     Vector2 me = c.zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
     if (!quiet) {
         SpawnFloatText(s, c.zone, me, "+" + CorpseLootName(l), kFloatLootColor);
@@ -30974,29 +31003,63 @@ static const char* kGuideBodies[5] = {
     "Chop, mine, and fish to train\nskills - every skill caps\nat 100.\n\nThe bank keeps your gold and\nitems safe. Buy a house plot\nfor storage and a hearth\nyou can recall to.\n\nLeave a dungeon anytime from\nits MENU - needs 25 Magery,\na 3-second cast, no hits.",
 };
 
-// ---- First steps (2026-09-27) ---------------------------------------------------------
-// New players get one simple goal at a time instead of a manual: a big banner
-// with the goal, and a bouncing gold arrow in the world pointing at where to go.
-// Walk -> visit a shop -> walk out -> go to the wilderness -> chop a tree ->
-// fight a monster -> loot it -> "You're ready!". Skippable; never shown again once
-// done. The old walkthrough pages live on under Help.
-enum StarterStep { kStWalk = 0, kStShop, kStLeave, kStGate, kStGather, kStFight, kStLoot, kStDone, kStCount };
+// ---- Opening expedition: learn by doing (2026-10-02) --------------------
+static void MenuGoScreen(GameState& s, Screen t);
+static const char* kStarterTitle[kStCount] = {
+    "1 / 7  Find your feet", "5 / 7  Check your backpack", "6 / 7  Return to safety",
+    "2 / 7  Leave through the town gate", "3 / 7  Gather supplies", "4 / 7  Win your first fight",
+    "4 / 7  Collect your reward", "7 / 7  Your first expedition is complete"
+};
 static const char* kStarterGoal[kStCount] = {
-    "Walk around! Tap the ground, drag the stick, or use WASD.",
-    "Visit a shop! Follow the gold arrow, then tap ENTER.",
-    "Have a look around, then walk out the door.",
-    "Time for adventure! Follow the arrow to the town gate.",
-    "Chop a tree or mine a rock: walk up and tap GATHER.",
-    "Fight a monster! Walk up to one and tap FIGHT.",
-    "You won! Tap the body, then tap LOOT ALL.",
-    "You're ready! Explore, get stronger, have fun. Stuck? MENU > Help.",
+    "Walk a short distance. Your first expedition starts here.",
+    "Your pack holds gathered materials and loot. Open it to see what you brought back.",
+    "Bring your supplies back to town. Towns have shops, a bank and a safe place to prepare.",
+    "Follow the gold marker out of town. The wilderness has resources, enemies and dungeons.",
+    "Gather wood from a tree or ore from a rock. Materials help you craft gear and grow your settlement.",
+    "Approach the marked enemy. Defeat one monster to earn loot and train your combat skills.",
+    "Take something from a monster's body. Winning the fight does not automatically collect its loot.",
+    "Explore, gather, fight, loot, then return to prepare. Your skills improve as you use them."
+};
+static const char* kStarterHint[kStCount] = {
+    "Drag the left joystick, tap open ground, or use WASD.",
+    "MENU > Backpack. Then use Resume to return to the world.",
+    "Follow the gold marker to a town entrance and use ENTER.",
+    "Walk up to the gate, then tap ENTER or press E.",
+    "Walk close, tap GATHER or press E, and wait for the progress bar.",
+    "Melee attacks are automatic while you are close. Move away to retreat; bandages restore health.",
+    "Tap the body or LOOT, then tap Loot All. If the body is gone, defeat another enemy.",
+    "Reward: 50 gold + 5 bandages (once). Choose your next goal below."
 };
 static void StarterBegin(GameState& s, int step) {
-    s.starterStep = step;
-    s.starterT = 0.0f;
-    s.starterBase = step == kStGather ? s.wood + s.ore + s.fish + s.ice : step == kStFight ? s.nextCorpseId : step == kStLoot ? s.gold : 0;
-    s.starterWalked = 0.0f;
+    s.starterStep = step; s.starterT = 0.0f; s.starterWalked = 0.0f; s.starterHasPrev = false;
+    s.starterBase = step == kStGather ? s.wood + s.ore : step == kStFight ? s.starterKills : step == kStLoot ? s.starterLooted : 0;
     if (step > 0) PlaySfx(SfxId::Quest);
+}
+static void StarterComplete(GameState& s) {
+    if (!s.starterRewarded) { s.gold += 50; s.bandages += 5; s.starterRewarded = true; }
+    StarterBegin(s, kStDone);
+    s.logLine = "First expedition complete! Explore for better gear, or open Home to develop your settlement.";
+}
+static void UpdateStarterProgress(GameState& s) {
+    if (!s.starterAccepted || s.starterStep < 0 || s.starterStep >= kStCount || s.playerIsGhost || s.playerDeathAnimT > 0) { s.starterHasPrev = false; return; }
+    bool world = s.screen == Screen::Town || s.screen == Screen::Wilderness;
+    Vector2 me = s.screen == Screen::Wilderness ? s.wildernessPlayerPos : s.townPlayerPos;
+    if (world && s.starterHasPrev && s.starterPrevScreen == s.screen && s.starterStep == kStWalk)
+        s.starterWalked += std::min(50.0f, Dist(s.starterPrevPos, me));
+    s.starterPrevPos = me; s.starterPrevScreen = s.screen; s.starterHasPrev = world;
+    switch (s.starterStep) {
+        case kStWalk: if (s.starterWalked >= 220.0f) StarterBegin(s, kStGate); break;
+        case kStGate: if (s.screen == Screen::Wilderness) StarterBegin(s, kStGather); break;
+        case kStGather: if (s.wood + s.ore > s.starterBase) { s.starterLooted = 0; StarterBegin(s, kStFight); } break;
+        case kStFight: if (s.starterKills > s.starterBase) {
+            // Corpse auto-open can let a quick player loot before this update.
+            if (s.starterLooted > 0) StarterBegin(s, kStPack); else StarterBegin(s, kStLoot);
+        } break;
+        case kStLoot: if (s.starterLooted > s.starterBase) StarterBegin(s, kStPack); break;
+        case kStPack: if (s.screen == Screen::Character && g_characterPack) StarterBegin(s, kStReturn); break;
+        case kStReturn: if (s.screen == Screen::Town) StarterComplete(s); break;
+        default: break;
+    }
 }
 // Where the arrow points for this step (world x/z), false = no arrow.
 static bool StarterTarget(GameState& s, Vector2* out) {
@@ -31004,24 +31067,29 @@ static bool StarterTarget(GameState& s, Vector2* out) {
         float d = Dist(me, p) + bias; if (d < bd) { bd = d; *out = p; ok = true; } }); return ok; };
     if (s.screen == Screen::Town) {
         Vector2 me = s.townPlayerPos;
-        if (s.starterStep == kStShop)
-            return nearest(me, [&](auto f) { for (auto& n : ActiveTownNodes(s.selectedTown)) if (n.key != "house") f(n.pos, 0.0f); });
-        if (s.starterStep == kStGate || s.starterStep >= kStGather) { *out = kWildernessGatePos; return true; }
+        if (s.starterStep == kStGate || s.starterStep == kStGather || s.starterStep == kStFight || s.starterStep == kStLoot) { *out = kWildernessGatePos; return true; }
         return false;
     }
     if (s.screen == Screen::Wilderness) {
         Vector2 me = s.wildernessPlayerPos;
         if (s.starterStep == kStGather)
             return nearest(me, [&](auto f) { for (auto& n : kWildernessGatherNodes) if (n.resource == "wood" || n.resource == "ore") f(n.pos, 0.0f); });
-        if (s.starterStep == kStFight)
+        if (s.starterStep == kStReturn)
+            return nearest(me, [&](auto f) { for (auto& gate : kTownGates) f(gate.wildernessPos, 0.0f); });
+        bool missingBody = std::none_of(s.worldCorpses.begin(), s.worldCorpses.end(), [](const auto& c) { return c.zone == 0 && c.spotIdx >= 0 && c.Lootable(); });
+        if (s.starterStep == kStFight || (s.starterStep == kStLoot && missingBody)) {
+            int easiest = 1000000;
+            for (size_t i=0;i<kWildernessMonsterSpots.size();++i)
+                if(s.wildSpotRespawn[i]<=0) easiest=std::min(easiest,kWildernessMonsterSpots[i].level);
             return nearest(me, [&](auto f) {
                 for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
-                    if (s.wildSpotRespawn[i] > 0.0f) continue;
-                    f(WildernessMonsterLivePos((int)i, s.worldTime), kWildernessMonsterSpots[i].level * 120.0f); // easy ones first
+                    if (s.wildSpotRespawn[i] > 0.0f || kWildernessMonsterSpots[i].level != easiest) continue;
+                    f(WildernessMonsterLivePos((int)i, s.worldTime), 0.0f);
                 }
             });
+        }
         if (s.starterStep == kStLoot)
-            return nearest(me, [&](auto f) { for (auto& c : s.worldCorpses) if (c.zone == 0 && c.Lootable()) f(c.pos, 0.0f); });
+            return nearest(me, [&](auto f) { for (auto& c : s.worldCorpses) if (c.zone == 0 && c.spotIdx >= 0 && c.Lootable()) f(c.pos, 0.0f); });
     }
     return false;
 }
@@ -31029,33 +31097,14 @@ static void UpdateDrawStarter(GameState& s, int screenW, int screenH) {
     if (s.starterStep < 0 || s.starterStep >= kStCount) return;
     float dt = GetFrameTime();
     s.starterT += dt;
-    // --- progress ---
-    static Vector2 lastPos = { -1, -1 };
-    Vector2 me = s.screen == Screen::Wilderness ? s.wildernessPlayerPos : s.townPlayerPos;
-    if (lastPos.x >= 0 && (s.screen == Screen::Town || s.screen == Screen::Wilderness)) s.starterWalked += std::min(50.0f, Dist(lastPos, me));
-    lastPos = me;
-    switch (s.starterStep) {
-        case kStWalk: if (s.starterWalked > 220.0f) StarterBegin(s, kStShop); break;
-        case kStShop: if (s.screen == Screen::Interior) StarterBegin(s, kStLeave); break;
-        case kStLeave: if (s.screen == Screen::Town || s.screen == Screen::Wilderness) StarterBegin(s, kStGate); break;
-        case kStGate: if (s.screen == Screen::Wilderness) StarterBegin(s, kStGather); break;
-        case kStGather: if (s.wood + s.ore + s.fish + s.ice > s.starterBase) StarterBegin(s, kStFight); break;
-        case kStFight: if (s.nextCorpseId > s.starterBase) StarterBegin(s, kStLoot); break;
-        case kStLoot: {
-            bool any = false;
-            for (auto& c : s.worldCorpses) if (c.zone == 0 && c.Lootable()) any = true;
-            if (s.gold > s.starterBase || !any) StarterBegin(s, kStDone);
-            break;
-        }
-        case kStDone: if (s.starterT > 9.0f) { s.starterStep = -1; return; } break;
-    }
+    UpdateStarterProgress(s);
     // Only over the playable world (and shops), never over menus, fights' panels or the map.
     bool world = s.screen == Screen::Town || s.screen == Screen::Wilderness || s.screen == Screen::Interior;
-    if (!world || s.worldMapOpen || s.combat.has_value() || s.houseDesignerOpen || s.exploreMenuOpen || s.selectedTile.has_value()) return;
+    if (!world || s.worldMapOpen || s.combat.has_value() || s.houseDesignerOpen || s.exploreMenuOpen || s.selectedTile.has_value() || s.guideOpen || s.openCorpseId >= 0 || s.playerIsGhost || s.playerDeathAnimT > 0) return;
     // --- the arrow ---
     Vector2 tgt;
     bool camOk = (s.screen == Screen::Town && g_hudCamZone == 2) || (s.screen == Screen::Wilderness && g_hudCamZone == 0);
-    if (camOk && StarterTarget(s, &tgt)) {
+    if (s.starterAccepted && camOk && StarterTarget(s, &tgt)) {
         float gy = s.screen == Screen::Wilderness ? WildGroundY(tgt.x, tgt.y) : 0.0f;
         Vector2 sp;
         bool front = Town3DProject(g_hudCam, { tgt.x, gy + 75.0f, tgt.y }, &sp);
@@ -31086,34 +31135,39 @@ static void UpdateDrawStarter(GameState& s, int screenW, int screenH) {
             DrawTriangleLines(tip, l2, l1, dark);
         }
     }
-    // --- the banner ---
-    Rectangle bn = { 16, 626, (float)screenW - 32, 70 };
-    float in = std::min(1.0f, s.starterT * 3.0f);
-    bn.y += (1.0f - in) * 30.0f;
-    DrawRectangleRounded({ bn.x + 3, bn.y + 4, bn.width, bn.height }, 0.25f, 8, Fade(BLACK, 0.4f));
-    DrawRectangleRounded(bn, 0.25f, 8, Color{ 42, 27, 14, 240 });
-    DrawRectangleRoundedLines(bn, 0.25f, 8, Color{ 232, 186, 84, 255 });
-    int stepNo = std::min(s.starterStep + 1, (int)kStDone);
-    DrawCircle((int)bn.x + 34, (int)(bn.y + bn.height / 2), 22, Color{ 232, 186, 84, 255 });
-    std::string num = s.starterStep == kStDone ? "!" : std::to_string(stepNo);
-    int nw = MeasureUIText(num.c_str(), 22);
-    DrawUIText(num.c_str(), (int)bn.x + 34 - nw / 2, (int)(bn.y + bn.height / 2 - 12), 22, Color{ 50, 30, 10, 255 });
-    // wrap the goal onto two lines if needed
-    std::string goal = kStarterGoal[s.starterStep];
-    int maxW = (int)bn.width - 110, fs = 17;
-    std::string l1 = goal, l2;
-    if (MeasureUIText(goal.c_str(), fs) > maxW) {
-        size_t cut = goal.rfind(' ', goal.size() / 2 + 6);
-        if (cut != std::string::npos) { l1 = goal.substr(0, cut); l2 = goal.substr(cut + 1); }
+    // Native landscape card, with its own input region: never stretched or
+    // split across the old portrait HUD strips, and never a tap-to-walk target.
+    auto& card = g_landscapeOpening;
+    card.visible = true;
+    bool largeCard = !s.starterAccepted || s.starterStep == kStDone;
+    card.rect = largeCard ? Rectangle{176,140,540,226} : Rectangle{16,140,344,236};
+    card.title = s.starterAccepted ? kStarterTitle[s.starterStep] : "Welcome to Town Forge";
+    card.goal = s.starterAccepted ? kStarterGoal[s.starterStep] : "Explore the wilderness, bring back materials and loot, and build a stronger character and settlement.";
+    card.hint = s.starterAccepted ? kStarterHint[s.starterStep] : "Start with one short expedition. Each objective teaches a control when you need it. Your progress is saved.";
+    Vector2 target;
+    if (s.starterAccepted && StarterTarget(s, &target)) {
+        Vector2 me = s.screen == Screen::Wilderness ? s.wildernessPlayerPos : s.townPlayerPos;
+        card.direction = TextFormat("Gold marker: %d paces %s", (int)(Dist(me, target)/10), CompassWord(me, target).c_str());
     }
-    int ty = (int)(bn.y + (l2.empty() ? bn.height / 2 - 9 : bn.height / 2 - 20));
-    DrawUIText(l1.c_str(), (int)bn.x + 66, ty, fs, Color{ 255, 236, 190, 255 });
-    if (!l2.empty()) DrawUIText(l2.c_str(), (int)bn.x + 66, ty + 22, fs, Color{ 255, 236, 190, 255 });
-    Rectangle skip = { bn.x + bn.width - 40, bn.y + 6, 32, 24 };
-    DrawUIText("skip", (int)skip.x, (int)skip.y + 4, 12, Color{ 200, 170, 120, 255 });
-    if (UIClick(skip))
-        s.starterStep = -1;
-    (void)screenH;
+    if (s.wildEngaged.has_value()) card.hint = "Stay close for automatic melee attacks. Watch your health; move away and use a bandage if needed.";
+    card.actions = !s.starterAccepted ? std::vector<std::string>{"Begin expedition", "Explore freely"} : s.starterStep == kStDone ? std::vector<std::string>{"Keep exploring", "Build settlement"} : s.starterStep == kStPack ? std::vector<std::string>{"Open backpack", "Skip guide"} : std::vector<std::string>{"Skip guide"};
+    // Test native input against the card that was actually presented last frame.
+    // Legacy world controls are disabled for this pointer region.
+    if (g_landscapePointerRegion != tflayout::Region::NativePage || !g_presentedOpening || g_uiClickTaken || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
+    for (int i = 0; i < (int)card.actions.size(); ++i) {
+        if (!CheckCollisionPointRec(GetMousePosition(), LandscapeOpeningAction(card, i))) continue;
+        g_uiClickTaken = g_uiGestureOwned = true; PlaySfx(SfxId::Click);
+        if (!s.starterAccepted && i == 0) { s.starterAccepted = true; StarterBegin(s, kStWalk); }
+        else if (s.starterStep == kStPack && i == 0) {
+            g_playScreen = s.screen; s.exploreMenuOpen = false; g_characterPack = true; MenuGoScreen(s, Screen::Character);
+        } else if (s.starterStep == kStDone && i == 1) {
+            s.starterStep = -1; g_playScreen = s.screen; MenuGoScreen(s, Screen::House); g_settleOpen = true;
+        } else { s.starterStep = -1; s.logLine = "Explore at your pace. MENU > Help can restart the guided expedition."; }
+        card.visible = false;
+        SaveGame(s);
+        break;
+    }
+    (void)screenW; (void)screenH;
 }
 
 // Shared page chrome: title, page dots, body lines.
@@ -31177,8 +31231,12 @@ static void DrawGuideScreen(GameState& s, int screenW) {
     if(g_landscapePage)cx=730.f,cw=200.f;
     if (page > 0 && Button({ cx, btnY, 140, 56 }, "Back", true)) s.guidePage--;
     if (page < kGuidePageCount - 1 && Button({ g_landscapePage ? cx:cx + cw - 140, g_landscapePage ? btnY+66:btnY, 140, 56 }, "Next", true)) s.guidePage++;
-    DrawUIText(g_landscapePage ? "Swipe pages with Next / Back":"This is the same walkthrough from your first visit.", (int)cx, (int)btnY + (g_landscapePage ? 140:70), g_landscapePage ? 11:13,
-               Fade(kColorText, 0.7f));
+    if (Button({ cx, g_landscapePage ? 246.f : btnY + 156, cw, 48 }, s.starterStep >= 0 ? "Restart expedition" : "Play guided expedition", true)) {
+        s.starterAccepted = false; StarterBegin(s, kStWalk);
+        s.screen = g_playScreen; s.exploreMenuOpen = false; s.guideOpen = false;
+        // Replay keeps inventory, skills, world position and the one-time reward flag.
+        SaveGame(s);
+    }
 #ifdef __EMSCRIPTEN__
     if (Button({ cx, g_landscapePage ? 180.f:btnY + 100, cw, 48 }, "Open the player wiki (full guide)", true)) JS_OpenWiki(); // (2026-09-27)
 #endif
@@ -32790,7 +32848,7 @@ static float g_resetArmedTimer = 0.0f; // >0 while the Reset button is armed, wa
 static bool g_warOpen = false;         // the War Week screen (over the House screen)
 static int g_guildTab = 0; // the Guild screen's tab: 0 Overview, 1 Hall, 2 Research, 3 Help, 4 Shop, 5 Wars, 6 Members, 7 Warband (2026-09-29)
 static bool g_tmapOpen = false;        // the Treasure maps screen (over the House screen, 2026-09-28)
-static bool g_settleOpen = false;
+
 static bool g_optOpen = false;         // the Options screen (over the House screen, 2026-09-28)
 static void OpenWarWeek(GameState& s); // (2026-09-27) defined with the Guildstone
 // Tap to walk (2026-09-27): a pulsing gold ring on the ground where you're headed.
@@ -32888,7 +32946,6 @@ static void DrawWalkMarker(const GameState& s) {
 static int g_pdSel = -1;
 static std::optional<Item> g_pdTryOn;
 static int g_questTab = 0;
-static bool g_characterPack = false;
 static std::string GuildAttentionLabel();
 static std::string JournalAttentionLabel(const GameState& s);
 static Screen g_menuGroupLast[3] = { Screen::Character, Screen::Craft, Screen::Bank };
@@ -38937,7 +38994,7 @@ static void UpdateDrawFrame() {
         // five-page overlay; the pages live on under Help.
         (void)guideBlocked;
         if (state.guideOpen && guideHome) { g_uiShieldBypass = true; DrawGuideOverlay(state); g_uiShieldBypass = false; }
-        if (!guideBlocked || state.starterStep == kStFight || state.starterStep == kStLoot) UpdateDrawStarter(state, screenW, screenH);
+        UpdateDrawStarter(state, screenW, screenH);
         DrawDirectionsHud(state, screenW); // compass + world-boss timer (2026-09-27)
         DrawWalkMarker(state);             // tap to walk + Teleport aim (2026-09-27)
         if (state.hidden && state.screen != Screen::Wilderness && state.screen != Screen::Hunt) state.hidden = false; // (2026-09-28)

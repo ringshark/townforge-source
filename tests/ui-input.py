@@ -14,6 +14,9 @@ enum {MOUSE_BUTTON_LEFT};
 Vector2 mouse{}; bool pressed=false,down=false,released=false;
 bool menuBlocked=false;bool LandscapeMenuBlocksWorld(){return menuBlocked;}
 bool landscapeAllowed=true;bool g_landscapePage=false;
+bool g_presentedOpening=false;
+namespace tflayout {enum class Region{World,NativePage};}
+tflayout::Region g_landscapePointerRegion=tflayout::Region::World;
 bool LandscapeUIAllowed(){return landscapeAllowed;}
 Vector2 GetMousePosition(){return mouse;}
 bool IsMouseButtonPressed(int){return pressed;} bool IsMouseButtonDown(int){return down;}

@@ -32,6 +32,19 @@ static std::set<unsigned> g_landscapeWorldTextures;
 // Keep world raster detail across the wide screen while retaining the existing
 // logical canvas for picking, collision and HUD coordinates.
 static std::map<unsigned,Vector2> g_landscapeSceneSizes;
+struct LandscapeOpeningCard {
+    bool visible=false;
+    Rectangle rect{};
+    std::string title,goal,hint,direction;
+    std::vector<std::string> actions;
+};
+static LandscapeOpeningCard g_landscapeOpening;
+static bool g_presentedOpening=false;
+static Rectangle g_presentedOpeningRect{};
+static Rectangle LandscapeOpeningAction(const LandscapeOpeningCard& card,int index) {
+    float w=card.actions.size()>1 ? (card.rect.width-44)/2:132.f;
+    return {card.rect.x+16+index*(w+12),card.rect.y+card.rect.height-48,w,36};
+}
 struct LandscapeCaption {std::string text;int size;Color color;bool prompt;};
 static std::vector<LandscapeCaption> g_landscapeCaptions;
 struct LandscapeNotice {std::vector<std::string> lines;Color color;float alpha;};
@@ -61,6 +74,7 @@ static tflayout::Region g_landscapePointerRegion=tflayout::Region::Panel;
 static bool g_landscapePointerHeld=false;
 static double g_landscapePressTime=-1;
 static tflayout::Region LandscapeRegion(Vector2 raw) {
+    if(g_presentedOpening && CheckCollisionPointRec(raw,g_presentedOpeningRect))return tflayout::Region::NativePage;
     if(g_presentedNativeMenu)return tflayout::Region::NativeMenu;
     if(g_presentedPage)return tflayout::Region::NativePage;
     if(g_presentedGear)return raw.y<110 ? tflayout::Region::GearHeader:
@@ -85,6 +99,7 @@ static tflayout::Region LandscapeRegion(Vector2 raw) {
 }
 static bool LandscapeUIAllowed() {
     if(LandscapeMenuBlocksWorld())return false;
+    if(g_presentedOpening && g_landscapePointerRegion==tflayout::Region::NativePage)return false;
     if(g_landscapePointerRegion==tflayout::Region::PanelChrome)return false;
     return !g_presentedWorld || g_presentedDialog || g_landscapePointerRegion!=tflayout::Region::World;
 }
@@ -223,6 +238,7 @@ static void LandscapeBeginFrame(bool world,bool dialog,int screen,bool gear=fals
     if(previousScreen!=screen || (dialog && !g_presentedDialog) || gear!=g_presentedGear)g_landscapeScroll=0;
     previousScreen=screen;
     if((!world || dialog) && !gear && !page && !g_presentedNativeMenu)LandscapePanelInput();
+    g_landscapeOpening=LandscapeOpeningCard{};
     g_landscapePage=page;
     if(page && !g_landscapePageTarget.id){g_landscapePageTarget=::LoadRenderTexture(960,540);::SetTextureFilter(g_landscapePageTarget.texture,TEXTURE_FILTER_BILINEAR);}
     g_landscapeNativeMenu=false;g_landscapeNativeMenuDrawing=false;
@@ -392,6 +408,31 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
                 ::DrawTextEx(font,line.c_str(),{738,ty},12,1,Fade(msg.color,msg.alpha));ty+=15;
             }
             sy+=h+4;
+        }
+    }
+    g_presentedOpening=g_landscapeOpening.visible && g_landscapeWorld && !g_landscapeDialog && !g_landscapeNativeMenu && !g_landscapePage && !g_presentedMap;
+    if(g_presentedOpening) {
+        const auto& card=g_landscapeOpening;auto r=card.rect;
+        g_presentedOpeningRect=r;
+        LandscapePlate(r,Color{217,177,100,255});
+        int titleSize=18;
+        while(titleSize>12 && ::MeasureTextEx(font,card.title.c_str(),titleSize,1).x>r.width-32)--titleSize;
+        ::DrawTextEx(font,card.title.c_str(),{r.x+16,r.y+12},titleSize,1,Color{255,221,151,255});
+        int goalSize=r.width<400 ? 14:15,hintSize=r.width<400 ? 12:13;
+        float y=r.y+40;
+        for(const auto& line:LandscapeWrap(font,card.goal,goalSize,r.width-32)) {
+            ::DrawTextEx(font,line.c_str(),{r.x+16,y},goalSize,1,Color{245,241,228,255});y+=goalSize+4;
+        }
+        y+=5;
+        for(const auto& line:LandscapeWrap(font,card.hint,hintSize,r.width-32)) {
+            ::DrawTextEx(font,line.c_str(),{r.x+16,y},hintSize,1,Color{185,204,212,255});y+=hintSize+4;
+        }
+        if(!card.direction.empty())::DrawTextEx(font,card.direction.c_str(),{r.x+16,r.y+r.height-67},12,1,Color{255,221,151,255});
+        for(int i=0;i<(int)card.actions.size();++i) {
+            auto b=LandscapeOpeningAction(card,i);
+            ::DrawRectangleRounded(b,.15f,4,i==0 ? Color{62,83,93,255}:Color{38,53,63,255});
+            float w=::MeasureTextEx(font,card.actions[i].c_str(),14,1).x;
+            ::DrawTextEx(font,card.actions[i].c_str(),{b.x+(b.width-w)/2,b.y+10},14,1,Color{245,241,228,255});
         }
     }
     g_presentedWorld=g_landscapeWorld;g_presentedDialog=g_landscapeDialog;

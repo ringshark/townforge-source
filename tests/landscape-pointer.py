@@ -16,6 +16,7 @@ Vector2 GetMousePosition(){return raw;}double GetTime(){return clockTime;}
 bool IsMouseButtonPressed(int){return pressed;}bool IsMouseButtonDown(int){return down;}bool IsMouseButtonReleased(int){return released;}
 bool CheckCollisionPointRec(Vector2 p,Rectangle r){return p.x>=r.x && p.x<=r.x+r.width && p.y>=r.y && p.y<=r.y+r.height;}
 bool g_presentedWorld=true,g_presentedDialog=false;float g_landscapeScroll=0;
+bool g_presentedOpening=false;Rectangle g_presentedOpeningRect{};
 '''+f'#include "{rules}"\n'
 code+=section('static std::vector<Rectangle> g_landscapeHitRects;', 'static RenderTexture2D LandscapeLoadScene(')
 code+=section('static Vector2 LandscapeMouse()', 'static Vector2 LandscapeTouch(')
@@ -23,6 +24,12 @@ code+='''
 void frame(Vector2 p,bool press,bool hold,bool release){raw=p;pressed=press;down=hold;released=release;clockTime+=.016;}
 int main(){
 auto near=[](float a,float b){return std::fabs(a-b)<.01;};
+g_presentedOpening=true;g_presentedOpeningRect={176,140,540,184};
+frame({400,180},true,true,false);auto cardPoint=LandscapeMouse();
+assert(near(cardPoint.x,400) && near(cardPoint.y,180));assert(!LandscapeUIAllowed());
+frame({900,500},false,true,false);cardPoint=LandscapeMouse();
+assert(near(cardPoint.x,900) && near(cardPoint.y,500)); // native card drag never becomes ground input
+frame({900,500},false,false,true);LandscapeMouse();g_presentedOpening=false;
 g_landscapeHitRects={{190,768,154,44},{12,58,110,44}};
 frame({85,455},true,true,false);auto p=LandscapeMouse();assert(near(p.x,85)&&near(p.y,815));
 frame({195,455},false,true,false);p=LandscapeMouse();assert(near(p.x,195)&&near(p.y,815)); // no jump when exiting stick region
@@ -79,6 +86,7 @@ bool CheckCollisionPointRec(Vector2 p,Rectangle r){return p.x>=r.x && p.x<=r.x+r
 """+f'#include "{rules}"\n'+section('static Rectangle LandscapePanelUp()', 'static void LandscapeBeginFrame(')
 panel+=r"""int main(){
 auto near=[](float a,float b){return std::fabs(a-b)<.01;};
+
 raw={900,488};pressed=down=true;LandscapePanelInput();assert(near(g_landscapeScroll,tflayout::maxScroll));
 pressed=down=false;LandscapePanelInput();
 raw={900,52};down=true; // touch-down fallback when the one-frame press was missed
