@@ -31024,7 +31024,7 @@ static const char* kStarterHint[kStCount] = {
     "Drag the left joystick, tap open ground, or use WASD.",
     "MENU > Backpack. Then use Resume to return to the world.",
     "Follow the gold marker to a town entrance and use ENTER.",
-    "Walk up to the gate, then tap ENTER or press E.",
+    "Walk up to the gate, then tap WILDERNESS or press E.",
     "Walk close, tap GATHER or press E, and wait for the progress bar.",
     "Melee attacks are automatic while you are close. Move away to retreat; bandages restore health.",
     "Tap the body or LOOT, then tap Loot All. If the body is gone, defeat another enemy.",
@@ -31141,6 +31141,7 @@ static void UpdateDrawStarter(GameState& s, int screenW, int screenH) {
     card.visible = true;
     bool largeCard = !s.starterAccepted || s.starterStep == kStDone;
     card.rect = largeCard ? Rectangle{176,140,540,226} : Rectangle{16,140,344,236};
+    if(!largeCard) card.vitals=TextFormat("Health %d / %d   Mana %d / %d",(int)s.hp,(int)s.maxHp,(int)s.mana,(int)MaxMana(s));
     card.title = s.starterAccepted ? kStarterTitle[s.starterStep] : "Welcome to Town Forge";
     card.goal = s.starterAccepted ? kStarterGoal[s.starterStep] : "Explore the wilderness, bring back materials and loot, and build a stronger character and settlement.";
     card.hint = s.starterAccepted ? kStarterHint[s.starterStep] : "Start with one short expedition. Each objective teaches a control when you need it. Your progress is saved.";
@@ -31149,6 +31150,14 @@ static void UpdateDrawStarter(GameState& s, int screenW, int screenH) {
         Vector2 me = s.screen == Screen::Wilderness ? s.wildernessPlayerPos : s.townPlayerPos;
         card.direction = TextFormat("Gold marker: %d paces %s", (int)(Dist(me, target)/10), CompassWord(me, target).c_str());
     }
+    if (s.starterAccepted && s.screen == Screen::Town && (s.starterStep == kStGather || s.starterStep == kStFight || s.starterStep == kStLoot)) {
+        card.goal = "Your expedition continues outside town. Follow the gold marker back to the gate.";
+        card.hint = "Walk close, tap WILDERNESS or press E. Your saved objective continues outside.";
+    } else if (s.starterAccepted && s.screen == Screen::Interior) {
+        card.goal = "Leave this building to continue your expedition.";
+        card.hint = "Walk to the exit door. Your current objective will appear again outside.";
+    }
+    if (s.starterStep == kStDone && s.starterRewarded) card.hint = "First-completion reward collected: 50 gold + 5 bandages. Choose your next goal below.";
     if (s.wildEngaged.has_value()) card.hint = "Stay close for automatic melee attacks. Watch your health; move away and use a bandage if needed.";
     card.actions = !s.starterAccepted ? std::vector<std::string>{"Begin expedition", "Explore freely"} : s.starterStep == kStDone ? std::vector<std::string>{"Keep exploring", "Build settlement"} : s.starterStep == kStPack ? std::vector<std::string>{"Open backpack", "Skip guide"} : std::vector<std::string>{"Skip guide"};
     // Test native input against the card that was actually presented last frame.
@@ -37826,8 +37835,14 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
 
     }
     if(g_characterPack) {
-        if(Button({20,120,244,44},"Bank storage",true)) MenuGoScreen(s,Screen::Bank);
-        if(Button({g_landscapePage ? 280.f:276.f,120,244,44},"Home & settlement",true)) MenuGoScreen(s,Screen::House);
+        bool openingPack=s.starterAccepted && (s.starterStep==kStPack || s.starterStep==kStReturn);
+        if(openingPack) {
+            DrawUIText("These are your supplies and loot. Use Resume, then return to town.",20,126,14,kColorText);
+            DrawUIText("Materials make gear and buildings; gold buys equipment and services.",20,148,12,Fade(kColorText,.8f));
+        } else {
+            if(Button({20,120,244,44},"Bank storage",true)) MenuGoScreen(s,Screen::Bank);
+            if(Button({g_landscapePage ? 280.f:276.f,120,244,44},"Home & settlement",true)) MenuGoScreen(s,Screen::House);
+        }
     }
     // ---- the backpack (UO bag gump) ----
     Rectangle bag = { 10, st.y + st.height + 18, 520, (float)screenH - (st.y + st.height + 18) - 8 };

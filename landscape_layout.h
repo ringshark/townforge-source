@@ -35,7 +35,7 @@ static std::map<unsigned,Vector2> g_landscapeSceneSizes;
 struct LandscapeOpeningCard {
     bool visible=false;
     Rectangle rect{};
-    std::string title,goal,hint,direction;
+    std::string title,goal,hint,direction,vitals;
     std::vector<std::string> actions;
 };
 static LandscapeOpeningCard g_landscapeOpening;
@@ -414,6 +414,12 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
     if(g_presentedOpening) {
         const auto& card=g_landscapeOpening;auto r=card.rect;
         g_presentedOpeningRect=r;
+        if(!card.vitals.empty()) {
+            Rectangle health={r.x,r.y-36,r.width,28};
+            LandscapePlate(health,Color{87,133,103,255});
+            ::DrawTextEx(font,card.vitals.c_str(),{health.x+12,health.y+6},14,1,Color{240,236,219,255});
+            g_presentedOpeningRect.y-=36;g_presentedOpeningRect.height+=36;
+        }
         LandscapePlate(r,Color{217,177,100,255});
         int titleSize=18;
         while(titleSize>12 && ::MeasureTextEx(font,card.title.c_str(),titleSize,1).x>r.width-32)--titleSize;
