@@ -1,0 +1,68 @@
+{
+  "batch": "townforge-armor-20261003",
+  "credits": 60,
+  "pieces": {
+    "chest": {
+      "task_id": "01a0ff8b-1cf6-7375-9fd5-bd483fa8fd34",
+      "source_triangles": 4046,
+      "triangles": 2395,
+      "bounds": [
+        [
+          -0.135,
+          -0.25,
+          -0.11
+        ],
+        [
+          0.135,
+          0.13,
+          0.09999999999999999
+        ]
+      ],
+      "files": [
+        "steel-cuirass.glb"
+      ]
+    },
+    "shoulder": {
+      "task_id": "01a0ff8b-2926-7708-b061-9729ec903007",
+      "source_triangles": 4124,
+      "triangles": 309,
+      "bounds": [
+        [
+          -0.084,
+          -0.045,
+          -0.084
+        ],
+        [
+          0.084,
+          0.15500000000000003,
+          0.084
+        ]
+      ],
+      "files": [
+        "steel-pauldron-r.glb",
+        "steel-pauldron-l.glb"
+      ]
+    },
+    "greave": {
+      "task_id": "01a0ff8b-3174-7409-8053-ea0acf5384b6",
+      "source_triangles": 4146,
+      "triangles": 157,
+      "bounds": [
+        [
+          -0.062,
+          0.015,
+          -0.058
+        ],
+        [
+          0.062,
+          0.355,
+          0.07500000000000001
+        ]
+      ],
+      "files": [
+        "steel-greave-r.glb",
+        "steel-greave-l.glb"
+      ]
+    }
+  }
+}

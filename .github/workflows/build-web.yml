@@ -40,6 +40,7 @@ jobs:
           python tests/menu-status.py
           python tests/equipment-preview.py
           python tests/hero-model.py
+          python tests/armor-assets.py
           node server/mp/test/den.mjs
           node server/mp/test/ladder.mjs
           node tests/den-client.cjs

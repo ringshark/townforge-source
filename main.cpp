@@ -12995,7 +12995,8 @@ static Model HumanBuildRobeSkirt() {
 
 // Armor pieces (2026-09-28, #64), in their bone's space (metres, +Y along the bone):
 // 0/1 chest light/heavy, 2/3 pauldron, 4/5 bracer, 6/7 greave, 8 heavy cuisse, 9 gorget.
-enum { kArChestL, kArChestH, kArPauldronL, kArPauldronH, kArBracerL, kArBracerH, kArGreaveL, kArGreaveH, kArCuisse, kArGorget };
+enum { kArChestL, kArChestH, kArPauldronL, kArPauldronH, kArBracerL, kArBracerH, kArGreaveL, kArGreaveH, kArCuisse, kArGorget,
+       kArPauldronHL, kArGreaveHL, kArCount };
 // Tapered plate shell: broad flat faces, bevelled corners and a shallow ridge.
 static void HumanArmorShell(T3CMeshBuilder& b, float y0, float y1,
                             float w0, float w1, float d0, float d1, float z,
@@ -13189,7 +13190,20 @@ static void HumanEnsure() {
     for (int g = kHwBow; g < kHwGearCount; g++) { H.gear[g] = HumanBuildWeapon(g); H.gearOk[g] = true; }
     for (int k = kHhLeather; k <= kHhPlate; k++) H.helm[k] = HumanBuildHelm(k);
     H.cloak = HumanBuildCloak();
-    for (int k = kArChestL; k <= kArGorget; k++) H.armor[k] = HumanBuildArmor(k);
+    // Meshy armor is already fitted to these same bone-space attachment frames.
+    // Mirrored files preserve outward normals and the asymmetric layered shapes.
+    for (int k = kArChestL; k < kArCount; k++) {
+        const char* file = k == kArChestH ? "assets/armor/steel-cuirass.glb" :
+                           k == kArPauldronH ? "assets/armor/steel-pauldron-r.glb" :
+                           k == kArPauldronHL ? "assets/armor/steel-pauldron-l.glb" :
+                           k == kArGreaveH ? "assets/armor/steel-greave-r.glb" :
+                           k == kArGreaveHL ? "assets/armor/steel-greave-l.glb" : nullptr;
+        if (file && FileExists(file)) H.armor[k] = LoadModel(file);
+        if (H.armor[k].meshCount <= 0) {
+            int fallback = k == kArPauldronHL ? kArPauldronH : k == kArGreaveHL ? kArGreaveH : k;
+            H.armor[k] = HumanBuildArmor(fallback);
+        }
+    }
     H.robeSkirt = HumanBuildRobeSkirt();
     for (int k = kClWizardHat; k <= kClFeatherHat; k++) H.hat[k] = HumanBuildHat(k);
     H.face = HumanBuildFace();
@@ -14143,12 +14157,12 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
         if (o.armChest && !o.robe) piece(o.armChest == 2 ? kArChestH : kArChestL, H.boneChest, o.armChestCol);
         if (o.armArms && !o.robe) {
             int pk = o.armArms == 2 ? kArPauldronH : kArPauldronL, bk = o.armArms == 2 ? kArBracerH : kArBracerL;
-            piece(pk, H.boneUpperR, o.armArmsCol); piece(pk, H.boneUpperL, o.armArmsCol);
+            piece(pk, H.boneUpperR, o.armArmsCol); piece(o.armArms == 2 ? kArPauldronHL : pk, H.boneUpperL, o.armArmsCol);
             piece(bk, H.boneForearmR, o.armArmsCol); piece(bk, H.boneForearmL, o.armArmsCol);
         }
         if (o.armLegs && !o.robe) {
             int gk = o.armLegs == 2 ? kArGreaveH : kArGreaveL;
-            piece(gk, H.boneShinR, o.armLegsCol); piece(gk, H.boneShinL, o.armLegsCol);
+            piece(gk, H.boneShinR, o.armLegsCol); piece(o.armLegs == 2 ? kArGreaveHL : gk, H.boneShinL, o.armLegsCol);
             if (o.armLegs == 2) { piece(kArCuisse, H.boneThighR, o.armLegsCol); piece(kArCuisse, H.boneThighL, o.armLegsCol); }
         }
         if (o.armGorget) piece(kArGorget, H.boneChest, o.armGorgetCol);
@@ -14429,6 +14443,7 @@ static const char* const kSkClipNames[kSkClipCount] = {
 struct SkinChar {
     bool tried = false, ok = false;
     Model model{};
+    Model cuirass{}; // shares the hero's exact skeleton and current torso pose
     ModelAnimation* anims = nullptr;
     int animCount = 0;
     int clip[kSkClipCount];
@@ -14489,6 +14504,14 @@ static SkinChar* SkinCharGet(int id) {
         else if (!strcmp(n, "LeftLeg")) C.legL = b;
         else if (!strcmp(n, "RightFoot")) C.footR = b;
         else if (!strcmp(n, "LeftFoot")) C.footL = b;
+    }
+    if (g_skinCharFiles[(size_t)id] == "hero-neutral" && FileExists("assets/armor/steel-cuirass-skinned.glb")) {
+        C.cuirass = LoadModel("assets/armor/steel-cuirass-skinned.glb");
+        bool compatible = C.cuirass.meshCount > 0 && C.cuirass.skeleton.boneCount == C.model.skeleton.boneCount;
+        for (int b = 0; compatible && b < C.model.skeleton.boneCount; ++b)
+            compatible = !strcmp(C.cuirass.skeleton.bones[b].name, C.model.skeleton.bones[b].name) &&
+                         C.cuirass.skeleton.bones[b].parent == C.model.skeleton.bones[b].parent;
+        if (!compatible) { UnloadModel(C.cuirass); C.cuirass = {}; }
     }
     if (C.model.meshes[0].colors) { // dye-region markers: pure red / green / blue
         const Mesh& me = C.model.meshes[0];
@@ -14825,16 +14848,31 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
                                                          MatrixTranslate(0.0f, fitted.oy * u, fitted.oz * u)), rot);
             HumanDrawAttached(m, &flat, local, boneM(bone), world, HumanMul(c, tint));
         };
-        if (o.armChest && !o.robe) piece(H.armor[o.armChest == 2 ? kArChestH : kArChestL], C.spine, g_skinFitChest, o.armChestCol);
+        if (o.armChest && !o.robe) {
+            if (o.armChest == 2 && C.cuirass.meshCount > 0) {
+                // Copy the already blended body pose, including attacks and riding.
+                // This avoids a second animation clock and keeps the waist fitted
+                // as different spine bones rotate during a sword swing.
+                ModelAnimation pose{};
+                pose.boneCount = C.model.skeleton.boneCount;
+                pose.keyframeCount = 1;
+                pose.keyframePoses = &C.model.currentPose;
+                UpdateModelAnimation(C.cuirass, pose, 0.0f);
+                for (int i = 0; i < C.cuirass.materialCount; ++i) C.cuirass.materials[i].shader = sh;
+                DrawModelEx(C.cuirass, {x, baseY, z}, {0, 1, 0}, rotDeg, {sc, sc, sc}, HumanMul(o.armChestCol, tint));
+            } else piece(H.armor[o.armChest == 2 ? kArChestH : kArChestL], C.spine, g_skinFitChest, o.armChestCol);
+        }
         if (o.armArms && !o.robe) {
             const Model& pm = H.armor[o.armArms == 2 ? kArPauldronH : kArPauldronL];
             const Model& bm = H.armor[o.armArms == 2 ? kArBracerH : kArBracerL];
-            piece(pm, C.armR, g_skinFitPauldron, o.armArmsCol); piece(pm, C.armL, g_skinFitPauldron, o.armArmsCol);
+            piece(pm, C.armR, g_skinFitPauldron, o.armArmsCol);
+            piece(o.armArms == 2 ? H.armor[kArPauldronHL] : pm, C.armL, g_skinFitPauldron, o.armArmsCol);
             piece(bm, C.foreArmR, g_skinFitBracer, o.armArmsCol); piece(bm, C.foreArmL, g_skinFitBracer, o.armArmsCol);
         }
         if (o.armLegs && !o.robe) {
             const Model& gm = H.armor[o.armLegs == 2 ? kArGreaveH : kArGreaveL];
-            piece(gm, C.legR, g_skinFitGreave, o.armLegsCol); piece(gm, C.legL, g_skinFitGreave, o.armLegsCol);
+            piece(gm, C.legR, g_skinFitGreave, o.armLegsCol);
+            piece(o.armLegs == 2 ? H.armor[kArGreaveHL] : gm, C.legL, g_skinFitGreave, o.armLegsCol);
             if (o.armLegs == 2) { piece(H.armor[kArCuisse], C.upLegR, g_skinFitCuisse, o.armLegsCol); piece(H.armor[kArCuisse], C.upLegL, g_skinFitCuisse, o.armLegsCol); }
         }
         if (o.armGorget) piece(H.armor[kArGorget], C.spine, g_skinFitGorget, o.armGorgetCol);
