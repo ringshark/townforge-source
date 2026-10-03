@@ -14506,8 +14506,8 @@ static SkinChar* SkinCharGet(int id) {
         else if (!strcmp(n, "RightFoot")) C.footR = b;
         else if (!strcmp(n, "LeftFoot")) C.footL = b;
     }
-    if (g_skinCharFiles[(size_t)id] == "hero-neutral" && FileExists("assets/armor/steel-cuirass-skinned.glb")) {
-        C.cuirass = LoadModel("assets/armor/steel-cuirass-skinned.glb");
+    if (g_skinCharFiles[(size_t)id] == "hero-neutral" && FileExists("assets/armor/armored-tunic-skinned.glb")) {
+        C.cuirass = LoadModel("assets/armor/armored-tunic-skinned.glb");
         bool compatible = C.cuirass.meshCount > 0 && C.cuirass.skeleton.boneCount == C.model.skeleton.boneCount;
         for (int b = 0; compatible && b < C.model.skeleton.boneCount; ++b)
             compatible = !strcmp(C.cuirass.skeleton.bones[b].name, C.model.skeleton.bones[b].name) &&
@@ -14569,7 +14569,7 @@ static SkinChar* SkinCharGet(int id) {
     { int hips = -1; for (int b = 0; b < C.model.skeleton.boneCount; b++) if (!strcmp(C.model.skeleton.bones[b].name, "Hips")) hips = b;
       C.hipsY = hips >= 0 ? C.model.skeleton.bindPose[hips].translation.y - bb.min.y : h * 0.5f; }
     if (g_skinCharFiles[(size_t)id] == "hero-neutral") {
-        C.armorUnderlayer = LoadTexture("assets/armor/chain-underlayer.png");
+        C.armorUnderlayer = LoadTexture("assets/armor/tunic-underlayer.png");
         if (C.armorUnderlayer.id) { GenTextureMipmaps(&C.armorUnderlayer); SetTextureFilter(C.armorUnderlayer, TEXTURE_FILTER_TRILINEAR); }
     }
     Town3DApplyLitShader(C.model);
@@ -14609,8 +14609,8 @@ static const float kSkWalkMps = 1.36f, kSkRunMps = 3.8f;
 // Armor on the sculpted body: the body kit's pieces, per piece a scale and an
 // offset (metres, in the bone's space) to sit over the hero's own leather.
 struct SkinArmorFit { float s, sx, oy, oz; };
-static SkinArmorFit g_skinFitChest = { 1.22f, 1.18f, 0.02f, 0.03f }, g_skinFitPauldron = { 1.02f, 1.0f, -0.01f, 0.0f },
-                    g_skinFitBracer = { 1.25f, 1.0f, 0.0f, 0.0f }, g_skinFitGreave = { 1.25f, 1.0f, 0.0f, 0.0f },
+static SkinArmorFit g_skinFitChest = { 1.22f, 1.18f, 0.02f, 0.03f }, g_skinFitPauldron = { 0.86f, 1.0f, -0.01f, 0.0f },
+                    g_skinFitBracer = { 1.02f, 1.0f, 0.0f, 0.0f }, g_skinFitGreave = { 1.12f, 1.0f, 0.0f, 0.0f },
                     g_skinFitCuisse = { 1.2f, 1.0f, 0.0f, 0.0f }, g_skinFitGorget = { 1.2f, 1.1f, 0.0f, 0.0f },
                     g_skinFitHelm = { 1.1f, 1.0f, -0.01f, 0.015f };
 // Plate uses the same scene light and camera as the body, with a sharper metal highlight.
@@ -14880,8 +14880,8 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
                 pose.keyframeCount = 1;
                 pose.keyframePoses = &C.model.currentPose;
                 UpdateModelAnimation(C.cuirass, pose, 0.0f);
-                for (int i = 0; i < C.cuirass.materialCount; ++i) C.cuirass.materials[i].shader = metal;
-                DrawModelEx(C.cuirass, {x, baseY, z}, {0, 1, 0}, rotDeg, {sc, sc, sc}, HumanMul(o.armChestCol, tint));
+                for (int i = 0; i < C.cuirass.materialCount; ++i) C.cuirass.materials[i].shader = sh;
+                DrawModelEx(C.cuirass, {x, baseY, z}, {0, 1, 0}, rotDeg, {sc, sc, sc}, tint);
             } else piece(H.armor[o.armChest == 2 ? kArChestH : kArChestL], C.spine, g_skinFitChest, o.armChestCol, o.armChest == 2);
         }
         if (o.armArms && !o.robe) {
@@ -14895,7 +14895,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
             const Model& gm = H.armor[o.armLegs == 2 ? kArGreaveH : kArGreaveL];
             piece(gm, C.legR, g_skinFitGreave, o.armLegsCol, o.armLegs == 2);
             piece(o.armLegs == 2 ? H.armor[kArGreaveHL] : gm, C.legL, g_skinFitGreave, o.armLegsCol, o.armLegs == 2);
-            if (o.armLegs == 2) { piece(H.armor[kArCuisse], C.upLegR, g_skinFitCuisse, o.armLegsCol, true); piece(H.armor[kArCuisse], C.upLegL, g_skinFitCuisse, o.armLegsCol, true); }
+            if (o.armLegs == 2 && g_skinCharFiles[(size_t)id] != "hero-neutral") { piece(H.armor[kArCuisse], C.upLegR, g_skinFitCuisse, o.armLegsCol, true); piece(H.armor[kArCuisse], C.upLegL, g_skinFitCuisse, o.armLegsCol, true); }
         }
         if (o.armGorget) piece(H.armor[kArGorget], C.spine, g_skinFitGorget, o.armGorgetCol);
         if (o.helm != kHhNone) piece(H.helm[o.helm], C.head, g_skinFitHelm, o.helmCol);
@@ -14962,8 +14962,8 @@ static bool DrawEquippedHero(int track, float x, float z, float yaw, Color tint,
     dye.c[2] = equipment.robe ? ClothColor(*equipment.robe) : equipment.shirt ? ClothColor(*equipment.shirt) : Color{195,184,176,255};
     dye.c[3] = equipment.robe ? ColorBrightness(ClothColor(*equipment.robe), -0.10f) : equipment.pants ? ClothColor(*equipment.pants) : Color{92,78,69,255};
     if (outfit.armChest == 2 && !equipment.robe) {
-        dye.c[2] = {180,184,190,255};
-        if (outfit.armLegs) dye.c[3] = {170,174,182,255};
+        dye.c[2] = {70,110,140,255};
+        if (outfit.armLegs) dye.c[3] = {65,60,55,255};
     }
     Color glove;
     if (HumanArmorColor(equipment.gloves, &glove)) dye.c[4] = glove;

@@ -55,3 +55,16 @@ offscreen EGL ES2 context, and the game's actual lit/armor shaders. It shows
 front, side, back, and a distant perspective view. This is
 an equipment rendering test scene, not a capture of the live browser game.
 The visual draft still needs user review before replacing the live version.
+
+### Armored tunic review draft
+
+The rejected plate study remains available in branch history. The next draft
+uses `build_armored_tunic.py`: the hero's own torso surface and original skin
+weights form the cloth body, with a fitted waist, leather belt and short bound
+hem. The tunic uses diffuse cloth lighting; steel stays at the shoulders,
+forearms and shins. The heavy thigh plates are omitted on the hero. Plain fabric
+replaces the noisy chain atlas. The original hero GLB remains unchanged.
+
+Generate with `python tools/characters3d/build_armored_tunic.py` and
+`python tools/characters3d/build_armor_underlayer.py`. No additional Meshy jobs
+or credits are involved. This is a review draft, not a live deployment.

@@ -1,4 +1,4 @@
-"""Bake a chain underlayer into the hero's existing UV atlas.
+"""Bake a plain fabric underlayer into the hero's existing UV atlas.
 
 Preserves the base model, skeleton and uncovered head/hands/feet. No remote jobs.
 """
@@ -23,14 +23,11 @@ def main():
         draw.polygon(points,fill=255)
     mask=mask.filter(ImageFilter.MaxFilter(3))
     original=np.array(image).astype(float);lum=original.mean(axis=2)
-    yy,xx=np.mgrid[:h,:w];row=yy//5
-    dx=((xx+(row%2)*3)%6)-2.5;dy=(yy%5)-2
-    radius=(dx/2.5)**2+(dy/1.7)**2
-    link=np.where((radius>.42)&(radius<1.45),1.,0.)
-    relief=np.where((radius>.60)&(radius<1.30)&(dy<0),1.,0.)
-    value=np.clip(70+link*34+relief*20+(lum-110)*.30,40,178)
-    fabric=np.stack([value*.92,value*.96,value],axis=2)
+    # Broad original folds remain; no repeating chain rings or speckle.
+    smooth=np.asarray(image.filter(ImageFilter.GaussianBlur(2))).astype(float).mean(axis=2)
+    value=np.clip(185+(smooth-110)*.45,110,235)
+    fabric=np.stack([value,value,value],axis=2)
     out=np.where(np.array(mask)[:,:,None]>0,fabric,original).astype('uint8')
-    path=Path('assets/armor/chain-underlayer.png');Image.fromarray(out).quantize(colors=224,dither=Image.Dither.NONE).save(path,optimize=True)
-    print('Chain underlayer:',path.stat().st_size,'bytes; uncovered skin and source model preserved')
+    path=Path('assets/armor/tunic-underlayer.png');Image.fromarray(out).quantize(colors=224,dither=Image.Dither.NONE).save(path,optimize=True)
+    print('Fabric underlayer:',path.stat().st_size,'bytes; uncovered skin and source model preserved')
 if __name__=='__main__':main()

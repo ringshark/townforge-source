@@ -67,3 +67,10 @@ assert count == manifest['pieces']['chest']['triangles']
 assert all(.98 <= v[1] <= 1.50 and abs(v[0]) < .26 and abs(v[2]) < .26 for v in points)
 assert total_bytes + size < 300_000
 print(f'PASS armor: {total_triangles} equipped triangles, {total_bytes+size:,} asset bytes, lighting normals, mirrored limbs, exact hero skeleton, normalized skin weights, 60-credit provenance')
+# Cloth draft must keep the exact hero rig and survive the same weight checks.
+tunic = root / 'armored-tunic-skinned.glb'
+if tunic.exists():
+    points, count, size = read(tunic, True)
+    assert count < 3500 and size < 500_000
+    assert all(.83 <= v[1] <= 1.50 and abs(v[0]) < .26 and abs(v[2]) < .27 for v in points)
+    print(f'PASS fitted tunic: {count} triangles, {size:,} bytes, exact hero skeleton and normalized weights')
