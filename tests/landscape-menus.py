@@ -64,6 +64,18 @@ reset();DrawFurTraderScreen(s,960,540);check("fur trader");
 reset();DrawMinersGuildScreen(s,960,540);check("miners guild");
 reset();DrawRefugeScreen(s,960,540);check("refuge");
 for(int page=0;page<kGuidePageCount;page++){reset();s.guidePage=page;DrawGuideScreen(s,960);check("help");}
+// Decoration is a native overlay: every control fits and taps use wide coordinates.
+auto decorReset=[&](){reset();g_landscapePage=g_presentedPage=false;g_presentedNativeMenu=true;g_landscapeWorld=g_presentedWorld=true;g_presentedDialog=false;g_hdOn=true;g_hdGhost=g_hdMove=g_hdSel=-1;g_hdMsg.clear();};
+decorReset();DrawHouseDecorateUI(s,540,900);check("decorate catalog");assert(g_landscapeNativeMenu && !g_landscapeNativeMenuDrawing);
+decorReset();g_hdCat=0;testPressed=true;testMouse={584+16+2*(336.f/kHdcCount)+10,190};DrawHouseDecorateUI(s,540,900);assert(g_hdCat==2);check("decorate categories");
+decorReset();g_hdGhost=0;g_hdRot=0;testPressed=true;testMouse={270,488};DrawHouseDecorateUI(s,540,900);assert(g_hdRot==90);check("decorate placement");
+decorReset();g_hdGhost=0;testPressed=true;testMouse={658,488};DrawHouseDecorateUI(s,540,900);assert(g_hdGhost==-1 && g_hdMove==-1);
+decorReset();testPressed=true;testMouse={937,161};DrawHouseDecorateUI(s,540,900);assert(!g_hdOn);
+for(int i=0;i<kIsCount;i++)g_isReady[i]=true;
+decorReset();s.houseDesignerOpen=true;s.houseLayout=HouseStarterLayout(kHousePlots[s.housePlotIdx].cells);DrawHouseDesigner(s,540,900);check("house designer");
+decorReset();int style=s.houseWallStyle;testPressed=true;testMouse={666,215};DrawHouseDesigner(s,540,900);assert(s.houseWallStyle!=style);check("house styles");
+decorReset();s.houseDesignerOpen=true;testPressed=true;testMouse={140,490};DrawHouseDesigner(s,540,900);assert(!s.houseDesignerOpen);
+g_hdOn=false;g_presentedNativeMenu=g_landscapeNativeMenu=false;
 // Invisible panels from other screens must not shrink a playable interior.
 GameState room;room.screen=Screen::Town;room.greetedNPC=0;
 EnterInterior(room,"stable");assert(!room.greetedNPC && !LandscapeDialogOpen(room));

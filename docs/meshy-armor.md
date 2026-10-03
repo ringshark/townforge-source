@@ -1,6 +1,6 @@
 # Meshy plate armor
 
-The heavy armor appearance now uses a Meshy cuirass, mirrored pauldrons and
+The heavy armor appearance now uses locally rebuilt plate cuirass, mirrored pauldrons and
 mirrored greaves. Existing equipment names, materials, dyes and stats select
 the same slots. World and Me continue to share the equipment renderer.
 
@@ -8,6 +8,9 @@ The three Meshy-6 tasks consumed exactly 60 credits (20 each); task IDs and
 triangle counts are recorded in `assets/armor/meshy-armor.json`. Meshy returned
 display/full figures, so the requested pieces were extracted locally. The
 display stand, other body parts and detached fragments were discarded.
+Those extracted meshes produced jagged surfaces in game and have since been
+retired. Clean, symmetric plate shells now replace their geometry. No new
+Meshy jobs or credit charges were made.
 
 The current hero model was not changed. The cuirass was fitted to its torso
 and weighted locally to its existing Spine, Spine01, Spine02 and Hips bones.
@@ -19,11 +22,11 @@ Pauldrons and greaves attach to their existing limb bones. Mirroring is baked
 into separate left GLBs, preserving winding and normals. Light armor retains
 the tapered procedural shapes. A robe continues to cover armor.
 
-Reproduce from the approved artifact `townforge-armor-20261003`:
+Reproduce the current local replacements (the original task ledger is retained):
 
 ```
 pip install numpy scipy trimesh shapely networkx
-python tools/characters3d/fit_armor.py RAW_DIRECTORY assets/armor
+python tools/characters3d/build_clean_armor.py
 python tools/characters3d/rig_armor.py
 python tests/armor-assets.py
 ```

@@ -1,4 +1,4 @@
-"""Check shipped Meshy armor exports: dimensions, lighting, mirroring and budget."""
+"""Check shipped plate armor exports: dimensions, lighting, mirroring and budget."""
 import json
 import math
 from pathlib import Path

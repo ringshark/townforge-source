@@ -143,6 +143,20 @@ static void LandscapeTextureEnd() {
         if(!g_landscapeTargets.empty())LandscapeTextureBegin(g_landscapeTargets.back());
     }
 }
+// A room editor overlays the wide world without slicing its controls into HUD bands.
+struct LandscapeRoomOverlay {
+    bool active;
+    LandscapeRoomOverlay():active(g_landscapeActive) {
+        if(!active)return;
+        if(!g_landscapeNativeMenuTarget.id) {
+            g_landscapeNativeMenuTarget=::LoadRenderTexture(960,540);
+            ::SetTextureFilter(g_landscapeNativeMenuTarget.texture,TEXTURE_FILTER_BILINEAR);
+        }
+        g_landscapeNativeMenu=true;g_landscapeNativeMenuDrawing=true;
+        LandscapeTextureBegin(g_landscapeNativeMenuTarget);::ClearBackground(BLANK);
+    }
+    ~LandscapeRoomOverlay(){if(active){LandscapeTextureEnd();g_landscapeNativeMenuDrawing=false;}}
+};
 // Isolate a complete map widget before compositing. It must never be sliced
 // across the portrait HUD bands; its picking uses the same source/destination.
 struct LandscapeMapWidget {

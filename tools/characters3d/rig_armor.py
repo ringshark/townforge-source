@@ -1,7 +1,7 @@
-"""Fit and skin the Meshy cuirass to the existing hero, without paid rigging.
+"""Fit and skin the plate cuirass to the existing hero, without paid rigging.
 
 Uses the hero's exact skeleton and torso weights. The base character is read-only.
-Run from the repository root after fit_armor.py. Requires numpy, scipy, trimesh.
+Run from the repository root after build_clean_armor.py. Requires numpy, scipy, trimesh.
 """
 import copy
 import json
@@ -46,20 +46,23 @@ def main():
     # Same rest placement as DrawSkinChar's chest attachment.
     center=world(names['Spine'])[:3,3]
     m.vertices=m.vertices*np.array([1.22*1.18,1.22,1.22])+center+np.array([0,-.12,.03])
-    # Preserve the sculpted relief while moving inset shell faces outside the
-    # existing torso. A bevelled superellipse keeps broad plate faces flat.
-    for i,point in enumerate(m.vertices):
-        band=ref[np.abs(ref[:,1]-point[1])<.035]
-        if not len(band):band=ref[np.argsort(np.abs(ref[:,1]-point[1]))[:50]]
+    # Fit whole horizontal plate rings together. Per-vertex outward pushes
+    # distort planar faces into random triangles and create crumpled lighting.
+    for height in np.unique(m.vertices[:,1]):
+        mask=np.abs(m.vertices[:,1]-height)<1e-7
+        points=m.vertices[mask].copy()
+        band=ref[np.abs(ref[:,1]-height)<.035]
+        if not len(band):band=ref[np.argsort(np.abs(ref[:,1]-height))[:50]]
         cx=(band[:,0].min()+band[:,0].max())/2
         cz=(band[:,2].min()+band[:,2].max())/2
-        rx=max(.10,(band[:,0].max()-band[:,0].min())/2)+.014
-        rz=max(.06,(band[:,2].max()-band[:,2].min())/2)+.014
-        x=point[0]-cx;z=point[2]-cz
-        radius=((abs(x)/rx)**4+(abs(z)/rz)**4)**.25
-        if radius<1:
-            if radius<.001:z=rz;radius=1
-            point[0]=cx+x/radius;point[2]=cz+z/radius
+        old_center=(points[:,2].min()+points[:,2].max())/2
+        old_rx=max(abs(points[:,0]).max(),.001)
+        old_rz=max((points[:,2].max()-points[:,2].min())/2,.001)
+        rx=max(old_rx,(band[:,0].max()-band[:,0].min())/2+.014)
+        rz=max(old_rz,(band[:,2].max()-band[:,2].min())/2+.014)
+        points[:,0]=cx+points[:,0]/old_rx*rx
+        points[:,2]=cz+(points[:,2]-old_center)/old_rz*rz
+        m.vertices[mask]=points
     # Transfer continuous torso weights using four neighboring body vertices.
     distances,near=tree.query(m.vertices,k=4)
     blend=1/np.maximum(distances,.002)**2;blend/=blend.sum(axis=1,keepdims=True)
@@ -73,7 +76,18 @@ def main():
                 if int(joint) in accum:accum[int(joint)]+=float(weight*blend[i,k])
         pairs=sorted(accum.items(),key=lambda p:-p[1])[:4];total=sum(v for _,v in pairs)
         for k,(j,w) in enumerate(pairs):out_ids[i,k]=j;out_weights[i,k]=w/total
+    # Every ring uses one blend across its width, keeping broad plates from
+    # wrinkling differently at each vertex as the character breathes or swings.
+    dense=np.zeros((len(m.vertices),len(torso_ids)))
+    for k,j in enumerate(torso_ids):dense[:,k]=(out_weights*(out_ids==j)).sum(axis=1)
+    for height in np.unique(m.vertices[:,1]):
+        mask=np.abs(m.vertices[:,1]-height)<1e-7
+        avg=dense[mask].mean(axis=0);avg/=avg.sum()
+        out_ids[mask]=torso_ids;out_weights[mask]=avg
     m.fix_normals(multibody=True)
+    normals=m.face_normals.reshape(-1,2,3).mean(axis=1)
+    normals/=np.linalg.norm(normals,axis=1)[:,None]
+    m.vertex_normals=np.repeat(normals,6,axis=0)
     doc={'asset':{'version':'2.0','generator':'Town Forge local armor fit'},
          'nodes':copy.deepcopy(nodes),'scenes':copy.deepcopy(g['scenes']),'scene':g.get('scene',0),
          'bufferViews':[],'accessors':[],'materials':[{'pbrMetallicRoughness':{'baseColorFactor':[1,1,1,1],'metallicFactor':0,'roughnessFactor':1}}]}
@@ -91,7 +105,7 @@ def main():
            'COLOR_0':add(np.tile([240,240,240,255],(len(m.vertices),1)).astype('u1'),'VEC4',5121,True),
            'JOINTS_0':add(out_ids,'VEC4',5121),'WEIGHTS_0':add(out_weights,'VEC4',5126)}
     indices=add(m.faces.reshape(-1,1).astype('<u2'),'SCALAR',5123)
-    doc['meshes']=[{'name':'Meshy fitted cuirass','primitives':[{'attributes':attrs,'indices':indices,'material':0}]}]
+    doc['meshes']=[{'name':'Fitted plate cuirass','primitives':[{'attributes':attrs,'indices':indices,'material':0}]}]
     doc['skins']=[copy.deepcopy(skin)]
     doc['skins'][0]['inverseBindMatrices']=add(accessor(g,b,skin['inverseBindMatrices']).astype('<f4'),'MAT4',5126)
     for n in doc['nodes']:

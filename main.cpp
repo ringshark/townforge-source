@@ -14938,6 +14938,7 @@ static bool DrawEquippedHero(int track, float x, float z, float yaw, Color tint,
     SkinDye dye;
     dye.c[2] = equipment.robe ? ClothColor(*equipment.robe) : equipment.shirt ? ClothColor(*equipment.shirt) : Color{195,184,176,255};
     dye.c[3] = equipment.robe ? ColorBrightness(ClothColor(*equipment.robe), -0.10f) : equipment.pants ? ClothColor(*equipment.pants) : Color{92,78,69,255};
+    if (outfit.armChest == 2 && !equipment.robe) dye.c[2] = ColorBrightness(dye.c[2], -0.55f);
     Color glove;
     if (HumanArmorColor(equipment.gloves, &glove)) dye.c[4] = glove;
     if (DrawSkinChar(SkinCharFor("hero-neutral"), track, x, z, yaw, 66.0f, tint, pose, shadowPass, &outfit, 0.0f, &dye)) return true;
@@ -26260,7 +26261,10 @@ static void HouseDecorDraw3D(const GameState& s) {
 // Decorate mode UI (UO-style: pick from the catalog, tap the floor to set it
 // down, turn it, place it; tap a placed piece to move, turn or pick it up).
 static Vector2 HouseFloorHit(float y) {
-    Ray ray = Town3DMouseRay(g_intTCam, GetMousePosition());
+    Vector2 pointer = GetMousePosition();
+    if (g_landscapeActive && g_landscapeNativeMenuDrawing)
+        pointer = {pointer.x * 540.0f / 960.0f, pointer.y * 900.0f / 540.0f};
+    Ray ray = Town3DMouseRay(g_intTCam, pointer);
     if (fabsf(ray.direction.y) < 1e-4f) return g_hdRaw;
     float t = (y - ray.position.y) / ray.direction.y;
     return { ray.position.x + ray.direction.x * t + g_intW * 0.5f, ray.position.z + ray.direction.z * t + g_intH * 0.5f };
@@ -26275,14 +26279,19 @@ static void DrawHouseDecorateUI(GameState& s, int screenW, int screenH) {
         }
         return;
     }
+    LandscapeRoomOverlay overlay;
+    const bool wide = overlay.active;
+    if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_X)) { HouseDecorEnd(); return; }
     s.interior3DView = true;
     const int limit = HouseDecorLimit(std::max(7, g_houseInt.cells));
     const bool bar = g_hdGhost >= 0 || g_hdSel >= 0;
-    const Rectangle G = bar ? Rectangle{ 6, 772, 528, 122 } : Rectangle{ 6, 540, 528, 354 };
+    const Rectangle G = wide ? (bar ? Rectangle{210,408,528,122} : Rectangle{584,142,368,388})
+                             : (bar ? Rectangle{6,772,528,122} : Rectangle{6,540,528,354});
     const float hw = g_intW * 0.5f, hh = g_intH * 0.5f;
     // --- taps in the room ---
     Vector2 m = GetMousePosition();
-    bool inRoom = m.y > 196 && m.y < G.y - 14 && m.x >= 0 && m.x < screenW;
+    bool inRoom = wide ? (m.y > 90 && m.y < (bar ? G.y - 14 : 530) && m.x >= 0 && m.x < (bar ? 960 : G.x - 12))
+                       : (m.y > 196 && m.y < G.y - 14 && m.x >= 0 && m.x < screenW);
     if (g_hdGhost >= 0) {
         const HouseDecorDef& k = kHouseDecorDefs[g_hdGhost];
         if (inRoom && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_hdRaw = HouseFloorHit(k.place == kHdpWall ? k.yOff + 12.0f : 0.0f);
@@ -26294,6 +26303,7 @@ static void DrawHouseDecorateUI(GameState& s, int screenW, int screenH) {
             const HouseDecorDef& k = kHouseDecorDefs[d.kind];
             Vector2 sp;
             if (!Town3DProject(g_intTCam, { d.x - hw, HouseDecorYOff(s, k, { d.x, d.y }, (int)i) + (k.place == kHdpRug ? 0.0f : 14.0f), d.y - hh }, &sp)) continue;
+            if (wide) sp = {sp.x * 960.0f / 540.0f, sp.y * 540.0f / 900.0f};
             float dd = Dist(sp, m) + (k.place == kHdpRug ? 20.0f : 0.0f); // rugs lose ties to what stands on them
             if (dd < bd) { bd = dd; best = (int)i; }
         }
@@ -26386,8 +26396,9 @@ static void DrawHouseDecorateUI(GameState& s, int screenW, int screenH) {
     std::vector<int> items;
     for (int i = 0; i < kHouseDecorDefCount; i++) if (kHouseDecorDefs[i].cat == g_hdCat) items.push_back(i);
     Rectangle area = { G.x + 12, G.y + 72, G.width - 24, G.height - 104 };
-    const float rowH = 44.0f, colW = area.width / 2;
-    int rows = ((int)items.size() + 1) / 2;
+    const int columns = wide ? 1 : 2;
+    const float rowH = wide ? 48.0f : 44.0f, colW = area.width / columns;
+    int rows = ((int)items.size() + columns - 1) / columns;
     g_hdScroll -= ScrollDelta(area);
     g_hdScroll = std::clamp(g_hdScroll, 0.0f, std::max(0.0f, rows * rowH - area.height));
     UIBeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
@@ -26396,7 +26407,7 @@ static void DrawHouseDecorateUI(GameState& s, int screenW, int screenH) {
     bool tap = IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && Dist(pressAt, m) < 10.0f && CheckCollisionPointRec(m, area);
     for (size_t i = 0; i < items.size(); i++) {
         const HouseDecorDef& k = kHouseDecorDefs[items[i]];
-        Rectangle r = { area.x + (i % 2) * colW + 2, area.y + (i / 2) * rowH - g_hdScroll + 2, colW - 4, rowH - 4 };
+        Rectangle r = { area.x + (i % columns) * colW + 2, area.y + (i / columns) * rowH - g_hdScroll + 2, colW - 4, rowH - 4 };
         if (r.y > area.y + area.height || r.y + r.height < area.y) continue;
         std::string why;
         bool ok = HouseDecorAfford(s, k, &why);
@@ -26408,7 +26419,9 @@ static void DrawHouseDecorateUI(GameState& s, int screenW, int screenH) {
         if (k.storage > 0) price += "  (opens your bank)";
         if (k.module >= 0 && HomeWingLevel(s, k.module) <= 0) price = std::string("needs ") + kSettleDefs[kWingSettleKind[k.module]].name;
         DrawUIText(price.c_str(), (int)r.x + 34, (int)r.y + 22, 11, ok ? kUoGoldText : Color{ 200, 120, 100, 255 });
-        if (tap && CheckCollisionPointRec(m, r)) {
+        UIRegister(r);
+        if (tap && UIContains(m, r) && !g_uiClickTaken) {
+            g_uiClickTaken = true;
             if (!ok) g_hdMsg = why;
             else {
                 g_hdGhost = items[i]; g_hdMove = -1; g_hdRot = 0; g_hdMsg.clear();
@@ -26419,7 +26432,7 @@ static void DrawHouseDecorateUI(GameState& s, int screenW, int screenH) {
     }
     UIEndScissorMode();
     if (!g_hdMsg.empty()) msgLine(G.y + G.height - 28);
-    else DrawUIText("Tap a piece in the room to move, turn or pick it up.", (int)G.x + 18, (int)(G.y + G.height - 28), 12, Color{ 190, 175, 150, 255 });
+    else DrawUIText(wide ? "Tap furniture in the room to edit it." : "Tap a piece in the room to move, turn or pick it up.", (int)G.x + 18, (int)(G.y + G.height - 28), 12, Color{ 190, 175, 150, 255 });
 }
 
 // Workshop station gump: craft from your home wing right at the bench.
@@ -31450,6 +31463,9 @@ static void DrawHouseDesigner(GameState& s, int screenW, int screenH) {
         s.houseDesignerOpen = false;
         return;
     }
+    LandscapeRoomOverlay overlay;
+    const bool wide = overlay.active;
+    if (wide) { screenW = 960; screenH = 540; }
     const HousePlot& p = kHousePlots[s.housePlotIdx];
     int cells = p.cells;
     if (!HouseLayoutValid(s.houseLayout, cells)) s.houseLayout = HouseEmptyLayout(cells);
@@ -31461,7 +31477,7 @@ static void DrawHouseDesigner(GameState& s, int screenW, int screenH) {
     s.houseDesignerTool = std::clamp(s.houseDesignerTool, 0, 4);
 
     DrawRectangle(0, 0, screenW, screenH, Fade(BLACK, 0.7f));
-    Rectangle G = { 8, 116, (float)screenW - 16, (float)screenH - 124 };
+    Rectangle G = wide ? Rectangle{16,20,928,504} : Rectangle{8,116,(float)screenW-16,(float)screenH-124};
     UODrawGump(G, kUoParchment);
     UODrawTitle(G, "House Designer - " + std::string(p.name), 14);
     const Color ink = { 60, 40, 24, 255 };
@@ -31514,7 +31530,7 @@ static void DrawHouseDesigner(GameState& s, int screenW, int screenH) {
         for (char c : s.houseLayout) have += HouseCellValue(c);
         for (char c : tpl) cost += HouseCellValue(c);
         int net = std::max(0, cost - have);
-        Rectangle sb = { G.x + 16, G.y + 106, G.width - 32, 38 };
+        Rectangle sb = { G.x + 16, G.y + 106, wide ? 464.f : G.width - 32, 38 };
         if (UOButton(sb, TextFormat("Build a starter cottage (%dg) - reshape it after", net), s.gold >= net)) {
             s.gold -= net; s.houseLayout = tpl; s.houseDemolishArmed = false;
             PlaySfx(SfxId::Door);
@@ -31522,9 +31538,9 @@ static void DrawHouseDesigner(GameState& s, int screenW, int screenH) {
         }
     }
     // the plot grid - tap or drag to paint
-    float cellPx = std::min(36.0f, (G.width - 60) / cells);
+    float cellPx = wide ? std::min(30.0f, 270.0f / cells) : std::min(36.0f, (G.width - 60) / cells);
     float gw = cells * cellPx, gh = cells * cellPx;
-    float gx = G.x + (G.width - gw) / 2.0f, gy = G.y + 114 + (offerStarter ? 44.0f : 0.0f);
+    float gx = wide ? 270.f - gw / 2 : G.x + (G.width - gw) / 2.0f, gy = wide ? 184.f : G.y + 114 + (offerStarter ? 44.0f : 0.0f);
     DrawRectangleRec({ gx - 6, gy - 6, gw + 12, gh + 12 }, Color{ 90, 70, 44, 255 });
     DrawRectangleLinesEx({ gx - 6, gy - 6, gw + 12, gh + 12 }, 2.0f, kUoBronze);
     Vector2 m = GetMousePosition();
@@ -31565,14 +31581,15 @@ static void DrawHouseDesigner(GameState& s, int screenW, int screenH) {
     DrawUIText("front", (int)(gx + gw / 2 - 16), (int)(gy + gh + 6), 11, Fade(ink, 0.7f));
 
     // style pickers
-    float sy = gy + gh + 26;
+    float sy = wide ? 200.f : gy + gh + 26;
+    const float styleX = wide ? 546.f : G.x;
     auto picker = [&](const char* label, int* idx, const int* surfs, int count, bool inUse) {
-        DrawUIText(label, (int)G.x + 24, (int)sy + 9, 14, ink);
-        Rectangle prev = { G.x + 104, sy, 34, 32 }, next = { G.x + G.width - 146, sy, 34, 32 };
-        Rectangle sw = { G.x + 146, sy, 32, 32 };
+        DrawUIText(label, (int)styleX + 24, (int)sy + 9, 14, ink);
+        Rectangle prev = { styleX + 104, sy, 34, 32 }, next = { G.x + G.width - 146, sy, 34, 32 };
+        Rectangle sw = { styleX + 146, sy, 32, 32 };
         DrawTexturePro(SurfTex(surfs[*idx]), { 0, 0, 128, 128 }, sw, { 0, 0 }, 0, WHITE);
         DrawRectangleLinesEx(sw, 2.0f, kUoBronze);
-        DrawUIText(SurfName(surfs[*idx]), (int)sw.x + 42, (int)sy + 9, 14, ink);
+        DrawUIText(SurfName(surfs[*idx]), (int)(wide ? styleX+24 : sw.x+42), (int)sy + (wide ? 35 : 9), wide ? 12 : 14, ink);
         int cost = inUse ? kHouseRestyleCost : 0;
         int dir = 0;
         if (UOButton(prev, "<")) dir = -1;
@@ -31582,14 +31599,14 @@ static void DrawHouseDesigner(GameState& s, int screenW, int screenH) {
             if (s.gold < cost) s.logLine = "Restyling costs " + std::to_string(cost) + "g.";
             else { *idx = (*idx + dir + count) % count; s.gold -= cost; }
         }
-        sy += 40;
+        sy += wide ? 64 : 40;
     };
     picker("Walls", &s.houseWallStyle, kHouseWallSurfs, kHouseWallStyleCount, nW + nN + nD > 0);
     picker("Floor", &s.houseFloorStyle, kHouseFloorSurfs, kHouseFloorStyleCount, nF > 0);
     picker("Roof", &s.houseRoofStyle, kHouseRoofSurfs, kHouseRoofStyleCount, nF + nW + nN + nD > 0);
 
     // Done / Demolish
-    float by = std::min(sy + 6, G.y + G.height - 52);
+    float by = wide ? 474.f : std::min(sy + 6, G.y + G.height - 52);
     if (UOButton({ G.x + 24, by, 200, 40 }, "Done [ESC]")) {
         s.houseDesignerOpen = false;
         s.houseDemolishArmed = false;
