@@ -13054,7 +13054,7 @@ static Model HumanBuildArmor(int k) {
             T3CCylinder(b, 0.0f, 0.06f, 0.0f, 0.36f, 0.062f, 0.052f, 10, w);
             HumanArmorShell(b, -0.042f, 0.044f, 0.056f, 0.060f, 0.050f, 0.054f, 0.03f, rim); // knee cop
             break;
-        case kArCuisse: T3CCylinder(b, 0.0f, 0.06f, 0.0f, 0.34f, 0.09f, 0.072f, 10, w); break;
+        case kArCuisse: T3CCylinder(b, 0.0f, 0.06f, 0.0f, 0.34f, 0.075f, 0.060f, 16, w); break;
         case kArGorget: T3CCylinder(b, 0.0f, 0.15f, 0.0f, 0.25f, 0.118f, 0.086f, 12, w); break;
     }
     return T3CFinish(b);
@@ -13070,7 +13070,7 @@ static Model HumanBuildCloak() {
         float u0 = -1.0f + 2.0f * i / cols, u1 = -1.0f + 2.0f * (i + 1) / cols;
         auto P = [&](float u, float y, float* o) {
             float t = (top - y) / (top - bot); // 0 at the shoulders, 1 at the hem
-            float hw = 0.15f + 0.09f * t;                  // shoulder-wide at the top, a little flare at the hem
+            float hw = 0.125f + 0.055f * t;                  // shoulder-wide at the top, a little flare at the hem
             o[0] = u * hw;
             o[1] = y;
             // wrapped around the back (edges curl forward), falling slightly away from the legs
@@ -14443,6 +14443,7 @@ static const char* const kSkClipNames[kSkClipCount] = {
 struct SkinChar {
     bool tried = false, ok = false;
     Model model{};
+    Texture2D armorUnderlayer{};
     Model cuirass{}; // shares the hero's exact skeleton and current torso pose
     ModelAnimation* anims = nullptr;
     int animCount = 0;
@@ -14567,6 +14568,10 @@ static SkinChar* SkinCharGet(int id) {
     C.minY = bb.min.y;
     { int hips = -1; for (int b = 0; b < C.model.skeleton.boneCount; b++) if (!strcmp(C.model.skeleton.bones[b].name, "Hips")) hips = b;
       C.hipsY = hips >= 0 ? C.model.skeleton.bindPose[hips].translation.y - bb.min.y : h * 0.5f; }
+    if (g_skinCharFiles[(size_t)id] == "hero-neutral") {
+        C.armorUnderlayer = LoadTexture("assets/armor/chain-underlayer.png");
+        if (C.armorUnderlayer.id) { GenTextureMipmaps(&C.armorUnderlayer); SetTextureFilter(C.armorUnderlayer, TEXTURE_FILTER_TRILINEAR); }
+    }
     Town3DApplyLitShader(C.model);
     C.ok = true;
     return &C;
@@ -14608,11 +14613,22 @@ static SkinArmorFit g_skinFitChest = { 1.22f, 1.18f, 0.02f, 0.03f }, g_skinFitPa
                     g_skinFitBracer = { 1.25f, 1.0f, 0.0f, 0.0f }, g_skinFitGreave = { 1.25f, 1.0f, 0.0f, 0.0f },
                     g_skinFitCuisse = { 1.2f, 1.0f, 0.0f, 0.0f }, g_skinFitGorget = { 1.2f, 1.1f, 0.0f, 0.0f },
                     g_skinFitHelm = { 1.1f, 1.0f, -0.01f, 0.015f };
+// Plate uses the same scene light and camera as the body, with a sharper metal highlight.
+static void T3DSetLightUniforms(Shader sh);
+static Shader SkinPlateShader(Shader fallback) {
+    static Shader shader{}; static bool tried=false;
+    if(!tried){tried=true;shader=LoadShader("assets/shaders/lit.vs","assets/shaders/armor.fs");}
+    if(!shader.id)return fallback;
+    T3DSetLightUniforms(shader);
+    Matrix eye=MatrixInvert(rlGetMatrixModelview());Vector3 view={eye.m12,eye.m13,eye.m14};
+    SetShaderValue(shader,GetShaderLocation(shader,"viewPos"),&view,SHADER_UNIFORM_VEC3);
+    return shader;
+}
 static Matrix SkinCloakLocal(float u, float move, Matrix restRotation) {
     // Pivot at the shoulders. Positive X tilt carries the hanging hem toward
     // -Z (the back); negative tilt pushed it through the chest while running.
     const float top = 0.22f * u;
-    Matrix local = MatrixMultiply(MatrixScale(u * 1.18f, u, u), MatrixTranslate(0, -top, 0));
+    Matrix local = MatrixMultiply(MatrixScale(u, u, u), MatrixTranslate(0, -top, 0));
     local = MatrixMultiply(local, MatrixRotateX(0.06f + 0.30f * std::clamp(move, 0.0f, 1.0f)));
     local = MatrixMultiply(local, MatrixTranslate(0, top - 0.12f * u, -0.04f * u));
     return MatrixMultiply(local, restRotation);
@@ -14764,6 +14780,9 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     float rotDeg = 90.0f - yawRad * RAD2DEG; // model faces +Z
     float baseY = -C.minY * sc;
     if (riding) baseY += p.saddle - C.hipsY * sc; // hips in the saddle
+    Texture2D originalDiffuse = C.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture;
+    bool armored = gear && gear->armChest == 2 && !gear->robe && C.armorUnderlayer.id;
+    if (armored) C.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = C.armorUnderlayer;
     if (lunge > 0.0f) { // no attack clip: throw the whole body into it
         rlPushMatrix();
         rlTranslatef(x + cosf(yawRad) * lunge * heightW * 0.16f, baseY, z + sinf(yawRad) * lunge * heightW * 0.16f);
@@ -14773,6 +14792,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         rlPopMatrix();
     } else
     DrawModelEx(C.model, { x, baseY, z }, { 0.0f, 1.0f, 0.0f }, rotDeg, { sc, sc, sc }, tint);
+    C.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = originalDiffuse;
     // ---- in hand: the weapon (or the gathering tool) and the shield ----
     if (gear && g_human.ok && p.deathT < 0.0f) {
         HumanRig& H = g_human;
@@ -14836,7 +14856,8 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         Material flat = H.model.materials[0];
         flat.shader = sh;
         flat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
-        auto piece = [&](const Model& m, int bone, const SkinArmorFit& fit, Color c) {
+        Shader metal = SkinPlateShader(sh);
+        auto piece = [&](const Model& m, int bone, const SkinArmorFit& fit, Color c, bool plate = false) {
             if (bone < 0 || m.meshCount <= 0) return;
             SkinArmorFit fitted = fit;
             if (g_skinCharFiles[(size_t)id] == "hero-neutral") {
@@ -14846,6 +14867,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
             Matrix rot = bone < (int)C.armorRot.size() ? C.armorRot[(size_t)bone] : MatrixIdentity();
             Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(u * fitted.s * fitted.sx, u * fitted.s, u * fitted.s * fitted.sx),
                                                          MatrixTranslate(0.0f, fitted.oy * u, fitted.oz * u)), rot);
+            flat.shader = plate ? metal : sh;
             HumanDrawAttached(m, &flat, local, boneM(bone), world, HumanMul(c, tint));
         };
         if (o.armChest && !o.robe) {
@@ -14858,22 +14880,22 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
                 pose.keyframeCount = 1;
                 pose.keyframePoses = &C.model.currentPose;
                 UpdateModelAnimation(C.cuirass, pose, 0.0f);
-                for (int i = 0; i < C.cuirass.materialCount; ++i) C.cuirass.materials[i].shader = sh;
+                for (int i = 0; i < C.cuirass.materialCount; ++i) C.cuirass.materials[i].shader = metal;
                 DrawModelEx(C.cuirass, {x, baseY, z}, {0, 1, 0}, rotDeg, {sc, sc, sc}, HumanMul(o.armChestCol, tint));
-            } else piece(H.armor[o.armChest == 2 ? kArChestH : kArChestL], C.spine, g_skinFitChest, o.armChestCol);
+            } else piece(H.armor[o.armChest == 2 ? kArChestH : kArChestL], C.spine, g_skinFitChest, o.armChestCol, o.armChest == 2);
         }
         if (o.armArms && !o.robe) {
             const Model& pm = H.armor[o.armArms == 2 ? kArPauldronH : kArPauldronL];
             const Model& bm = H.armor[o.armArms == 2 ? kArBracerH : kArBracerL];
-            piece(pm, C.armR, g_skinFitPauldron, o.armArmsCol);
-            piece(o.armArms == 2 ? H.armor[kArPauldronHL] : pm, C.armL, g_skinFitPauldron, o.armArmsCol);
-            piece(bm, C.foreArmR, g_skinFitBracer, o.armArmsCol); piece(bm, C.foreArmL, g_skinFitBracer, o.armArmsCol);
+            piece(pm, C.armR, g_skinFitPauldron, o.armArmsCol, o.armArms == 2);
+            piece(o.armArms == 2 ? H.armor[kArPauldronHL] : pm, C.armL, g_skinFitPauldron, o.armArmsCol, o.armArms == 2);
+            piece(bm, C.foreArmR, g_skinFitBracer, o.armArmsCol, o.armArms == 2); piece(bm, C.foreArmL, g_skinFitBracer, o.armArmsCol, o.armArms == 2);
         }
         if (o.armLegs && !o.robe) {
             const Model& gm = H.armor[o.armLegs == 2 ? kArGreaveH : kArGreaveL];
-            piece(gm, C.legR, g_skinFitGreave, o.armLegsCol);
-            piece(o.armLegs == 2 ? H.armor[kArGreaveHL] : gm, C.legL, g_skinFitGreave, o.armLegsCol);
-            if (o.armLegs == 2) { piece(H.armor[kArCuisse], C.upLegR, g_skinFitCuisse, o.armLegsCol); piece(H.armor[kArCuisse], C.upLegL, g_skinFitCuisse, o.armLegsCol); }
+            piece(gm, C.legR, g_skinFitGreave, o.armLegsCol, o.armLegs == 2);
+            piece(o.armLegs == 2 ? H.armor[kArGreaveHL] : gm, C.legL, g_skinFitGreave, o.armLegsCol, o.armLegs == 2);
+            if (o.armLegs == 2) { piece(H.armor[kArCuisse], C.upLegR, g_skinFitCuisse, o.armLegsCol, true); piece(H.armor[kArCuisse], C.upLegL, g_skinFitCuisse, o.armLegsCol, true); }
         }
         if (o.armGorget) piece(H.armor[kArGorget], C.spine, g_skinFitGorget, o.armGorgetCol);
         if (o.helm != kHhNone) piece(H.helm[o.helm], C.head, g_skinFitHelm, o.helmCol);
@@ -14895,6 +14917,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
             if (o.robe) piece(H.robeSkirt, C.spine, {1.05f, 1.12f, 0.0f, -0.08f}, o.robeCol);
             if (o.cloak && C.spine >= 0) {
                 Matrix local = SkinCloakLocal(u, p.move, C.armorRot[(size_t)C.spine]);
+                flat.shader = sh;
                 HumanDrawAttached(H.cloak, &flat, local, boneM(C.spine), world, HumanMul(o.cloakCol, tint));
             }
         }
@@ -14938,7 +14961,10 @@ static bool DrawEquippedHero(int track, float x, float z, float yaw, Color tint,
     SkinDye dye;
     dye.c[2] = equipment.robe ? ClothColor(*equipment.robe) : equipment.shirt ? ClothColor(*equipment.shirt) : Color{195,184,176,255};
     dye.c[3] = equipment.robe ? ColorBrightness(ClothColor(*equipment.robe), -0.10f) : equipment.pants ? ClothColor(*equipment.pants) : Color{92,78,69,255};
-    if (outfit.armChest == 2 && !equipment.robe) dye.c[2] = ColorBrightness(dye.c[2], -0.55f);
+    if (outfit.armChest == 2 && !equipment.robe) {
+        dye.c[2] = {180,184,190,255};
+        if (outfit.armLegs) dye.c[3] = {170,174,182,255};
+    }
     Color glove;
     if (HumanArmorColor(equipment.gloves, &glove)) dye.c[4] = glove;
     if (DrawSkinChar(SkinCharFor("hero-neutral"), track, x, z, yaw, 66.0f, tint, pose, shadowPass, &outfit, 0.0f, &dye)) return true;

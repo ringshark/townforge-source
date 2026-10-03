@@ -38,3 +38,20 @@ Validation: the web build, equipment operations, hero skin and cape checks
 passed. Offline mesh rendering inspected idle, walk and sword-swing poses.
 Live browser visual checking remains limited by the available browser's WebGL
 startup failure, so phone playtesting is still needed for final visual approval.
+
+## UO outfit study (review branch)
+
+The `codex/uo-outfit-study` draft adds a locally baked chain underlayer while
+keeping uncovered skin, the original model and its animations. Chest/shoulder/
+shin plates use slimmer 24-sided profiles, a leather waist belt, and an armor
+shader with stronger metal highlights. The cape has a narrower hem; equipped
+colors and slots continue to use the shared world/preview renderer.
+
+Rebuild the underlayer with `python tools/characters3d/build_armor_underlayer.py`
+(requires Pillow in addition to the existing model tools).
+
+The review board was rendered through `DrawEquippedHero` using raylib 6.0, an
+offscreen EGL ES2 context, and the game's actual lit/armor shaders. It shows
+front, side, back, and a distant perspective view. This is
+an equipment rendering test scene, not a capture of the live browser game.
+The visual draft still needs user review before replacing the live version.
