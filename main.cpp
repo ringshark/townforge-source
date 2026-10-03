@@ -12996,27 +12996,62 @@ static Model HumanBuildRobeSkirt() {
 // Armor pieces (2026-09-28, #64), in their bone's space (metres, +Y along the bone):
 // 0/1 chest light/heavy, 2/3 pauldron, 4/5 bracer, 6/7 greave, 8 heavy cuisse, 9 gorget.
 enum { kArChestL, kArChestH, kArPauldronL, kArPauldronH, kArBracerL, kArBracerH, kArGreaveL, kArGreaveH, kArCuisse, kArGorget };
+// Tapered plate shell: broad flat faces, bevelled corners and a shallow ridge.
+static void HumanArmorShell(T3CMeshBuilder& b, float y0, float y1,
+                            float w0, float w1, float d0, float d1, float z,
+                            Color color, bool caps = true) {
+    static const float profile[10][2] = {
+        {0, 1}, {0.72f, 0.86f}, {1, 0.42f}, {1, -0.48f}, {0.72f, -0.86f},
+        {0, -0.92f}, {-0.72f, -0.86f}, {-1, -0.48f}, {-1, 0.42f}, {-0.72f, 0.86f}
+    };
+    for (int i = 0; i < 10; ++i) {
+        int j = (i + 1) % 10;
+        float a[3] = {profile[i][0] * w0, y0, z + profile[i][1] * d0};
+        float bb[3] = {profile[j][0] * w0, y0, z + profile[j][1] * d0};
+        float c[3] = {profile[j][0] * w1, y1, z + profile[j][1] * d1};
+        float d[3] = {profile[i][0] * w1, y1, z + profile[i][1] * d1};
+        T3CQuad(b, a, bb, c, d, color);
+        if (caps) {
+            float top[3] = {0, y1, z}, bottom[3] = {0, y0, z};
+            T3CPushTri(b, top, d, c, color);
+            T3CPushTri(b, bottom, bb, a, color);
+        }
+    }
+}
 static Model HumanBuildArmor(int k) {
     T3CMeshBuilder b;
     Color w = WHITE, rim = { 214, 214, 214, 255 }; // tinted per draw; rims a shade darker
     switch (k) {
-        case kArChestL: T3CSphere(b, 0.0f, 0.0f, 0.012f, 0.166f, 0.205f, 0.13f, 6, 12, w); break;
-        case kArChestH:
-            T3CSphere(b, 0.0f, 0.01f, 0.016f, 0.178f, 0.215f, 0.14f, 6, 12, w);
-            T3CCylinder(b, 0.0f, -0.31f, 0.0f, -0.13f, 0.168f, 0.16f, 12, rim, false, false); // faulds
-            T3CBox(b, 0.0f, 0.04f, 0.15f, 0.03f, 0.26f, 0.02f, rim);                        // the ridge down the front
+        case kArChestL:
+            HumanArmorShell(b, -0.19f, 0.10f, 0.137f, 0.166f, 0.105f, 0.125f, 0.012f, w);
+            HumanArmorShell(b, 0.10f, 0.19f, 0.166f, 0.125f, 0.125f, 0.09f, 0.012f, w);
             break;
-        case kArPauldronL: T3CSphere(b, 0.0f, 0.035f, 0.0f, 0.07f, 0.068f, 0.07f, 5, 10, w); break;
+        case kArChestH:
+            HumanArmorShell(b, -0.19f, 0.11f, 0.145f, 0.178f, 0.112f, 0.14f, 0.016f, w);
+            HumanArmorShell(b, 0.11f, 0.205f, 0.178f, 0.132f, 0.14f, 0.095f, 0.016f, w);
+            // Overlapping waist lames replace the round barrel skirt.
+            for (int i = 0; i < 3; ++i) {
+                float t = (float)i;
+                HumanArmorShell(b, -0.245f - t * 0.035f, -0.185f - t * 0.035f,
+                                0.15f + t * 0.006f, 0.145f + t * 0.006f,
+                                0.115f + t * 0.003f, 0.112f + t * 0.003f, 0.016f, rim, false);
+            }
+            break;
+        case kArPauldronL:
+            HumanArmorShell(b, -0.028f, 0.067f, 0.064f, 0.070f, 0.063f, 0.069f, 0.0f, w);
+            HumanArmorShell(b, 0.067f, 0.092f, 0.070f, 0.047f, 0.069f, 0.047f, 0.0f, rim);
+            break;
         case kArPauldronH:
-            T3CSphere(b, 0.0f, 0.025f, 0.0f, 0.088f, 0.078f, 0.088f, 5, 10, w);
-            T3CSphere(b, 0.0f, 0.095f, 0.0f, 0.078f, 0.05f, 0.078f, 4, 10, rim);
+            HumanArmorShell(b, -0.040f, 0.067f, 0.075f, 0.084f, 0.074f, 0.082f, 0.0f, w);
+            HumanArmorShell(b, 0.067f, 0.105f, 0.084f, 0.052f, 0.082f, 0.052f, 0.0f, w);
+            HumanArmorShell(b, -0.064f, -0.022f, 0.070f, 0.080f, 0.069f, 0.079f, 0.0f, rim, false);
             break;
         case kArBracerL: T3CCylinder(b, 0.0f, 0.07f, 0.0f, 0.22f, 0.043f, 0.049f, 10, w); break;
         case kArBracerH: T3CCylinder(b, 0.0f, 0.04f, 0.0f, 0.23f, 0.05f, 0.057f, 10, w); break;
         case kArGreaveL: T3CCylinder(b, 0.0f, 0.08f, 0.0f, 0.34f, 0.056f, 0.048f, 10, w); break;
         case kArGreaveH:
             T3CCylinder(b, 0.0f, 0.06f, 0.0f, 0.36f, 0.062f, 0.052f, 10, w);
-            T3CSphere(b, 0.0f, 0.0f, 0.03f, 0.062f, 0.058f, 0.058f, 5, 10, rim); // knee cop
+            HumanArmorShell(b, -0.042f, 0.044f, 0.056f, 0.060f, 0.050f, 0.054f, 0.03f, rim); // knee cop
             break;
         case kArCuisse: T3CCylinder(b, 0.0f, 0.06f, 0.0f, 0.34f, 0.09f, 0.072f, 10, w); break;
         case kArGorget: T3CCylinder(b, 0.0f, 0.15f, 0.0f, 0.25f, 0.118f, 0.086f, 12, w); break;
