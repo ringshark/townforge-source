@@ -84,3 +84,20 @@ Its baked helmet and cloth cannot be individually toggled. Dense embedded
 textures now use mipmaps and trilinear filtering. Run
 `python tests/complete-skin.py` to validate its rig, core clips, budget and
 held-equipment boundary.
+
+### All eight skins: material and shading refinement
+
+All complete `hero_` outfits now use a dedicated `skin.fs` finish: restrained
+contrast compression quiets baked scratches, low-saturation steel receives
+stronger directional highlights, and the dark leather/cloth profiles gain a
+small brightness lift. Warm facial detail remains protected. Filtering remains
+trilinear; neighboring atlas texels are not sampled, preserving color boundaries
+between UV islands. Nearly parallel normals at identical positions are welded
+across UV seams, while sharper plate creases remain intact.
+
+The source meshes, texture atlases, rigs and animation clips are unchanged.
+This is a material/shading pass, not a remodel. Each loaded model owns its finish
+shader/profile, and camera, fog and time-of-day uniforms are refreshed during
+rendering. Eight profiles are reviewed at the same camera and noon lighting;
+`tests/complete-skin.py` checks every outfit's core clips, weights and budget.
+The work remains on the review branch pending visual acceptance.

@@ -14444,6 +14444,7 @@ struct SkinChar {
     bool tried = false, ok = false;
     Model model{};
     Texture2D armorUnderlayer{};
+    Shader finishShader{}; // complete outfit material finish, per model
     Model cuirass{}; // shares the hero's exact skeleton and current torso pose
     ModelAnimation* anims = nullptr;
     int animCount = 0;
@@ -14472,6 +14473,31 @@ static int SkinCharFor(const char* stem) {
     for (size_t i = 0; i < g_skinCharFiles.size(); i++) if (g_skinCharFiles[i] == stem) return (int)i;
     g_skinCharFiles.push_back(stem);
     return (int)g_skinCharFiles.size() - 1;
+}
+static void T3DSetLightUniforms(Shader sh);
+// Weld lighting normals across UV seams without changing geometry or skin weights.
+// Only nearly parallel normals share a finish; plate creases stay deliberate.
+static void SkinSmoothSeams(Model& model) {
+    for (int m = 0; m < model.meshCount; ++m) {
+        Mesh& mesh = model.meshes[m];
+        if (!mesh.vertices || !mesh.normals) continue;
+        std::map<std::array<int,3>, std::vector<int>> groups;
+        for (int v = 0; v < mesh.vertexCount; ++v) {
+            const float* p = mesh.vertices + v * 3;
+            groups[{(int)lroundf(p[0]*100000), (int)lroundf(p[1]*100000), (int)lroundf(p[2]*100000)}].push_back(v);
+        }
+        std::vector<float> original(mesh.normals, mesh.normals + mesh.vertexCount * 3);
+        for (const auto& entry : groups) for (int v : entry.second) {
+            Vector3 n{original[v*3],original[v*3+1],original[v*3+2]}, sum = n;
+            for (int other : entry.second) if (other != v) {
+                Vector3 candidate{original[other*3],original[other*3+1],original[other*3+2]};
+                if (Vector3DotProduct(n,candidate) > 0.87f) sum = Vector3Add(sum,candidate);
+            }
+            sum = Vector3Normalize(sum);
+            mesh.normals[v*3]=sum.x;mesh.normals[v*3+1]=sum.y;mesh.normals[v*3+2]=sum.z;
+        }
+        UpdateMeshBuffer(mesh, 2, mesh.normals, mesh.vertexCount * 3 * sizeof(float), 0);
+    }
 }
 static SkinChar* SkinCharGet(int id) {
     while ((int)g_skinChars.size() < (int)g_skinCharFiles.size()) g_skinChars.emplace_back();
@@ -14582,6 +14608,23 @@ static SkinChar* SkinCharGet(int id) {
         }
     }
     Town3DApplyLitShader(C.model);
+    if (g_skinCharFiles[(size_t)id].rfind("hero_", 0) == 0) {
+        SkinSmoothSeams(C.model);
+        C.finishShader = LoadShader("assets/shaders/lit.vs", "assets/shaders/skin.fs");
+        if (C.finishShader.id) {
+            C.finishShader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(C.finishShader, "viewPos");
+            const std::string& name = g_skinCharFiles[(size_t)id];
+            Vector3 finish{0.05f, 0.86f, 1.04f};
+            if (name == "hero_knight") finish = {0.85f,0.92f,1.05f};
+            else if (name == "hero_paladin") finish = {1.0f,0.90f,1.03f};
+            else if (name == "hero_footman") finish = {0.65f,0.96f,1.08f};
+            else if (name == "hero_ranger") finish = {0.02f,0.88f,1.12f};
+            else if (name == "hero_thief") finish = {0.04f,0.85f,1.15f};
+            else if (name == "hero_necromancer") finish = {0.28f,0.88f,1.12f};
+            SetShaderValue(C.finishShader, GetShaderLocation(C.finishShader,"skinFinish"), &finish, SHADER_UNIFORM_VEC3);
+            for (int m = 0; m < C.model.materialCount; ++m) C.model.materials[m].shader = C.finishShader;
+        }
+    }
     C.ok = true;
     return &C;
 }
@@ -14648,6 +14691,12 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     SkinChar* Cp = SkinCharGet(id);
     if (!Cp) return false;
     SkinChar& C = *Cp;
+    if (C.finishShader.id) {
+        T3DSetLightUniforms(C.finishShader);
+        Matrix view = MatrixInvert(rlGetMatrixModelview());
+        Vector3 camera{view.m12,view.m13,view.m14};
+        SetShaderValue(C.finishShader, C.finishShader.locs[SHADER_LOC_VECTOR_VIEW], &camera, SHADER_UNIFORM_VEC3);
+    }
     bool skipSkin = false;
     T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
     if (shadowPass) return true; // skinned meshes skip the shadow map; blob shadow below
