@@ -68,3 +68,19 @@ replaces the noisy chain atlas. The original hero GLB remains unchanged.
 Generate with `python tools/characters3d/build_armored_tunic.py` and
 `python tools/characters3d/build_armor_underlayer.py`. No additional Meshy jobs
 or credits are involved. This is a review draft, not a live deployment.
+
+### Complete knight skin prototype
+
+The next review step switches the hero to the existing `hero_knight.glb`, a
+complete Meshy outfit with sixteen retargeted clips. No new generation credits
+were spent. `DrawEquippedHero` is shared by the world and try-on preview; it
+first draws the complete skin, with only held weapons and shields supplied by
+equipment. Armor overlays, procedural boots and the separate cape are disabled
+for this path. Equipment data, stats and equip rules remain unchanged. If the
+skin cannot load, the previous fitted character remains the fallback.
+
+This is one fixed cosmetic skin for review, not a wardrobe UI or live release.
+Its baked helmet and cloth cannot be individually toggled. Dense embedded
+textures now use mipmaps and trilinear filtering. Run
+`python tests/complete-skin.py` to validate its rig, core clips, budget and
+held-equipment boundary.

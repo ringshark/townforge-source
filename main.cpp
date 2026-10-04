@@ -14572,6 +14572,15 @@ static SkinChar* SkinCharGet(int id) {
         C.armorUnderlayer = LoadTexture("assets/armor/tunic-underlayer.png");
         if (C.armorUnderlayer.id) { GenTextureMipmaps(&C.armorUnderlayer); SetTextureFilter(C.armorUnderlayer, TEXTURE_FILTER_TRILINEAR); }
     }
+    // Complete skins contain dense baked detail. Filter minified textures so
+    // plates and cloth remain legible at the gameplay camera distance.
+    for (int m = 0; m < C.model.materialCount; ++m) {
+        Texture2D& tex = C.model.materials[m].maps[MATERIAL_MAP_DIFFUSE].texture;
+        if (tex.id && tex.width > 1 && tex.height > 1) {
+            if (tex.mipmaps < 2) GenTextureMipmaps(&tex);
+            SetTextureFilter(tex, TEXTURE_FILTER_TRILINEAR);
+        }
+    }
     Town3DApplyLitShader(C.model);
     C.ok = true;
     return &C;
@@ -14946,6 +14955,16 @@ static const char* HeroLookFor(const GameState& s) {
     return nullptr;
 }
 static void PlayerCombatPhases3D(const GameState& s, float* atk, float* cast);
+// Complete knight skin prototype on the review branch. Its baked outfit is
+// independent of armor stats; the held equipment still drives combat/animations.
+static constexpr const char* kHeroReviewSkin = "hero_knight";
+static HumanOutfit SkinHeldGearFor(HumanOutfit o) {
+    o.armChest = o.armArms = o.armLegs = o.armGorget = 0;
+    o.helm = kHhNone; o.hat = kClStyleNone;
+    o.cloak = false; o.robe = false; o.footwear = false;
+    o.outfitMask = 0; o.hideRegions = 0;
+    return o;
+}
 // One avatar and equipment path for the world and the Me/try-on preview.
 static bool DrawEquippedHero(int track, float x, float z, float yaw, Color tint,
                              const Equipment& equipment, const HumanPose& hp, bool shadowPass,
@@ -14958,6 +14977,9 @@ static bool DrawEquippedHero(int track, float x, float z, float yaw, Color tint,
     pose.hurtT = hp.hurtT; pose.deathT = hp.deathT; pose.engaged = hp.engaged;
     pose.gather = hp.gather; pose.style = outfit.style;
     pose.sneaking = sneaking; pose.blocking = blocking;
+    HumanOutfit held = SkinHeldGearFor(outfit);
+    if (DrawSkinChar(SkinCharFor(kHeroReviewSkin), track, x, z, yaw, 66.0f,
+                     tint, pose, shadowPass, &held)) return true;
     SkinDye dye;
     dye.c[2] = equipment.robe ? ClothColor(*equipment.robe) : equipment.shirt ? ClothColor(*equipment.shirt) : Color{195,184,176,255};
     dye.c[3] = equipment.robe ? ColorBrightness(ClothColor(*equipment.robe), -0.10f) : equipment.pants ? ClothColor(*equipment.pants) : Color{92,78,69,255};
