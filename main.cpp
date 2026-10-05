@@ -36791,25 +36791,29 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
     if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_warOpen = false; s.screen=g_playScreen; return; }
     WarCheckWeek(s);
     int today = WarDayNow();
-    { // the tabs (2026-09-28: one Guild screen for everything guild)
-        static const char* kTabs[8] = { "Overview", "City", "Research", "Help", "Shop", "Wars", "Members", "Activities" };
+    { // the tabs - City/Research/Help/Shop/Activities (the online-alliance-only
+      // tabs) are hidden for now: dead weight without a real online guild to
+      // join, and Warband's own content (roster, colors, wars on Orcs/Murder
+      // Inc) already lives on Overview/Wars/Members below. Re-add them to
+      // kTabs/kTabMap once online guilds are worth surfacing again.
+        static const char* kTabs[3] = { "Overview", "Wars", "Members" };
+        static const int kTabMap[3] = { 0, 5, 6 };
+        if (g_guildTab != 0 && g_guildTab != 5 && g_guildTab != 6) g_guildTab = 0; // a stale/hidden tab lands on Overview
         float tw = (G.width - 36) / (g_landscapePage ? 8.f:4.f);
         bool hub = g_gnet.hub;
-        bool helpDot = GuildHelpCount()>0;
-        bool hallDot = !g_gnet.gifts.empty() || (g_gnet.buildLeft >= 0 && !g_gnet.lent);
-        bool activityDot=false; for(const auto& r:g_gnet.cityRuns) if(r.finished && r.success && r.joined && !r.claimed) activityDot=true;
         bool warDot=false; for(const auto& b:g_gnet.cityBattles) if((long long)std::time(nullptr)>=b.ends && b.actions>0 && !b.claimed) warDot=true;
-        for (int t = 0; t < 8; t++) {
+        for (int t = 0; t < 3; t++) {
+            int tab = kTabMap[t];
             Rectangle tb = g_landscapePage ? Rectangle{26,130.f+t*48.f,162,44}:Rectangle{G.x+18+(t%4)*tw,G.y+34+(t/4)*52,tw-6,44};
-            bool on = g_guildTab == t || (t == 1 && (g_guildTab == 9 || g_guildTab >= 10));
+            bool on = g_guildTab == tab;
             if(g_landscapePage) {
-                if(MenuGroupTab(tb,kTabs[t],on,true)) {g_guildTab=t;g_warScroll=0;PlaySfx(SfxId::Click);}
+                if(MenuGroupTab(tb,kTabs[t],on,true)) {g_guildTab=tab;g_warScroll=0;PlaySfx(SfxId::Click);}
             } else {
                 DrawRectangleRounded(tb,.3f,6,on ? Color{110,70,36,255}:Color{70,50,34,200});
                 int lw=MeasureUIText(kTabs[t],14);DrawUIText(kTabs[t],(int)(tb.x+(tb.width-lw)/2),(int)tb.y+14,14,kUoGoldText);
             }
-            if (hub && ((t == 3 && helpDot) || (t == 1 && hallDot) || (t == 7 && activityDot) || (t == 5 && warDot))) DrawCircle((int)(tb.x + tb.width - 8), (int)tb.y + 8, 5, Color{ 210, 40, 30, 255 });
-            if (!g_landscapePage && g_guildTab != t && UOTapped(tb)) { g_guildTab = t; g_warScroll = 0.0f; PlaySfx(SfxId::Click); }
+            if (hub && tab == 5 && warDot) DrawCircle((int)(tb.x + tb.width - 8), (int)tb.y + 8, 5, Color{ 210, 40, 30, 255 });
+            if (!g_landscapePage && g_guildTab != tab && UOTapped(tb)) { g_guildTab = tab; g_warScroll = 0.0f; PlaySfx(SfxId::Click); }
         }
     }
     Rectangle area = g_landscapePage ? Rectangle{208,130,726,386}:Rectangle{G.x+8,G.y+142,G.width-16,G.height-152};
@@ -37484,7 +37488,7 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     int y = 116;
     DrawUIText("Your Home", 20, y, 18, kColorHeading); (void)tier;
     if (Button({ (float)screenW - 150, (float)y - 4, 130, g_landscapePage ? 44.f:28.f }, s.guildName.empty() ? "Warband" : ("Warband [" + s.guildTag + "]").c_str(), true))
-        { OpenWarWeek(s); g_guildTab = 7; } // (2026-09-28) the Guild screen, on its Guildmates tab
+        { OpenWarWeek(s); g_guildTab = 6; } // the Guild screen's Members tab - same Warband roster section Activities (hidden for now) showed
     if (Button({ (float)screenW - 290, (float)y - 4, 130, g_landscapePage ? 44.f:28.f }, SettleHall(s) > 0 ? TextFormat("Settlement %d", SettleHall(s)) : "Settlement", true))
         { g_settleOpen = true; g_settleScroll = 0.0f; } // (2026-09-27)
     y += g_landscapePage ? 58:24;
