@@ -157,7 +157,7 @@ struct LandscapeRoomOverlay {
         g_landscapeNativeMenu=true;g_landscapeNativeMenuDrawing=true;
         LandscapeTextureBegin(g_landscapeNativeMenuTarget);::ClearBackground(BLANK);
     }
-    ~LandscapeRoomOverlay(){if(active){LandscapeTextureEnd();g_landscapeNativeMenuDrawing=false;g_landscapeNativeMenu=false;}}
+    ~LandscapeRoomOverlay(){if(active){LandscapeTextureEnd();g_landscapeNativeMenuDrawing=false;}}
 };
 // Isolate a complete map widget before compositing. It must never be sliced
 // across the portrait HUD bands; its picking uses the same source/destination.
