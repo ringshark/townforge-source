@@ -91,7 +91,7 @@ static tflayout::Region LandscapeRegion(Vector2 raw) {
         for(auto r:g_landscapeHitRects)if(CheckCollisionPointRec({p.x,p.y},r))return region;
     // The middle HUD strip uses the world scale but contains real controls.
     // Keep those taps distinct from unclaimed ground gestures.
-    if(raw.y>=138 && raw.y<360) {
+    if(raw.y>=132 && raw.y<360) { // 132 matches RegionAt's Hud upper bound (y<132); no dead band between them
         p=tflayout::Map({raw.x,raw.y},tflayout::Region::Field);
         for(auto r:g_landscapeHitRects)if(CheckCollisionPointRec({p.x,p.y},r))return tflayout::Region::Field;
     }
@@ -118,7 +118,9 @@ static Vector2 LandscapeMouse() {
     bool held=::IsMouseButtonDown(MOUSE_BUTTON_LEFT) || ::IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
     double now=::GetTime();
     bool freshPress=::IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && g_landscapePressTime!=now;
-    if(freshPress || !g_landscapePointerHeld)g_landscapePointerRegion=LandscapeRegion(raw);
+    // Use this frame's held state, not the stale value from before it's updated
+    // below - otherwise the region stays locked for one extra frame after release.
+    if(freshPress || !held)g_landscapePointerRegion=LandscapeRegion(raw);
     if(freshPress)g_landscapePressTime=now;
     g_landscapePointerHeld=held;
     auto p=LandscapePointerMap(raw,g_landscapePointerRegion);return {p.x,p.y};
@@ -155,7 +157,7 @@ struct LandscapeRoomOverlay {
         g_landscapeNativeMenu=true;g_landscapeNativeMenuDrawing=true;
         LandscapeTextureBegin(g_landscapeNativeMenuTarget);::ClearBackground(BLANK);
     }
-    ~LandscapeRoomOverlay(){if(active){LandscapeTextureEnd();g_landscapeNativeMenuDrawing=false;}}
+    ~LandscapeRoomOverlay(){if(active){LandscapeTextureEnd();g_landscapeNativeMenuDrawing=false;g_landscapeNativeMenu=false;}}
 };
 // Isolate a complete map widget before compositing. It must never be sliced
 // across the portrait HUD bands; its picking uses the same source/destination.
@@ -232,13 +234,15 @@ static void LandscapePanelInput() {
         if(CheckCollisionPointRec(mouse,LandscapePanelTop()))g_landscapeScroll=0;
         if(CheckCollisionPointRec(mouse,LandscapePanelBottom()))g_landscapeScroll=tflayout::maxScroll;
     }
-    if(dragging && down)g_landscapeScroll=tflayout::Scroll((mouse.y-rail.y-30)/(rail.height-60)*tflayout::maxScroll);
+    // Must match the thumb's actual drawn geometry (top 100..376, i.e. a 276px
+    // travel span, 60px tall) so the thumb tracks the cursor 1:1 while dragging.
+    if(dragging && down)g_landscapeScroll=tflayout::Scroll((mouse.y-130.0f)/276.0f*tflayout::maxScroll);
     if(!down)dragging=false;
     if(CheckCollisionPointRec(mouse,rail))
         g_landscapeScroll=tflayout::Scroll(g_landscapeScroll-::GetMouseWheelMove()*48);
     held=down;
 }
-static void LandscapeBeginFrame(bool world,bool dialog,int screen,bool gear=false,bool page=false) {
+static void LandscapeBeginFrame(bool world,int dialog,int screen,bool gear=false,bool page=false) {
 #ifdef PLATFORM_WEB
     // Use the displayed landscape aspect for both projection and picking.
     // CSS fills the phone; a wider camera keeps characters from stretching.
@@ -249,8 +253,11 @@ static void LandscapeBeginFrame(bool world,bool dialog,int screen,bool gear=fals
     tflayout::DisplayAspect((float)aspect,1);
 #endif
     static int previousScreen=-1;
-    if(previousScreen!=screen || (dialog && !g_presentedDialog) || gear!=g_presentedGear)g_landscapeScroll=0;
-    previousScreen=screen;
+    static int previousDialogKind=0;
+    // dialog is a per-kind tag, not just open/closed, so switching straight from
+    // one dialog to a different one on the same screen also resets the scroll.
+    if(previousScreen!=screen || (dialog && previousDialogKind!=dialog) || gear!=g_presentedGear)g_landscapeScroll=0;
+    previousScreen=screen;previousDialogKind=dialog;
     if((!world || dialog) && !gear && !page && !g_presentedNativeMenu)LandscapePanelInput();
     g_landscapeOpening=LandscapeOpeningCard{};
     g_landscapePage=page;
@@ -306,6 +313,9 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
             while(w>320 && size>11)w=::MeasureTextEx(font,label.text.c_str(),--size,1).x;
             float x=std::max(12.0f,std::min(948.0f-w,label.point.x-w*.5f));
             float y=std::max(12.0f,label.point.y-size);
+            // The skill/XP toast column (x 730-944, y up to ~356) draws over this
+            // later and would otherwise fully hide a label stuck under it.
+            if(!g_landscapeSkills.empty() && x+w>726.0f && y<360.0f)x=std::min(x,726.0f-w);
             if(!label.plain)LandscapePlate({x-6,y-3,w+12,(float)size+8},Color{105,119,119,255},label.alpha);
             else ::DrawTextEx(font,label.text.c_str(),{x+1,y+2},size,1,Fade(BLACK,label.alpha*.85f));
             ::DrawTextEx(font,label.text.c_str(),{x,y},size,1,label.color);
