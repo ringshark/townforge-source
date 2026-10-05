@@ -38,3 +38,66 @@ Validation: the web build, equipment operations, hero skin and cape checks
 passed. Offline mesh rendering inspected idle, walk and sword-swing poses.
 Live browser visual checking remains limited by the available browser's WebGL
 startup failure, so phone playtesting is still needed for final visual approval.
+
+## UO outfit study (review branch)
+
+The `codex/uo-outfit-study` draft adds a locally baked chain underlayer while
+keeping uncovered skin, the original model and its animations. Chest/shoulder/
+shin plates use slimmer 24-sided profiles, a leather waist belt, and an armor
+shader with stronger metal highlights. The cape has a narrower hem; equipped
+colors and slots continue to use the shared world/preview renderer.
+
+Rebuild the underlayer with `python tools/characters3d/build_armor_underlayer.py`
+(requires Pillow in addition to the existing model tools).
+
+The review board was rendered through `DrawEquippedHero` using raylib 6.0, an
+offscreen EGL ES2 context, and the game's actual lit/armor shaders. It shows
+front, side, back, and a distant perspective view. This is
+an equipment rendering test scene, not a capture of the live browser game.
+The visual draft still needs user review before replacing the live version.
+
+### Armored tunic review draft
+
+The rejected plate study remains available in branch history. The next draft
+uses `build_armored_tunic.py`: the hero's own torso surface and original skin
+weights form the cloth body, with a fitted waist, leather belt and short bound
+hem. The tunic uses diffuse cloth lighting; steel stays at the shoulders,
+forearms and shins. The heavy thigh plates are omitted on the hero. Plain fabric
+replaces the noisy chain atlas. The original hero GLB remains unchanged.
+
+Generate with `python tools/characters3d/build_armored_tunic.py` and
+`python tools/characters3d/build_armor_underlayer.py`. No additional Meshy jobs
+or credits are involved. This is a review draft, not a live deployment.
+
+### Complete knight skin prototype
+
+The next review step switches the hero to the existing `hero_knight.glb`, a
+complete Meshy outfit with sixteen retargeted clips. No new generation credits
+were spent. `DrawEquippedHero` is shared by the world and try-on preview; it
+first draws the complete skin, with only held weapons and shields supplied by
+equipment. Armor overlays, procedural boots and the separate cape are disabled
+for this path. Equipment data, stats and equip rules remain unchanged. If the
+skin cannot load, the previous fitted character remains the fallback.
+
+This is one fixed cosmetic skin for review, not a wardrobe UI or live release.
+Its baked helmet and cloth cannot be individually toggled. Dense embedded
+textures now use mipmaps and trilinear filtering. Run
+`python tests/complete-skin.py` to validate its rig, core clips, budget and
+held-equipment boundary.
+
+### All eight skins: material and shading refinement
+
+All complete `hero_` outfits now use a dedicated `skin.fs` finish: restrained
+contrast compression quiets baked scratches, low-saturation steel receives
+stronger directional highlights, and the dark leather/cloth profiles gain a
+small brightness lift. Warm facial detail remains protected. Filtering remains
+trilinear; neighboring atlas texels are not sampled, preserving color boundaries
+between UV islands. Nearly parallel normals at identical positions are welded
+across UV seams, while sharper plate creases remain intact.
+
+The source meshes, texture atlases, rigs and animation clips are unchanged.
+This is a material/shading pass, not a remodel. Each loaded model owns its finish
+shader/profile, and camera, fog and time-of-day uniforms are refreshed during
+rendering. Eight profiles are reviewed at the same camera and noon lighting;
+`tests/complete-skin.py` checks every outfit's core clips, weights and budget.
+The work remains on the review branch pending visual acceptance.

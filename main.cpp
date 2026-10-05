@@ -13054,7 +13054,7 @@ static Model HumanBuildArmor(int k) {
             T3CCylinder(b, 0.0f, 0.06f, 0.0f, 0.36f, 0.062f, 0.052f, 10, w);
             HumanArmorShell(b, -0.042f, 0.044f, 0.056f, 0.060f, 0.050f, 0.054f, 0.03f, rim); // knee cop
             break;
-        case kArCuisse: T3CCylinder(b, 0.0f, 0.06f, 0.0f, 0.34f, 0.09f, 0.072f, 10, w); break;
+        case kArCuisse: T3CCylinder(b, 0.0f, 0.06f, 0.0f, 0.34f, 0.075f, 0.060f, 16, w); break;
         case kArGorget: T3CCylinder(b, 0.0f, 0.15f, 0.0f, 0.25f, 0.118f, 0.086f, 12, w); break;
     }
     return T3CFinish(b);
@@ -13070,7 +13070,7 @@ static Model HumanBuildCloak() {
         float u0 = -1.0f + 2.0f * i / cols, u1 = -1.0f + 2.0f * (i + 1) / cols;
         auto P = [&](float u, float y, float* o) {
             float t = (top - y) / (top - bot); // 0 at the shoulders, 1 at the hem
-            float hw = 0.15f + 0.09f * t;                  // shoulder-wide at the top, a little flare at the hem
+            float hw = 0.125f + 0.055f * t;                  // shoulder-wide at the top, a little flare at the hem
             o[0] = u * hw;
             o[1] = y;
             // wrapped around the back (edges curl forward), falling slightly away from the legs
@@ -14443,6 +14443,8 @@ static const char* const kSkClipNames[kSkClipCount] = {
 struct SkinChar {
     bool tried = false, ok = false;
     Model model{};
+    Texture2D armorUnderlayer{};
+    Shader finishShader{}; // complete outfit material finish, per model
     Model cuirass{}; // shares the hero's exact skeleton and current torso pose
     ModelAnimation* anims = nullptr;
     int animCount = 0;
@@ -14471,6 +14473,31 @@ static int SkinCharFor(const char* stem) {
     for (size_t i = 0; i < g_skinCharFiles.size(); i++) if (g_skinCharFiles[i] == stem) return (int)i;
     g_skinCharFiles.push_back(stem);
     return (int)g_skinCharFiles.size() - 1;
+}
+static void T3DSetLightUniforms(Shader sh);
+// Weld lighting normals across UV seams without changing geometry or skin weights.
+// Only nearly parallel normals share a finish; plate creases stay deliberate.
+static void SkinSmoothSeams(Model& model) {
+    for (int m = 0; m < model.meshCount; ++m) {
+        Mesh& mesh = model.meshes[m];
+        if (!mesh.vertices || !mesh.normals) continue;
+        std::map<std::array<int,3>, std::vector<int>> groups;
+        for (int v = 0; v < mesh.vertexCount; ++v) {
+            const float* p = mesh.vertices + v * 3;
+            groups[{(int)lroundf(p[0]*100000), (int)lroundf(p[1]*100000), (int)lroundf(p[2]*100000)}].push_back(v);
+        }
+        std::vector<float> original(mesh.normals, mesh.normals + mesh.vertexCount * 3);
+        for (const auto& entry : groups) for (int v : entry.second) {
+            Vector3 n{original[v*3],original[v*3+1],original[v*3+2]}, sum = n;
+            for (int other : entry.second) if (other != v) {
+                Vector3 candidate{original[other*3],original[other*3+1],original[other*3+2]};
+                if (Vector3DotProduct(n,candidate) > 0.87f) sum = Vector3Add(sum,candidate);
+            }
+            sum = Vector3Normalize(sum);
+            mesh.normals[v*3]=sum.x;mesh.normals[v*3+1]=sum.y;mesh.normals[v*3+2]=sum.z;
+        }
+        UpdateMeshBuffer(mesh, 2, mesh.normals, mesh.vertexCount * 3 * sizeof(float), 0);
+    }
 }
 static SkinChar* SkinCharGet(int id) {
     while ((int)g_skinChars.size() < (int)g_skinCharFiles.size()) g_skinChars.emplace_back();
@@ -14505,8 +14532,8 @@ static SkinChar* SkinCharGet(int id) {
         else if (!strcmp(n, "RightFoot")) C.footR = b;
         else if (!strcmp(n, "LeftFoot")) C.footL = b;
     }
-    if (g_skinCharFiles[(size_t)id] == "hero-neutral" && FileExists("assets/armor/steel-cuirass-skinned.glb")) {
-        C.cuirass = LoadModel("assets/armor/steel-cuirass-skinned.glb");
+    if (g_skinCharFiles[(size_t)id] == "hero-neutral" && FileExists("assets/armor/armored-tunic-skinned.glb")) {
+        C.cuirass = LoadModel("assets/armor/armored-tunic-skinned.glb");
         bool compatible = C.cuirass.meshCount > 0 && C.cuirass.skeleton.boneCount == C.model.skeleton.boneCount;
         for (int b = 0; compatible && b < C.model.skeleton.boneCount; ++b)
             compatible = !strcmp(C.cuirass.skeleton.bones[b].name, C.model.skeleton.bones[b].name) &&
@@ -14567,7 +14594,37 @@ static SkinChar* SkinCharGet(int id) {
     C.minY = bb.min.y;
     { int hips = -1; for (int b = 0; b < C.model.skeleton.boneCount; b++) if (!strcmp(C.model.skeleton.bones[b].name, "Hips")) hips = b;
       C.hipsY = hips >= 0 ? C.model.skeleton.bindPose[hips].translation.y - bb.min.y : h * 0.5f; }
+    if (g_skinCharFiles[(size_t)id] == "hero-neutral") {
+        C.armorUnderlayer = LoadTexture("assets/armor/tunic-underlayer.png");
+        if (C.armorUnderlayer.id) { GenTextureMipmaps(&C.armorUnderlayer); SetTextureFilter(C.armorUnderlayer, TEXTURE_FILTER_TRILINEAR); }
+    }
+    // Complete skins contain dense baked detail. Filter minified textures so
+    // plates and cloth remain legible at the gameplay camera distance.
+    for (int m = 0; m < C.model.materialCount; ++m) {
+        Texture2D& tex = C.model.materials[m].maps[MATERIAL_MAP_DIFFUSE].texture;
+        if (tex.id && tex.width > 1 && tex.height > 1) {
+            if (tex.mipmaps < 2) GenTextureMipmaps(&tex);
+            SetTextureFilter(tex, TEXTURE_FILTER_TRILINEAR);
+        }
+    }
     Town3DApplyLitShader(C.model);
+    if (g_skinCharFiles[(size_t)id].rfind("hero_", 0) == 0) {
+        SkinSmoothSeams(C.model);
+        C.finishShader = LoadShader("assets/shaders/lit.vs", "assets/shaders/skin.fs");
+        if (C.finishShader.id) {
+            C.finishShader.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(C.finishShader, "viewPos");
+            const std::string& name = g_skinCharFiles[(size_t)id];
+            Vector3 finish{0.05f, 0.86f, 1.04f};
+            if (name == "hero_knight") finish = {0.85f,0.92f,1.05f};
+            else if (name == "hero_paladin") finish = {1.0f,0.90f,1.03f};
+            else if (name == "hero_footman") finish = {0.65f,0.96f,1.08f};
+            else if (name == "hero_ranger") finish = {0.02f,0.88f,1.12f};
+            else if (name == "hero_thief") finish = {0.04f,0.85f,1.15f};
+            else if (name == "hero_necromancer") finish = {0.28f,0.88f,1.12f};
+            SetShaderValue(C.finishShader, GetShaderLocation(C.finishShader,"skinFinish"), &finish, SHADER_UNIFORM_VEC3);
+            for (int m = 0; m < C.model.materialCount; ++m) C.model.materials[m].shader = C.finishShader;
+        }
+    }
     C.ok = true;
     return &C;
 }
@@ -14604,15 +14661,26 @@ static const float kSkWalkMps = 1.36f, kSkRunMps = 3.8f;
 // Armor on the sculpted body: the body kit's pieces, per piece a scale and an
 // offset (metres, in the bone's space) to sit over the hero's own leather.
 struct SkinArmorFit { float s, sx, oy, oz; };
-static SkinArmorFit g_skinFitChest = { 1.22f, 1.18f, 0.02f, 0.03f }, g_skinFitPauldron = { 1.02f, 1.0f, -0.01f, 0.0f },
-                    g_skinFitBracer = { 1.25f, 1.0f, 0.0f, 0.0f }, g_skinFitGreave = { 1.25f, 1.0f, 0.0f, 0.0f },
+static SkinArmorFit g_skinFitChest = { 1.22f, 1.18f, 0.02f, 0.03f }, g_skinFitPauldron = { 0.86f, 1.0f, -0.01f, 0.0f },
+                    g_skinFitBracer = { 1.02f, 1.0f, 0.0f, 0.0f }, g_skinFitGreave = { 1.12f, 1.0f, 0.0f, 0.0f },
                     g_skinFitCuisse = { 1.2f, 1.0f, 0.0f, 0.0f }, g_skinFitGorget = { 1.2f, 1.1f, 0.0f, 0.0f },
                     g_skinFitHelm = { 1.1f, 1.0f, -0.01f, 0.015f };
+// Plate uses the same scene light and camera as the body, with a sharper metal highlight.
+static void T3DSetLightUniforms(Shader sh);
+static Shader SkinPlateShader(Shader fallback) {
+    static Shader shader{}; static bool tried=false;
+    if(!tried){tried=true;shader=LoadShader("assets/shaders/lit.vs","assets/shaders/armor.fs");}
+    if(!shader.id)return fallback;
+    T3DSetLightUniforms(shader);
+    Matrix eye=MatrixInvert(rlGetMatrixModelview());Vector3 view={eye.m12,eye.m13,eye.m14};
+    SetShaderValue(shader,GetShaderLocation(shader,"viewPos"),&view,SHADER_UNIFORM_VEC3);
+    return shader;
+}
 static Matrix SkinCloakLocal(float u, float move, Matrix restRotation) {
     // Pivot at the shoulders. Positive X tilt carries the hanging hem toward
     // -Z (the back); negative tilt pushed it through the chest while running.
     const float top = 0.22f * u;
-    Matrix local = MatrixMultiply(MatrixScale(u * 1.18f, u, u), MatrixTranslate(0, -top, 0));
+    Matrix local = MatrixMultiply(MatrixScale(u, u, u), MatrixTranslate(0, -top, 0));
     local = MatrixMultiply(local, MatrixRotateX(0.06f + 0.30f * std::clamp(move, 0.0f, 1.0f)));
     local = MatrixMultiply(local, MatrixTranslate(0, top - 0.12f * u, -0.04f * u));
     return MatrixMultiply(local, restRotation);
@@ -14623,6 +14691,12 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     SkinChar* Cp = SkinCharGet(id);
     if (!Cp) return false;
     SkinChar& C = *Cp;
+    if (C.finishShader.id) {
+        T3DSetLightUniforms(C.finishShader);
+        Matrix view = MatrixInvert(rlGetMatrixModelview());
+        Vector3 camera{view.m12,view.m13,view.m14};
+        SetShaderValue(C.finishShader, C.finishShader.locs[SHADER_LOC_VECTOR_VIEW], &camera, SHADER_UNIFORM_VEC3);
+    }
     bool skipSkin = false;
     T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
     if (shadowPass) return true; // skinned meshes skip the shadow map; blob shadow below
@@ -14764,6 +14838,9 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
     float rotDeg = 90.0f - yawRad * RAD2DEG; // model faces +Z
     float baseY = -C.minY * sc;
     if (riding) baseY += p.saddle - C.hipsY * sc; // hips in the saddle
+    Texture2D originalDiffuse = C.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture;
+    bool armored = gear && gear->armChest == 2 && !gear->robe && C.armorUnderlayer.id;
+    if (armored) C.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = C.armorUnderlayer;
     if (lunge > 0.0f) { // no attack clip: throw the whole body into it
         rlPushMatrix();
         rlTranslatef(x + cosf(yawRad) * lunge * heightW * 0.16f, baseY, z + sinf(yawRad) * lunge * heightW * 0.16f);
@@ -14773,6 +14850,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         rlPopMatrix();
     } else
     DrawModelEx(C.model, { x, baseY, z }, { 0.0f, 1.0f, 0.0f }, rotDeg, { sc, sc, sc }, tint);
+    C.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = originalDiffuse;
     // ---- in hand: the weapon (or the gathering tool) and the shield ----
     if (gear && g_human.ok && p.deathT < 0.0f) {
         HumanRig& H = g_human;
@@ -14836,7 +14914,8 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         Material flat = H.model.materials[0];
         flat.shader = sh;
         flat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
-        auto piece = [&](const Model& m, int bone, const SkinArmorFit& fit, Color c) {
+        Shader metal = SkinPlateShader(sh);
+        auto piece = [&](const Model& m, int bone, const SkinArmorFit& fit, Color c, bool plate = false) {
             if (bone < 0 || m.meshCount <= 0) return;
             SkinArmorFit fitted = fit;
             if (g_skinCharFiles[(size_t)id] == "hero-neutral") {
@@ -14846,6 +14925,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
             Matrix rot = bone < (int)C.armorRot.size() ? C.armorRot[(size_t)bone] : MatrixIdentity();
             Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(u * fitted.s * fitted.sx, u * fitted.s, u * fitted.s * fitted.sx),
                                                          MatrixTranslate(0.0f, fitted.oy * u, fitted.oz * u)), rot);
+            flat.shader = plate ? metal : sh;
             HumanDrawAttached(m, &flat, local, boneM(bone), world, HumanMul(c, tint));
         };
         if (o.armChest && !o.robe) {
@@ -14859,21 +14939,21 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
                 pose.keyframePoses = &C.model.currentPose;
                 UpdateModelAnimation(C.cuirass, pose, 0.0f);
                 for (int i = 0; i < C.cuirass.materialCount; ++i) C.cuirass.materials[i].shader = sh;
-                DrawModelEx(C.cuirass, {x, baseY, z}, {0, 1, 0}, rotDeg, {sc, sc, sc}, HumanMul(o.armChestCol, tint));
-            } else piece(H.armor[o.armChest == 2 ? kArChestH : kArChestL], C.spine, g_skinFitChest, o.armChestCol);
+                DrawModelEx(C.cuirass, {x, baseY, z}, {0, 1, 0}, rotDeg, {sc, sc, sc}, tint);
+            } else piece(H.armor[o.armChest == 2 ? kArChestH : kArChestL], C.spine, g_skinFitChest, o.armChestCol, o.armChest == 2);
         }
         if (o.armArms && !o.robe) {
             const Model& pm = H.armor[o.armArms == 2 ? kArPauldronH : kArPauldronL];
             const Model& bm = H.armor[o.armArms == 2 ? kArBracerH : kArBracerL];
-            piece(pm, C.armR, g_skinFitPauldron, o.armArmsCol);
-            piece(o.armArms == 2 ? H.armor[kArPauldronHL] : pm, C.armL, g_skinFitPauldron, o.armArmsCol);
-            piece(bm, C.foreArmR, g_skinFitBracer, o.armArmsCol); piece(bm, C.foreArmL, g_skinFitBracer, o.armArmsCol);
+            piece(pm, C.armR, g_skinFitPauldron, o.armArmsCol, o.armArms == 2);
+            piece(o.armArms == 2 ? H.armor[kArPauldronHL] : pm, C.armL, g_skinFitPauldron, o.armArmsCol, o.armArms == 2);
+            piece(bm, C.foreArmR, g_skinFitBracer, o.armArmsCol, o.armArms == 2); piece(bm, C.foreArmL, g_skinFitBracer, o.armArmsCol, o.armArms == 2);
         }
         if (o.armLegs && !o.robe) {
             const Model& gm = H.armor[o.armLegs == 2 ? kArGreaveH : kArGreaveL];
-            piece(gm, C.legR, g_skinFitGreave, o.armLegsCol);
-            piece(o.armLegs == 2 ? H.armor[kArGreaveHL] : gm, C.legL, g_skinFitGreave, o.armLegsCol);
-            if (o.armLegs == 2) { piece(H.armor[kArCuisse], C.upLegR, g_skinFitCuisse, o.armLegsCol); piece(H.armor[kArCuisse], C.upLegL, g_skinFitCuisse, o.armLegsCol); }
+            piece(gm, C.legR, g_skinFitGreave, o.armLegsCol, o.armLegs == 2);
+            piece(o.armLegs == 2 ? H.armor[kArGreaveHL] : gm, C.legL, g_skinFitGreave, o.armLegsCol, o.armLegs == 2);
+            if (o.armLegs == 2 && g_skinCharFiles[(size_t)id] != "hero-neutral") { piece(H.armor[kArCuisse], C.upLegR, g_skinFitCuisse, o.armLegsCol, true); piece(H.armor[kArCuisse], C.upLegL, g_skinFitCuisse, o.armLegsCol, true); }
         }
         if (o.armGorget) piece(H.armor[kArGorget], C.spine, g_skinFitGorget, o.armGorgetCol);
         if (o.helm != kHhNone) piece(H.helm[o.helm], C.head, g_skinFitHelm, o.helmCol);
@@ -14895,6 +14975,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
             if (o.robe) piece(H.robeSkirt, C.spine, {1.05f, 1.12f, 0.0f, -0.08f}, o.robeCol);
             if (o.cloak && C.spine >= 0) {
                 Matrix local = SkinCloakLocal(u, p.move, C.armorRot[(size_t)C.spine]);
+                flat.shader = sh;
                 HumanDrawAttached(H.cloak, &flat, local, boneM(C.spine), world, HumanMul(o.cloakCol, tint));
             }
         }
@@ -14907,8 +14988,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
 // plate (the knight's, or the paladin's once you walk the path of Chivalry), mail
 // (the footman's) or leather (the ranger's). With no body armor, a life of theft
 // or song shows too (the thief, the bard). nullptr: the base hero, who takes dyes.
-static const char* HeroLookFor(const GameState& s) {
-    const Equipment& e = s.equipped;
+static const char* HeroLookFor(const GameState& s, const Equipment& e) {
     if (e.robe) return s.necromancy > s.magery ? "hero_necromancer" : "hero_archmage";
     if (e.chest) {
         const std::string& n = e.chest->name;
@@ -14923,10 +15003,21 @@ static const char* HeroLookFor(const GameState& s) {
     return nullptr;
 }
 static void PlayerCombatPhases3D(const GameState& s, float* atk, float* cast);
+// A complete skin's torso/limbs are a single baked sculpt, so the old
+// per-piece plates underneath it would only clip and double up geometry.
+// Helm, cloak and whatever's held (weapon/shield) still sit on top of it.
+static HumanOutfit SkinHeldGearFor(HumanOutfit o) {
+    o.armChest = o.armArms = o.armLegs = o.armGorget = 0;
+    o.robe = false; o.footwear = false;
+    o.outfitMask = 0; o.hideRegions = 0;
+    return o;
+}
 // One avatar and equipment path for the world and the Me/try-on preview.
+// skin: a complete baked look from HeroLookFor (e.g. "hero_knight"), or
+// nullptr for the base hero body with modular attached armor and dyes.
 static bool DrawEquippedHero(int track, float x, float z, float yaw, Color tint,
                              const Equipment& equipment, const HumanPose& hp, bool shadowPass,
-                             bool sneaking = false, bool blocking = false) {
+                             bool sneaking = false, bool blocking = false, const char* skin = nullptr) {
     HumanEnsure();
     HumanOutfit outfit = HumanOutfitFor(equipment);
     SkinPose pose;
@@ -14935,10 +15026,18 @@ static bool DrawEquippedHero(int track, float x, float z, float yaw, Color tint,
     pose.hurtT = hp.hurtT; pose.deathT = hp.deathT; pose.engaged = hp.engaged;
     pose.gather = hp.gather; pose.style = outfit.style;
     pose.sneaking = sneaking; pose.blocking = blocking;
+    if (skin) {
+        HumanOutfit held = SkinHeldGearFor(outfit);
+        if (DrawSkinChar(SkinCharFor(skin), track, x, z, yaw, 66.0f,
+                         tint, pose, shadowPass, &held)) return true;
+    }
     SkinDye dye;
     dye.c[2] = equipment.robe ? ClothColor(*equipment.robe) : equipment.shirt ? ClothColor(*equipment.shirt) : Color{195,184,176,255};
     dye.c[3] = equipment.robe ? ColorBrightness(ClothColor(*equipment.robe), -0.10f) : equipment.pants ? ClothColor(*equipment.pants) : Color{92,78,69,255};
-    if (outfit.armChest == 2 && !equipment.robe) dye.c[2] = ColorBrightness(dye.c[2], -0.55f);
+    if (outfit.armChest == 2 && !equipment.robe) {
+        dye.c[2] = {70,110,140,255};
+        if (outfit.armLegs) dye.c[3] = {65,60,55,255};
+    }
     Color glove;
     if (HumanArmorColor(equipment.gloves, &glove)) dye.c[4] = glove;
     if (DrawSkinChar(SkinCharFor("hero-neutral"), track, x, z, yaw, 66.0f, tint, pose, shadowPass, &outfit, 0.0f, &dye)) return true;
@@ -15001,7 +15100,8 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
         }
     }
     if (s.hidden) tint = Color{ (unsigned char)(tint.r * 0.35f), (unsigned char)(tint.g * 0.35f), (unsigned char)(tint.b * 0.45f), tint.a }; // in the shadows (2026-09-28)
-    return DrawEquippedHero(trackId, x, z, yawRad, tint, s.equipped, hp, shadowPass, s.hidden, arenaGuard || s.playerBlockT >= 0.0f);
+    return DrawEquippedHero(trackId, x, z, yawRad, tint, s.equipped, hp, shadowPass, s.hidden,
+                             arenaGuard || s.playerBlockT >= 0.0f, HeroLookFor(s, s.equipped));
 }
 
 // ---- Multiplayer, phase 1 (2026-09-29): presence + chat ------------------------------
@@ -15074,7 +15174,7 @@ static std::string MpZoneFor(const GameState& s) {
 // What others need to draw you: hero look | fighting style | weapon | sculpted weapon | shield | sculpted shield | 3 dyes.
 static std::string MpLookFor(const GameState& s) {
     HumanOutfit o = HumanOutfitFor(s.equipped);
-    const char* look = HeroLookFor(s);
+    const char* look = HeroLookFor(s, s.equipped);
     auto hex = [](const std::optional<Item>& it) {
         if (!it) return std::string("-");
         Color c = ColorBrightness(ClothColor(*it), 0.12f);
@@ -37716,7 +37816,8 @@ static void PaperdollRenderPass(const GameState& s) {
     DrawCylinder({ 0, -0.2f, 0 }, 22.5f, 25.0f, 0.4f, 40, Color{ 132, 122, 108, 255 });
     HumanPose hp; // standing idle (the engaged guard is a deep crouch - reads worse here)
     Equipment preview = EquipmentPreview(s.equipped, PaperdollTryOnItem(s));
-    DrawEquippedHero(kT3CTrackPaperdoll, 0.0f, 0.0f, 1.5708f + g_dollYaw, WHITE, preview, hp, false);
+    DrawEquippedHero(kT3CTrackPaperdoll, 0.0f, 0.0f, 1.5708f + g_dollYaw, WHITE, preview, hp, false,
+                     false, false, HeroLookFor(s, preview));
     EndMode3D();
     EndTextureMode();
 }

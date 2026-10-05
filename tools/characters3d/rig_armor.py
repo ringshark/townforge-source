@@ -102,7 +102,7 @@ def main():
         doc['accessors'].append(a);return len(doc['accessors'])-1
     attrs={'POSITION':add(m.vertices.astype('<f4'),'VEC3',5126),
            'NORMAL':add(m.vertex_normals.astype('<f4'),'VEC3',5126),
-           'COLOR_0':add(np.tile([240,240,240,255],(len(m.vertices),1)).astype('u1'),'VEC4',5121,True),
+           'COLOR_0':add(np.asarray(m.visual.vertex_colors,dtype='u1'),'VEC4',5121,True),
            'JOINTS_0':add(out_ids,'VEC4',5121),'WEIGHTS_0':add(out_weights,'VEC4',5126)}
     indices=add(m.faces.reshape(-1,1).astype('<u2'),'SCALAR',5123)
     doc['meshes']=[{'name':'Fitted plate cuirass','primitives':[{'attributes':attrs,'indices':indices,'material':0}]}]
