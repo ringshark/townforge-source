@@ -32737,6 +32737,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 s.logLine = TextFormat("Collected %d %s from the %s.", n, SettleResName(kSettleDefs[nearestIdx].res), kSettleDefs[nearestIdx].name);
                 PlaySfx(SfxId::Coin);
             } else {
+                // MenuGoScreen(House) resets g_settleOpen itself - set it after, not before.
+                g_playScreen = s.screen; MenuGoScreen(s, Screen::House);
                 g_settleOpen = true; g_settleTab = 0; g_settleScroll = 0.0f;
                 PlaySfx(SfxId::Click);
             }
