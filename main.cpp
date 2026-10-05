@@ -14988,8 +14988,7 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
 // plate (the knight's, or the paladin's once you walk the path of Chivalry), mail
 // (the footman's) or leather (the ranger's). With no body armor, a life of theft
 // or song shows too (the thief, the bard). nullptr: the base hero, who takes dyes.
-static const char* HeroLookFor(const GameState& s) {
-    const Equipment& e = s.equipped;
+static const char* HeroLookFor(const GameState& s, const Equipment& e) {
     if (e.robe) return s.necromancy > s.magery ? "hero_necromancer" : "hero_archmage";
     if (e.chest) {
         const std::string& n = e.chest->name;
@@ -15004,20 +15003,21 @@ static const char* HeroLookFor(const GameState& s) {
     return nullptr;
 }
 static void PlayerCombatPhases3D(const GameState& s, float* atk, float* cast);
-// Complete knight skin prototype on the review branch. Its baked outfit is
-// independent of armor stats; the held equipment still drives combat/animations.
-static constexpr const char* kHeroReviewSkin = "hero_knight";
+// A complete skin's torso/limbs are a single baked sculpt, so the old
+// per-piece plates underneath it would only clip and double up geometry.
+// Helm, cloak and whatever's held (weapon/shield) still sit on top of it.
 static HumanOutfit SkinHeldGearFor(HumanOutfit o) {
     o.armChest = o.armArms = o.armLegs = o.armGorget = 0;
-    o.helm = kHhNone; o.hat = kClStyleNone;
-    o.cloak = false; o.robe = false; o.footwear = false;
+    o.robe = false; o.footwear = false;
     o.outfitMask = 0; o.hideRegions = 0;
     return o;
 }
 // One avatar and equipment path for the world and the Me/try-on preview.
+// skin: a complete baked look from HeroLookFor (e.g. "hero_knight"), or
+// nullptr for the base hero body with modular attached armor and dyes.
 static bool DrawEquippedHero(int track, float x, float z, float yaw, Color tint,
                              const Equipment& equipment, const HumanPose& hp, bool shadowPass,
-                             bool sneaking = false, bool blocking = false) {
+                             bool sneaking = false, bool blocking = false, const char* skin = nullptr) {
     HumanEnsure();
     HumanOutfit outfit = HumanOutfitFor(equipment);
     SkinPose pose;
@@ -15026,9 +15026,11 @@ static bool DrawEquippedHero(int track, float x, float z, float yaw, Color tint,
     pose.hurtT = hp.hurtT; pose.deathT = hp.deathT; pose.engaged = hp.engaged;
     pose.gather = hp.gather; pose.style = outfit.style;
     pose.sneaking = sneaking; pose.blocking = blocking;
-    HumanOutfit held = SkinHeldGearFor(outfit);
-    if (DrawSkinChar(SkinCharFor(kHeroReviewSkin), track, x, z, yaw, 66.0f,
-                     tint, pose, shadowPass, &held)) return true;
+    if (skin) {
+        HumanOutfit held = SkinHeldGearFor(outfit);
+        if (DrawSkinChar(SkinCharFor(skin), track, x, z, yaw, 66.0f,
+                         tint, pose, shadowPass, &held)) return true;
+    }
     SkinDye dye;
     dye.c[2] = equipment.robe ? ClothColor(*equipment.robe) : equipment.shirt ? ClothColor(*equipment.shirt) : Color{195,184,176,255};
     dye.c[3] = equipment.robe ? ColorBrightness(ClothColor(*equipment.robe), -0.10f) : equipment.pants ? ClothColor(*equipment.pants) : Color{92,78,69,255};
@@ -15098,7 +15100,8 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
         }
     }
     if (s.hidden) tint = Color{ (unsigned char)(tint.r * 0.35f), (unsigned char)(tint.g * 0.35f), (unsigned char)(tint.b * 0.45f), tint.a }; // in the shadows (2026-09-28)
-    return DrawEquippedHero(trackId, x, z, yawRad, tint, s.equipped, hp, shadowPass, s.hidden, arenaGuard || s.playerBlockT >= 0.0f);
+    return DrawEquippedHero(trackId, x, z, yawRad, tint, s.equipped, hp, shadowPass, s.hidden,
+                             arenaGuard || s.playerBlockT >= 0.0f, HeroLookFor(s, s.equipped));
 }
 
 // ---- Multiplayer, phase 1 (2026-09-29): presence + chat ------------------------------
@@ -15171,7 +15174,7 @@ static std::string MpZoneFor(const GameState& s) {
 // What others need to draw you: hero look | fighting style | weapon | sculpted weapon | shield | sculpted shield | 3 dyes.
 static std::string MpLookFor(const GameState& s) {
     HumanOutfit o = HumanOutfitFor(s.equipped);
-    const char* look = HeroLookFor(s);
+    const char* look = HeroLookFor(s, s.equipped);
     auto hex = [](const std::optional<Item>& it) {
         if (!it) return std::string("-");
         Color c = ColorBrightness(ClothColor(*it), 0.12f);
@@ -37813,7 +37816,8 @@ static void PaperdollRenderPass(const GameState& s) {
     DrawCylinder({ 0, -0.2f, 0 }, 22.5f, 25.0f, 0.4f, 40, Color{ 132, 122, 108, 255 });
     HumanPose hp; // standing idle (the engaged guard is a deep crouch - reads worse here)
     Equipment preview = EquipmentPreview(s.equipped, PaperdollTryOnItem(s));
-    DrawEquippedHero(kT3CTrackPaperdoll, 0.0f, 0.0f, 1.5708f + g_dollYaw, WHITE, preview, hp, false);
+    DrawEquippedHero(kT3CTrackPaperdoll, 0.0f, 0.0f, 1.5708f + g_dollYaw, WHITE, preview, hp, false,
+                     false, false, HeroLookFor(s, preview));
     EndMode3D();
     EndTextureMode();
 }
