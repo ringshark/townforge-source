@@ -27731,6 +27731,43 @@ static Color SettleClothes(int i) {
                                 { 150, 70, 60, 255 }, { 110, 110, 100, 255 }, { 160, 140, 100, 255 }, { 80, 70, 90, 255 } };
     return c[i & 7];
 }
+// Sculpted exteriors (2026-10-05, Meshy): five producers got a real building
+// model instead of the recolored generic house shell + hand-placed props.
+// Same fit convention as MeshMonGet - centred on X/Z, stood on the ground via
+// the model's own transform, scaled off its natural footprint so it reads at
+// the same size the procedural building it replaces occupied.
+struct SettleCustomModel { bool tried = false, ok = false; Model m{}; float baseW = 1.0f; };
+static SettleCustomModel g_settleCustom[kSbCount];
+static const float kSettleCustomWidth = 150.0f; // matches the ~140-unit footprint of the house shell it replaces
+static const char* SettleCustomModelFile(int k) {
+    switch (k) {
+        case kSbLumber:  return "lumber_camp";
+        case kSbMine:    return "mine";
+        case kSbTannery: return "tannery";
+        case kSbHerbs:   return "herb_garden";
+        case kSbFishery: return "fishery";
+        default: return nullptr;
+    }
+}
+static SettleCustomModel* SettleCustomModelGet(int k) {
+    if (k < 0 || k >= kSbCount) return nullptr;
+    const char* file = SettleCustomModelFile(k);
+    if (!file) return nullptr;
+    SettleCustomModel& C = g_settleCustom[(size_t)k];
+    if (!C.tried) {
+        C.tried = true;
+        std::string f = std::string("assets/settlement/") + file + ".glb";
+        if (!FileExists(f.c_str())) return &C;
+        C.m = LoadModel(f.c_str());
+        if (C.m.meshCount <= 0) return &C;
+        BoundingBox bb = GetModelBoundingBox(C.m);
+        C.baseW = std::max(0.01f, std::max(bb.max.x - bb.min.x, bb.max.z - bb.min.z));
+        C.m.transform = MatrixTranslate(-(bb.min.x + bb.max.x) * 0.5f, -bb.min.y, -(bb.min.z + bb.max.z) * 0.5f);
+        Town3DApplyLitShader(C.m);
+        C.ok = true;
+    }
+    return &C;
+}
 static void SettleDrawBuilding(const GameState& s, int k, bool shadowPass) {
     Town3DModels& M = g_t3dModels;
     const SettleBuilding& B = s.settle[(size_t)k];
@@ -27749,7 +27786,13 @@ static void SettleDrawBuilding(const GameState& s, int k, bool shadowPass) {
     auto piece = [&](const Model& m, float x, float y, float z, float rot) {
         if (m.meshCount > 0) DrawModelEx(m, { x, y, z }, { 0, 1, 0 }, rot, { kT3DModScale, kT3DModScale, kT3DModScale }, WHITE);
     };
-    if (B.level > 0) {
+    SettleCustomModel* custom = SettleCustomModelGet(k);
+    if (B.level > 0 && custom && custom->ok) {
+        // Meshy's models face +Z, same convention as MeshMonGet/MeshMonDraw.
+        float sc = kSettleCustomWidth / custom->baseW;
+        Color tint = B.damaged ? Color{ 150, 140, 130, 255 } : WHITE;
+        DrawModelEx(custom->m, { 0, 0, 0 }, { 0, 1, 0 }, 90.0f, { sc, sc, sc }, tint);
+    } else if (B.level > 0) {
         bool brick = k == kSbForge || k == kSbMine || k == kSbBarracks || k == kSbChapel || k == kSbStore;
         const Model& w = brick ? M.wallBrick : M.wallPlaster;
         const Model& wd = brick ? M.wallBrickDoor : M.wallPlasterDoor;
