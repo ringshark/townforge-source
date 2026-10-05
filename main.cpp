@@ -15335,6 +15335,7 @@ static float g_t3dPinchDist = 0.0f;
 static void Town3DPinchZoom(float distMin, float distMax) {
     if (GetTouchPointCount() == 2) {
         Vector2 t0 = GetTouchPosition(0), t1 = GetTouchPosition(1);
+        if (UIHit(t0) || UIHit(t1)) { g_t3dPinchDist = 0.0f; return; } // a panel/menu is under a finger
         float dx = t1.x - t0.x, dy = t1.y - t0.y;
         float d = sqrtf(dx * dx + dy * dy);
         if (g_t3dPinchDist > 1.0f && d > 1.0f)
@@ -37333,7 +37334,10 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     UODrawTitle(G, "Settings", 15);
     const Color ink = { 40, 24, 12, 255 }, soft = { 78, 52, 30, 255 };
     if (UOCloseButton(G) || IsKeyPressed(KEY_ESCAPE)) { g_optOpen = false; s.screen=g_playScreen; return; }
-    static float scroll=0,content=0;
+    // content starts generous, not 0: it's only measured at the bottom of this
+    // function, so the very first frame Settings is ever opened would otherwise
+    // clamp against last frame's (nonexistent) height and swallow that frame's scroll.
+    static float scroll=0,content=4000.0f;
     Rectangle area={G.x+12,G.y+36,G.width-24,G.height-50};
     scroll-=ScrollDelta(area);scroll=std::clamp(scroll,0.0f,std::max(0.0f,content-area.height));
     UIBeginScissorMode((int)area.x,(int)area.y,(int)area.width,(int)area.height);
@@ -38246,8 +38250,12 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
     else {float follow=1-expf(-GameDt()*5);duelFocus.x+=(midpoint.x-duelFocus.x)*follow;duelFocus.y+=(midpoint.y-duelFocus.y)*follow;}
     float framing=std::clamp(Dist(fighter[0],fighter[1])/260.0f,1.0f,1.9f);
     Vector3 focus=fighting ? Vector3{duelFocus.x,-35,duelFocus.y}:Vector3{s.townPlayerPos.x,0,s.townPlayerPos.y};
-    Camera3D cam=fighting ? Camera3D{{focus.x+420*framing,600*framing,focus.z+504*framing},focus,{0,1,0},43,CAMERA_PERSPECTIVE}:
-        Camera3D{{focus.x+500,780,focus.z+600},focus,{0,1,0},48,CAMERA_PERSPECTIVE};
+    // Every other 3D screen scales its camera distance by CameraDistance() to
+    // compensate for landscape's wider, shorter frustum; the Den skipped it, so
+    // it read noticeably smaller/farther away than Town/Wilderness/Interiors.
+    float camScale=g_landscapeWorld ? tflayout::CameraDistance(1.0f):1.0f;
+    Camera3D cam=fighting ? Camera3D{{focus.x+420*framing*camScale,600*framing*camScale,focus.z+504*framing*camScale},focus,{0,1,0},43,CAMERA_PERSPECTIVE}:
+        Camera3D{{focus.x+500*camScale,780*camScale,focus.z+600*camScale},focus,{0,1,0},48,CAMERA_PERSPECTIVE};
     if(g_t3dLit.ready) {
         SetShaderValue(g_t3dLit.shader,g_t3dLit.viewPosLoc,&cam.position,SHADER_UNIFORM_VEC3);
         float fog[2]={2500,4000};SetShaderValue(g_t3dLit.shader,g_t3dLit.fogRangeLoc,fog,SHADER_UNIFORM_VEC2);T3DGroundShaderSync(&cam.position,fog);
@@ -38353,6 +38361,12 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
         DrawDenAura(fighter[1],g_den.castB,g_den.spellB,g_den.guardB,g_den.poisonB,visual,1,cam);
     }
     EndMode3D();EndTextureMode();
+    // scene is this screen's own private buffer, not a nested world-decal pass,
+    // but BeginMode3D above tagged it as one since it wasn't g_landscapeUI at the
+    // time. Untag it before compositing below, or the composite draw gets
+    // redirected into g_landscapeScene at the wrong viewport/scale instead of
+    // landing on the UI layer (visibly broken/blank Den).
+    g_landscapeWorldTextures.erase(scene.texture.id);
 #ifndef __EMSCRIPTEN__
     BeginTextureMode(g_zoomTarget);
 #endif
@@ -38756,26 +38770,35 @@ static const float kZoom = 1.125f;
 // build grew past some threshold) - emscripten_set_main_loop is the robust, standard
 // pattern raylib's own web examples use instead, with the browser's requestAnimationFrame
 // driving each call rather than a C++-side blocking sleep.
-static bool LandscapeDialogOpen(const GameState& s) {
+// A distinct nonzero tag per dialog kind, not just "some dialog is open" - so
+// Landscape can tell two different dialogs on the same screen apart and reset
+// the scroll position between them, instead of only on an open/closed edge.
+static int LandscapeDialogOpen(const GameState& s) {
     // Only panels rendered by this screen may switch the world into a scroll page.
     // A remembered journal, town greeting or home workshop is invisible elsewhere.
-    if (IsMenuScreen(s.screen)) return true;
+    if (IsMenuScreen(s.screen)) return 1;
     const bool town = s.screen == Screen::Town;
     const bool wild = s.screen == Screen::Wilderness;
     const bool hunt = s.screen == Screen::Hunt;
     const bool interior = s.screen == Screen::Interior;
     const bool den = s.screen == Screen::Blackwake;
-    return ((town || wild || interior || den) && s.exploreMenuOpen) ||
-        (hunt && s.dungeonMenuOpen) || (wild && s.worldMapOpen) ||
-        ((town || wild) && s.guideOpen) ||
-        ((town || interior) && s.selectedTile.has_value()) ||
-        (town && s.greetedNPC.has_value()) || (interior && s.interiorGreeted) ||
-        ((wild || hunt) && (s.journalOpen || s.recallPickerOpen ||
-            s.hotbarPickerSlot.has_value() || s.openCorpseId >= 0)) ||
-        (wild && (s.houseDesignerOpen || g_trackOpen)) ||
-        (interior && s.interiorKey == "wildhouse" &&
-            (s.houseChestOpen || s.houseCraftModule >= 0)) ||
-        (den && g_denPanel != 0);
+    if ((town || wild || interior || den) && s.exploreMenuOpen) return 2;
+    if (hunt && s.dungeonMenuOpen) return 3;
+    if (wild && s.worldMapOpen) return 4;
+    if ((town || wild) && s.guideOpen) return 5;
+    if ((town || interior) && s.selectedTile.has_value()) return 6;
+    if (town && s.greetedNPC.has_value()) return 7;
+    if (interior && s.interiorGreeted) return 8;
+    if ((wild || hunt) && s.journalOpen) return 9;
+    if ((wild || hunt) && s.recallPickerOpen) return 10;
+    if ((wild || hunt) && s.hotbarPickerSlot.has_value()) return 11;
+    if ((wild || hunt) && s.openCorpseId >= 0) return 12;
+    if (wild && s.houseDesignerOpen) return 13;
+    if (wild && g_trackOpen) return 14;
+    if (interior && s.interiorKey == "wildhouse" && s.houseChestOpen) return 15;
+    if (interior && s.interiorKey == "wildhouse" && s.houseCraftModule >= 0) return 16;
+    if (den && g_denPanel != 0) return 100 + g_denPanel; // each den sub-panel counts as its own dialog
+    return 0;
 }
 static void WarmWildernessCache(const GameState& s) {
     // Spread independent cache preparation over quiet town frames. The complete

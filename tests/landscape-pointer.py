@@ -113,7 +113,7 @@ print('PASS production Top/Bottom, missed-press touch fallback, rail drag, wheel
 # Exercise the production modal selector rather than inferring dialogs from
 # control dimensions (which missed menus and mistook broad HUD bars for panels).
 main=Path('main.cpp').read_text()
-start=main.index('static bool LandscapeDialogOpen(')
+start=main.index('static int LandscapeDialogOpen(')
 selector=main[start:main.index('static void WarmWildernessCache(',start)]
 modal='''#include <optional>
 #include <string>
