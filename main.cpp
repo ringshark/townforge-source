@@ -1370,6 +1370,8 @@ static bool IsPlayScreen(Screen sc) {
 }
 static Screen g_playScreen = Screen::Town;
 static bool g_characterPack = false, g_settleOpen = false;
+static int g_settleTab = 0;
+static float g_settleScroll = 0.0f;
 // Keep the saved step IDs compatible with the original first-steps guide.
 enum StarterStep { kStWalk = 0, kStPack, kStReturn, kStGate, kStGather, kStFight, kStLoot, kStDone, kStCount };
 static bool g_questOpen = false; // the Town Hall quest board (2026-09-28, #72), over the House screen
@@ -23004,6 +23006,8 @@ static void Wild3DDrawAmbience(const Town3DCam& c) {
 // Nearest interactable for the 3D view's highlight ring + label. Mirrors the
 // nearest-search in DrawWildernessScreen (positions only); the real interaction
 // logic stays there.
+static bool SettleOwned(const GameState& s);
+static Vector2 SettleSlotPos(const GameState& s, int kind, float* yawDeg = nullptr);
 struct Wild3DNearest {
     bool valid = false;
     Vector2 pos{};
@@ -23043,6 +23047,12 @@ static Wild3DNearest Wild3DNearestInfo(const GameState& s) {
     for (size_t pi = 0; pi < kHousePlots.size(); pi++)
         consider(HousePlotInteractPos(s.housePlotIdx, s.houseLayout, (int)pi),
                  HousePlotPrompt(s.housePlotIdx, s.houseLayout, (int)pi));
+    if (SettleOwned(s)) for (int k = 0; k < kSbCount; k++) {
+        if (s.settle[(size_t)k].level <= 0 && s.settleUpgrading != k) continue;
+        const SettleDef& d = kSettleDefs[k];
+        bool collect = d.res && s.settle[(size_t)k].stored >= 1.0f;
+        consider(SettleSlotPos(s, k), (collect ? "Collect from the " : "Manage the ") + std::string(d.name));
+    }
     consider(kWildernessReturnGatePos, "Return to Emberhold");
     consider(kWildernessTown2GatePos, std::string("Enter ") + kTown2Name);
     consider(kWildernessTown3GatePos, std::string("Enter ") + kTown3Name); // Phase 4: was missing since Phase 3
@@ -27315,7 +27325,7 @@ static float SettleGateAngle(int plotIdx) {
 static const int kSettleSlotOrder[13] = { kSbLumber, kSbMine, kSbTannery, kSbHerbs, kSbFishery, kSbBarracks, kSbHall,
                                           kSbForge, kSbYard, kSbChapel, kSbLibrary, kSbStable, kSbStore };
 static const float kSettleGateGap = 0.45f; // radians either side of the gate kept open as the lane in
-static Vector2 SettleSlotPos(const GameState& s, int kind, float* yawDeg = nullptr) {
+static Vector2 SettleSlotPos(const GameState& s, int kind, float* yawDeg) {
     int slot = 6;
     for (int i = 0; i < 13; i++) if (kSettleSlotOrder[i] == kind) slot = i;
     float g = SettleGateAngle(s.housePlotIdx);
@@ -31915,7 +31925,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // --- Nearest interactable: gather nodes, creature spots, monster spots, and the
     // return gate all compete in one search, same pattern as the Wilderness Gate vs.
     // buildings in Town.
-    enum class WildNodeKind { Gather, Creature, Monster, Rival, Blade, Innocent, ReturnGate, DungeonEntrance, Town2Gate, Town3Gate, Town4Gate, HousePlot, Shrine, Refuge }; // Phase 6: Shrine + Refuge
+    enum class WildNodeKind { Gather, Creature, Monster, Rival, Blade, Innocent, ReturnGate, DungeonEntrance, Town2Gate, Town3Gate, Town4Gate, HousePlot, Shrine, Refuge, Settlement }; // Phase 6: Shrine + Refuge
     WildNodeKind nearestKind = WildNodeKind::ReturnGate;
     int nearestIdx = -1;
     float nearestDist = 1e9f;
@@ -31985,6 +31995,14 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // once one is placed, so E walks you to the entrance, not the plot middle.
         float d = Dist(s.wildernessPlayerPos, HousePlotInteractPos(s, (int)pi));
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::HousePlot; nearestIdx = (int)pi; }
+    }
+    // Settlement buildings (2026-10-05): walk up to one you've actually built (or
+    // that's mid-construction) and manage/collect it directly, same as every other
+    // world object here - no more opening the Settlement gump just to collect wood.
+    if (SettleOwned(s)) for (int k = 0; k < kSbCount; k++) {
+        if (s.settle[(size_t)k].level <= 0 && s.settleUpgrading != k) continue; // nothing standing there yet
+        float d = Dist(s.wildernessPlayerPos, SettleSlotPos(s, k));
+        if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Settlement; nearestIdx = k; }
     }
     // Phase 6 - virtue shrines (all seven) and the outlaw refuge. The refuge stays
     // hidden from the upstanding: it only competes for E when you're red.
@@ -32669,6 +32687,17 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 else { s.houseDesignerOpen = true; s.houseDemolishArmed = false; PlaySfx(SfxId::Click); }
             } else TryBuyHousePlot(s, pi);
         }
+        else if (nearestKind == WildNodeKind::Settlement) {
+            // Collecting is the one-tap case; anything else (upgrade/repair/assign
+            // settlers) still needs the full gump, just opened straight to it.
+            if (int n = SettleCollect(s, nearestIdx); n > 0) {
+                s.logLine = TextFormat("Collected %d %s from the %s.", n, SettleResName(kSettleDefs[nearestIdx].res), kSettleDefs[nearestIdx].name);
+                PlaySfx(SfxId::Coin);
+            } else {
+                g_settleOpen = true; g_settleTab = 0; g_settleScroll = 0.0f;
+                PlaySfx(SfxId::Click);
+            }
+        }
         // Phase 6 - virtue shrines: the virtuous find healing. Karma 10+ to be heard.
         // Ghosts with high karma rise on the spot; the rest find only silence.
         else if (nearestKind == WildNodeKind::Shrine) {
@@ -32732,6 +32761,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             prompt = std::string("[E] Pray at the Shrine of ") + kShrines[nearestIdx].name;
         else if (nearestKind == WildNodeKind::Refuge) // Phase 6
             prompt = "[E] Slip into the outlaw refuge";
+        else if (nearestKind == WildNodeKind::Settlement) {
+            const SettleDef& d = kSettleDefs[nearestIdx];
+            const SettleBuilding& b = s.settle[(size_t)nearestIdx];
+            if (d.res && b.stored >= 1.0f) prompt = TextFormat("[E] Collect from the %s (%d %s)", d.name, (int)b.stored, SettleResName(d.res));
+            else if (s.settleUpgrading == nearestIdx) prompt = std::string("[E] Check on the ") + d.name;
+            else prompt = std::string("[E] Manage the ") + d.name + (b.damaged ? " (damaged)" : "");
+        }
         else prompt = "[E] Return to Emberhold";
     }
     // Ghosts and the dying get no prompts - they can't touch anything. (Phase 6:
@@ -35715,9 +35751,8 @@ static void UpdateTextInput(std::string& text, size_t maxLen) {
 // Found a guild (house owners only), hire guildmates, pick the tabard color,
 // declare or end wars with Murder Inc. and Grimtusk Hold.
 // ---- Settlement gump (House screen, 2026-09-27) ----
-
-static int g_settleTab = 0;
-static float g_settleScroll = 0.0f;
+// g_settleTab/g_settleScroll live up near g_settleOpen - the Wilderness
+// walk-up-and-tap interaction needs them too, earlier in the file.
 static std::string SettleClock(float secs) {
     int t = std::max(0, (int)secs);
     if (t >= 3600) return TextFormat("%dh %02dm", t / 3600, (t % 3600) / 60);
