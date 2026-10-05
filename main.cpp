@@ -8966,6 +8966,11 @@ static void BladeFightEnded(GameState& s, int bi, const GameState::ActiveMonster
 // keeps a chasing monster from wandering into a neighboring node's territory, and the
 // disengage range (320) lets it "lose interest" if the player breaks away.
 static const float kWildMeleeRange = 60.0f;
+// Archery (2026-10-05): bows and crossbows shoot from range, UO-style - the fight
+// starts when you're within bowshot, and each shot flies to the target as an arrow.
+static const float kBowRange = 400.0f;
+static bool PlayerRanged(const GameState& s) { return ActiveWeaponSkillField(s) == &GameState::archery; }
+static float PlayerAttackRange(const GameState& s) { return PlayerRanged(s) ? kBowRange : kWildMeleeRange; }
 static const float kWildMonsterChaseSpeed = 140.0f; // 2026-09-27: was 90 - aggressive monsters really come for you (you can still outrun them at 220)
 static const float kWildMonsterLeashRange = 250.0f;
 static const float kWildDisengageRange = 320.0f;
@@ -14870,7 +14875,22 @@ static bool DrawSkinChar(int id, int track, float x, float z, float yawRad, floa
         if (mw) { // a sculpted weapon: already true size, grip at its origin
             bool left = gear->meshWeapon == 11; // the bow
             int hb = left ? C.handL : C.handR;
-            if (hb >= 0) {
+            if (hb >= 0 && left) {
+                // (2026-10-05) The bow stands upright in the fist, gripped at its middle, the
+                // curve toward the foe and the string toward you - it used to borrow the
+                // sword's grip and trail behind like a blade. The model's limbs run along +Y
+                // and bulge toward -X, so -X faces forward and +Y up.
+                Vector3 off = g_skinGripOff; off.x = -off.x;
+                Matrix hand = MatrixMultiply(MatrixMultiply(MatrixTranslate(off.x * u, off.y * u, off.z * u), boneM(hb)), world);
+                float fx = cosf(yawRad), fz = sinf(yawRad), k = u * sc;
+                Vector3 X = { -fx, 0.0f, -fz }, Y = { 0.0f, 1.0f, 0.0f }, Z = Vector3CrossProduct(X, Y);
+                Matrix m = { X.x * k, Y.x * k, Z.x * k, hand.m12,
+                             X.y * k, Y.y * k, Z.y * k, hand.m13,
+                             X.z * k, Y.z * k, Z.z * k, hand.m14,
+                             0.0f, 0.0f, 0.0f, 1.0f };
+                for (int i = 0; i < mw->materialCount; i++) mw->materials[i].shader = sh;
+                HumanDrawAttached(*mw, nullptr, MatrixIdentity(), MatrixIdentity(), m, tint);
+            } else if (hb >= 0) {
                 Vector3 off = g_skinGripOff;
                 if (left) off.x = -off.x;
                 Vector3 rot = g_skinGripRot; rot.x += MeshWeaponTilt(gear->meshWeapon);
@@ -28281,6 +28301,7 @@ static const float kCombatDebuffDuration = 20.0f; // Sap/Cloud Mind/Fumbling liv
 // (-2 = rival/blade shadow bolt, an enemy projectile; debuff indices 2/3/4 fly
 // as wisps.) Colors/sizes/speeds are presentation only.
 struct SpellFX { Color proj; float projRadius; float speed; Color impact; float impactRadius; };
+static const int kArrowFx = -5; // an arrow in flight: visual only, the hit was already rolled
 static SpellFX SpellFXFor(int spellIdx) {
     switch (spellIdx) {
         case 0:  return { Color{255,240,180,255},  9, 1400, Color{255,220,120,255}, 42 }; // Spark Dart
@@ -28300,6 +28321,7 @@ static SpellFX SpellFXFor(int spellIdx) {
         case -11: return { Color{255,220,130,255}, 0, 1200, Color{255,220,130,255}, 60 }; // vigor burst
         case -12: return { Color{255,140,70,255},  0, 1200, Color{255,120,50,255},  80 }; // summoning burst
         case -4:  return { Color{255,255,255,255},  0,    0, Color{255,236,170,255},  40 }; // melee hit burst
+        case -5:  return { Color{236,222,196,255},  4, 1900, Color{255,236,170,255},  26 }; // an arrow (2026-10-05)
         // Necromancy (2026-09-27)
         case 17: return { Color{190,225,255,255},  7, 1500, Color{160,205,245,255},  36 }; // Grave Chill (#70: tomb-frost)
         case 18: return { Color{120,255,150,255},  0, 1000, Color{120,255,150,255},  64 }; // Raise (grave light)
@@ -29578,7 +29600,9 @@ static void UpdateLiveSpellFX(GameState& s, float dt) {
         p.pos = { p.from.x + (p.target.x - p.from.x) * f, p.from.y + (p.target.y - p.from.y) * f };
         if (p.t >= p.dur) {
             p.active = false;
-            if (p.spellIdx == -2) {
+            if (p.spellIdx == kArrowFx) {
+                SpawnSpellImpact(s, p.zone, p.target, -4, 0.6f); // it lands
+            } else if (p.spellIdx == -2) {
                 SpawnSpellImpact(s, p.zone, p.target, -2, 1.0f);
                 if (p.zone == 0) ResolveEnemyRangedImpact(s, p.castByRival, p.castByBladeIdx, p.enemySpell);
             } else if (p.spellIdx >= 0 && p.spellIdx < (int)kSpells.size()) {
@@ -29851,7 +29875,7 @@ static void SteerTowardFlag(GameState& s, Vector2& playerPos, Vector2& playerFac
     Vector2 tgt;
     if (!FlagTargetLivePos(s, &tgt)) { s.flagTarget.reset(); return; }
     float d = Dist(playerPos, tgt);
-    if (d <= kWildMeleeRange * 0.9f) return; // close enough - contact engagement fires on its own
+    if (d <= PlayerAttackRange(s) * 0.9f) return; // close enough: contact (or, with a bow, bowshot) engages
     float step = kPlayerSpeed * dt; // same pace as manual walking
     if (step >= d) return;
     Vector2 dir = { (tgt.x - playerPos.x) / d, (tgt.y - playerPos.y) / d };
@@ -32549,7 +32573,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (!s.wildEngaged.has_value()) return;
         GameState::ActiveMonster& am = *s.wildEngaged;
         EngagedMonsterStats spot = EngagedWildMonsterStats(s, am);
-        bool inRange = Dist(am.pos, s.wildernessPlayerPos) < kWildMeleeRange;
+        bool inRange = Dist(am.pos, s.wildernessPlayerPos) < PlayerAttackRange(s);
         HumanOutfit outfit = HumanOutfitFor(s.equipped);
         float contactPhase = outfit.style == kHsBow ? 0.64f : 0.40f;
         auto strike = tfmotion::StepStrike(am, !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && am.hp > 0.0f,
@@ -32584,7 +32608,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             am.monsterHurtT = 0.0f; // hit-flash on the monster
             PlaySfx(SfxId::Hit);
             SpawnFloatText(s, 0, am.pos, std::to_string(dmg), kFloatDmgColor);
-            SpawnSpellImpact(s, 0, am.pos, -4, 0.8f); // melee hit burst at the contact point
+            if (PlayerRanged(s)) SpawnSpellProjectile(s, 0, s.wildernessPlayerPos, am.pos, kArrowFx, true); // the arrow (2026-10-05)
+            else SpawnSpellImpact(s, 0, am.pos, -4, 0.8f); // melee hit burst at the contact point
             s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage";
             bool swingWasDuel = am.isRival || am.bladeIdx >= 0; // captured before BeginWildMonsterDeath resets the optional
             if (am.hp > 0 && !swingWasDuel)
@@ -32606,7 +32631,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             // every pack attacker inside the same melee range + swing arc - each
             // victim keeps its own hit-chance and damage roll, and deaths queue
             // independently. Rival/blade duels never cleave (1v1 stays 1v1).
-            if (!swingWasDuel && !s.wildExtraAttackers.empty()) {
+            if (!swingWasDuel && !PlayerRanged(s) && !s.wildExtraAttackers.empty()) { // an arrow strikes one foe
                 int cleaveCount = 0;
                 for (size_t ei = 0; ei < s.wildExtraAttackers.size(); ) {
                     GameState::ActiveMonster& ex = s.wildExtraAttackers[ei];
@@ -32638,6 +32663,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             Journal(s, s.logLine); // hits dealt go to the event journal
         } else if (!foeBlocked) {
             s.logLine = "Your attack misses";
+            if (PlayerRanged(s)) SpawnSpellProjectile(s, 0, s.wildernessPlayerPos, am.pos, kArrowFx, true);
             SpawnFloatText(s, 0, am.pos, "MISS", kFloatMissColor);
             Journal(s, s.logLine);
         }
@@ -32829,6 +32855,18 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // steer toward the flagged target until contact auto-engages. Manual
         // input always wins - steering only fills the idle gap.
         if (!moved) SteerTowardFlag(s, s.wildernessPlayerPos, s.playerFacing, GameDt(), kWildernessWorldSize, 0);
+        // Archery (2026-10-05): with a bow, the flagged target is engaged from bowshot -
+        // no walking into its reach first. It still closes in on you; keep your distance.
+        if (PlayerRanged(s) && s.flagTarget.has_value() && s.flagTarget->zone == 0 && !s.wildEngaged.has_value() &&
+            s.wildExtraAttackers.empty() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f) {
+            const auto& f = *s.flagTarget;
+            if (f.isRival) { if (!GuildAbsent(s.rivalPos) && Dist(s.wildernessPlayerPos, s.rivalPos) <= kBowRange) tryEngageRival(); }
+            else if (f.bladeIdx >= 0 && f.bladeIdx < kBladeCount) {
+                if (!GuildAbsent(s.blades[f.bladeIdx].pos) && Dist(s.wildernessPlayerPos, s.blades[f.bladeIdx].pos) <= kBowRange) tryEngageBlade(f.bladeIdx);
+            } else if (f.spotIdx >= 0 && f.spotIdx < (int)kWildernessMonsterSpots.size() && s.wildSpotRespawn[(size_t)f.spotIdx] <= 0.0f &&
+                       Dist(s.wildernessPlayerPos, WildernessMonsterLivePos(f.spotIdx, s.worldTime)) <= kBowRange)
+                tryEngageWildMonster(f.spotIdx);
+        }
         if (ActivePet(s)) UpdateCompanionFollow(s, s.wildernessPlayerPos, s.playerFacing, GameDt(),
                                                 s.wildEngaged.has_value() ? &s.wildEngaged->pos : nullptr);
         UpdateExtraFollowers(s, s.wildernessPlayerPos, s.playerFacing, GameDt(), s.wildEngaged.has_value() ? &s.wildEngaged->pos : nullptr);
@@ -34056,7 +34094,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         if (!s.dungeonEngaged.has_value()) return;
         GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
         const DungeonMonster& m = am.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, am.monsterIdx);
-        bool inRange = Dist(am.pos, s.dungeonPlayerPos) < kWildMeleeRange;
+        bool inRange = Dist(am.pos, s.dungeonPlayerPos) < PlayerAttackRange(s);
         HumanOutfit outfit = HumanOutfitFor(s.equipped);
         float contactPhase = outfit.style == kHsBow ? 0.64f : 0.40f;
         auto strike = tfmotion::StepStrike(am, !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && am.hp > 0.0f,
@@ -34090,7 +34128,8 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             am.monsterHurtT = 0.0f; // hit-flash on the monster
             PlaySfx(SfxId::Hit);
             SpawnFloatText(s, 1, am.pos, std::to_string(dmg), kFloatDmgColor);
-            SpawnSpellImpact(s, 1, am.pos, -4, 0.8f); // melee hit burst at the contact point
+            if (PlayerRanged(s)) SpawnSpellProjectile(s, 1, s.dungeonPlayerPos, am.pos, kArrowFx, true); // the arrow (2026-10-05)
+            else SpawnSpellImpact(s, 1, am.pos, -4, 0.8f); // melee hit burst at the contact point
             s.logLine = "You hit the " + mname + " for " + std::to_string(dmg) + " damage";
             if (am.hp > 0 && !wasBoss)
                 DungeonPackAggro(s, dungeonIdx, am.monsterIdx, false, am.pos); // damaging a normal monster pulls its pack in (2026-09-25)
@@ -34099,7 +34138,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             // every pack attacker inside the same melee range + swing arc - each
             // victim keeps its own hit-chance and damage roll, and deaths queue
             // independently. The boss fights alone, so it never cleaves.
-            if (!wasBoss && !s.dungeonExtraAttackers.empty()) {
+            if (!wasBoss && !PlayerRanged(s) && !s.dungeonExtraAttackers.empty()) { // an arrow strikes one foe
                 int cleaveCount = 0;
                 for (size_t ei = 0; ei < s.dungeonExtraAttackers.size(); ) {
                     GameState::ActiveDungeonMonster& ex = s.dungeonExtraAttackers[ei];
@@ -34131,6 +34170,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             Journal(s, s.logLine); // hits dealt go to the event journal
         } else {
             s.logLine = "Your attack misses";
+            if (PlayerRanged(s)) SpawnSpellProjectile(s, 1, s.dungeonPlayerPos, am.pos, kArrowFx, true); // (2026-10-05)
             SpawnFloatText(s, 1, am.pos, "MISS", kFloatMissColor);
             Journal(s, s.logLine);
         }
@@ -34168,6 +34208,15 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         StealthTick(s, GameDt(), moved); // Hiding & Stealth (2026-09-28)
         // Flag steering, same as Wilderness - the wall-slide below still applies.
         if (!moved) SteerTowardFlag(s, s.dungeonPlayerPos, s.playerFacing, GameDt(), kDungeonWorldSize, 1);
+        if (PlayerRanged(s) && s.flagTarget.has_value() && s.flagTarget->zone == 1 && !s.dungeonEngaged.has_value() &&
+            s.dungeonExtraAttackers.empty() && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f) { // archery: engage from bowshot (2026-10-05)
+            const auto& f = *s.flagTarget;
+            int slot = f.isBoss ? kDungeonBossSlot : f.monsterIdx;
+            int di = *s.selectedDungeon;
+            if (slot >= 0 && slot < kDungeonSlotCount && s.dungeonSpawnRespawn[di][slot] <= 0.0f &&
+                Dist(s.dungeonPlayerPos, DungeonMonsterLivePos(di, slot, s.worldTime)) <= kBowRange)
+                tryEngageDungeonMonster(f.monsterIdx, f.isBoss);
+        }
         if (ActivePet(s)) UpdateCompanionFollow(s, s.dungeonPlayerPos, s.playerFacing, GameDt(),
                                                 s.dungeonEngaged.has_value() ? &s.dungeonEngaged->pos : nullptr);
         UpdateExtraFollowers(s, s.dungeonPlayerPos, s.playerFacing, GameDt(), s.dungeonEngaged.has_value() ? &s.dungeonEngaged->pos : nullptr);
