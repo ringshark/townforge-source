@@ -1468,7 +1468,10 @@ static const SettleDef kSettleDefs[kSbCount] = {
     { "Walls",        1, 150, 60, 20, 3.0f, 0, 0,  "Raid defense (palisade, then stone, then towers)" },
     { "Barracks",     2, 200, 50, 30, 3.5f, 0, 0,  "2 guard posts per level; guards fight harder per level" },
 };
-struct SettleBuilding { int level = 0; float stored = 0.0f; int workers = 0; bool damaged = false; };
+// slot: the ring position this building claimed the moment it was first built
+// (see SettleClaimSlot) - kept for life, so a building never relocates once
+// it's up. -1 means not yet claimed (unbuilt, or an old save predating this).
+struct SettleBuilding { int level = 0; float stored = 0.0f; int workers = 0; bool damaged = false; int slot = -1; };
 struct Settler { std::string name; int trait = kSbLumber; int job = -1; }; // job: building kind, 100 = guard, -1 idle
 static const int kSettlerGuard = 100;
 
@@ -7387,7 +7390,7 @@ static void SaveGame(const GameState& s) {
     WriteEquipSlot(out, "equipped.shoes", s.equipped.shoes);
     out << "clothesInit=1\n";
     for (int k = 0; k < kSbCount; k++)
-        out << "settle" << k << "=" << s.settle[(size_t)k].level << "|" << s.settle[(size_t)k].stored << "|" << s.settle[(size_t)k].workers << "|" << (s.settle[(size_t)k].damaged ? 1 : 0) << "\n";
+        out << "settle" << k << "=" << s.settle[(size_t)k].level << "|" << s.settle[(size_t)k].stored << "|" << s.settle[(size_t)k].workers << "|" << (s.settle[(size_t)k].damaged ? 1 : 0) << "|" << s.settle[(size_t)k].slot << "\n";
     out << "settleQueue=" << s.settleUpgrading << "|" << s.settleUpgradeT << "\nsettleRaidT=" << s.settleRaidT
         << "\nsettleArrivalT=" << s.settleArrivalT << "\nsettleEpoch=" << (long long)std::time(nullptr) << "\n";
     out << "autoReagents=" << (s.autoReagents ? 1 : 0) << "\nstableBought=" << s.stableBought << "\n";
@@ -7496,6 +7499,7 @@ static void ApplyOfflineAutoGather(GameState& s, long long elapsedSeconds) {
     if (NextAutoGatherType(s).empty()) s.autoGather = false;
 }
 
+static void SettleClaimSlot(GameState& s, int k); // defined with the settlement's ring layout, below
 // Returns true if a save file was found and loaded (whether or not it parsed cleanly -
 // a partially-corrupt file still applies whatever fields it could read, matching the
 // JS's per-field fallback-to-default approach).
@@ -7704,6 +7708,7 @@ static bool LoadGame(GameState& s) {
             if (k >= 0 && k < kSbCount && p.size() >= 4) {
                 SettleBuilding& b = s.settle[(size_t)k];
                 b.level = std::atoi(p[0].c_str()); b.stored = (float)std::atof(p[1].c_str()); b.workers = std::atoi(p[2].c_str()); b.damaged = p[3] == "1";
+                b.slot = p.size() >= 5 ? std::atoi(p[4].c_str()) : -1; // -1: a save from before ring slots were persisted
             }
         }
         else if (key == "settleQueue") { auto p = SplitStr(val, '|'); if (p.size() >= 2) { s.settleUpgrading = std::atoi(p[0].c_str()); s.settleUpgradeT = (float)std::atof(p[1].c_str()); } }
@@ -7928,6 +7933,11 @@ static bool LoadGame(GameState& s) {
         for (auto& b : s.blades) { if (!GuildAbsent(b.pos)) b.pos = { b.pos.x * f, b.pos.y * f }; b.patrolTarget = b.pos; }
         for (auto& m : s.tmaps) m.spot = { m.spot.x * f, m.spot.y * f }; // treasure still lies at the same place on the land
     }
+    // A save from before ring slots were persisted: claim one now for every
+    // building already standing, in kind order (the only order left to go on) -
+    // a one-time reflow, same spirit as the maxHp fixup above.
+    for (int k = 0; k < kSbCount; k++)
+        if (k != kSbHall && s.settle[(size_t)k].level > 0 && s.settle[(size_t)k].slot < 0) SettleClaimSlot(s, k);
     return true;
 }
 
@@ -27341,13 +27351,25 @@ static float SettleGateAngle(int plotIdx) {
     done[plotIdx] = true;
     return cache[plotIdx];
 }
-// Ring order: the Great Hall straight across from the gate, trades either side.
-static const int kSettleSlotOrder[13] = { kSbLumber, kSbMine, kSbTannery, kSbHerbs, kSbFishery, kSbBarracks, kSbHall,
-                                          kSbForge, kSbYard, kSbChapel, kSbLibrary, kSbStable, kSbStore };
+// Ring order: 13 evenly-spaced positions around the available arc, the Great
+// Hall fixed at index 6 (straight across from the gate). Every other kind's
+// index is the ring slot it personally claimed on the day it was first built
+// (see SettleClaimSlot), not a fixed per-kind slot - so whatever you've
+// actually built lands in consecutive, clustered slots fanning out from the
+// Hall, instead of scattered wherever its building *type* happened to land.
+// A building's position never changes once claimed; new construction only
+// ever takes the next free slot, it never renumbers what's already standing.
+static const int kSettleFreeSlotOrder[12] = { 5, 7, 4, 8, 3, 9, 2, 10, 1, 11, 0, 12 };
 static const float kSettleGateGap = 0.45f; // radians either side of the gate kept open as the lane in
+static void SettleClaimSlot(GameState& s, int k) {
+    if (k == kSbHall || s.settle[(size_t)k].slot >= 0) return;
+    int claimed = 0;
+    for (int i = 0; i < kSbCount; i++) if (i != kSbHall && s.settle[(size_t)i].slot >= 0) claimed++;
+    s.settle[(size_t)k].slot = kSettleFreeSlotOrder[std::clamp(claimed, 0, 11)];
+}
 static Vector2 SettleSlotPos(const GameState& s, int kind, float* yawDeg) {
-    int slot = 6;
-    for (int i = 0; i < 13; i++) if (kSettleSlotOrder[i] == kind) slot = i;
+    int slot = (kind == kSbHall) ? 6 : s.settle[(size_t)kind].slot;
+    if (slot < 0) slot = 0; // not claimed yet - shouldn't normally be queried before Build is pressed
     float g = SettleGateAngle(s.housePlotIdx);
     float a = g + kSettleGateGap + slot * (6.2831853f - 2.0f * kSettleGateGap) / 12.0f;
     float R = SettleRingR(SettleCells(s)) + (kind == kSbHall ? 22.0f : 0.0f);
@@ -35970,6 +35992,7 @@ static void DrawSettlement(GameState& s, int screenW, int screenH) {
                     const char* lbl = s.settleUpgrading == k ? "Building..." : (B.level == 0 ? "Build" : "Upgrade");
                     if (Button({ bx, row.y + 34, 104, g_landscapePage ? 44.f:24.f }, lbl, afford && free) && afford && free) {
                         s.gold -= g; s.wood -= wd; s.ore -= o;
+                        if (B.level == 0) SettleClaimSlot(s, k); // claim its ring position now, before scaffolding appears
                         s.settleUpgrading = k; s.settleUpgradeT = secs;
                         s.logLine = std::string("Builders start on the ") + d.name + " (" + SettleClock(secs) + ").";
                         PlaySfx(SfxId::Buy);
