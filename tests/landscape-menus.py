@@ -26,7 +26,7 @@ stubs+='\n#define CGLTF_IMPLEMENTATION\n#include \"external/cgltf.h\"\nextern \"
 root=Path(__file__).resolve().parents[1]
 test='''#include <cassert>
 #include <iostream>
-void JS_CloudOpen(){}void CleanupAndClose(){}
+void JS_CloudOpen(){}
 #define main game_main
 #include "'''+str(root/'main.cpp')+'''"
 #undef main
