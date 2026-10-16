@@ -619,6 +619,10 @@ static std::string HouseEmptyLayout(int cells) { return std::string((size_t)cell
 // A starter cottage (2026-09-29): a walled square centred on the plot, floored inside, a
 // door mid-front (the bottom row is the front), windows mid-way along the other walls.
 // 7-cell plots get a 5x5 cottage, 9 a 7x7 house, 12 an 8x8 hall - room to grow round it.
+static Rectangle HousePlotBounds(const HousePlot& p) {
+    float half = p.cells * kHouseCellSize * 0.5f;
+    return { p.pos.x - half, p.pos.y - half, half * 2, half * 2 };
+}
 static std::string HouseStarterLayout(int cells) {
     std::string L = HouseEmptyLayout(cells);
     int k = cells >= 12 ? 8 : cells >= 9 ? 7 : std::max(3, cells - 2);
@@ -1208,6 +1212,13 @@ static void InitSfx() {
         for (Sound& snd : g_sfx.v[i]) SetSoundVolume(snd, SfxBaseVolume((SfxId)i));
     }
 }
+static void UnloadMusic();
+static void UnloadSfx() {
+    UnloadMusic();
+    for (int i = 0; i < (int)SfxId::Count; i++)
+        for (Sound& snd : g_sfx.v[i]) UnloadSound(snd);
+    CloseAudioDevice();
+}
 static void PlaySfx(SfxId id) {
     int i = (int)id;
     if (!g_sfxOn || i < 0 || i >= (int)SfxId::Count || g_sfx.v[i].empty()) return;
@@ -1225,6 +1236,9 @@ static void PlaySfx(SfxId id) {
 struct MusicSlot { Music m{}; bool ok = false; float vol = 0.0f; };
 static MusicSlot g_music[6];
 static bool g_musicLoaded = false;
+static void UnloadMusic() {
+    for (auto& ms : g_music) if (ms.ok) { StopMusicStream(ms.m); UnloadMusicStream(ms.m); ms.ok = false; }
+}
 static void MusicTick(int want, float dt) { // want: 0 town, 1 wilds, 2 dungeon, -1 none
     if (!g_musicLoaded) {
         g_musicLoaded = true;
@@ -1503,15 +1517,15 @@ struct GameState {
     // 3D town view toggle (2026-09-24, first 3D milestone) - switches DrawTownScreen's
     // world render between the classic 2D sprite view and the new 3D programmer-art
     // view (DrawTown3DWorld). Transient UI state, not saved - same as selectedTile above.
-    bool town3DView = true;   // 3D is the main view (2026-09-26); 2D stays a toggle
+    bool town3DView = false;  // derived each frame from optClassic2D (2026-10-16: 2D default, 3D a toggle)
     // 3D wilderness view toggle (2026-09-24, Phase 1 of the wilderness 3D work) -
     // same deal for DrawWildernessScreen: the 3D view is a pure view layer, all game
     // logic stays in the shared DrawWildernessScreen code. Transient, not saved.
-    bool wild3DView = true;
+    bool wild3DView = false; // derived from optClassic2D
     // 3D dungeon view toggle (2026-09-24, Phase 2 - dungeons 3D) - same deal for
     // DrawHuntScreen's explorable dungeon arena: the 3D view is a pure view layer,
     // all game logic stays in the shared DrawHuntScreen code. Transient, not saved.
-    bool hunt3DView = true;
+    bool hunt3DView = false; // derived from optClassic2D
     // In-dungeon MENU (2026-09-25): the global tab bar / resource HUD collapse
     // behind a single MENU toggle while inside a dungeon so the dungeon gets
     // nearly the full screen. Transient, not saved.
@@ -1577,6 +1591,7 @@ struct GameState {
     std::array<float, kCraftBuildings.size()> buildingSkill = {0, 0, 0, 0}; // smith/carpenter/tailor/(alchemy unused)
     std::vector<Item> backpack;
     int nextItemId = 1;
+    bool optClassic2D = true;      // (2026-10-16, Mark's call) 2D is the default view again; 3D stays a toggle (V key / Options)
     Equipment equipped = [] { Equipment e; DressStarterClothes(e); return e; }(); // starts dressed (2026-09-27)
     int craftBuildingTab = 0;   // which of kCraftBuildings is open on the Craft screen
     int craftModeTab = 0;        // 0 = Craft (existing UI), 1 = Buy pre-made gear (2026-09-21)
@@ -2029,7 +2044,7 @@ struct GameState {
     // the interior (or re-entering) just resets the spawn. ---
     std::string interiorKey;                 // building key whose room we're inside ("" = not inside)
     Vector2 interiorPlayerPos = {280, 640};  // room-local position
-    bool interior3DView = true;             // 3D/2D view inside interiors (mirrors town3DView on entry, V toggles)
+    bool interior3DView = false;            // 3D/2D view inside interiors (derived from optClassic2D, V toggles)
     bool interiorGreeted = false;            // greeting popup open for the room's static NPC (if any)
 
     // --- Live Wilderness combat (first slice of the real-time combat rework - see
@@ -3032,6 +3047,47 @@ static void LoadGameAssets() {
 
     g_assets.player = TryLoadTexture("assets/player.png", g_assets.playerOk);
 
+    static const char* kBuildingKeys[10] = {
+        "smith", "carpenter", "tailor", "alchemy", "provisioner", "stable", "healer", "bank", "townhall", "house"
+    };
+    for (int i = 0; i < 10; i++) {
+        bool ok = false;
+        Texture2D t = TryLoadTexture(std::string("assets/buildings/") + kBuildingKeys[i] + ".png", ok);
+        g_assets.building[i] = { kBuildingKeys[i], t };
+        g_assets.buildingOk[i] = ok;
+    }
+    for (int i = 0; i < 10; i++) {
+        bool ok = false;
+        Texture2D t = TryLoadTexture(std::string("assets/town_buildings/") + kBuildingKeys[i] + ".png", ok);
+        g_assets.townBuilding[i] = { kBuildingKeys[i], t };
+        g_assets.townBuildingOk[i] = ok;
+    }
+    for (int i = 0; i < 10; i++) {
+        bool ok = false;
+        Texture2D t = TryLoadTexture(std::string("assets/saltmere_buildings/") + kBuildingKeys[i] + ".png", ok);
+        g_assets.saltmereBuilding[i] = { kBuildingKeys[i], t };
+        g_assets.saltmereBuildingOk[i] = ok;
+    }
+    // Phase 3 - Frostmere's building art (5 keys matching kTown3NodePositions).
+    static const char* kFrostmereBuildingKeys[5] = {
+        "bank", "healer", "provisioner", "furtrader", "smith"
+    };
+    for (int i = 0; i < 5; i++) {
+        bool ok = false;
+        Texture2D t = TryLoadTexture(std::string("assets/frostmere_buildings/") + kFrostmereBuildingKeys[i] + ".png", ok);
+        g_assets.frostmereBuilding[i] = { kFrostmereBuildingKeys[i], t };
+        g_assets.frostmereBuildingOk[i] = ok;
+    }
+    // Phase 4 - Cragmoor's building art (5 keys matching kTown4NodePositions).
+    static const char* kCragmoorBuildingKeys[5] = {
+        "bank", "healer", "provisioner", "smith", "minersguild"
+    };
+    for (int i = 0; i < 5; i++) {
+        bool ok = false;
+        Texture2D t = TryLoadTexture(std::string("assets/cragmoor_buildings/") + kCragmoorBuildingKeys[i] + ".png", ok);
+        g_assets.cragmoorBuilding[i] = { kCragmoorBuildingKeys[i], t };
+        g_assets.cragmoorBuildingOk[i] = ok;
+    }
 
     // File names match dungeon theme (emberveil/bloodtusk/sunkencrypt/wyrmscar/
     // hollowwarrens), in the same 0-4 order as kDungeons, for both the regular-monster
@@ -3063,9 +3119,12 @@ static void LoadGameAssets() {
         g_assets.bossFamily[i] = TryLoadTexture(kBossFiles[i], g_assets.bossFamilyOk[i]);
     }
 
+    g_assets.groundGrass = TryLoadTexture("assets/ground/grass.png", g_assets.groundGrassOk);
     g_assets.groundDirt = TryLoadTexture("assets/ground/dirt.png", g_assets.groundDirtOk);
     g_assets.dungeonWall = TryLoadTexture("assets/dungeon/wall.png", g_assets.dungeonWallOk);
     g_assets.dungeonFloor = TryLoadTexture("assets/dungeon/floor.png", g_assets.dungeonFloorOk);
+    g_assets.buildingDoor = TryLoadTexture("assets/buildings/door.png", g_assets.buildingDoorOk);
+    g_assets.foliage = TryLoadTexture("assets/ground/foliage.png", g_assets.foliageOk);
 
     // Per-dungeon theming - same 0-4 order as kDungeons/kMonsterFiles above.
     static const char* kThemedFloorFiles[6] = {
@@ -3085,6 +3144,7 @@ static void LoadGameAssets() {
         g_assets.dungeonWallThemed[i] = TryLoadTexture(kThemedWallFiles[i], g_assets.dungeonWallThemedOk[i]);
     }
     g_assets.hollowWarrensRug = TryLoadTexture("assets/dungeon_themed/hollowwarrens_rug.png", g_assets.hollowWarrensRugOk);
+    g_assets.hollowWarrensTorch = TryLoadTexture("assets/dungeon_themed/hollowwarrens_torch.png", g_assets.hollowWarrensTorchOk);
 
     // Per-building interior backdrop - same 0-3 order as kCraftBuildings.
     static const char* kCraftFloorFiles[4] = {
@@ -3189,6 +3249,31 @@ static void LoadGameAssets() {
         g_assets.heroSheet.castStart[3] = 0; g_assets.heroSheet.castCount[3] = 1;
     }
 
+    g_assets.doorSmith = LoadSpriteSheet("assets/village/door_smith.png", 64);
+    g_assets.doorCarpenter = LoadSpriteSheet("assets/village/door_carpenter.png", 64);
+    g_assets.doorTailor = LoadSpriteSheet("assets/village/door_tailor.png", 64);
+    g_assets.doorAlchemy = LoadSpriteSheet("assets/village/door_alchemy.png", 64);
+    g_assets.fencePost = TryLoadTexture("assets/village/fencepost.png", g_assets.fencePostOk);
+    g_assets.farmland = TryLoadTexture("assets/village/farmland.png", g_assets.farmlandOk);
+    g_assets.townFountain = TryLoadTexture("assets/village/fountain.png", g_assets.townFountainOk);
+    g_assets.townLamp = TryLoadTexture("assets/village/streetlamp.png", g_assets.townLampOk);
+    g_assets.townSignSmith = TryLoadTexture("assets/village/sign_smith.png", g_assets.townSignSmithOk);
+    g_assets.townStall1 = TryLoadTexture("assets/village/stall1.png", g_assets.townStall1Ok);
+    g_assets.townStall2 = TryLoadTexture("assets/village/stall2.png", g_assets.townStall2Ok);
+    g_assets.townStall3 = TryLoadTexture("assets/village/stall3.png", g_assets.townStall3Ok);
+    g_assets.townLumberpile = TryLoadTexture("assets/village/lumberpile.png", g_assets.townLumberpileOk);
+    g_assets.townBarrel = TryLoadTexture("assets/village/barrel.png", g_assets.townBarrelOk);
+    g_assets.townCrate = TryLoadTexture("assets/village/crate.png", g_assets.townCrateOk);
+    g_assets.townAnvil = TryLoadTexture("assets/village/anvil.png", g_assets.townAnvilOk);
+    g_assets.townStatue = TryLoadTexture("assets/village/statue.png", g_assets.townStatueOk);
+    g_assets.townAutumnBush = TryLoadTexture("assets/village/autumnbush.png", g_assets.townAutumnBushOk);
+    g_assets.townSheep = TryLoadTexture("assets/village/sheep.png", g_assets.townSheepOk);
+    g_assets.townCow = TryLoadTexture("assets/village/cow.png", g_assets.townCowOk);
+    g_assets.townChicken = TryLoadTexture("assets/village/chicken.png", g_assets.townChickenOk);
+    g_assets.townPotionPurple = TryLoadTexture("assets/village/potion_purple.png", g_assets.townPotionPurpleOk);
+    g_assets.townPotionRed = TryLoadTexture("assets/village/potion_red.png", g_assets.townPotionRedOk);
+    g_assets.townChest = TryLoadTexture("assets/village/chest.png", g_assets.townChestOk);
+    g_assets.townBookshelf = TryLoadTexture("assets/village/bookshelf.png", g_assets.townBookshelfOk);
     g_assets.spellIconOffensive = TryLoadTexture("assets/spellbook_icons/spell_offensive.png", g_assets.spellIconOffensiveOk);
     g_assets.spellIconDebuff = TryLoadTexture("assets/spellbook_icons/spell_debuff.png", g_assets.spellIconDebuffOk);
     g_assets.spellIconBuff = TryLoadTexture("assets/spellbook_icons/spell_buff.png", g_assets.spellIconBuffOk);
@@ -3216,7 +3301,94 @@ static void LoadGameAssets() {
     g_assets.gearIconGauntlet = TryLoadTexture("assets/gear_icons/gauntlet.png", g_assets.gearIconGauntletOk);
     g_assets.gearIconAmulet = TryLoadTexture("assets/gear_icons/amulet.png", g_assets.gearIconAmuletOk);
     g_assets.sunkenCryptWater = TryLoadTexture("assets/dungeon_themed/sunkencrypt_water.png", g_assets.sunkenCryptWaterOk);
+    g_assets.emberveilBrazier = TryLoadTexture("assets/dungeon_themed/emberveil_brazier.png", g_assets.emberveilBrazierOk);
 
+    g_assets.wildTree = TryLoadTexture("assets/wilderness/tree.png", g_assets.wildTreeOk);
+    g_assets.wildRock = TryLoadTexture("assets/wilderness/rock.png", g_assets.wildRockOk);
+    // Replaced 2026-09-23 with real directional sheets (Mark's "Carl" art drop,
+    // assets/wilderness_v2/creatures/) - also what the AI companion now renders as.
+    // Column counts and the two walkColsOverride cases (Panther, Wyvern - side-view
+    // rows only have 5 real frames trailed by blank padding) came from viewing each
+    // sheet directly, same as the dungeon monsters above.
+    static const char* kWildCreatureFiles[11] = {
+        "assets/wilderness_v2/creatures/dog.png", "assets/wilderness_v2/creatures/wolf.png", "assets/wilderness_v2/creatures/bear.png",
+        "assets/wilderness_v2/creatures/panther.png", "assets/wilderness_v2/creatures/bison.png", "assets/wilderness_v2/creatures/horse.png",
+        "assets/wilderness_v2/creatures/sabertooth.png", "assets/wilderness_v2/creatures/griffin.png", "assets/wilderness_v2/creatures/drake.png",
+        "assets/wilderness_v2/creatures/wyvern.png", "assets/wilderness_v2/creatures/dragon.png"
+    };
+    static const int kWildCreatureCols[11] = { 6, 8, 8, 8, 5, 8, 8, 5, 8, 6, 5 };
+    static const int kWildCreatureWalkOverride[11] = { 0, 0, 0, 5, 0, 0, 0, 0, 0, 5, 0 };
+    for (int i = 0; i < (int)kWildCreatures.size(); i++) {
+        g_assets.wildCreatureTex[i] = LoadCarlActorSheet(kWildCreatureFiles[i], kWildCreatureCols[i], 4, kWildCreatureWalkOverride[i]);
+    }
+    static const char* kWildPropFiles[10] = {
+        "assets/wilderness_props/water.png", "assets/wilderness_props/deerskull.png",
+        "assets/wilderness_props/chest.png", "assets/wilderness_props/bush.png",
+        "assets/wilderness_props/rocks.png", "assets/wilderness_props/cactus.png",
+        "assets/wilderness_props/fence.png", "assets/wilderness_props/grass.png",
+        "assets/wilderness_props/haybale.png", "assets/wilderness_props/plant.png"
+    };
+    for (int i = 0; i < 10; i++) {
+        bool ok = false;
+        g_assets.wildPropTex[i] = TryLoadTexture(kWildPropFiles[i], ok);
+        g_assets.wildPropTexOk[i] = ok;
+    }
+    static const char* kWildOreFiles[3] = {
+        "assets/wilderness/ore1.png", "assets/wilderness/ore2.png", "assets/wilderness/ore3.png"
+    };
+    for (int i = 0; i < 3; i++) {
+        bool ok = false;
+        g_assets.wildOreTex[i] = TryLoadTexture(kWildOreFiles[i], ok);
+        g_assets.wildOreTexOk[i] = ok;
+    }
+    g_assets.wildBush1 = TryLoadTexture("assets/wilderness/bush1.png", g_assets.wildBush1Ok);
+    g_assets.wildBush2 = TryLoadTexture("assets/wilderness/bush2.png", g_assets.wildBush2Ok);
+    g_assets.wildFern1 = TryLoadTexture("assets/wilderness/fern1.png", g_assets.wildFern1Ok);
+    // Replaced 2026-09-23 with real directional sheets, same drop as above - these
+    // chase the player, so DrawWildernessScreen derives real facing from movement now.
+    static const char* kWildMonsterFiles[5] = {
+        "assets/wilderness_v2/monsters/bat.png", "assets/wilderness_v2/monsters/goblin.png", "assets/wilderness_v2/monsters/wolf.png",
+        "assets/wilderness_v2/monsters/imp.png", "assets/wilderness_v2/monsters/bandit.png"
+    };
+    static const int kWildMonsterCols[5] = { 8, 5, 8, 8, 5 };
+    for (int i = 0; i < 5; i++) {
+        g_assets.wildMonsterTex[i] = LoadCarlActorSheet(kWildMonsterFiles[i], kWildMonsterCols[i]);
+    }
+    g_assets.rivalAdventurerSheet = LoadCarlActorSheet("assets/wilderness_v2/rival_adventurer.png", 8);
+
+    // Town NPCs - order matches kTownNPCs/kTown2NPCs exactly (see those arrays' own
+    // declaration for the name list). walkColsOverride covers two sheets whose Left row
+    // has fewer real frames than their nominal column count, found by viewing them
+    // directly, same as the monster/creature sheets above: Cobb (8 nominal, 6 real) and
+    // Young Petra (8 nominal, 7 real) both need their Left row's walkCount narrowed
+    // after loading since LoadCarlActorSheet only takes one uniform override.
+    static const char* kTownNPCFiles[6] = {
+        "assets/npcs_v2/old_miran.png", "assets/npcs_v2/young_petra.png", "assets/npcs_v2/wystan_baker.png",
+        "assets/npcs_v2/widow_aelith.png", "assets/npcs_v2/cobb_stableboy.png", "assets/npcs_v2/sister_meraude.png"
+    };
+    static const int kTownNPCCols[6] = { 8, 8, 5, 7, 8, 8 };
+    for (int i = 0; i < 6; i++) g_assets.townNPCSheets[i] = LoadCarlActorSheet(kTownNPCFiles[i], kTownNPCCols[i]);
+    g_assets.townNPCSheets[1].walkCount[1] = 7; // Young Petra's Left row: 7 real frames, not 8
+    g_assets.townNPCSheets[4].walkCount[1] = 6; // Cobb's Left row: 6 real frames, not 8
+    g_assets.townNPCSheets[4].walkCount[3] = 6; // Cobb's Up row: 6 real frames, not 8
+
+    static const char* kSaltmereNPCFiles[6] = {
+        "assets/npcs_v2/harbormaster_thane.png", "assets/npcs_v2/salty_bjorn.png", "assets/npcs_v2/nessa_netmender.png",
+        "assets/npcs_v2/old_corwin.png", "assets/npcs_v2/dockhand_fenn.png", "assets/npcs_v2/captain_ysolde.png"
+    };
+    static const int kSaltmereNPCCols[6] = { 8, 8, 8, 8, 8, 5 };
+    for (int i = 0; i < 6; i++) g_assets.saltmereNPCSheets[i] = LoadCarlActorSheet(kSaltmereNPCFiles[i], kSaltmereNPCCols[i]);
+    static const char* kWildEntranceFiles[6] = {
+        "assets/wilderness_entrances/sunkencrypt.png", "assets/wilderness_entrances/weaversnest.png", // [1] Phase 5
+        "assets/wilderness_entrances/wyrmscar.png", "assets/wilderness_entrances/emberveil.png", // [3] Ember Depths uses the emberveil entrance
+        "assets/wilderness_entrances/sunkencrypt.png", // [4] Frostbound Tomb aliases the crypt entrance
+        "assets/wilderness_entrances/hollowwarrens.png"
+    };
+    for (int i = 0; i < 6; i++) {
+        bool ok = false;
+        g_assets.wildEntranceTex[i] = TryLoadTexture(kWildEntranceFiles[i], ok);
+        g_assets.wildEntranceTexOk[i] = ok;
+    }
     static const char* kInnocentFiles[4] = {
         "assets/innocents/traveler.png", "assets/innocents/pilgrim.png",
         "assets/innocents/merchant.png", "assets/innocents/farmer.png"
@@ -3691,6 +3863,54 @@ static void DrawIconCentered(const Texture2D& tex, Vector2 center, float targetS
 }
 // Same as above but for one cropped frame of a sheet (srcRect, e.g. from ActorSrcRect)
 // rather than the whole texture - used by DrawWorldNode's icon path for animated
+static const Texture2D* FindBuildingTexture(const std::string& key) {
+    for (int i = 0; i < 10; i++)
+        if (g_assets.buildingOk[i] && g_assets.building[i].first == key) return &g_assets.building[i].second;
+    return nullptr;
+}
+static const Texture2D* FindTownBuildingTexture(const std::string& key) {
+    for (int i = 0; i < 10; i++)
+        if (g_assets.townBuildingOk[i] && g_assets.townBuilding[i].first == key) return &g_assets.townBuilding[i].second;
+    return nullptr;
+}
+static const Texture2D* FindSaltmereBuildingTexture(const std::string& key) {
+    for (int i = 0; i < 10; i++)
+        if (g_assets.saltmereBuildingOk[i] && g_assets.saltmereBuilding[i].first == key) return &g_assets.saltmereBuilding[i].second;
+    return nullptr;
+}
+static const Texture2D* FindFrostmereBuildingTexture(const std::string& key) {
+    for (int i = 0; i < 5; i++)
+        if (g_assets.frostmereBuildingOk[i] && g_assets.frostmereBuilding[i].first == key) return &g_assets.frostmereBuilding[i].second;
+    return nullptr;
+}
+static const Texture2D* FindCragmoorBuildingTexture(const std::string& key) { // Phase 4
+    for (int i = 0; i < 5; i++)
+        if (g_assets.cragmoorBuildingOk[i] && g_assets.cragmoorBuilding[i].first == key) return &g_assets.cragmoorBuilding[i].second;
+    return nullptr;
+}
+// One of the 4 CraftPix "village" animated doors per craft building, for a little visual
+// distinction beyond just roof color - see "Village dressing" above. Amenity buildings
+// (Provisioner/Stable/Healer/Bank/Townhall) still use the plain generic door.
+static const SpriteSheet* DoorAnimForBuilding(const std::string& key) {
+    if (key == "smith") return &g_assets.doorSmith;
+    if (key == "carpenter") return &g_assets.doorCarpenter;
+    if (key == "tailor") return &g_assets.doorTailor;
+    if (key == "alchemy") return &g_assets.doorAlchemy;
+    return nullptr;
+}
+// Picks one kWildCreatures index as a visual stand-in for a Pet of the given role -
+// used to render the AI companion (2026-09-23). Not the pet's exact tamed species:
+// `Pet` only records role/stats/name, not which of the 11 creatures it came from, so
+// this is "a believable creature for a Melee/Tank/Caster companion" rather than a
+// precise match. Wolf/Bear/Drake read as reasonably representative of their roles
+// without being the most extreme (Forest Dragon, Elder Wyvern) pick for Caster.
+static const DirSpriteSheet& WildCreatureSheetForRole(PetRole role) {
+    switch (role) {
+        case PetRole::Tank: return g_assets.wildCreatureTex[2];   // Grizzly Bear
+        case PetRole::Caster: return g_assets.wildCreatureTex[8]; // Young Drake
+        case PetRole::Melee: default: return g_assets.wildCreatureTex[1]; // Timber Wolf
+    }
+}
 // monster/creature/NPC sprites, which still want its ring/plate/label chrome.
 static void DrawIconCenteredRect(const Texture2D& tex, Rectangle srcRect, Vector2 center, float targetSize, Color tint) {
     float srcW = std::fabs(srcRect.width), srcH = std::fabs(srcRect.height);
@@ -3720,6 +3940,30 @@ static void DrawTiledGround(const Texture2D* tex, Rectangle screenArea, Vector2 
             DrawTextureEx(*tex, { x, y }, 0.0f, scale, tint);
 }
 
+
+// Draws one wall band - a rectangle given in WORLD coordinates - tiled with `tex`,
+// converted to screen space via the camera. Used four times (one per side) to frame a
+// room; each call is a no-op if that band is currently scrolled off-screen. Tiles from
+// the band's own resolved screen position (NOT via DrawTiledGround's camera-relative
+// math - that would double-apply the camera offset, since WorldToScreen already baked
+// it in here). No internal scissor (see DrawTiledGround's note).
+static void DrawWallBand(Rectangle worldBand, Vector2 cameraTopLeft, const Texture2D* tex,
+                           float worldTileSize, Color fillColor) {
+    Vector2 topLeft = WorldToScreen({ worldBand.x, worldBand.y }, cameraTopLeft);
+    Rectangle screenBand = { topLeft.x, topLeft.y, worldBand.width, worldBand.height };
+    if (screenBand.x + screenBand.width < kViewport.x || screenBand.x > kViewport.x + kViewport.width ||
+        screenBand.y + screenBand.height < kViewport.y || screenBand.y > kViewport.y + kViewport.height) return;
+    if (!tex) { DrawRectangleRec(screenBand, fillColor); }
+    else {
+        float scale = worldTileSize / (float)tex->width;
+        for (float y = screenBand.y; y < screenBand.y + screenBand.height; y += worldTileSize)
+            for (float x = screenBand.x; x < screenBand.x + screenBand.width; x += worldTileSize)
+                DrawTextureEx(*tex, { x, y }, 0.0f, scale, WHITE);
+    }
+    // A 1px solid black outline used to be drawn here (road/path/plaza edges) - Mark
+    // went back and forth on it a few times this project (2px/faded -> too thick,
+    // thinnest-possible 1px -> still didn't read right) and asked for it gone entirely.
+}
 
 // A static "you're inside this building" backdrop, added 2026-09-21 - a thin wall
 // band along the top plus a floor fill for the rest of the content area, drawn behind
@@ -3776,6 +4020,145 @@ static void DrawInfoLine(const char* text, int x, int y, int fontSize, Color col
 // Wilderness screen, just reused here for variety instead of one repeated bush;
 // 5=autumn bush, "Mage City Arcanos" pack, see the GameAssets comment above - a splash
 // of warm color instead of one more green bush).
+static void DrawStretched(const Texture2D& tex, Rectangle dest, Color tint) {
+    Rectangle src = { 0, 0, (float)tex.width, (float)tex.height };
+    DrawTexturePro(tex, src, dest, { 0, 0 }, 0.0f, tint);
+}
+
+static void DrawBuildingNode(Vector2 screenPos, Color roofColor, const std::string& label, bool nearPlayer,
+                               const std::string& sublabel, const Texture2D* signIcon,
+                               const SpriteSheet* doorAnim = nullptr, const Texture2D* realBuildingTex = nullptr,
+                               Color bodyTint = WHITE, float scale = 1.0f) {
+    float kNodeRadius = ::kNodeRadius * scale; // shadows the global on purpose - every size
+                                                 // below already reads "kNodeRadius", so scaling
+                                                 // it locally scales the whole function for free
+                                                 // without duplicating every line.
+    if (realBuildingTex) {
+        // Real building art (CraftPix "Tropical Medieval City" set, assets/town_buildings/)
+        // in place of the generic wall+roof+door composite below. Scaled to a consistent
+        // on-screen footprint regardless of each building's native aspect ratio, and
+        // anchored at its bottom-center - screenPos is the tile's ground point, and
+        // these images have a roof going up from there, not a centered blob. bodyTint
+        // defaults to WHITE (no change) for every existing building; the House uses it
+        // for its chosen hue (see kHouseHues/DrawTownScreen).
+        float targetSize = kNodeRadius * 1.89f; // 1.8x + 5%, after that felt slightly too small
+        float scale = targetSize / (float)std::max(realBuildingTex->width, realBuildingTex->height);
+        float rw = realBuildingTex->width * scale, rh = realBuildingTex->height * scale;
+        Vector2 topLeft = { screenPos.x - rw / 2.0f, screenPos.y + kNodeRadius * 0.6f - rh };
+        bool onScreenReal = topLeft.x + rw > kViewport.x - 20 && topLeft.x < kViewport.x + kViewport.width + 20 &&
+                              topLeft.y + rh > kViewport.y - 40 && topLeft.y < kViewport.y + kViewport.height + 40;
+        if (!onScreenReal) return;
+        DrawTextureEx(*realBuildingTex, topLeft, 0.0f, scale, bodyTint);
+        if (nearPlayer) {
+            Rectangle glow = { topLeft.x - 4, topLeft.y - 4, rw + 8, rh + 8 };
+            DrawRectangleRoundedLines(glow, 0.15f, 4, kColorSlate);
+        }
+        int rtw = MeasureUIText(label.c_str(), 13);
+        Rectangle rLabelBg = { screenPos.x - rtw / 2.0f - 4, topLeft.y + rh + 2, (float)rtw + 8, 14 };
+        DrawRectangleRec(rLabelBg, Fade(kColorPanelBg, 0.9f));
+        DrawUIText(label.c_str(), (int)screenPos.x - rtw / 2, (int)(topLeft.y + rh + 4), 13, kColorText);
+        if (!sublabel.empty()) {
+            int rstw = MeasureUIText(sublabel.c_str(), 11);
+            DrawUIText(sublabel.c_str(), (int)screenPos.x - rstw / 2, (int)(topLeft.y + rh + 16), 11, Fade(kColorText, 0.85f));
+        }
+        return;
+    }
+    float w = kNodeRadius * 2.0f, h = kNodeRadius * 1.5f;
+    Rectangle wallRect = { screenPos.x - w / 2.0f, screenPos.y - h / 2.0f + kNodeRadius * 0.3f, w, h };
+    bool onScreen = wallRect.x + wallRect.width > kViewport.x - 20 && wallRect.x < kViewport.x + kViewport.width + 20 &&
+                     wallRect.y + wallRect.height > kViewport.y - 40 && wallRect.y < kViewport.y + kViewport.height + 40;
+    if (!onScreen) return;
+    if (g_assets.dungeonWallOk) DrawStretched(g_assets.dungeonWall, wallRect, WHITE);
+    else DrawRectangleRec(wallRect, Fade(GRAY, 0.6f));
+    // Roof - a plain triangle, no texture needed; keeps the building's original color
+    // as an at-a-glance identity, same role the colored circle used to play.
+    Vector2 roofLeft = { wallRect.x - 8, wallRect.y };
+    Vector2 roofRight = { wallRect.x + wallRect.width + 8, wallRect.y };
+    Vector2 roofTop = { screenPos.x, wallRect.y - h * 0.55f };
+    DrawTriangle(roofLeft, roofTop, roofRight, roofColor);
+
+    if (doorAnim && doorAnim->ok) {
+        // A little life on approach: shows its closed (first) frame from a distance and
+        // its open (last) frame once you're actually near - see the CraftPix "village"
+        // animated door sheets this is built from, assets/village/door_*.png.
+        float doorW = w * 0.3f, doorH = h * 0.55f;
+        int frame = nearPlayer ? doorAnim->frames - 1 : 0;
+        float frameW = (float)doorAnim->tex.width / doorAnim->frames;
+        Rectangle src = { frame * frameW, 0, frameW, (float)doorAnim->tex.height };
+        Rectangle dest = { screenPos.x - doorW / 2.0f, wallRect.y + wallRect.height - doorH, doorW, doorH };
+        DrawTexturePro(doorAnim->tex, src, dest, { 0, 0 }, 0.0f, WHITE);
+    } else if (g_assets.buildingDoorOk) {
+        float doorW = w * 0.3f, doorH = h * 0.55f;
+        DrawStretched(g_assets.buildingDoor, { screenPos.x - doorW / 2.0f, wallRect.y + wallRect.height - doorH, doorW, doorH }, WHITE);
+    }
+
+    if (nearPlayer) {
+        Rectangle glow = { wallRect.x - 4, wallRect.y - 4, wallRect.width + 8, wallRect.height + 8 };
+        DrawRectangleRoundedLines(glow, 0.15f, 4, kColorSlate);
+    }
+
+    if (signIcon) {
+        // Backing plate removed 2026-09-23 at Mark's request ("remove the circle behind
+        // all of the images") - was originally added because a translucent backing let
+        // grass bleed through and muddy contrast; if a specific icon turns out hard to
+        // read against a specific ground color again, that's the thing to revisit.
+        Vector2 signPos = { screenPos.x, wallRect.y - h * 0.78f };
+        DrawIconCentered(*signIcon, signPos, kNodeRadius * 0.7f, WHITE);
+    }
+
+    // Label text on its own solid plate too, for the same reason - dark text alone
+    // reads inconsistently against a busy grass texture.
+    int tw = MeasureUIText(label.c_str(), 13);
+    Rectangle labelBg = { screenPos.x - tw / 2.0f - 4, (float)(wallRect.y + wallRect.height + 2), (float)tw + 8, 14 };
+    DrawRectangleRec(labelBg, Fade(kColorPanelBg, 0.9f));
+    DrawUIText(label.c_str(), (int)screenPos.x - tw / 2, (int)(wallRect.y + wallRect.height + 4), 13, kColorText);
+    if (!sublabel.empty()) {
+        int stw = MeasureUIText(sublabel.c_str(), 11);
+        DrawUIText(sublabel.c_str(), (int)screenPos.x - stw / 2, (int)(wallRect.y + wallRect.height + 16), 11, Fade(kColorText, 0.85f));
+    }
+}
+
+static void DrawRoadToPlaza(Vector2 buildingPos, Rectangle plaza, Vector2 camera, const Texture2D* dirtTex) {
+    const float kRoadWidth = 28.0f * kTownVisualScale;
+    const Color kRoadFallback = { 196, 164, 100, 255 };
+    bool insideX = buildingPos.x >= plaza.x && buildingPos.x <= plaza.x + plaza.width;
+    bool insideY = buildingPos.y >= plaza.y && buildingPos.y <= plaza.y + plaza.height;
+    if (insideX && insideY) return; // already standing on the plaza
+
+    if (insideX) {
+        float plazaEdgeY = (buildingPos.y < plaza.y) ? plaza.y : plaza.y + plaza.height;
+        float top = std::min(buildingPos.y, plazaEdgeY), bottom = std::max(buildingPos.y, plazaEdgeY);
+        DrawWallBand({ buildingPos.x - kRoadWidth / 2, top, kRoadWidth, bottom - top }, camera, dirtTex, 48.0f * kTownVisualScale, kRoadFallback);
+    } else if (insideY) {
+        float plazaEdgeX = (buildingPos.x < plaza.x) ? plaza.x : plaza.x + plaza.width;
+        float left = std::min(buildingPos.x, plazaEdgeX), right = std::max(buildingPos.x, plazaEdgeX);
+        DrawWallBand({ left, buildingPos.y - kRoadWidth / 2, right - left, kRoadWidth }, camera, dirtTex, 48.0f * kTownVisualScale, kRoadFallback);
+    } else {
+        // Bend at the plaza's CENTER x, not its edge - this lands exactly on the
+        // straight spoke already drawn by the edge-mid building sharing this row
+        // (e.g. Carpenter's spoke for the grid used today), so a corner's road
+        // merges into that spoke instead of running its own parallel line a few
+        // tiles away. Without this, each side of the grid drew 3 near-parallel
+        // road strips (the straight spoke plus each corner's own edge-bend) in a
+        // narrow gap - reads as a cluttered "road pile-up," not a real network.
+        float plazaCenterX = plaza.x + plaza.width / 2.0f;
+        float plazaEdgeY = (buildingPos.y < plaza.y) ? plaza.y : plaza.y + plaza.height;
+        float left = std::min(buildingPos.x, plazaCenterX), right = std::max(buildingPos.x, plazaCenterX);
+        DrawWallBand({ left, buildingPos.y - kRoadWidth / 2, right - left, kRoadWidth }, camera, dirtTex, 48.0f * kTownVisualScale, kRoadFallback);
+        float top = std::min(buildingPos.y, plazaEdgeY), bottom = std::max(buildingPos.y, plazaEdgeY);
+        DrawWallBand({ plazaCenterX - kRoadWidth / 2, top, kRoadWidth, bottom - top }, camera, dirtTex, 48.0f * kTownVisualScale, kRoadFallback);
+    }
+}
+
+static void DrawWildPath(Vector2 from, Vector2 to, Vector2 camera, const Texture2D* dirtTex) {
+    const float kPathWidth = 24.0f;
+    const Color kPathFallback = { 196, 164, 100, 255 };
+    float left = std::min(from.x, to.x), right = std::max(from.x, to.x);
+    float top = std::min(from.y, to.y), bottom = std::max(from.y, to.y);
+    DrawWallBand({ from.x - kPathWidth / 2, top, kPathWidth, bottom - top }, camera, dirtTex, 48.0f, kPathFallback);
+    DrawWallBand({ left, to.y - kPathWidth / 2, right - left, kPathWidth }, camera, dirtTex, 48.0f, kPathFallback);
+}
+
 struct TownFoliage { Vector2 pos; int variant; };
 // Repositioned 2026-09-21 for the 250->300-unit grid spacing bump (see kTownNodePositions'
 // comment) - every coordinate run through the same piecewise transform used for the grid
@@ -3787,7 +4170,26 @@ static const std::array<TownFoliage, 44> kFoliagePositions = {{
     {TS(296, 272), 0}, {TS(404, 320), 1}, {TS(704, 272), 2}, {TS(632, 416), 3},
     {TS(272, 632), 4}, {TS(416, 704), 0}, {TS(716, 680), 1}, {TS(632, 596), 2},
     {TS(344, 416), 3}, {TS(248, 320), 4}, {TS(584, 368), 0}, {TS(680, 320), 1},
+// Stretches a texture to exactly fill `dest`, no tiling - used for small composite
+// pieces (a building's wall panel, its door) where a single stretched image reads
+// fine at this scale and avoids any tiling/clipping complexity.
+
+// A Town building: a stone wall panel with a door, a colored roof (keeps each
+// building's existing color identity), and its shop-icon "sign" floating above -
+// replacing the flat colored-circle-with-icon look used for monsters/paths. Falls
+// back to plain shapes for any piece whose texture didn't load.
+
+// Connects a building to the town plaza with a simple cardinal-direction dirt path -
+// a straight line if the building already lines up with the plaza on one axis, an
+// L-shaped bend (horizontal then vertical) otherwise. No road drawn if the building
+// is already inside the plaza. Avoids any rotation math by only ever using
+// axis-aligned bands (reuses DrawWallBand), which keeps this simple and matches the
+// blocky, cardinal-direction feel of the rest of this tile-based world.
     {TS(260, 680), 2}, {TS(320, 740), 3}, {TS(680, 740), 4}, {TS(740, 656), 0},
+// Same L-bend idea as DrawRoadToPlaza but between two arbitrary points instead of a
+// point and a rectangle - used to connect the Wilderness's Return Gate to each dungeon
+// entrance, so the map reads as a place with real paths through it (matching Town's
+// road network) instead of open grass with icons scattered on it.
     // North of the grid (above the top building row, y < 150)
     {TS(60, 90), 1}, {TS(110, 140), 2}, {TS(344, 80), 5}, {TS(392, 120), 4},
     {TS(632, 90), 0}, {TS(680, 130), 1}, {TS(900, 80), 2}, {TS(950, 120), 3},
@@ -3906,6 +4308,34 @@ static void DrawCapitalProp3D(int kind, float x, float z, float size, float t) {
 // Pier, beached boat, rope coils, drying-net racks, anchor monument, and
 // waving pennant poles - all primitive-drawn, no new art. Mirrors the
 // Phase 1 kCapitalProps approach: own table, drawn only for Saltmere,
+static void DrawCapitalProp2D(int kind, Vector2 sp, float size, float t) {
+    float s = size / 32.0f;
+    if (kind == 18) { // banner: dark pole, crimson swallowtail cloth, gold emblem
+        Color wood = { 92, 66, 42, 255 }, cloth = { 150, 30, 35, 255 }, gold = { 212, 175, 90, 255 };
+        DrawRectangle((int)(sp.x - 2.0f * s), (int)(sp.y - 30.0f * s), (int)(4.0f * s), (int)(34.0f * s), wood);
+        DrawRectangle((int)(sp.x - 2.0f * s), (int)(sp.y - 32.0f * s), (int)(24.0f * s), (int)(4.0f * s), wood);
+        DrawRectangle((int)(sp.x + 1.0f * s), (int)(sp.y - 28.0f * s), (int)(8.0f * s), (int)(24.0f * s), cloth);
+        DrawRectangle((int)(sp.x + 12.0f * s), (int)(sp.y - 28.0f * s), (int)(8.0f * s), (int)(24.0f * s), cloth);
+        Vector2 c = { sp.x + 10.5f * s, sp.y - 18.0f * s };
+        float r = 3.5f * s;
+        DrawTriangle({ c.x, c.y - r }, { c.x - r, c.y }, { c.x, c.y + r }, gold);
+        DrawTriangle({ c.x, c.y - r }, { c.x + r, c.y }, { c.x, c.y + r }, gold);
+        DrawRectangle((int)(sp.x + 1.0f * s), (int)(sp.y - 6.0f * s), (int)(19.0f * s), (int)(2.0f * s), gold);
+    } else { // brazier: stone base + bowl + flickering flame + warm glow
+        Color stone = { 120, 118, 125, 255 }, dark = { 60, 58, 62, 255 };
+        Color glow = { 255, 180, 90, 255 };
+        DrawCircleV(sp, 13.0f * s, Fade(glow, 0.10f));
+        DrawCircleV(sp, 8.0f * s, Fade(glow, 0.16f));
+        DrawEllipse((int)sp.x, (int)sp.y, 9.0f * s, 3.5f * s, stone);
+        DrawRectangle((int)(sp.x - 2.5f * s), (int)(sp.y - 12.0f * s), (int)(5.0f * s), (int)(10.0f * s), stone);
+        DrawEllipse((int)sp.x, (int)(sp.y - 12.0f * s), 8.0f * s, 3.0f * s, dark);
+        float f = 1.0f + 0.22f * sinf(t * 11.0f + sp.x * 0.7f);
+        DrawTriangle({ sp.x - 4.5f * s, sp.y - 12.0f * s }, { sp.x + 4.5f * s, sp.y - 12.0f * s },
+                     { sp.x, sp.y - (12.0f + 11.0f * f) * s }, Color{ 230, 110, 30, 255 });
+        DrawTriangle({ sp.x - 2.5f * s, sp.y - 12.0f * s }, { sp.x + 2.5f * s, sp.y - 12.0f * s },
+                     { sp.x, sp.y - (12.0f + 7.0f * f) * s }, Color{ 250, 210, 90, 255 });
+    }
+}
 // in both the 2D and 3D town views (plus the wilderness docks landmark).
 // ---------------------------------------------------------------------
 struct CoastProp { Vector2 pos; int kind; float size; }; // 20=pier 21=boat 22=rope 23=netrack 24=anchor 25=pennant
@@ -3928,6 +4358,51 @@ static const std::array<CoastProp, 3> kSaltDocks = {{
     {WP(2800, 1450), 20, 48.0f}, {WP(2720, 1480), 21, 44.0f}, {WP(2760, 1420), 22, 20.0f},
 }};
 
+
+static void DrawCoastProp2D(int kind, Vector2 sp, float size, float t) {
+    float s = size / 32.0f;
+    Color wood = { 110, 82, 55, 255 }, woodDk = { 80, 58, 38, 255 };
+    Color ropeC = { 178, 150, 105, 255 }, netC = { 200, 180, 140, 255 };
+    Color ironDk = { 70, 72, 78, 255 };
+    if (kind == 20) { // pier: posts + plank deck
+        for (int i = -1; i <= 1; i++)
+            DrawRectangle((int)(sp.x + (float)i * 22.0f * s - 2.5f * s), (int)(sp.y - 6.0f * s),
+                          (int)(5.0f * s), (int)(16.0f * s), woodDk);
+        for (int i = 0; i < 4; i++)
+            DrawRectangle((int)(sp.x - 30.0f * s), (int)(sp.y - 14.0f * s + (float)i * 7.0f * s),
+                          (int)(60.0f * s), (int)(5.5f * s), (i % 2 == 0) ? wood : woodDk);
+    } else if (kind == 21) { // beached boat: hull + inner + thwart
+        DrawEllipse((int)sp.x, (int)sp.y, 26.0f * s, 12.0f * s, woodDk);
+        DrawEllipse((int)sp.x, (int)(sp.y - 2.0f * s), 21.0f * s, 8.5f * s, wood);
+        DrawEllipse((int)sp.x, (int)(sp.y - 2.0f * s), 17.0f * s, 6.0f * s, Color{ 60, 44, 30, 255 });
+        DrawRectangle((int)(sp.x - 14.0f * s), (int)(sp.y - 4.0f * s), (int)(28.0f * s), (int)(3.0f * s), woodDk);
+    } else if (kind == 22) { // rope coil: concentric rings
+        for (int r = 3; r >= 1; r--) DrawCircleLines((int)sp.x, (int)sp.y, (float)r * 5.0f * s, ropeC);
+        DrawCircleV(sp, 2.5f * s, ropeC);
+    } else if (kind == 23) { // drying-net rack: posts + crosshatched net
+        DrawRectangle((int)(sp.x - 20.0f * s), (int)(sp.y - 26.0f * s), (int)(4.0f * s), (int)(30.0f * s), woodDk);
+        DrawRectangle((int)(sp.x + 16.0f * s), (int)(sp.y - 26.0f * s), (int)(4.0f * s), (int)(30.0f * s), woodDk);
+        DrawRectangle((int)(sp.x - 20.0f * s), (int)(sp.y - 24.0f * s), (int)(40.0f * s), (int)(22.0f * s), Fade(netC, 0.85f));
+        for (int i = 0; i <= 4; i++) {
+            float lx = sp.x - 20.0f * s + (float)i * 10.0f * s;
+            DrawLine((int)lx, (int)(sp.y - 24.0f * s), (int)(lx + 10.0f * s), (int)(sp.y - 2.0f * s), Color{ 150, 128, 95, 255 });
+            DrawLine((int)lx, (int)(sp.y - 2.0f * s), (int)(lx + 10.0f * s), (int)(sp.y - 24.0f * s), Color{ 150, 128, 95, 255 });
+        }
+    } else if (kind == 24) { // anchor: ring + shank + arms + flukes
+        DrawCircleLines((int)sp.x, (int)(sp.y - 20.0f * s), 5.0f * s, ironDk);
+        DrawRectangle((int)(sp.x - 2.0f * s), (int)(sp.y - 16.0f * s), (int)(4.0f * s), (int)(28.0f * s), ironDk);
+        DrawRectangle((int)(sp.x - 14.0f * s), (int)(sp.y + 6.0f * s), (int)(28.0f * s), (int)(4.0f * s), ironDk);
+        DrawTriangle({ sp.x - 14.0f * s, sp.y + 8.0f * s }, { sp.x - 8.0f * s, sp.y + 8.0f * s },
+                     { sp.x - 14.0f * s, sp.y - 2.0f * s }, ironDk);
+        DrawTriangle({ sp.x + 14.0f * s, sp.y + 8.0f * s }, { sp.x + 8.0f * s, sp.y + 8.0f * s },
+                     { sp.x + 14.0f * s, sp.y - 2.0f * s }, ironDk);
+    } else if (kind == 25) { // pennant pole: pole + waving pennant
+        DrawRectangle((int)(sp.x - 2.0f * s), (int)(sp.y - 30.0f * s), (int)(4.0f * s), (int)(34.0f * s), woodDk);
+        float w = sinf(t * 3.0f + sp.x * 0.5f) * 3.0f * s;
+        DrawTriangle({ sp.x + 2.0f * s, sp.y - 30.0f * s }, { sp.x + 2.0f * s, sp.y - 20.0f * s },
+                     { sp.x + 20.0f * s, sp.y - 25.0f * s + w }, Color{ 40, 110, 150, 255 });
+    }
+}
 
 static void DrawCoastProp3D(int kind, float x, float z, float size, float t) {
     float s = size / 32.0f;
@@ -4716,6 +5191,20 @@ static void TryStartGather(GameState& s, const std::string& resourceKey, float s
     if (resourceKey == "wood") PlaySfx(SfxId::Chop); else if (resourceKey != "fish") PlaySfx(SfxId::Mine); // (2026-09-28)
     s.gatherDuration = seconds;
     s.logLine = (resourceKey == "richore") ? "Mining the rich vein..." : "Gathering " + resourceKey + "..."; // Phase 4
+}
+static void ToggleAutoGather(GameState& s) {
+    if (s.autoGather) { s.autoGather = false; s.logLine = "Auto-gather stopped."; return; }
+    std::string next = NextAutoGatherType(s);
+    if (next.empty()) { s.logLine = "Mining and Lumberjacking are already at 100."; return; }
+    float skillVal = (next == "wood") ? s.lumberjacking : s.mining;
+    if (skillVal < kAutoGatherMinSkill) {
+        s.logLine = "Auto-gather requires " + std::to_string((int)kAutoGatherMinSkill) +
+                     " " + (next == "wood" ? "Lumberjacking" : "Mining") + " - gather manually until then.";
+        return;
+    }
+    s.autoGather = true;
+    s.logLine = "Auto-gather started.";
+    if (!s.gatheringResource.has_value()) TryStartGather(s, next);
 }
 
 
@@ -7400,7 +7889,7 @@ static void SaveGame(const GameState& s) {
         << "\ntaskKind=" << s.taskKind << "\ntaskWhat=" << s.taskWhat << "\ntaskNeed=" << s.taskNeed << "\ntaskHave=" << s.taskHave
         << "\ntaskReward=" << s.taskReward << "\ntaskSeed=" << s.taskSeed << "\nthievesGuild=" << (s.thievesGuild ? 1 : 0) << "\n";
     out << "optHideWyrm=" << (s.optHideWyrm ? 1 : 0) << "\noptHideDungeonBoss=" << (s.optHideDungeonBoss ? 1 : 0)
-        << "\noptTapWalk=" << (s.optTapWalk ? 1 : 0) << "\noptAlwaysDay=" << (s.optAlwaysDay ? 1 : 0) << "\noptClassicBody=" << (s.optClassicBody ? 1 : 0)
+        << "\noptClassic2D=" << (s.optClassic2D ? 1 : 0) << "\noptTapWalk=" << (s.optTapWalk ? 1 : 0) << "\noptAlwaysDay=" << (s.optAlwaysDay ? 1 : 0) << "\noptClassicBody=" << (s.optClassicBody ? 1 : 0)
         << "\noptSfx=" << (s.optSfx ? 1 : 0) << "\noptMusic=" << (s.optMusic ? 1 : 0) << "\n";
     out << "optCalmMusic=" << (s.optCalmMusic ? 1 : 0) << "\noptMusicVol=" << s.optMusicVol << "\noptSfxVol=" << s.optSfxVol << "\n";
     out << "optOnline=" << (s.optOnline ? 1 : 0) << "\n"; // (2026-09-29) multiplayer
@@ -7576,6 +8065,7 @@ static bool LoadGame(GameState& s) {
                 s.dungeonXP = { old[2], old[1], old[3], 0, old[5], old[4] };
             } else for (size_t i = 0; i < p.size() && i < s.dungeonXP.size(); i++) s.dungeonXP[i] = std::atoi(p[i].c_str());
         }
+        else if (key == "optClassic2D") s.optClassic2D = std::atoi(val.c_str()) != 0;
         else if (key == "hp") s.hp = std::atoi(val.c_str());
         else if (key == "maxHp") s.maxHp = std::atoi(val.c_str());
         else if (key == "str") s.str = std::atoi(val.c_str());
@@ -8090,6 +8580,20 @@ static void TryBuyPremadeItem(GameState& s, int buildingIdx, int recipeIdx) {
     s.backpack.push_back(item);
     s.logLine = "Bought " + item.name + " for " + std::to_string(price) + "g.";
 }
+// Player housing - ported from the JS's buyHouseTier()/setHouseHue()/setHouseName()/
+static void BuyHouseTier(GameState& s, int targetIdx) {
+    if (targetIdx <= s.houseTierIdx || targetIdx >= (int)kHouseTiers.size()) return;
+    int cost = kHouseTiers[targetIdx].cost - kHouseTiers[s.houseTierIdx].cost;
+    if (!CanAfford(s, cost)) return;
+    PayGold(s, cost);
+    s.houseTierIdx = targetIdx;
+    s.logLine = "Purchased a " + kHouseTiers[targetIdx].name + " for " + std::to_string(cost) + " gold.";
+}
+static void SetHouseHue(GameState& s, int hueIdx) {
+    if (hueIdx < 0 || hueIdx >= kHouseTiers[s.houseTierIdx].hueOptions) return;
+    s.houseHue = hueIdx;
+}
+
 // Alchemy's Buy tab: potions have no quality scaling at all (see TryCraftPotion's own
 // comment), so this is just the same potion at a flat markup over its reagent cost -
 // no "Standard" tier question to resolve here.
@@ -8100,6 +8604,7 @@ static void TryBuyPremadePotion(GameState& s, int recipeIdx) {
     int price = VendorPriceFor(r);
     if (!CanAfford(s, price)) { s.logLine = "Not enough gold for a " + r.name + " (" + std::to_string(price) + "g)."; return; }
     PayGold(s, price);
+// buildHouseModule()/upgradeHouseModule() (see kHouseTiers/kHouseHues/kHomeModuleDefs).
     auto stack = std::find_if(s.potions.begin(), s.potions.end(), [&](const PotionStack& p) { return p.name == r.name; });
     if (stack == s.potions.end()) s.potions.push_back({ r.name, r.category, r.power, 1 });
     else stack->count += 1;
@@ -8108,6 +8613,32 @@ static void TryBuyPremadePotion(GameState& s, int recipeIdx) {
 
 // JS usePotion(): heal potions restore HP anytime; stamina potions are brewable but
 // have nothing to restore here (no stamina stat in this scaffold - see header note).
+static int BuiltHouseModuleCount(const GameState& s) {
+    int n = 0;
+    for (int lvl : s.houseModuleLevel) if (lvl > 0) n++;
+    return n;
+}
+static void BuildHouseModule(GameState& s, int moduleIdx) {
+    if (moduleIdx < 0 || moduleIdx >= (int)kHomeModuleDefs.size()) return;
+    if (s.houseModuleLevel[moduleIdx] > 0) return;
+    if (BuiltHouseModuleCount(s) >= kHouseTiers[s.houseTierIdx].moduleSlots) return;
+    int cost = kHomeModuleLevels[0].cost;
+    if (!CanAfford(s, cost)) return;
+    PayGold(s, cost);
+    s.houseModuleLevel[moduleIdx] = 1;
+    s.logLine = "Built a " + kHomeModuleDefs[moduleIdx].label + " onto your home for " + std::to_string(cost) + " gold.";
+}
+static void UpgradeHouseModule(GameState& s, int moduleIdx) {
+    if (moduleIdx < 0 || moduleIdx >= (int)kHomeModuleDefs.size()) return;
+    int current = s.houseModuleLevel[moduleIdx];
+    if (current <= 0 || current >= (int)kHomeModuleLevels.size()) return;
+    int cost = kHomeModuleLevels[current].cost; // levels are 1-based; index by current = next level's cost entry
+    if (!CanAfford(s, cost)) return;
+    PayGold(s, cost);
+    s.houseModuleLevel[moduleIdx] = current + 1;
+    s.logLine = "Upgraded your " + kHomeModuleDefs[moduleIdx].label + " to level " + std::to_string(current + 1) +
+                 " for " + std::to_string(cost) + " gold.";
+}
 static void DrinkPotion(GameState& s, int potionIdx) {
     if (potionIdx < 0 || potionIdx >= (int)s.potions.size()) return;
     PotionStack& p = s.potions[potionIdx];
@@ -8863,6 +9394,22 @@ static void RivalStartStalk(GameState& s) {
 // never touched), plus one random backpack item on the ordinary-loss path - the
 // murderer-loss path already strips the whole backpack, so the empty check skips it
 // there naturally. Called AFTER the loss function so it appends to that log line.
+static const Texture2D* WildFoliageIcon(int variant) {
+    switch (variant) {
+        case 0: return g_assets.wildBush1Ok ? &g_assets.wildBush1 : nullptr;
+        case 1: return g_assets.wildBush2Ok ? &g_assets.wildBush2 : nullptr;
+        case 2: return g_assets.wildFern1Ok ? &g_assets.wildFern1 : nullptr;
+        case 3: return g_assets.wildTreeOk ? &g_assets.wildTree : nullptr;
+        case 4: return g_assets.wildRockOk ? &g_assets.wildRock : nullptr;
+        default: {
+            int propIdx = variant - 5; // 5..14 -> wildPropTex[0..9]
+            if (propIdx >= 0 && propIdx < (int)g_assets.wildPropTex.size() && g_assets.wildPropTexOk[propIdx])
+                return &g_assets.wildPropTex[propIdx];
+            return nullptr;
+        }
+    }
+}
+
 static void RivalCorpseLoot(GameState& s) {
     s.rivalKillsOnPlayer++;
     int loot = (int)std::round(s.gold * kRivalCorpseLootPct);
@@ -9630,6 +10177,18 @@ static void UpdateGuildOffscreen(GameState& s, float dt) {
     s.rivalAutoEngage = false;
 }
 
+static void DrawTiledRect(const Texture2D* tex, Rectangle worldRect, Vector2 camera, float worldTileSize, Color fillColor, Color tint = WHITE) {
+    Vector2 topLeft = WorldToScreen({ worldRect.x, worldRect.y }, camera);
+    Rectangle screenRect = { topLeft.x, topLeft.y, worldRect.width, worldRect.height };
+    if (!tex) { DrawRectangleRec(screenRect, fillColor); return; }
+    float scale = worldTileSize / (float)tex->width;
+    float startX = screenRect.x - std::fmod(worldRect.x, worldTileSize);
+    float startY = screenRect.y - std::fmod(worldRect.y, worldTileSize);
+    for (float y = startY; y < screenRect.y + screenRect.height; y += worldTileSize)
+        for (float x = startX; x < screenRect.x + screenRect.width; x += worldTileSize)
+            DrawTextureEx(*tex, { x, y }, 0.0f, scale, tint);
+}
+
 static void UpdateRivalRoaming(GameState& s, float dt) {
     if (s.wildEngaged.has_value() && s.wildEngaged->isRival) return;
     // Ghosts are beneath the red's notice - break off any hunt/stalk, patrol instead.
@@ -9709,6 +10268,12 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
             // the player sharply reversed direction since the sprint began.
             bool stuck = (s.rivalSprintStartDist - distNow) < kRivalSprintStuckEps;
             float cv = std::sqrt(s.rivalPlayerVel.x * s.rivalPlayerVel.x + s.rivalPlayerVel.y * s.rivalPlayerVel.y);
+// Draws `tex` tiled within `worldRect` (converted to screen space via `camera`), phase-
+// aligned to the world grid (not the rect's own corner) so adjacent rects tile
+// seamlessly. Deliberately doesn't scissor to its own bounds - every caller already
+// has an outer scissor active, and nesting scissor calls breaks it (raylib's
+// EndScissorMode() disables scissoring entirely rather than restoring the outer one) -
+// so tiles may overhang a rect's edge by a fraction of a tile into neighboring wall.
             float sv = std::sqrt(s.rivalSprintStartVel.x * s.rivalSprintStartVel.x +
                                  s.rivalSprintStartVel.y * s.rivalSprintStartVel.y);
             bool juked = false;
@@ -9765,6 +10330,15 @@ static void UpdateRivalRoaming(GameState& s, float dt) {
 // pair-hunt roll that makes two blades jump you at once. Called once per frame
 // per blade from DrawWildernessScreen, right after UpdateRivalRoaming (which owns
 // the shared s.rivalPlayerVel tracking the blades read).
+static void DrawDyingWorldNode(Vector2 screenPos, float radius, const Texture2D* icon,
+                               Color iconTint, const Rectangle* iconSrcRect, float iconScaleMul) {
+    bool onScreen = screenPos.x > kViewport.x - radius * 2 && screenPos.x < kViewport.x + kViewport.width + radius * 2 &&
+                     screenPos.y > kViewport.y - radius * 2 && screenPos.y < kViewport.y + kViewport.height + radius * 2;
+    if (!onScreen || !icon) return;
+    if (iconSrcRect) DrawIconCenteredRect(*icon, *iconSrcRect, screenPos, radius * 1.5f * iconScaleMul, iconTint);
+    else DrawIconCentered(*icon, screenPos, radius * 1.5f * iconScaleMul, iconTint);
+}
+
 static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
     auto& b = s.blades[bi];
     if (s.wildEngaged.has_value() && s.wildEngaged->bladeIdx == bi) return;
@@ -9844,6 +10418,10 @@ static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
         // you can be pulled in; the champion never pair-hunts.
         int partner = -1;
         if (RandUnit() < kBladePairChance) {
+// Death-system variant of DrawWorldNode (2026-09-24): draws an art icon fading out
+// and growing slightly as the death animation runs - used for monsters mid-death
+// in the 2D wilderness/dungeon views. Everything else (backing circle, labels)
+// would look wrong half-faded, so this only draws the fading sprite.
             for (int j = 0; j < kBladeCount; j++) {
                 if (j == bi) continue;
                 const auto& bj = s.blades[j];
@@ -11863,6 +12441,23 @@ static const T3CHumanSpec kT3CHumanSpecs[4] = {
       kGearHelm | kGearSword | kGearCape | kGearPauldrons },
 };
 
+static const DirSpriteSheet& WildMonsterSheetFor(int iconIdx) {
+    int base = iconIdx;
+    if (base == 5 || base == 8) base = 2;
+    else if (base == 6 || base == 7) base = 3;
+    else if (base == 9 || base == 10) base = 1; // orcs: the goblin sheet, darker and bigger
+    if (base < 0 || base >= 5) base = 0;
+    return g_assets.wildMonsterTex[base];
+}
+
+static Color WildMonsterTintFor(int iconIdx) {
+    if (iconIdx == 5 || iconIdx == 6) return Color{ 185, 215, 240, 255 }; // frostbitten
+    if (iconIdx == 7) return Color{ 150, 140, 128, 255 }; // granite
+    if (iconIdx == 8) return Color{ 205, 170, 115, 255 }; // tawny
+    if (iconIdx == 9 || iconIdx == 10) return Color{ 150, 175, 120, 255 }; // orc grey-green
+    return WHITE;
+}
+
 struct T3CHumanParts {
     Model torso, head, arm, leg; // arm/leg meshes shared L/R
     Model armor;                 // chestplate, baked steel (WHITE tint)
@@ -11871,6 +12466,9 @@ struct T3CHumanParts {
     Model cape, pauldron;        // torso-local coords
     Model merged;                // rest-pose merge (shadow pass)
     Vector3 neckP, armLP, armRP, legLP, legRP;
+// Phase 3/4 - new wilderness monster icons reuse existing sheets with a tint
+// (no new art files): 5 Ice Wolf -> wolf sheet, 6 Frostbitten Husk -> imp sheet,
+// 7 Rock Golem -> imp (humanoid) sheet, 8 Mountain Cat -> wolf sheet.
     int gear;
 };
 
@@ -13865,6 +14463,7 @@ static void HumanCastMove(HumanRig& H, const HumanOutfit& o, float t) {
 // Uses whatever shader the kit currently has (sun lighting outdoors, torch in
 // dungeons). Returns false when the model isn't available (caller draws the kit).
 static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMul, Color tint,
+
                       const HumanOutfit& o, const HumanPose& p, bool shadowPass) {
     T3DLiftScope lift_(x, z); // onto the terrain (wilderness hills)
     HumanEnsure();
@@ -14084,6 +14683,8 @@ static bool DrawHuman(int trackId, float x, float z, float yawRad, float scaleMu
     Material flat = H.model.materials[0]; // untextured material with the current shader
     flat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
     auto gearMat = [&](int g) {
+// Point a loaded model at the shadow shader (every material), so buildings and
+// the ground render lit + shadowed + fogged. No-op when shadows are off.
         for (int i = 0; i < H.gear[g].materialCount; i++) H.gear[g].materials[i].shader = sh;
     };
     // While gathering, the tool replaces the weapon in hand.
@@ -15380,6 +15981,7 @@ static void Town3DPinchZoom(float distMin, float distMax) {
 }
 static float WildGroundY(float x, float z);
 static Town3DCam Town3DGetCamFor(Vector2 playerPos, int screenW, int screenH, int screenId,
+
                                  float distMin, float distMax, float followPitch) {
     float dt = GameDt();
     if (!g_t3dCamInit || g_t3dCamScreen != screenId) {
@@ -15598,6 +16200,11 @@ struct Town3DShadow {
     RenderTexture2D map{};
 };
 static Town3DShadow g_t3dShadow;
+
+static void Town3DApplyShadowShader(Model& m) {
+    if (!g_t3dShadow.ready || m.meshCount <= 0) return;
+    for (int i = 0; i < m.materialCount; i++) m.materials[i].shader = g_t3dShadow.shader;
+}
 static Matrix g_t3dLightVP{};      // sun view-projection, captured during the shadow pass
 static Camera3D g_t3dLightCam{};    // orthographic sun camera
 static const Vector3 kT3DSunDir = { 0.4268f, -0.8535f, 0.2987f }; // normalized (0.5,-1,0.35)
@@ -16646,6 +17253,7 @@ static void Town3DDrawHouse(float cx, float cz, const Model& wall, const Model& 
 // underneath. Painted once per trade into a small texture (CPU image drawing).
 static float SurfRand(int x, int y, int k); // (room surfaces, further down)
 static Color SurfMul(Color c, float f);
+
 static const char* ShopSignWord(const std::string& k) {
     if (k == "smith") return "BLACKSMITH";
     if (k == "carpenter") return "CARPENTER";
@@ -17215,6 +17823,39 @@ static float WildFieldAt(const WildField& F, float x, float z) {
     float a = at(x0, z0) + (at(x0 + 1, z0) - at(x0, z0)) * tx;
     float b = at(x0, z0 + 1) + (at(x0 + 1, z0 + 1) - at(x0, z0 + 1)) * tx;
     return a + (b - a) * tz;
+}
+
+static void WildDraw2DTerrainOverlay(Vector2 camera) {
+    if (!g_wild2DOverlayBuilt) {
+        g_wild2DOverlayBuilt = true;
+        const int N = 1024;
+        const float k = N / kWildernessWorldSize;
+        WildField wf = WildTerrainField(kWTWater | kWTRiver, 2), rf = WildTerrainField(kWTRidge, 2);
+        Image img = GenImageColor(N, N, BLANK);
+        Color* px = (Color*)img.data;
+        for (int y = 0; y < N; y++)
+            for (int x = 0; x < N; x++) {
+                float wx = (x + 0.5f) / k, wz = (y + 0.5f) / k;
+                float w = WildFieldAt(wf, wx, wz), r = WildFieldAt(rf, wx, wz);
+                Color c = BLANK;
+                if (r > 0.3f) c = Color{ 112, 104, 94, (unsigned char)std::min(255.0f, (r - 0.3f) * 900.0f) };
+                if (w > 0.12f && w <= 0.54f) c = Color{ 206, 190, 146, (unsigned char)std::min(220.0f, (w - 0.12f) * 900.0f) };
+                if (w > 0.54f && w <= 0.62f) c = Color{ 220, 228, 214, 255 };
+                if (w > 0.62f) {
+                    float d = std::clamp((w - 0.62f) / 0.35f, 0.0f, 1.0f);
+                    c = Color{ (unsigned char)(78 - 44 * d), (unsigned char)(142 - 56 * d), (unsigned char)(150 - 34 * d), 255 };
+                }
+                px[y * N + x] = c;
+            }
+        for (const WildBridge& b : g_wtBridges) // plank decks
+            ImageDrawLineEx(&img, { b.a.x * k, b.a.y * k }, { b.b.x * k, b.b.y * k }, 13, Color{ 140, 100, 62, 255 });
+        g_wild2DOverlay = LoadTextureFromImage(img);
+        UnloadImage(img);
+        SetTextureFilter(g_wild2DOverlay, TEXTURE_FILTER_BILINEAR);
+    }
+    Vector2 tl = WorldToScreen({ 0, 0 }, camera);
+    DrawTexturePro(g_wild2DOverlay, { 0, 0, (float)g_wild2DOverlay.width, (float)g_wild2DOverlay.height },
+                   { tl.x, tl.y, kWildernessWorldSize, kWildernessWorldSize }, { 0, 0 }, 0.0f, WHITE);
 }
 
 // --- Wilderness minimap (2026-09-25): display-only v1, top-right of the viewport
@@ -18637,6 +19278,7 @@ static void WildOuterEnsure() {
 }
 // The wilderness drawn around a town: same heights, shifted by the town's offset.
 static Vector2 g_groundOffset = { 0.0f, 0.0f };
+static float WildGroundYOffset(float x, float z) { return WildGroundY(x + g_groundOffset.x, z + g_groundOffset.y); }
 
 // Hilly ground mesh in world coordinates (0..WS), UVs matching the ground map.
 static Mesh WildBuildGroundMesh(float WS) {
@@ -21107,6 +21749,45 @@ static void GuildWorkPose(const GameState::GuildMind& m, GameState::RivalActivit
 
 static void Wild3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m);
 static void Dungeon3DPickFlag(GameState& s, const Town3DCam& c, Vector2 m);
+static void DrawFiend2D(GameState& s, Vector2 camera) {
+    // A genuinely distinct little demon (2026-09-24): drawn entirely from
+    // shapes - horned head, flapping wings, barbed tail, ember glow - so it
+    // never reads as a recolored adventurer.
+    Vector2 sp = WorldToScreen(s.fiendPos, camera);
+    float flick = 0.7f + 0.3f * sinf(s.worldTime * 13.0f);
+    DrawCircleV(sp, 26.0f, Fade(Color{ 255, 110, 40, 255 }, 0.22f * flick)); // ember aura
+    float bob = sinf(s.worldTime * 6.0f) * 3.0f;
+    float wing = sinf(s.worldTime * 11.0f) * 0.5f; // wing flap
+    Color body = Color{ 178, 52, 44, 255 }, dark = Color{ 110, 28, 26, 255 }, horn = Color{ 240, 220, 170, 255 };
+    // Tail with a barbed tip, curling behind.
+    Vector2 tailBase = { sp.x - 10.0f, sp.y - 8.0f + bob };
+    DrawLineEx(tailBase, { sp.x - 22.0f, sp.y - 2.0f + bob }, 4.0f, dark);
+    DrawTriangle({ sp.x - 26.0f, sp.y - 8.0f + bob }, { sp.x - 26.0f, sp.y + 4.0f + bob },
+                 { sp.x - 18.0f, sp.y - 2.0f + bob }, dark);
+    // Wings.
+    DrawTriangle({ sp.x - 4.0f, sp.y - 18.0f + bob }, { sp.x - 26.0f, sp.y - 34.0f - wing * 10.0f + bob },
+                 { sp.x - 12.0f, sp.y - 12.0f + bob }, Fade(body, 0.85f));
+    DrawTriangle({ sp.x + 4.0f, sp.y - 18.0f + bob }, { sp.x + 26.0f, sp.y - 34.0f - wing * 10.0f + bob },
+                 { sp.x + 12.0f, sp.y - 12.0f + bob }, Fade(body, 0.85f));
+    // Body.
+    DrawEllipse((int)sp.x, (int)(sp.y - 12.0f + bob), 11.0f, 14.0f, body);
+    DrawEllipse((int)sp.x, (int)(sp.y - 10.0f + bob), 6.0f, 9.0f, dark);
+    // Head with horns and glowing eyes.
+    DrawCircleV({ sp.x, sp.y - 30.0f + bob }, 9.0f, body);
+    DrawTriangle({ sp.x - 8.0f, sp.y - 34.0f + bob }, { sp.x - 14.0f, sp.y - 46.0f + bob },
+                 { sp.x - 3.0f, sp.y - 38.0f + bob }, horn);
+    DrawTriangle({ sp.x + 8.0f, sp.y - 34.0f + bob }, { sp.x + 14.0f, sp.y - 46.0f + bob },
+                 { sp.x + 3.0f, sp.y - 38.0f + bob }, horn);
+    DrawCircleV({ sp.x - 3.5f, sp.y - 31.0f + bob }, 2.2f, Color{ 255, 220, 80, 255 });
+    DrawCircleV({ sp.x + 3.5f, sp.y - 31.0f + bob }, 2.2f, Color{ 255, 220, 80, 255 });
+    // Rising embers.
+    for (int i = 0; i < 3; i++) {
+        float ph = fmodf(s.worldTime * 3.0f + i * 0.37f, 1.0f);
+        DrawCircleV({ sp.x + sinf(i * 2.1f + s.worldTime * 5.0f) * 8.0f, sp.y - 34.0f * ph + bob },
+                    5.0f * (1.0f - ph), Fade(Color{ 255, 150, 50, 255 }, 0.6f * (1.0f - ph)));
+    }
+}
+
 static bool Wild3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
                                float assistPx, GameState::FlagTarget* out);
 static bool Dungeon3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
@@ -23121,6 +23802,7 @@ static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
     return false;
 }
 
+
 static void DrawWilderness3DWorld(GameState& s, int screenW, int screenH, const std::string& prompt) {
     T3DGroundHook groundHook_(WildGroundY); // rolling hills: everything drawn here sits on the terrain
     Vector2 mouse = GetMousePosition();
@@ -23462,6 +24144,7 @@ struct Dungeon3DGround {
 };
 static Dungeon3DGround g_dung3dGround;
 
+static int HouseStorageCap(const GameState& s); // Housing 2.0: base + every chest/trunk/cabinet placed
 static void Dungeon3DEnsureGround(int dungeonIdx) {
     Dungeon3DGround& G = g_dung3dGround;
     if (G.loaded && G.dungeon == dungeonIdx) return;
@@ -23573,6 +24256,12 @@ struct Dungeon3DWalls {
     Model model{};
 };
 static Dungeon3DWalls g_dung3dWalls;
+
+static int HouseStorageCap(const GameState& s) {
+    int cap = kHouseStorageBase;
+    for (const auto& d : s.houseDecor) cap += kHouseDecorDefs[d.kind].storage;
+    return cap;
+}
 
 static void Dungeon3DBuildWalls(int dungeonIdx) {
     Dungeon3DWalls& W = g_dung3dWalls;
@@ -23948,6 +24637,52 @@ static Color Dungeon3DMonsterColor(int dungeonIdx, bool boss) {
 // with diagonal-pair trot, idle bob and head turns. `tint` is the per-dungeon
 // palette color (boss brightened by the caller).
 static const DungeonMonster& DungeonSlotMonster(const DungeonDef& dungeon, int slotIdx);
+static void DrawPlayerLifeState(const GameState& s, Vector2 screenPos, Vector2 facing,
+                                const std::string& interactPrompt, float visualScale = 1.0f,
+                                ActorAnim combatAnim = ActorAnim::Idle) {
+    float kPlayerRadius = ::kPlayerRadius * visualScale;
+    if (s.playerDeathAnimT > 0.0f) {
+        // Body collapsing: draw the normal player, then sink it under a growing
+        // dark fade - reads as falling even without a dedicated prone sprite.
+        float fade = 1.0f - std::max(0.0f, s.playerDeathAnimT / kPlayerDeathAnimTime);
+        DrawPlayer(s, screenPos, facing, "", visualScale, ActorAnim::Idle);
+        DrawCircleV(screenPos, kPlayerRadius * 1.4f, Fade(BLACK, 0.75f * fade));
+    } else if (s.playerIsGhost) {
+        // Ghost: no body, just a drifting translucent wisp with a faint ring.
+        float pulse = 0.5f + 0.2f * std::sin(s.worldTime * 3.0f);
+        DrawCircleV(screenPos, kPlayerRadius * 1.1f, Fade(Color{ 170, 205, 255, 255 }, 0.28f * pulse));
+        DrawCircleV(screenPos, kPlayerRadius * 0.7f, Fade(Color{ 215, 235, 255, 255 }, 0.35f * pulse));
+        DrawCircleLines((int)screenPos.x, (int)screenPos.y, kPlayerRadius * 1.1f, Fade(Color{ 200, 225, 255, 255 }, 0.6f));
+    } else {
+        // Hurt reaction (2026-09-24): red flash + a small reel away from the
+        // engaged monster, synced to the damage tick. WorldToScreen is 1:1, so
+        // the world-space knockback offsets screen pixels directly.
+        Color tint = WHITE;
+        Vector2 drawPos = screenPos;
+        if (s.playerHurtT >= 0.0f) {
+            tint = Color{ 255, 120, 120, 255 };
+            Vector2 ppos = s.wildernessPlayerPos, mpos = ppos;
+            bool haveM = false;
+            if (s.screen == Screen::Wilderness) {
+                if (s.wildEngaged.has_value()) { mpos = s.wildEngaged->pos; haveM = true; }
+            } else if (s.screen == Screen::Hunt) {
+                ppos = s.dungeonPlayerPos;
+                if (s.dungeonEngaged.has_value()) { mpos = s.dungeonEngaged->pos; haveM = true; }
+            }
+            if (haveM) {
+                Vector2 away = { ppos.x - mpos.x, ppos.y - mpos.y };
+                float al = std::sqrt(away.x * away.x + away.y * away.y);
+                if (al > 0.001f) {
+                    float kb = 12.0f * (1.0f - s.playerHurtT / 0.30f);
+                    drawPos.x += away.x / al * kb;
+                    drawPos.y += away.y / al * kb;
+                }
+            }
+        }
+        DrawPlayer(s, drawPos, facing, interactPrompt, visualScale, combatAnim, tint);
+    }
+}
+
 static const DungeonMonster& DungeonBoss(const GameState& s, const DungeonDef& d);
 static std::string DungeonBossTitle(const GameState& s, int di);
 static void Dungeon3DDrawMonster(int dungeonIdx, int monsterIdx, int trackId, float x, float z,
@@ -26618,6 +27353,96 @@ static void DrawHouseCraftGump(GameState& s) {
     }
     UIEndScissorMode();
 }
+static Vector2 InteriorCameraTopLeft(Vector2 playerPos) {
+    // The room (560x760) is nearly the viewport size (540x790): center it, with
+    // a thin dark surround where the room is smaller than the viewport.
+    Vector2 tl = { playerPos.x - kViewport.width / 2.0f, playerPos.y - kViewport.height / 2.0f };
+    float maxX = g_intW - kViewport.width;
+    float maxY = g_intH - kViewport.height;
+    tl.x = (maxX <= 0.0f) ? maxX * 0.5f : std::clamp(tl.x, 0.0f, maxX);
+    tl.y = (maxY <= 0.0f) ? maxY * 0.5f : std::clamp(tl.y, 0.0f, maxY);
+    return tl;
+}
+
+static void DrawInterior2D(GameState& s, int screenW, int screenH,
+                           const InteriorRoomDef& room,
+                           const std::vector<InteriorPropDef>& props,
+                           const std::string& prompt, const InteriorPropDef* nearest,
+                           bool npcNearest, const InteriorNPCDef* npc) {
+    (void)screenW; (void)screenH;
+    Vector2 cam = InteriorCameraTopLeft(s.interiorPlayerPos);
+    BeginScissorMode(kViewport.x, kViewport.y, kViewport.width, kViewport.height);
+    DrawRectangle(kViewport.x, kViewport.y, kViewport.width, kViewport.height, Color{ 22, 18, 16, 255 });
+    Vector2 ro = WorldToScreen({ 0, 0 }, cam); // room origin on screen
+    // Floors in the room's own texture, then every wall segment, windows and doorways
+    // (the same shell the 3D view draws - shops and the homestead alike).
+    (void)room;
+    for (const Rectangle& f : g_intFloors)
+        DrawTexturePro(SurfTex(g_intFloorSurf), { f.x * 2.3f, f.y * 2.3f, f.width * 2.3f, f.height * 2.3f },
+                       { ro.x + f.x, ro.y + f.y, f.width, f.height }, { 0, 0 }, 0, Color{ 235, 225, 210, 255 });
+    for (const IntSeg& sg : g_intSegs) {
+        float x0 = std::min(sg.ax, sg.bx), x1 = std::max(sg.ax, sg.bx), z0 = std::min(sg.az, sg.bz), z1 = std::max(sg.az, sg.bz);
+        Rectangle wr = (x1 - x0 >= z1 - z0) ? Rectangle{ ro.x + x0, ro.y + z0 - kIntWallT * 0.5f, x1 - x0, kIntWallT }
+                                            : Rectangle{ ro.x + x0 - kIntWallT * 0.5f, ro.y + z0, kIntWallT, z1 - z0 };
+        DrawRectangleRec({ wr.x + 2, wr.y + 3, wr.width, wr.height }, Fade(BLACK, 0.35f));
+        DrawTexturePro(SurfTex(sg.surf), { wr.x, wr.y, wr.width, wr.height }, wr, { 0, 0 }, 0, Color{ 170, 160, 150, 255 });
+        DrawRectangleLinesEx(wr, 1.0f, Fade(BLACK, 0.5f));
+    }
+    for (const IntWindow& w : g_intWins) {
+        bool alongZ = w.nx != 0;
+        Rectangle gr = alongZ ? Rectangle{ ro.x + w.x - 4, ro.y + w.z - 30, 8, 60 } : Rectangle{ ro.x + w.x - 30, ro.y + w.z - 4, 60, 8 };
+        DrawRectangleRec(gr, Color{ 150, 200, 230, 255 });
+        DrawRectangleLinesEx(gr, 1.5f, Color{ 60, 40, 26, 255 });
+    }
+    // Props.
+    for (auto& p : props) {
+        Vector2 sp = WorldToScreen({ p.x, p.y }, cam);
+        bool hl = (nearest && nearest == &p);
+        Rectangle rc = { sp.x - p.sw / 2, sp.y - p.sh / 2, p.sw, p.sh };
+        bool drewSprite = false;
+        // The anvil reuses the existing 2D anvil sprite; everything else is a
+        // tidy labeled shape (no other 2D prop sprites exist for these).
+        if (p.model && std::string(p.model) == "Anvil.gltf" && g_assets.townAnvilOk) {
+            float tw = p.sw * 1.7f, th = p.sh * 1.7f;
+            DrawTexturePro(g_assets.townAnvil,
+                           { 0, 0, (float)g_assets.townAnvil.width, (float)g_assets.townAnvil.height },
+                           { sp.x - tw / 2, sp.y - th / 2, tw, th }, { 0, 0 }, 0, WHITE);
+            drewSprite = true;
+        }
+        Color hlCol = Color{ 255, 200, 90, 255 }; // warm gold: reads on every floor color
+        if (!drewSprite) {
+            DrawRectangleRounded(rc, 0.18f, 4, p.c2d);
+            DrawRectangleRoundedLines(rc, 0.18f, 4, hl ? hlCol : Fade(BLACK, 0.35f));
+        } else if (hl) {
+            DrawRectangleRoundedLines({ rc.x - 4, rc.y - 4, rc.width + 8, rc.height + 8 },
+                                      0.18f, 4, hlCol);
+        }
+        int lw = MeasureText(p.label, 11);
+        DrawUIText(p.label, (int)sp.x - lw / 2, (int)(sp.y + p.sh / 2) + 3, 11,
+                   hl ? WHITE : Fade(BLACK, 0.65f));
+    }
+    for (auto& p : props) { // station signs on top of every prop
+        const char* verb = InteriorStationVerb(s.interiorKey, p);
+        if (!verb) continue;
+        Vector2 sp = WorldToScreen({ p.x, p.y }, cam);
+        bool hl = nearest == &p && !npcNearest;
+        if (hl) DrawCircleLinesV(sp, std::max(p.sw, p.sh) * 0.7f + 6 + 3 * sinf((float)GetTime() * 5), Color{ 255, 200, 90, 255 });
+        DrawStationSign({ sp.x, sp.y - p.sh / 2 - 4 }, verb, p.label, hl);
+    }
+    // Static shop NPC, if any.
+    if (npc) {
+        Vector2 sp = WorldToScreen({ npc->x, npc->y }, cam);
+        DrawCircleV(sp, 16, Color{ 210, 170, 130, 255 });
+        DrawCircleLinesV(sp, 16, npcNearest ? Color{ 255, 200, 90, 255 } : Fade(BLACK, 0.4f));
+        int nw = MeasureText(npc->name, 11);
+        DrawUIText(npc->name, (int)sp.x - nw / 2, (int)sp.y - 38, 11, WHITE);
+    }
+    // Player + floating interact prompt.
+    Vector2 pp = WorldToScreen(s.interiorPlayerPos, cam);
+    DrawPlayer(s, pp, s.playerFacing, prompt, 1.15f);
+    EndScissorMode();
+}
+
 static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
     const InteriorRoomDef* room = InteriorRoomFor(s.interiorKey);
     if (!room) { // safety net
@@ -26675,7 +27500,8 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
         if (inRange && IsKeyPressed(KEY_E) && InteriorDoInteract(s, nearest, npcNearest)) return;
     }
 
-    DrawInterior3DWorld(s, *room, props, npcs, screenW, screenH, uiOpen, npcNearest ? nullptr : nearest); // (2026-09-28) 3D only
+    if (s.interior3DView) DrawInterior3DWorld(s, *room, props, npcs, screenW, screenH, uiOpen, npcNearest ? nullptr : nearest);
+    else DrawInterior2D(s, screenW, screenH, *room, props, prompt, nearest, npcNearest, npc);
 
     if (!(home && g_hdOn)) DrawVirtualJoystick();
     if (inRange && !uiOpen && DrawInteractButton(prompt)) {
@@ -26828,7 +27654,282 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     // 3D milestone (2026-09-24): when town3DView is on, the whole 2D world block below
     // is skipped and DrawTown3DWorld renders the programmer-art 3D scene instead. The
     // HUD, panels, and interaction code around it are shared by both views.
-    if (s.town3DView) { DrawTown3DWorld(s, screenW, screenH); } // end else: 2D world view (3D renders via DrawTown3DWorld above)
+    if (s.town3DView) { DrawTown3DWorld(s, screenW, screenH); } else {
+    BeginScissorMode((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height);
+    Vector2 camera = CameraTopLeft(s.townPlayerPos, kTownWorldSize);
+    // Town 2 uses the dirt/road texture as its primary ground (already loaded, no new
+    // asset needed) instead of grass, for an immediately different first impression -
+    // a "packed earth trading post" feel vs. Town 1's tended grass.
+    // Frostmere (Town 3) reuses the grass texture under a snow wash - the cold
+    // fallback color shows through the semi-transparent tint below.
+    bool town4 = (s.selectedTown == 3); // Phase 4: Cragmoor - granite mountain town
+    const Texture2D* activeGroundTex = (s.selectedTown == 0)
+        ? (g_assets.groundGrassOk ? &g_assets.groundGrass : nullptr)
+        : (s.selectedTown == 2)
+            ? (g_assets.groundGrassOk ? &g_assets.groundGrass : nullptr)
+            : (g_assets.groundDirtOk ? &g_assets.groundDirt : nullptr);
+    Color activeGroundFallback = (s.selectedTown == 0) ? Color{ 210, 198, 168, 255 }
+        : (s.selectedTown == 2) ? Color{ 228, 238, 248, 255 }
+        : town4 ? Color{ 148, 144, 136, 255 } : Color{ 176, 158, 132, 255 };
+    DrawTiledGround(activeGroundTex, kViewport, camera, 48.0f * kTownVisualScale, activeGroundFallback);
+    if (s.selectedTown == 2) { // Frostmere: snow wash over the whole town ground
+        DrawRectangle((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height,
+                      Color{ 232, 242, 252, 110 });
+    }
+    if (town4) { // Cragmoor: granite wash over the whole town ground
+        DrawRectangle((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height,
+                      Color{ 150, 148, 140, 70 });
+    }
+
+    // Farmland patches - CraftPix "village" ground dressing (assets/village/farmland.png),
+    // hand-placed clear of every building/road/plaza, same spirit as kFoliagePositions
+    // below (just a rectangle of tiled ground instead of a scattered icon). Re-placed
+    // for the 3x3 grid layout, tucked along the open west edge near Alchemy/Healer
+    // (both now in the grid's west column) same as before - offsets kept the same
+    // distance from Alchemy/Healer's own (now 300-unit-spaced) positions.
+    static const std::array<Rectangle, 2> kFarmlandPatches = {{
+        {20 * kTS, 356 * kTS, 100, 100},  // near the Alchemy garden
+        {20 * kTS, 632 * kTS, 100, 100},  // near the Healer's kitchen garden
+    }};
+    // Skipped for Town 2 - farmland doesn't fit its coastal trade-port identity; no
+    // equivalent dressing added this pass (see the plan's deferred list).
+    if (s.selectedTown == 0 && g_assets.farmlandOk)
+        for (const Rectangle& patch : kFarmlandPatches)
+            DrawTiledRect(&g_assets.farmland, patch, camera, 48.0f * kTownVisualScale, Color{ 200, 150, 90, 255 });
+
+    // Fence posts marking the town plaza - purely decorative (no collision), evenly
+    // spaced along its 4 edges from the same "village" pack as the farmland above.
+    if (g_assets.fencePostOk) {
+        std::vector<Vector2> posts;
+        for (float x = kTownPlaza.x; x <= kTownPlaza.x + kTownPlaza.width; x += 50.0f) {
+            posts.push_back({ x, kTownPlaza.y });
+            posts.push_back({ x, kTownPlaza.y + kTownPlaza.height });
+        }
+        for (float py = kTownPlaza.y; py <= kTownPlaza.y + kTownPlaza.height; py += 50.0f) {
+            posts.push_back({ kTownPlaza.x, py });
+            posts.push_back({ kTownPlaza.x + kTownPlaza.width, py });
+        }
+        for (auto& p : posts) {
+            Vector2 screenPos = WorldToScreen(p, camera);
+            if (screenPos.x < kViewport.x - 20 || screenPos.x > kViewport.x + kViewport.width + 20 ||
+                screenPos.y < kViewport.y - 20 || screenPos.y > kViewport.y + kViewport.height + 20) continue;
+            DrawIconCentered(g_assets.fencePost, screenPos, 26.0f * kTownVisualScale, WHITE);
+        }
+    }
+
+    // Decorative foliage first, so buildings/roads/plaza always render on top of it -
+    // purely visual, no collision, hand-placed clear of every building/road/plaza. Six
+    // variants (see kFoliagePositions) reusing the Wilderness screen's tree/bush/fern
+    // textures for variety instead of one repeated bush icon, plus one autumn-colored
+    // bush from a different pack for a splash of warm color.
+    // Phase 3: skipped for Frostmere - winter-dressed separately below.
+    if (s.selectedTown != 2)
+    for (const TownFoliage& f : kFoliagePositions) {
+        const Texture2D* icon = f.variant == 0 ? (g_assets.foliageOk ? &g_assets.foliage : nullptr)
+                                 : f.variant == 1 ? (g_assets.wildTreeOk ? &g_assets.wildTree : nullptr)
+                                 : f.variant == 2 ? (g_assets.wildBush1Ok ? &g_assets.wildBush1 : nullptr)
+                                 : f.variant == 3 ? (g_assets.wildBush2Ok ? &g_assets.wildBush2 : nullptr)
+                                 : f.variant == 4 ? (g_assets.wildFern1Ok ? &g_assets.wildFern1 : nullptr)
+                                 : (g_assets.townAutumnBushOk ? &g_assets.townAutumnBush : nullptr);
+        if (!icon) continue;
+        Vector2 screenPos = WorldToScreen(f.pos, camera);
+        if (screenPos.x < kViewport.x - 30 || screenPos.x > kViewport.x + kViewport.width + 30 ||
+            screenPos.y < kViewport.y - 30 || screenPos.y > kViewport.y + kViewport.height + 30) continue;
+        DrawIconCentered(*icon, screenPos, 34.0f * kTownVisualScale, WHITE);
+    }
+
+    // Phase 3 - Frostmere winter dressing: snow drifts and frost-dusted pines,
+    // hand-placed clear of the 5 buildings/plaza/gate road (decorative only).
+    if (s.selectedTown == 2) {
+        static const std::array<Vector2, 6> kFrostDrifts = {{
+            TS(120, 150), TS(880, 120), TS(950, 700), TS(60, 750), TS(750, 920), TS(200, 920)
+        }};
+        static const std::array<Vector2, 4> kFrostPines = {{
+            TS(100, 400), TS(900, 350), TS(520, 120), TS(60, 600)
+        }};
+        for (auto& d : kFrostDrifts) {
+            Vector2 sp = WorldToScreen(d, camera);
+            DrawEllipse((int)sp.x, (int)sp.y, 46.0f * kTownVisualScale, 20.0f * kTownVisualScale, Color{ 240, 248, 255, 255 });
+            DrawEllipse((int)sp.x, (int)sp.y - 4, 34.0f * kTownVisualScale, 15.0f * kTownVisualScale, Color{ 252, 253, 255, 255 });
+        }
+        for (auto& p : kFrostPines) {
+            Vector2 sp = WorldToScreen(p, camera);
+            float w = 30.0f * kTownVisualScale, h = 44.0f * kTownVisualScale;
+            DrawTriangle({ sp.x, sp.y - h }, { sp.x - w, sp.y + h * 0.5f }, { sp.x + w, sp.y + h * 0.5f },
+                         Color{ 90, 120, 130, 255 });
+            DrawTriangle({ sp.x, sp.y - h * 0.7f }, { sp.x - w * 0.7f, sp.y + h * 0.5f }, { sp.x + w * 0.7f, sp.y + h * 0.5f },
+                         Color{ 225, 238, 248, 255 });
+            DrawRectangle((int)(sp.x - 3), (int)(sp.y + h * 0.5f), 6, (int)(h * 0.35f), Color{ 90, 70, 55, 255 });
+        }
+    }
+
+    // A dirt plaza around the Town Hall / Provisioner cluster - the outer 6 buildings
+    // sit on open grass, connected back to it by roads, rather than a uniform flat
+    // ground. Town 2 tints its roads/plaza a cooler gray-blue (worn dock stone) instead
+    // of Town 1's warm tan, on top of the same already-loaded dirt texture.
+    const Texture2D* dirtTex = g_assets.groundDirtOk ? &g_assets.groundDirt : nullptr;
+    Color roadTint = (s.selectedTown == 0) ? Color{ 196, 164, 100, 255 }
+        : (s.selectedTown == 2) ? Color{ 190, 205, 220, 255 } : Color{ 140, 148, 156, 255 };
+    DrawWallBand(kTownPlaza, camera, dirtTex, 48.0f * kTownVisualScale, roadTint);
+    for (auto& node : ActiveTownNodes(s.selectedTown)) DrawRoadToPlaza(node.pos, kTownPlaza, camera, dirtTex);
+    // Extends Bank's own straight road (same central column, x=450) on past it to the
+    // Wilderness Gate - one continuous main street from the plaza straight out of town,
+    // instead of the gate sitting unconnected off in a corner.
+    DrawWallBand({ kWildernessGatePos.x - 14, kTownPlaza.y + kTownPlaza.height, 28,
+                    kWildernessGatePos.y - (kTownPlaza.y + kTownPlaza.height) },
+                  camera, dirtTex, 48.0f * kTownVisualScale, roadTint);
+
+    // Town-flavor props (well/lamps/signage/stalls/clutter) - see kTownProps.
+    for (const TownProp& p : kTownProps) {
+        const Texture2D* icon = nullptr;
+        switch (p.kind) {
+            case 0: icon = g_assets.townFountainOk ? &g_assets.townFountain : nullptr; break;
+            case 1: icon = g_assets.townLampOk ? &g_assets.townLamp : nullptr; break;
+            case 2: icon = g_assets.townSignSmithOk ? &g_assets.townSignSmith : nullptr; break;
+            case 3: icon = g_assets.townStall1Ok ? &g_assets.townStall1 : nullptr; break;
+            case 4: icon = g_assets.townStall2Ok ? &g_assets.townStall2 : nullptr; break;
+            case 5: icon = g_assets.townStall3Ok ? &g_assets.townStall3 : nullptr; break;
+            case 6: icon = g_assets.townLumberpileOk ? &g_assets.townLumberpile : nullptr; break;
+            case 7: icon = g_assets.townBarrelOk ? &g_assets.townBarrel : nullptr; break;
+            case 8: icon = g_assets.townCrateOk ? &g_assets.townCrate : nullptr; break;
+            case 9: icon = g_assets.townAnvilOk ? &g_assets.townAnvil : nullptr; break;
+            case 10: icon = g_assets.townStatueOk ? &g_assets.townStatue : nullptr; break;
+            case 11: icon = g_assets.townSheepOk ? &g_assets.townSheep : nullptr; break;
+            case 12: icon = g_assets.townCowOk ? &g_assets.townCow : nullptr; break;
+            case 13: icon = g_assets.townChickenOk ? &g_assets.townChicken : nullptr; break;
+            case 14: icon = g_assets.townPotionPurpleOk ? &g_assets.townPotionPurple : nullptr; break;
+            case 15: icon = g_assets.townPotionRedOk ? &g_assets.townPotionRed : nullptr; break;
+            case 16: icon = g_assets.townChestOk ? &g_assets.townChest : nullptr; break;
+            case 17: icon = g_assets.townBookshelfOk ? &g_assets.townBookshelf : nullptr; break;
+        }
+        if (!icon) continue;
+        Vector2 screenPos = WorldToScreen(p.pos, camera);
+        if (screenPos.x < kViewport.x - 30 || screenPos.x > kViewport.x + kViewport.width + 30 ||
+            screenPos.y < kViewport.y - 30 || screenPos.y > kViewport.y + kViewport.height + 30) continue;
+        // Soft warm ground-glow under each streetlamp (Gemini's "sell the illusion they're
+        // actively lighting the paths" suggestion) - layered fading circles (not
+        // DrawCircleGradient: its signature differs between the desktop raylib 6.0 build
+        // and the web build's raylib 5.5 source, int-x/y vs Vector2 - this avoids the
+        // mismatch entirely) drawn before the lamp sprite so the sprite sits on top of
+        // its own light pool rather than the glow overlapping the post.
+        if (p.kind == 1) {
+            float glowR = p.size * kTownVisualScale * 1.1f;
+            Color glow = { 255, 214, 130, 255 };
+            DrawCircleV(screenPos, glowR, Fade(glow, 0.10f));
+            DrawCircleV(screenPos, glowR * 0.66f, Fade(glow, 0.16f));
+            DrawCircleV(screenPos, glowR * 0.33f, Fade(glow, 0.22f));
+        }
+        DrawIconCentered(*icon, screenPos, p.size * kTownVisualScale, WHITE);
+    }
+
+    // Phase 1 - Emberhold capital dressing (town 1 only).
+    if (s.selectedTown == 0) {
+        for (const CapitalProp& p : kCapitalProps) {
+            Vector2 csp = WorldToScreen(p.pos, camera);
+            if (csp.x < kViewport.x - 40 || csp.x > kViewport.x + kViewport.width + 40 ||
+                csp.y < kViewport.y - 40 || csp.y > kViewport.y + kViewport.height + 40) continue;
+            DrawCapitalProp2D(p.kind, csp, p.size * kTownVisualScale, s.worldTime);
+        }
+    }
+
+    // Phase 2 - Saltmere coastal dressing (town 2 only).
+    if (s.selectedTown == 1) {
+        for (const CoastProp& p : kCoastProps) {
+            Vector2 csp = WorldToScreen(p.pos, camera);
+            if (csp.x < kViewport.x - 40 || csp.x > kViewport.x + kViewport.width + 40 ||
+                csp.y < kViewport.y - 40 || csp.y > kViewport.y + kViewport.height + 40) continue;
+            DrawCoastProp2D(p.kind, csp, p.size * kTownVisualScale, s.worldTime);
+        }
+    }
+
+    // Phase 3 - Frostmere cold dressing (town 3 only): ice lanterns, snow-capped
+    // wood piles, and frost banners. Primitive-drawn, hand-placed clear of the
+    // 5 buildings/plaza/gate road - no new art files needed.
+    if (s.selectedTown == 2) {
+        struct FrostProp { int kind; Vector2 pos; float size; };
+        static const std::array<FrostProp, 7> kFrostProps = {{
+            {0, TS(250, 450), 30}, {0, TS(750, 450), 30},   // ice lanterns
+            {1, TS(280, 700), 26}, {1, TS(720, 700), 26},   // snow-capped wood piles
+            {2, TS(500, 180), 34}, {2, TS(150, 850), 30}, {2, TS(850, 850), 30}, // frost banners
+        }};
+        for (const FrostProp& p : kFrostProps) {
+            Vector2 csp = WorldToScreen(p.pos, camera);
+            if (csp.x < kViewport.x - 40 || csp.x > kViewport.x + kViewport.width + 40 ||
+                csp.y < kViewport.y - 40 || csp.y > kViewport.y + kViewport.height + 40) continue;
+            float sc = p.size * kTownVisualScale;
+            if (p.kind == 0) { // ice lantern: dark post, glowing blue crystal, cool light pool
+                DrawRectangle((int)(csp.x - 2.5f), (int)(csp.y - sc * 0.5f), 5, (int)sc, Color{ 70, 75, 85, 255 });
+                DrawCircleV(csp, sc * 1.4f, Fade(Color{ 150, 200, 255, 255 }, 0.12f));
+                DrawCircleV(csp, sc * 0.9f, Fade(Color{ 150, 200, 255, 255 }, 0.18f));
+                DrawTriangle({ csp.x, csp.y - sc * 0.85f }, { csp.x + sc * 0.3f, csp.y - sc * 0.35f },
+                             { csp.x, csp.y + sc * 0.05f }, Color{ 170, 215, 250, 255 });
+                DrawTriangle({ csp.x, csp.y - sc * 0.85f }, { csp.x, csp.y + sc * 0.05f },
+                             { csp.x - sc * 0.3f, csp.y - sc * 0.35f }, Color{ 210, 235, 255, 255 });
+            } else if (p.kind == 1) { // wood pile under a snow cap
+                DrawRectangle((int)(csp.x - sc * 0.8f), (int)(csp.y - sc * 0.25f), (int)(sc * 1.6f), (int)(sc * 0.5f),
+                              Color{ 105, 80, 60, 255 });
+                DrawRectangle((int)(csp.x - sc * 0.8f), (int)(csp.y - sc * 0.35f), (int)(sc * 1.6f), (int)(sc * 0.22f),
+                              Color{ 245, 250, 255, 255 });
+            } else { // frost banner: pole + waving pale pennant
+                DrawRectangle((int)(csp.x - 2), (int)(csp.y - sc), 4, (int)(sc * 2), Color{ 80, 85, 95, 255 });
+                float wave = sinf(s.worldTime * 2.5f + p.pos.x) * sc * 0.12f;
+                DrawTriangle({ csp.x + 2, csp.y - sc }, { csp.x + sc * 0.9f, csp.y - sc * 0.75f + wave },
+                             { csp.x + 2, csp.y - sc * 0.45f }, Color{ 175, 210, 240, 255 });
+            }
+        }
+    }
+
+    for (auto& node : ActiveTownNodes(s.selectedTown)) {
+        Vector2 screenPos = WorldToScreen(node.pos, camera);
+        bool near = (node.key == nearestKey) && inRange;
+        std::string sub;
+        // Saltmere got its own real building art 2026-09-23 (Mark's "Carl" art drop,
+        // assets/saltmere_buildings/) - before that, Town 2 had no dedicated art at all
+        // and fell back to the generic wall+roof+door composite tinted slate-blue. Real
+        // art always renders at its own true colors (bodyTint WHITE); the slate tint is
+        // now only a defensive fallback for the rare case a given key's file is missing.
+        // Phase 3: Frostmere (assets/frostmere_buildings/) works the same way.
+        const Texture2D* realTex = (s.selectedTown == 0) ? FindTownBuildingTexture(node.key)
+            : (s.selectedTown == 2) ? FindFrostmereBuildingTexture(node.key)
+            : (s.selectedTown == 3) ? FindCragmoorBuildingTexture(node.key) // Phase 4
+            : FindSaltmereBuildingTexture(node.key);
+        Color bodyTint = realTex ? WHITE : Color{ 150, 170, 185, 255 };
+        if (int idx = FindCraftBuildingIndex(node.key); idx >= 0)
+            sub = "Lv " + std::to_string(s.buildingLevel[idx]);
+        DrawBuildingNode(screenPos, TileColorFor(node.key), TileNameFor(node.key), near, sub,
+                           FindBuildingTexture(node.key), DoorAnimForBuilding(node.key),
+                           realTex, bodyTint, kTownVisualScale);
+    }
+    {
+        // The Wilderness Gate - drawn with the generic wall+roof fallback (no CraftPix
+        // building art fits "gate to the wilds"), colored sage to read as an outdoor
+        // threshold rather than a shop.
+        Vector2 gateScreenPos = WorldToScreen(kWildernessGatePos, camera);
+        DrawBuildingNode(gateScreenPos, kColorPanelBg, "Wilderness Gate", gateIsNearest && inRange, "",
+                           nullptr, nullptr, nullptr, WHITE, kTownVisualScale);
+    }
+    // Wandering townsfolk (2026-09-23: real animated art, Mark's "Carl" drop - used to
+    // be a plain colored circle, see kTownNPCs' comment history) - faces its own wander
+    // motion via WanderFacing rather than always Down, since Town is the one screen
+    // players linger on long enough for that polish to actually read.
+    const auto& activeNPCSheets = (s.selectedTown == 0) ? g_assets.townNPCSheets : g_assets.saltmereNPCSheets;
+    for (int i = 0; i < (int)activeNPCs.size(); i++) {
+        Vector2 screenPos = WorldToScreen(TownNPCLivePos(i, s.worldTime, s.selectedTown), camera);
+        bool near = npcIsNearest && nearestNPCIdx == i && inRange;
+        const DirSpriteSheet& sheet = activeNPCSheets[i];
+        if (sheet.ok) {
+            Vector2 facing = WanderFacing(i, s.worldTime);
+            Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
+            DrawWorldNode(screenPos, kNodeRadius * 0.5f * kTownVisualScale, kColorPanelBg, activeNPCs[i].name, near,
+                           "", &sheet.tex, WHITE, &src);
+        } else {
+            DrawWorldNode(screenPos, kNodeRadius * 0.5f * kTownVisualScale, kColorPanelBg, activeNPCs[i].name, near);
+        }
+    }
+    DrawPlayer(s, WorldToScreen(s.townPlayerPos, camera), s.playerFacing,
+                (inRange && !s.selectedTile.has_value()) ? "[E] " + interactLabel : "", kTownVisualScale);
+    EndScissorMode();
+    } // end else: 2D world view (3D renders via DrawTown3DWorld above)
     DrawVirtualJoystick();
     if (inRange && !s.selectedTile.has_value() && DrawInteractButton("[E] " + interactLabel)) {
         if (npcIsNearest) s.greetedNPC = (s.greetedNPC.has_value() && *s.greetedNPC == nearestNPCIdx)
@@ -26911,6 +28012,29 @@ static const DungeonMonster& DungeonSlotMonster(const DungeonDef& dungeon, int s
 }
 // Dread bosses (2026-09-29): now and then a lair's boss comes back stronger and richer.
 // Same name (models, corpses and tasks key on it) - "Dread" is only in its title.
+static void DrawWorldCorpses2D(const GameState& s, int zone, Vector2 camera) {
+    for (const GameState::WorldCorpse& c : s.worldCorpses) {
+        if (c.zone != zone) continue;
+        if (zone == 1 && c.dungeonIdx >= 0 && s.selectedDungeon.has_value() && c.dungeonIdx != *s.selectedDungeon) continue;
+        float fade = std::clamp(c.timer / 10.0f, 0.0f, 1.0f); // solid until its last seconds
+        Vector2 sp = WorldToScreen(c.pos, camera);
+        if (c.Lootable()) { // gold glint: there's still something on it
+            float pulse = 0.55f + 0.45f * sinf((float)g_gameClock * 3.0f + c.id);
+            DrawCircleLines((int)sp.x, (int)sp.y, kNodeRadius * 0.8f + 2.0f * pulse, Fade(Color{ 255, 210, 90, 255 }, 0.7f * pulse));
+            DrawPoly({ sp.x, sp.y - kNodeRadius - 6.0f - 3.0f * pulse }, 4, 5.0f, 45.0f, Fade(Color{ 255, 226, 120, 255 }, 0.9f));
+        }
+        if (c.iconIdx >= 0 && c.iconIdx < kWildMonsterIconCount && WildMonsterSheetFor(c.iconIdx).ok) {
+            const DirSpriteSheet& sheet = WildMonsterSheetFor(c.iconIdx);
+            Rectangle src = ActorSrcRect(sheet, { 0, 1 }, ActorAnim::Idle, s.worldTime);
+            Color tint = Fade(Color{ 90, 85, 80, 255 }, 0.75f * fade); // dark, drained, fading
+            DrawIconCenteredRect(sheet.tex, src, sp, kNodeRadius * 1.1f, tint);
+        } else {
+            DrawCircleV(sp, kNodeRadius * 0.5f, Fade(Color{ 70, 62, 58, 255 }, 0.8f * fade));
+            DrawCircleLines((int)sp.x, (int)sp.y, kNodeRadius * 0.5f, Fade(Color{ 40, 36, 32, 255 }, 0.8f * fade));
+        }
+    }
+}
+
 static const DungeonMonster& DungeonBoss(const GameState& s, const DungeonDef& d) {
     size_t di = (size_t)(&d - kDungeons.data());
     if (di >= kDungeons.size() || !s.dungeonBossRare[di]) return d.boss;
@@ -26924,7 +28048,13 @@ static const DungeonMonster& DungeonBoss(const GameState& s, const DungeonDef& d
             dread[i] = m;
         }
     }
+// Death-system 2D player rendering (2026-09-24): during the death animation the
+// body sinks/fades; as a ghost the player is a translucent pale wisp that can
+// walk but touch nothing. Otherwise draws the normal player.
     return dread[di];
+// Draws world corpses (the purely visual markers from the death system) in a 2D
+// view: the monster's sprite dark-tinted and fading for wilderness kills, a dark
+// mound for everything else.
 }
 static std::string DungeonBossTitle(const GameState& s, int di) {
     std::string n = kDungeons[(size_t)di].boss.name;
@@ -28149,6 +29279,25 @@ static void MaybeAutoOpenCorpse(GameState& s, const GameState::WorldCorpse& c) {
     if (!fighting && here && Dist(me, c.pos) < 170.0f && s.openCorpseId < 0) { s.openCorpseId = c.id; s.skinningT = -1.0f; }
 }
 
+static void DrawInnocentSprite2D(Vector2 screenPos, int id, const std::string& label, bool near) {
+    id = std::clamp(id, 0, 3);
+    if (g_assets.innocentTexOk[id]) {
+        const Texture2D& tex = g_assets.innocentTex[id];
+        float hgt = 52.0f;
+        float wdt = hgt * (float)tex.width / (float)tex.height;
+        Rectangle src = { 0, 0, (float)tex.width, (float)tex.height };
+        Rectangle dst = { screenPos.x - wdt / 2, screenPos.y - hgt, wdt, hgt };
+        DrawTexturePro(tex, src, dst, { 0, 0 }, 0.0f, WHITE);
+        int w = MeasureUIText(label.c_str(), 12);
+        DrawUIText(label.c_str(), (int)(screenPos.x - w / 2), (int)(screenPos.y + 4), 12,
+                   near ? kColorAccent : DARKGRAY);
+        if (near) DrawCircleLines((int)screenPos.x, (int)screenPos.y - 20, 30, kColorAccent);
+    } else {
+        DrawWorldNode(screenPos, kNodeRadius * 0.6f, Color{ 150, 140, 110, 255 }, label, near);
+    }
+}
+
+
 static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
     bool breakout = dm.zone == 0 && dm.spotIdx == kBreakoutSpot && s.breakoutBoss >= 0;
     if (breakout) BreakoutEnd(s);
@@ -28189,6 +29338,9 @@ static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
     if (dm.rare || breakout) { // (2026-09-29) a Dread boss or a breakout: a proper hoard
         c.loot.push_back({ GameState::kClGold, dm.baseGold, std::nullopt });
         c.loot.push_back({ GameState::kClItem, 1, MakeJewel(s, GetRandomValue(0, 2), 4 + dm.baseGold / 20 + GetRandomValue(0, 2)) });
+// Innocent world sprite (2D wilderness, 2026-09-24) - dedicated pixel-art portrait
+// per identity, drawn at a readable world size; falls back to the old neutral
+// circle if the texture didn't load.
         std::string extra;
         if (s.tmaps.size() < 10) { GameState::TreasureMap m; m.tier = breakout ? 4 : 3; s.tmaps.push_back(m); extra += " a treasure map"; }
         if (RandUnit() < 0.5f) { s.rareDyeCharges++; extra += extra.empty() ? " a rare dye" : " and a rare dye"; }
@@ -28212,6 +29364,7 @@ static void FinishMonsterDeath(GameState& s, GameState::DyingMonster dm) {
         const DungeonDef& dungeon = kDungeons[dm.dungeonIdx];
         if (s.dungeonXP[dm.dungeonIdx] >= dungeon.bossUnlockXp &&
             s.dungeonXP[dm.dungeonIdx] - dm.level < dungeon.bossUnlockXp)
+// Out-and-back lunge distance (world units) for a monster attack at time t.
             { if (!s.optHideDungeonBoss) msg += " " + dungeon.boss.name + " is now available!"; else Journal(s, dungeon.boss.name + " is now available."); }
     }
     LiveMaybeGainMagicResist(s);
@@ -28317,6 +29470,11 @@ static const float kCombatLungeTime = 0.28f; // monster attack lunge, out and ba
 static const float kCombatHurtTime = 0.30f;  // hit-flash on the monster
 static const float kCombatFlashTime = 0.25f; // hit-flash + knockback on the player
 static const float kCombatDebuffDuration = 20.0f; // Sap/Cloud Mind/Fumbling live in world combat
+
+static float CombatLungeCurve(float t) {
+    float f = std::clamp(t / kCombatLungeTime, 0.0f, 1.0f);
+    return sinf(f * 3.14159265f) * 26.0f;
+}
 
 
 // --- Spell visuals: one row per castable spell, indexed by kSpells index ---
@@ -29553,6 +30711,203 @@ static void FiendStrikeLive(GameState& s, int zone) { SummonStrikeLive(s, zone, 
 
 // Ticks every frame from both wilderness and dungeon updates: combat anim
 // timers, debuff expiry, spell projectiles/impacts, vigor, and the fiend.
+static std::string FlagTargetName(const GameState& s) {
+    if (!s.flagTarget.has_value()) return "";
+    const auto& f = *s.flagTarget;
+    if (f.zone == 0) {
+        if (s.wildEngaged.has_value()) return EngagedWildMonsterStats(s, *s.wildEngaged).name;
+        if (f.isRival) return RivalEpithetName(s);
+        if (f.bladeIdx >= 0 && f.bladeIdx < kBladeCount) return std::string("Murder Inc. ") + BladeName(f.bladeIdx);
+        if (f.spotIdx >= 0 && f.spotIdx < (int)kWildernessMonsterSpots.size())
+            return kWildernessMonsterSpots[f.spotIdx].name;
+    } else if (s.selectedDungeon.has_value()) {
+        const DungeonDef& dungeon = kDungeons[*s.selectedDungeon];
+        if (s.dungeonEngaged.has_value()) {
+            const auto& am = *s.dungeonEngaged;
+            return (am.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, am.monsterIdx)).name;
+        }
+        if (f.monsterIdx == kDungeonBossSlot) return DungeonBoss(s, dungeon).name;
+        if (f.monsterIdx >= 0 && f.monsterIdx < kDungeonRegularSlots)
+            return DungeonSlotMonster(dungeon, f.monsterIdx).name;
+    }
+    return "target";
+}
+
+static const float kDisengageGraceSeconds = 1.5f; // bump-engage suppression after a manual disengage
+static void DisengageFromNormals(GameState& s, int zone) {
+    if (zone == 0) {
+        if (!s.wildEngaged.has_value()) { s.flagTarget.reset(); return; }
+        const auto& am = *s.wildEngaged;
+        if (am.isRival || am.bladeIdx >= 0) return; // duels stay locked
+        s.wildEngaged.reset();
+        s.wildExtraAttackers.clear(); // the pack stands down too
+    } else {
+        if (!s.dungeonEngaged.has_value()) { s.flagTarget.reset(); return; }
+        if (s.dungeonEngaged->isBoss) return; // boss stays locked
+        s.dungeonEngaged.reset();
+        s.dungeonExtraAttackers.clear();
+    }
+    s.flagTarget.reset();
+    s.disengageGraceT = kDisengageGraceSeconds;
+    s.logLine = "You break away from the fight!";
+}
+
+static bool Wild2DFlagCandidate(const GameState& s, Vector2 camera, Vector2 m,
+                                GameState::FlagTarget* out, float* outDist, float assistPx) {
+    bool found = false;
+    float best = assistPx;
+    GameState::FlagTarget bestF;
+    auto consider = [&](Vector2 worldPos, GameState::FlagTarget f) {
+        Vector2 sp = WorldToScreen(worldPos, camera);
+        float d = std::sqrt((sp.x - m.x) * (sp.x - m.x) + (sp.y - m.y) * (sp.y - m.y));
+        if (d < best) { best = d; bestF = f; found = true; }
+    };
+    int n = (int)kWildernessMonsterSpots.size();
+    for (int i = 0; i < n; i++) {
+        if (s.wildSpotRespawn[i] > 0.0f) continue;
+        if (s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->bladeIdx < 0 &&
+            s.wildEngaged->spotIdx == i) continue; // already fighting it - nothing to flag
+        const GameState::ActiveMonster* ex = FindWildExtra(s, i);
+        GameState::FlagTarget f; f.zone = 0; f.spotIdx = i;
+        consider(ex ? ex->pos : WildernessMonsterLivePos(i, s.worldTime), f);
+    }
+    { GameState::FlagTarget f; f.zone = 0; f.isRival = true; consider(s.rivalPos, f); }
+    for (int bi = 0; bi < kBladeCount; bi++) {
+        GameState::FlagTarget f; f.zone = 0; f.bladeIdx = bi;
+        consider(s.blades[bi].pos, f);
+    }
+    if (found) { *out = bestF; *outDist = best; }
+    return found;
+}
+
+static bool TryOpenCorpse2D(GameState& s, int zone, Vector2 camera, Vector2 m);
+static void Wild2DClickFlag(GameState& s, Vector2 camera, int screenW, int screenH) {
+    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
+    if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    Vector2 m = GetMousePosition();
+    if (!CheckCollisionPointRec(m, kViewport)) return;
+    if (m.y < 200) return; // top HUD strip
+    if (CheckCollisionPointRec(m, kJoystickZone)) return;
+    if (m.x > screenW - 170 && m.y > screenH - 170) return; // interact button
+    if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return; // TARGET button (shared HUD handles it)
+    if (s.worldMapOpen) return; // full map: any tap closes it
+    if (s.minimapOpen && CheckCollisionPointRec(m, MinimapRect())) return; // minimap (tap opens the full map)
+    if (s.recallPickerOpen && CheckCollisionPointRec(m, RecallPickerRect())) return; // recall modal
+    if (!s.minimapOpen && CheckCollisionPointRec(m, MinimapToggleRect())) return; // MAP button
+    if (CorpseUIPointIn(m)) return; // corpse window / Loot button
+    if (!s.wildEngaged.has_value() && TryOpenCorpse2D(s, 0, camera, m)) return; // tap a body to open it
+    if (s.wildEngaged.has_value()) {
+        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return; // quick items
+        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 100 })) return; // spell hotbar
+    }
+    // Tapping the target frame cycles targets (2026-09-25).
+    if ((s.flagTarget.has_value() || s.wildEngaged.has_value()) &&
+        CheckCollisionPointRec(m, TargetFrameRect())) {
+        CycleFlagTarget(s);
+        return;
+    }
+    // Tap-assist (2026-09-25): 40px at 1080p height, scaled with resolution.
+    float assistPx = std::max(32.0f, kClickAssistBasePx * ((float)screenH / 1080.0f));
+    bool duelLocked = s.wildEngaged.has_value() &&
+                      (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0);
+    bool fightingNormal = s.wildEngaged.has_value() && !duelLocked;
+    GameState::FlagTarget f; float fd = 0.0f;
+    if (!duelLocked && Wild2DFlagCandidate(s, camera, m, &f, &fd, assistPx)) {
+        if ((fightingNormal && !f.isRival && f.bladeIdx < 0 && f.spotIdx != s.wildEngaged->spotIdx) ||
+            (!s.wildEngaged.has_value() && !f.isRival && f.bladeIdx < 0 && FindWildExtra(s, f.spotIdx))) {
+            // Tap on a pack member: fight it (switching from the current target if any).
+            TransferWildPrimary(s, f.spotIdx);
+        } else if (fightingNormal && (f.isRival || f.bladeIdx >= 0)) {
+            s.logLine = "You're already in a fight - finish it first!";
+        } else {
+            s.flagTarget = f;
+            s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " - closing in!";
+        }
+    } else if (duelLocked) {
+        s.logLine = "You're locked in - finish the duel first!";
+    } else {
+        // Clicked empty ground: FULL disengage (2026-09-25), not just the flag -
+        // the per-frame flag/engagement sync would otherwise resurrect the marker
+        // from the still-live fight within one frame.
+        DisengageFromNormals(s, 0);
+    }
+}
+
+static bool Dungeon2DFlagCandidate(const GameState& s, Vector2 camera, Vector2 m,
+                                   GameState::FlagTarget* out, float assistPx) {
+    if (!s.selectedDungeon.has_value()) return false;
+    int di = *s.selectedDungeon;
+    const DungeonDef& dungeon = kDungeons[di];
+    bool found = false;
+    float best = assistPx;
+    GameState::FlagTarget bestF;
+    auto consider = [&](Vector2 worldPos, GameState::FlagTarget f) {
+        Vector2 sp = WorldToScreen(worldPos, camera);
+        float d = std::sqrt((sp.x - m.x) * (sp.x - m.x) + (sp.y - m.y) * (sp.y - m.y));
+        if (d < best) { best = d; bestF = f; found = true; }
+    };
+    for (int i = 0; i < kDungeonRegularSlots; i++) {
+        if (s.dungeonSpawnRespawn[di][i] > 0.0f) continue;
+        // Boss fights are 1v1 (like Rival/blade duels): no tapping away mid-fight (2026-09-25).
+        if (s.dungeonEngaged.has_value() &&
+            (s.dungeonEngaged->isBoss || s.dungeonEngaged->monsterIdx == i)) continue;
+        const GameState::ActiveDungeonMonster* ex = FindDungeonExtra(s, i, false);
+        GameState::FlagTarget f; f.zone = 1; f.monsterIdx = i;
+        consider(ex ? ex->pos : DungeonMonsterLivePos(di, i, s.worldTime), f);
+    }
+    if (s.dungeonXP[di] >= dungeon.bossUnlockXp && s.dungeonSpawnRespawn[di][kDungeonBossSlot] <= 0.0f) {
+        bool fightingBoss = s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss;
+        if (!fightingBoss) {
+            const GameState::ActiveDungeonMonster* ex = FindDungeonExtra(s, kDungeonBossSlot, true);
+            GameState::FlagTarget f; f.zone = 1; f.monsterIdx = kDungeonBossSlot; f.isBoss = true;
+            consider(ex ? ex->pos : DungeonMonsterLivePos(di, kDungeonBossSlot, s.worldTime), f);
+        }
+    }
+    if (found) *out = bestF;
+    return found;
+}
+
+static void Dungeon2DClickFlag(GameState& s, Vector2 camera, int screenW, int screenH) {
+    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
+    if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
+    Vector2 m = GetMousePosition();
+    if (!CheckCollisionPointRec(m, kViewport)) return;
+    if (m.y < 200) return; // top HUD strip + dungeon sub-tabs
+    if (CheckCollisionPointRec(m, kJoystickZone)) return;
+    if (m.x > screenW - 170 && m.y > screenH - 170) return; // interact button
+    if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return; // TARGET button (shared HUD handles it)
+    if (s.recallPickerOpen && CheckCollisionPointRec(m, RecallPickerRect())) return; // recall modal
+    if (CorpseUIPointIn(m)) return; // corpse window / Loot button
+    if (!s.dungeonEngaged.has_value() && TryOpenCorpse2D(s, 1, camera, m)) return; // tap a body to open it
+    if (s.dungeonEngaged.has_value()) {
+        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 160.0f, 330, 55 })) return; // quick items
+        if (CheckCollisionPointRec(m, { 160, kViewport.y + kViewport.height - 100.0f, 580, 100 })) return; // spell hotbar
+    }
+    // Tapping the target frame cycles targets (2026-09-25).
+    if ((s.flagTarget.has_value() || s.dungeonEngaged.has_value()) &&
+        CheckCollisionPointRec(m, TargetFrameRect())) {
+        CycleFlagTarget(s);
+        return;
+    }
+    // Tap-assist (2026-09-25): 40px at 1080p height, scaled with resolution.
+    float assistPx = std::max(32.0f, kClickAssistBasePx * ((float)screenH / 1080.0f));
+    GameState::FlagTarget f;
+    if (Dungeon2DFlagCandidate(s, camera, m, &f, assistPx)) {
+        if (s.dungeonEngaged.has_value() || FindDungeonExtra(s, f.monsterIdx, f.isBoss)) {
+            // Mid-fight tap on another pack member: switch the primary to it.
+            TransferDungeonPrimary(s, *s.selectedDungeon, f.monsterIdx, f.isBoss);
+        } else {
+            s.flagTarget = f;
+            s.logLine = "You fix your eyes on the " + FlagTargetName(s) + " - closing in!";
+        }
+    } else if (s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss) {
+        s.logLine = "You're locked in - finish the boss first!";
+    } else {
+        // Clicked empty ground: FULL disengage (2026-09-25), not just the flag.
+        DisengageFromNormals(s, 1);
+    }
+}
+
 static void UpdateLiveSpellFX(GameState& s, float dt) {
     auto tickEngagedFX = [&](auto& am) {
         if (am.monsterAttackT >= 0.0f) { am.monsterAttackT += dt; if (am.monsterAttackT > kCombatLungeTime) am.monsterAttackT = -1.0f; }
@@ -29629,6 +30984,7 @@ static void UpdateLiveSpellFX(GameState& s, float dt) {
                 if (p.zone == 0) ResolveEnemyRangedImpact(s, p.castByRival, p.castByBladeIdx, p.enemySpell);
             } else if (p.spellIdx >= 0 && p.spellIdx < (int)kSpells.size()) {
                 const Spell& sp = kSpells[p.spellIdx];
+// Click-to-flag shared bits: nearest candidate within a screen-space radius.
                 if (sp.type == SpellType::Debuff) {
                     SpawnSpellImpact(s, p.zone, p.target, p.spellIdx, 0.8f);
                     ResolvePlayerDebuffImpact(s, p.spellIdx, p.trainNote, p.zone);
@@ -29684,27 +31040,6 @@ static bool FlagTargetLivePos(const GameState& s, Vector2* out) {
     return true;
 }
 
-static std::string FlagTargetName(const GameState& s) {
-    if (!s.flagTarget.has_value()) return "";
-    const auto& f = *s.flagTarget;
-    if (f.zone == 0) {
-        if (s.wildEngaged.has_value()) return EngagedWildMonsterStats(s, *s.wildEngaged).name;
-        if (f.isRival) return RivalEpithetName(s);
-        if (f.bladeIdx >= 0 && f.bladeIdx < kBladeCount) return std::string("Murder Inc. ") + BladeName(f.bladeIdx);
-        if (f.spotIdx >= 0 && f.spotIdx < (int)kWildernessMonsterSpots.size())
-            return kWildernessMonsterSpots[f.spotIdx].name;
-    } else if (s.selectedDungeon.has_value()) {
-        const DungeonDef& dungeon = kDungeons[*s.selectedDungeon];
-        if (s.dungeonEngaged.has_value()) {
-            const auto& am = *s.dungeonEngaged;
-            return (am.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, am.monsterIdx)).name;
-        }
-        if (f.monsterIdx == kDungeonBossSlot) return DungeonBoss(s, dungeon).name;
-        if (f.monsterIdx >= 0 && f.monsterIdx < kDungeonRegularSlots)
-            return DungeonSlotMonster(dungeon, f.monsterIdx).name;
-    }
-    return "target";
-}
 
 static void ClearFlagTarget(GameState& s) { s.flagTarget.reset(); }
 // ---- Bard skills (2026-09-28) ----------------------------------------------
@@ -29858,7 +31193,6 @@ static void BardResolveProvokeKill(GameState& s) {
         }
 }
 
-static const float kDisengageGraceSeconds = 1.5f; // bump-engage suppression after a manual disengage
 
 // Full disengage (2026-09-25): clicking/tapping empty ground while fighting
 // normal monsters ends the WHOLE fight - engagement, pack, and flag. The old
@@ -29868,23 +31202,6 @@ static const float kDisengageGraceSeconds = 1.5f; // bump-engage suppression aft
 // fights stay locked 1v1 by design - callers check those first and never call
 // this for them. The grace timer stops contact auto-engage from instantly
 // re-engaging while the monsters are still standing on the player.
-static void DisengageFromNormals(GameState& s, int zone) {
-    if (zone == 0) {
-        if (!s.wildEngaged.has_value()) { s.flagTarget.reset(); return; }
-        const auto& am = *s.wildEngaged;
-        if (am.isRival || am.bladeIdx >= 0) return; // duels stay locked
-        s.wildEngaged.reset();
-        s.wildExtraAttackers.clear(); // the pack stands down too
-    } else {
-        if (!s.dungeonEngaged.has_value()) { s.flagTarget.reset(); return; }
-        if (s.dungeonEngaged->isBoss) return; // boss stays locked
-        s.dungeonEngaged.reset();
-        s.dungeonExtraAttackers.clear();
-    }
-    s.flagTarget.reset();
-    s.disengageGraceT = kDisengageGraceSeconds;
-    s.logLine = "You break away from the fight!";
-}
 
 // Steers the player toward the flagged target when it isn't already a fight.
 // Yields to everything: manual movement (caller only steers when the player
@@ -30013,6 +31330,17 @@ static void TransferDungeonPrimary(GameState& s, int dungeonIdx, int newMonsterI
     s.logLine = "You turn on the " + m.name + "!";
 }
 
+static void DrawFlagMarker2D(const GameState& s, Vector2 camera, int zone) {
+    if (!s.flagTarget.has_value() || s.flagTarget->zone != zone) return;
+    Vector2 tgt;
+    if (!FlagTargetLivePos(s, &tgt)) return;
+    Vector2 sp = WorldToScreen(tgt, camera);
+    float pulse = 0.55f + 0.45f * sinf(s.worldTime * 6.0f);
+    Color rc = Fade(Color{ 255, 60, 60, 255 }, pulse);
+    DrawTriangle({ sp.x, sp.y - 66 }, { sp.x - 9, sp.y - 50 }, { sp.x + 9, sp.y - 50 }, rc);
+    DrawCircleLines((int)sp.x, (int)sp.y, (int)(kNodeRadius * 0.85f + 8.0f + 3.0f * sinf(s.worldTime * 6.0f)), rc);
+}
+
 static void CycleFlagTarget(GameState& s) {
     if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
     if (s.screen != Screen::Wilderness && s.screen != Screen::Hunt) return;
@@ -30078,6 +31406,8 @@ static void CycleFlagTarget(GameState& s) {
         return;
     }
     // --- Dungeon ---
+// Pulsing red marker on the flagged target: diamond + ring (2D), floating
+// diamond + ground ring (3D). Drawn for both steering and engaged phases.
     if (!s.selectedDungeon.has_value()) return;
     int di = *s.selectedDungeon;
     const DungeonDef& dungeon = kDungeons[di];
@@ -30162,9 +31492,11 @@ static bool Wild3DConsiderFlag(GameState& s, const Town3DCam& c, Vector2 m, floa
 // enemy within a resolution-scaled pixel radius - the 3D counterpart of the
 // 2D click assist. Runs after the ray-sphere passes miss.
 static bool Wild3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
+
                                float assistPx, GameState::FlagTarget* out) {
     bool found = false;
     float best = assistPx;
+// --- Spell FX drawing ---
     GameState::FlagTarget bestF;
     auto considerScreen = [&](Vector2 worldPos, GameState::FlagTarget f) {
         Vector2 sp;
@@ -30192,6 +31524,87 @@ static bool Wild3DScreenAssist(GameState& s, const Town3DCam& c, Vector2 m,
 
 // Teleport (2026-09-27): after casting, the next tap on the ground in reach is
 // where you appear. Mana and reagents are paid here, on landing.
+static void DrawNecro2D(GameState& s, Vector2 camera, int zone) {
+    for (const auto& m : s.minions) {
+        if (m.zone != zone) continue;
+        Vector2 p = WorldToScreen(m.pos, camera);
+        float r = 13.0f * (0.3f + 0.7f * m.riseT);
+        DrawCircleV(p, r + 6.0f, Fade(Color{ 120, 255, 150, 255 }, 0.15f));
+        DrawCircleV(p, r, Color{ 224, 218, 194, 255 });
+        DrawCircleLinesV(p, r, Color{ 70, 64, 56, 255 });
+        DrawCircleV({ p.x - 4, p.y - 3 }, 2.2f, Color{ 40, 30, 30, 255 });
+        DrawCircleV({ p.x + 4, p.y - 3 }, 2.2f, Color{ 40, 30, 30, 255 });
+        if (m.kind == 0) DrawLineEx({ p.x + r, p.y - r }, { p.x + r + 10, p.y - r - 14 }, 3.0f, Color{ 190, 194, 202, 255 });
+        else DrawLineEx({ p.x + r, p.y + r }, { p.x + r + 4, p.y - r - 16 }, 3.0f, Color{ 110, 70, 140, 255 });
+    }
+    if (s.boneArmor > 0.0f) {
+        Vector2 me = WorldToScreen(zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos, camera);
+        float t = (float)GetTime();
+        for (int k = 0; k < 6; k++) {
+            float a = t * 2.2f + k * 1.047f;
+            DrawCircleV({ me.x + cosf(a) * 26.0f, me.y + sinf(a) * 20.0f }, 3.0f, Color{ 236, 230, 208, 255 });
+        }
+    }
+}
+
+static void DrawSpellFX2D(GameState& s, Vector2 camera, int zone) {
+    DrawNecro2D(s, camera, zone); // raised dead + bone armor (2026-09-27)
+    Vector2 ppos = (zone == 0) ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    for (auto& p : s.spellProjectiles) {
+        if (!p.active || p.zone != zone) continue;
+        SpellFX fx = SpellFXFor(p.spellIdx);
+        float wob = (p.spellIdx >= 2 && p.spellIdx <= 4) ? sinf(p.t * 18.0f) * 10.0f : 0.0f; // wisps wobble
+        for (int k = 3; k >= 1; k--) {
+            float bt = std::clamp((p.t - k * 0.035f) / p.dur, 0.0f, 1.0f);
+            Vector2 bp = { p.from.x + (p.target.x - p.from.x) * bt,
+                           p.from.y + (p.target.y - p.from.y) * bt + wob * bt };
+            DrawCircleV(WorldToScreen(bp, camera), fx.projRadius * (1.0f - k * 0.22f), Fade(fx.proj, 0.35f));
+        }
+        Vector2 sp = WorldToScreen({ p.pos.x, p.pos.y + wob }, camera);
+        DrawCircleV(sp, fx.projRadius, fx.proj);
+        DrawCircleV(sp, fx.projRadius * 0.5f, Color{ 255, 255, 255, 255 });
+    }
+    for (auto& im : s.spellImpacts) {
+        if (!im.active || im.zone != zone) continue;
+        SpellFX fx = SpellFXFor(im.spellIdx);
+        float f = std::clamp(im.t / im.dur, 0.0f, 1.0f);
+        Vector2 sp = WorldToScreen(im.pos, camera);
+        float r = fx.impactRadius * im.sizeMul * (0.4f + 0.6f * f);
+        DrawCircleV(sp, r, Fade(fx.impact, 0.55f * (1.0f - f)));
+        DrawCircleV(sp, r * 0.55f, Fade(Color{ 255, 255, 255, 255 }, 0.5f * (1.0f - f)));
+    }
+    for (auto& ft : s.floatTexts) { // floating damage numbers / MISS (2026-09-25)
+        if (!ft.active || ft.zone != zone) continue;
+        float f = std::clamp(ft.t / ft.dur, 0.0f, 1.0f);
+        Vector2 sp = WorldToScreen(ft.pos, camera);
+        sp.y -= 26.0f + ft.t * 54.0f; // rise as it fades
+        int fsz = 17;
+        int w = MeasureUIText(ft.text.c_str(), fsz);
+        int sx = (int)(sp.x - w / 2), sy = (int)sp.y;
+        float a = 1.0f - f * f;
+        Color oc = Fade(BLACK, 0.75f * a);
+        DrawUIText(ft.text.c_str(), sx - 1, sy, fsz, oc);
+        DrawUIText(ft.text.c_str(), sx + 1, sy, fsz, oc);
+        DrawUIText(ft.text.c_str(), sx, sy - 1, fsz, oc);
+        DrawUIText(ft.text.c_str(), sx, sy + 1, fsz, oc);
+        DrawUIText(ft.text.c_str(), sx, sy, fsz, Fade(ft.color, a));
+    }
+    if (s.fiendT > 0.0f && s.fiendZone == zone) DrawFiend2D(s, camera);
+    if (s.healGlowT >= 0.0f) {
+        Color gc = s.healGlowKind == 0 ? Color{ 150, 255, 170, 255 } :
+                   s.healGlowKind == 1 ? Color{ 255, 220, 130, 255 } : Color{ 255, 140, 70, 255 };
+        float f = s.healGlowT / 0.6f;
+        Vector2 pp = WorldToScreen(ppos, camera);
+        DrawCircleLines((int)pp.x, (int)pp.y, (int)(20 + 48 * f), Fade(gc, 0.85f * (1.0f - f)));
+        DrawCircleV(pp, 34.0f * (1.0f - f) + 8.0f, Fade(gc, 0.25f * (1.0f - f)));
+    }
+    if (s.vigorT > 0.0f) { // Blessing of Vigor: faint pulsing gold aura
+        Vector2 pp = WorldToScreen(ppos, camera);
+        float pulse = 0.35f + 0.2f * sinf(s.worldTime * 5.0f);
+        DrawCircleLines((int)pp.x, (int)pp.y, (int)(kPlayerRadius * 1.35f), Fade(Color{ 255, 210, 110, 255 }, pulse));
+    }
+}
+
 static bool TryTeleportLand(GameState& s, const Town3DCam& c, Vector2 m, int zone) {
     if (g_teleAimZone != zone) return false;
     g_teleAimZone = -1;
@@ -30528,6 +31941,19 @@ static void DrawNecro3D(GameState& s, int zone) {
 // Combat camera kick: offsets eye and target together along the camera's own
 // right/up axes, so the view jolts without changing where it looks. Two
 // incommensurate sines per axis read as noise instead of a wobble.
+static bool TryOpenCorpse2D(GameState& s, int zone, Vector2 camera, Vector2 m) {
+    Vector2 me = zone == 0 ? s.wildernessPlayerPos : s.dungeonPlayerPos;
+    for (auto& c : s.worldCorpses) {
+        if (!CorpseHere(s, c, zone) || !c.Lootable()) continue;
+        if (Dist(WorldToScreen(c.pos, camera), m) > 30.0f) continue;
+        if (Dist(me, c.pos) > 200.0f) { SpawnFloatText(s, zone, me, "Too far away", kFloatDenyColor); return true; }
+        s.openCorpseId = c.id; s.skinningT = -1.0f;
+        PlaySfx(SfxId::Click);
+        return true;
+    }
+    return false;
+}
+
 static void T3DApplyShake(Town3DCam& c) {
     if (g_shakeAmp <= 0.0f) return;
     float t = (float)GetTime();
@@ -30537,6 +31963,7 @@ static void T3DApplyShake(Town3DCam& c) {
                     c.right.z * ox + c.up.z * oy };
     c.pos = { c.pos.x + off.x, c.pos.y + off.y, c.pos.z + off.z };
     c.target = { c.target.x + off.x, c.target.y + off.y, c.target.z + off.z };
+// 2D views: a tap within reach of a body's sprite opens it.
 }
 
 // Hit sparks (see SpawnHitSparks): soft camera-facing dots, depth-tested but
@@ -31388,6 +32815,71 @@ static bool StarterTarget(GameState& s, Vector2* out) {
     }
     return false;
 }
+static Vector2 HousePlotInteractPos(const GameState& s, int plotIdx) {
+    return HousePlotInteractPos(s.housePlotIdx, s.houseLayout, plotIdx);
+}
+
+static void DrawWildernessHousePlots2D(const GameState& s, Vector2 camera, bool plotIsNearest, int nearestPlot) {
+    for (size_t pi = 0; pi < kHousePlots.size(); pi++) {
+        const HousePlot& hp = kHousePlots[pi];
+        bool owned = (int)pi == s.housePlotIdx;
+        Vector2 sp = WorldToScreen(hp.pos, camera);
+        if (!owned) {
+            // For-sale sign: post + board + price label.
+            DrawRectangle((int)sp.x - 3, (int)sp.y - 34, 6, 34, Color{ 110, 80, 50, 255 });
+            DrawRectangle((int)sp.x - 34, (int)sp.y - 62, 68, 30, Color{ 150, 115, 70, 255 });
+            DrawRectangleLines((int)sp.x - 34, (int)sp.y - 62, 68, 30, Color{ 90, 65, 40, 255 });
+            std::string price = std::to_string(hp.price) + "g";
+            int tw = MeasureUIText(price.c_str(), 12);
+            DrawUIText(price.c_str(), (int)sp.x - tw / 2, (int)sp.y - 56, 12, kColorText);
+            int nw = MeasureUIText("For Sale", 12);
+            DrawUIText("For Sale", (int)sp.x - nw / 2, (int)sp.y - 84, 12, GOLD);
+            if (plotIsNearest && nearestPlot == (int)pi)
+                DrawCircleLines((int)sp.x, (int)sp.y, kNodeRadius, GOLD);
+            continue;
+        }
+        int cells = hp.cells;
+        if (!HouseLayoutValid(s.houseLayout, cells)) continue;
+        // Plot boundary (subtle).
+        Rectangle wb = HousePlotBounds(hp);
+        Vector2 s0 = WorldToScreen({ wb.x, wb.y }, camera);
+        Vector2 s1 = WorldToScreen({ wb.x + wb.width, wb.y + wb.height }, camera);
+        DrawRectangleLines((int)s0.x, (int)s0.y, (int)(s1.x - s0.x), (int)(s1.y - s0.y), Fade(GOLD, 0.35f));
+        for (int cy = 0; cy < cells; cy++) {
+            for (int cx = 0; cx < cells; cx++) {
+                char c = HouseCellAt(s.houseLayout, cells, cx, cy);
+                if (c == '.') continue;
+                Vector2 cc = HouseCellCenter(hp, cx, cy);
+                Vector2 cp = WorldToScreen(cc, camera);
+                float cs = kHouseCellSize; // 2D wilderness is 1:1 world->screen (no zoom)
+                Rectangle r = { cp.x - cs / 2, cp.y - cs / 2, cs, cs };
+                // Housing 2.0: seen from above it's the roof, walls along the outline,
+                // glass on window cells and the door on its outward side.
+                DrawTexturePro(SurfTex(kHouseRoofSurfs[s.houseRoofStyle]), { cc.x * 2.0f, cc.y * 2.0f, cs * 2.0f, cs * 2.0f }, r, { 0, 0 }, 0, WHITE);
+                const int dx4[4] = { 0, 0, -1, 1 }, dy4[4] = { -1, 1, 0, 0 };
+                for (int k = 0; k < 4; k++) {
+                    if (HouseCellAt(s.houseLayout, cells, cx + dx4[k], cy + dy4[k]) != '.') continue;
+                    Rectangle e = k == 0 ? Rectangle{ r.x, r.y, cs, 5 } : k == 1 ? Rectangle{ r.x, r.y + cs - 5, cs, 5 }
+                                : k == 2 ? Rectangle{ r.x, r.y, 5, cs } : Rectangle{ r.x + cs - 5, r.y, 5, cs };
+                    DrawRectangleRec(e, Color{ 70, 50, 34, 255 });
+                    Rectangle mid = k < 2 ? Rectangle{ e.x + cs * 0.3f, e.y, cs * 0.4f, e.height } : Rectangle{ e.x, e.y + cs * 0.3f, e.width, cs * 0.4f };
+                    if (c == 'N') DrawRectangleRec(mid, Color{ 150, 200, 230, 255 });
+                    else if (c == 'D') DrawRectangleRec(k < 2 ? Rectangle{ mid.x, mid.y - 2, mid.width, mid.height + 4 } : Rectangle{ mid.x - 2, mid.y, mid.width + 4, mid.height },
+                                                        Color{ 200, 150, 80, 255 });
+                }
+            }
+        }
+        if (plotIsNearest && nearestPlot == (int)pi) {
+            Vector2 dp = WorldToScreen(HousePlotInteractPos(s, (int)pi), camera);
+            DrawCircleLines((int)dp.x, (int)dp.y, kInteractRange, GOLD);
+        }
+        // House name label.
+        std::string hn = s.houseName.empty() ? "Homestead" : s.houseName;
+        int hw = MeasureUIText(hn.c_str(), 13);
+        DrawUIText(hn.c_str(), (int)sp.x - hw / 2, (int)s0.y - 22, 13, kColorHeading);
+    }
+}
+
 static void UpdateDrawStarter(GameState& s, int screenW, int screenH) {
     if (s.starterStep < 0 || s.starterStep >= kStCount) return;
     float dt = GetFrameTime();
@@ -31434,6 +32926,7 @@ static void UpdateDrawStarter(GameState& s, int screenW, int screenH) {
     // split across the old portrait HUD strips, and never a tap-to-walk target.
     auto& card = g_landscapeOpening;
     card.visible = true;
+// 2D wilderness rendering of plots and custom houses.
     bool largeCard = !s.starterAccepted || s.starterStep == kStDone;
     card.rect = largeCard ? Rectangle{176,140,540,226} : Rectangle{16,140,344,236};
     if(!largeCard) card.vitals=TextFormat("Health %d / %d   Mana %d / %d",(int)s.hp,(int)s.maxHp,(int)s.mana,(int)MaxMana(s));
@@ -31567,9 +33060,6 @@ static float MonsterCombatPhase3D(float monsterAttackT) {
 // Custom wilderness housing - interactions, designer, and rendering (2026-09-25).
 // ---------------------------------------------------------------------------
 // GameState overload (forward declaration was next to the plot table).
-static Vector2 HousePlotInteractPos(const GameState& s, int plotIdx) {
-    return HousePlotInteractPos(s.housePlotIdx, s.houseLayout, plotIdx);
-}
 
 static void TryBuyHousePlot(GameState& s, int plotIdx) {
     if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
@@ -33037,7 +34527,405 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // 3D wilderness view (2026-09-24, Phase 1): when wild3DView is on, the whole
     // 2D world block below is skipped and DrawWilderness3DWorld renders the 3D
     // scene instead. Movement, interaction, combat, and the HUD are shared.
-    if (s.wild3DView) { DrawWilderness3DWorld(s, screenW, screenH, prompt); } // end else: 2D world view (3D renders via DrawWilderness3DWorld above)
+    if (s.wild3DView) { DrawWilderness3DWorld(s, screenW, screenH, prompt); } else {
+    BeginScissorMode((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height);
+    Vector2 camera = CameraTopLeft(s.wildernessPlayerPos, kWildernessWorldSize);
+    DrawTiledGround(g_assets.groundGrassOk ? &g_assets.groundGrass : nullptr, kViewport, camera, 48.0f,
+                      Color{ 170, 188, 148, 255 }); // a shade greener/wilder than Town's tended-grass tint
+
+    // Phase 0 region visuals (2D): light ground washes per region + thin boundary
+    // lines, so crossing a region reads on the map. Full biomes arrive in Phases 2-4.
+    {
+        auto washRect = [&](float x, float y, float w, float h, Color c) {
+            Vector2 tl = WorldToScreen({ x, y }, camera);
+            DrawRectangle((int)tl.x, (int)tl.y, (int)w, (int)h, c);
+        };
+        const float WS = kWildernessWorldSize;
+        const float F = 700.0f * kWS, C = 1950.0f * kWS, P = 500.0f * kWS; // region lines (1.5x map)
+        washRect(0, 0, WS, F, Color{ 228, 238, 248, 120 });         // Frostwastes: snow (Phase 3)
+        washRect(C, F, WS - C, WS - F, Color{ 216, 196, 150, 36 }); // Salt Coast: sandy wash
+        washRect(0, F, P, WS - F, Color{ 138, 136, 130, 80 });  // Stonepeaks: granite (Phase 4)
+        Color boundCol = Color{ 90, 70, 50, 110 };
+        Vector2 b1a = WorldToScreen({ 0, F }, camera), b1b = WorldToScreen({ WS, F }, camera);
+        Vector2 b2a = WorldToScreen({ C, F }, camera), b2b = WorldToScreen({ C, WS }, camera);
+        Vector2 b3a = WorldToScreen({ P, F }, camera), b3b = WorldToScreen({ P, WS }, camera);
+        DrawLineEx(b1a, b1b, 3.0f, boundCol);
+        DrawLineEx(b2a, b2b, 3.0f, boundCol);
+        DrawLineEx(b3a, b3b, 3.0f, boundCol);
+    }
+
+    // The King's Road (Phase 0): drawn as a proper waypoint polyline in both views.
+    // 2026-09-26: the whole road network (King's Road + curving branch roads,
+    // which replaced the straight gate-to-entrance spokes), then the terrain
+    // overlay - water, shores, ridges, bridge decks - over it, so 2D shows the
+    // same blocking terrain as 3D.
+    {
+        WildTerrainEnsure();
+        Color roadOuter = { 178, 148, 98, 255 }, roadInner = { 208, 182, 126, 255 };
+        for (int pass = 0; pass < 2; pass++)
+            for (const auto& road : g_wtRoads)
+                for (size_t i = 0; i + 1 < road.size(); i++) {
+                    Vector2 a = WorldToScreen(road[i], camera), b = WorldToScreen(road[i + 1], camera);
+                    if (fmaxf(a.x, b.x) < kViewport.x - 20 || fminf(a.x, b.x) > kViewport.x + kViewport.width + 20 ||
+                        fmaxf(a.y, b.y) < kViewport.y - 20 || fminf(a.y, b.y) > kViewport.y + kViewport.height + 20) continue;
+                    DrawLineEx(a, b, pass == 0 ? 30.0f : 16.0f, pass == 0 ? roadOuter : roadInner);
+                    DrawCircleV(a, pass == 0 ? 15.0f : 8.0f, pass == 0 ? roadOuter : roadInner);
+                }
+        Vector2 lbl = WorldToScreen(WP(1900, 1630), camera);
+        DrawUIText("King's Road", (int)lbl.x - 38, (int)lbl.y, 12, Color{ 96, 74, 50, 255 });
+        WildDraw2DTerrainOverlay(camera);
+    }
+
+    // Decorative bush/fern scatter - drawn first (no collision) so nodes layer on top of
+    // any incidental overlap. CraftPix "Rocks & Bushes", same license as the tame-spot art.
+    for (const WildernessFoliage& f : kWildernessFoliage) {
+        const Texture2D* icon = WildFoliageIcon(f.variant);
+        if (!icon) continue;
+        Vector2 screenPos = WorldToScreen(f.pos, camera);
+        if (screenPos.x < kViewport.x - 30 || screenPos.x > kViewport.x + kViewport.width + 30 ||
+            screenPos.y < kViewport.y - 30 || screenPos.y > kViewport.y + kViewport.height + 30) continue;
+        DrawIconCentered(*icon, screenPos, 34.0f, WHITE);
+    }
+
+    // Housing plots (2026-09-25) - for-sale signs on unowned plots, custom houses
+    // on owned ones. Drawn after foliage so houses layer on top of it.
+    DrawWildernessHousePlots2D(s, camera,
+        inRange && nearestKind == WildNodeKind::HousePlot, nearestIdx);
+
+    int oreSeen = 0;
+    for (size_t i = 0; i < kWildernessGatherNodes.size(); i++) {
+        const WildernessGatherNode& node = kWildernessGatherNodes[i];
+        bool isWood = node.resource == "wood";
+        bool isFish = node.resource == "fish"; // Phase 2: Salt Coast fishery
+        bool isIce = node.resource == "ice";  // Phase 3: Frostwastes ice crystals
+        bool isRichOre = node.resource == "richore"; // Phase 4: Stonepeaks rich ore vein
+        const Texture2D* icon;
+        if (isWood) icon = g_assets.wildTreeOk ? &g_assets.wildTree : nullptr;
+        else if (isFish) icon = nullptr; // tidal pool is primitive-drawn (animated ripples), no art
+        else if (isIce) icon = nullptr;  // ice crystal is primitive-drawn (diamond), no art
+        else {
+            int oreIdx = (oreSeen++) % 3; // 3 ore variants shared across all ore/rich-ore nodes (Phase 4: was unbounded)
+            icon = g_assets.wildOreTexOk[oreIdx] ? &g_assets.wildOreTex[oreIdx] : (g_assets.wildRockOk ? &g_assets.wildRock : nullptr);
+        }
+        bool near = nearestKind == WildNodeKind::Gather && nearestIdx == (int)i && inRange;
+        Vector2 screenPos = WorldToScreen(node.pos, camera);
+        Color ring = isWood ? Color{ 90, 110, 60, 255 }
+                   : (isFish ? Color{ 60, 140, 180, 255 } : (isIce ? Color{ 150, 190, 235, 255 }
+                   : (isRichOre ? Color{ 205, 165, 65, 255 } : Color{ 120, 116, 110, 255 })));
+        std::string label = isWood ? "Tree" : (isFish ? "Tidal Pool" : (isIce ? "Ice Crystal" : (isRichOre ? "Rich Ore Vein" : "Ore Vein")));
+        DrawWorldNode(screenPos, kNodeRadius * 0.6f, ring, label, near, "", icon);
+        if (isIce) { // glittering crystal diamond over the disc
+            float r = kNodeRadius * 0.45f;
+            float tw = 0.7f + 0.3f * sinf(s.worldTime * 3.0f + node.pos.x);
+            DrawTriangle({ screenPos.x, screenPos.y - r }, { screenPos.x + r * 0.7f, screenPos.y },
+                         { screenPos.x, screenPos.y + r }, Color{ 200, 225, 250, (unsigned char)(255 * tw) });
+            DrawTriangle({ screenPos.x, screenPos.y - r }, { screenPos.x, screenPos.y + r },
+                         { screenPos.x - r * 0.7f, screenPos.y }, Color{ 160, 195, 235, (unsigned char)(255 * tw) });
+            DrawCircleLines((int)screenPos.x, (int)screenPos.y, r * 1.2f, Color{ 220, 240, 255, 160 });
+        }
+        if (isFish) { // animated ripple rings over the pool disc
+            float rip = fmodf(s.worldTime * 1.5f, 1.0f);
+            DrawCircleLines((int)screenPos.x, (int)screenPos.y, kNodeRadius * 0.6f * rip, Color{ 150, 210, 240, 200 });
+        }
+    }
+    // Phase 2 - Saltmere Docks: wilderness landmark on the Salt Coast (decorative;
+    // the tidal-pool nodes nearby are the interactables).
+    for (const CoastProp& d : kSaltDocks) {
+        Vector2 dsp = WorldToScreen(d.pos, camera);
+        if (dsp.x < kViewport.x - 60 || dsp.x > kViewport.x + kViewport.width + 60 ||
+            dsp.y < kViewport.y - 60 || dsp.y > kViewport.y + kViewport.height + 60) continue;
+        DrawCoastProp2D(d.kind, dsp, d.size, s.worldTime);
+    }
+    for (size_t i = 0; i < kWildernessCreatureSpots.size(); i++) {
+        const WildernessCreatureSpot& spot = kWildernessCreatureSpots[i];
+        const WildCreature& creature = kWildCreatures[spot.creatureIdx];
+        const DirSpriteSheet& sheet = g_assets.wildCreatureTex[spot.creatureIdx];
+        bool near = nearestKind == WildNodeKind::Creature && nearestIdx == (int)i && inRange;
+        std::string sub = TextFormat("diff %d - %.0f%%", creature.difficulty, TameChance(s, creature));
+        Vector2 screenPos = WorldToScreen(spot.pos, camera);
+        // Tamable creatures don't wander (spot.pos is a fixed point, unlike Wilderness
+        // monsters/dungeon monsters), so there's no motion to derive a facing from - but
+        // they can still face the player, the same "notices you approaching" read the
+        // Rival/engaged-monster blocks already use elsewhere (2026-09-23 wire-up).
+        if (sheet.ok) {
+            Vector2 toPlayer = { s.wildernessPlayerPos.x - spot.pos.x, s.wildernessPlayerPos.y - spot.pos.y };
+            float len = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
+            Vector2 facing = len > 0.001f ? Vector2{ toPlayer.x / len, toPlayer.y / len } : Vector2{ 0, 1 };
+            Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Idle, s.worldTime);
+            DrawWorldNode(screenPos, kNodeRadius * 0.8f, Color{ 96, 72, 54, 255 }, creature.name, near, sub, &sheet.tex, WHITE, &src);
+        } else {
+            DrawWorldNode(screenPos, kNodeRadius * 0.8f, Color{ 96, 72, 54, 255 }, creature.name, near, sub);
+        }
+    }
+    bool wildDying2D = false;
+    for (const auto& d : s.dyingMonsters) if (d.zone == 0) { wildDying2D = true; break; }
+    for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
+        // The engaged slot is drawn separately below, at its live position with an HP
+        // bar, instead of here at its idle spawn spot. Checks s.wildEngaged fresh
+        // (not the frame-start wasEngaged) since updateEngagedMonsterAI() above may
+        // have just ended the fight this same frame - wasEngaged would still be true
+        // then, and dereferencing an emptied optional is undefined behavior.
+        if (s.wildEngaged.has_value() && !s.wildEngaged->isRival && s.wildEngaged->spotIdx == (int)i) continue;
+        // Empty slots (waiting to respawn) draw nothing - except a slot mid-death-
+        // animation, which draws the fading body instead. Pack attackers draw at
+        // their chase positions with a red flash while hurt.
+        const GameState::DyingMonster* dying = wildDying2D ? FindDyingWildSpot(s, (int)i) : nullptr;
+        bool isDying = dying != nullptr;
+        const GameState::ActiveMonster* extra = !isDying ? FindWildExtra(s, (int)i) : nullptr;
+        if (!isDying && !extra && s.wildSpotRespawn[i] > 0.0f) continue;
+        const WildernessMonsterSpot& spot = kWildernessMonsterSpots[i];
+        const DirSpriteSheet& sheet = WildMonsterSheetFor(spot.iconIdx);
+        bool near = nearestKind == WildNodeKind::Monster && nearestIdx == (int)i && inRange;
+        std::string sub = TextFormat("lvl %d - %.0f%%", spot.level, WinChancePreview(s, spot.level));
+        Vector2 screenPos = WorldToScreen(isDying ? dying->pos : (extra ? extra->pos : WildernessMonsterLivePos((int)i, s.worldTime)), camera);
+        Color baseTint = WildMonsterTintFor(spot.iconIdx);
+        Color hurtTint = CombatHitTint(extra ? extra->monsterHurtT : -1.0f, baseTint, Color{ 255, 130, 130, 255 });
+        if (sheet.ok) {
+            Rectangle src = ActorSrcRect(sheet, { 0, 1 }, ActorAnim::Idle, s.worldTime);
+            if (isDying) {
+                float fade = std::max(0.0f, dying->timer / dying->duration);
+                DrawDyingWorldNode(screenPos, kNodeRadius * 0.7f, &sheet.tex, Fade(baseTint, fade), &src,
+                                   1.0f + 0.25f * (1.0f - fade));
+            } else {
+                DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, near, sub, &sheet.tex, hurtTint, &src);
+            }
+        } else {
+            if (!isDying) DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, near, sub);
+        }
+    }
+    if (s.wildEngaged.has_value()) {
+        // Live, moving monster - "near" (the highlight ring) now means "close enough to
+        // swing" instead of "close enough to engage", reusing DrawWorldNode's existing
+        // ring rather than adding a second visual for the same idea.
+        EngagedMonsterStats spot = EngagedWildMonsterStats(s, *s.wildEngaged);
+        int engagedIcon = (s.wildEngaged->isRival || s.wildEngaged->bladeIdx >= 0) ? -1
+            : kWildernessMonsterSpots[s.wildEngaged->spotIdx].iconIdx;
+        const DirSpriteSheet& sheet = (engagedIcon < 0) ? g_assets.rivalAdventurerSheet : WildMonsterSheetFor(engagedIcon);
+        Color engagedBaseTint = (engagedIcon < 0) ? WHITE : WildMonsterTintFor(engagedIcon);
+        Vector2 screenPos = WorldToScreen(s.wildEngaged->pos, camera);
+        // Combat FX (2026-09-24): the monster lunges toward the player on its
+        // attack tick and flashes red when hurt - synced to the damage numbers.
+        const auto& amFX = *s.wildEngaged;
+        {
+            Vector2 toP = { s.wildernessPlayerPos.x - amFX.pos.x, s.wildernessPlayerPos.y - amFX.pos.y };
+            float tpl = std::sqrt(toP.x * toP.x + toP.y * toP.y);
+            if (tpl > 0.001f && amFX.monsterAttackT >= 0.0f) {
+                float lunge = CombatLungeCurve(amFX.monsterAttackT);
+                screenPos.x += toP.x / tpl * lunge;
+                screenPos.y += toP.y / tpl * lunge;
+            }
+        }
+        Color fxTint = CombatHitTint(amFX.monsterHurtT, engagedBaseTint, Color{ 255, 130, 130, 255 });
+        bool inMelee = Dist(s.wildEngaged->pos, s.wildernessPlayerPos) < kWildMeleeRange;
+        if (sheet.ok) {
+            // Faces the player directly rather than tracking real per-frame velocity -
+            // chasing monsters always move straight at the player anyway, so this reads
+            // identically without needing a stored previous-position/facing field.
+            Vector2 toPlayer = { s.wildernessPlayerPos.x - s.wildEngaged->pos.x, s.wildernessPlayerPos.y - s.wildEngaged->pos.y };
+            float toPlayerLen = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
+            Vector2 facing = toPlayerLen > 0.001f ? Vector2{ toPlayer.x / toPlayerLen, toPlayer.y / toPlayerLen } : Vector2{ 0, 1 };
+            Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
+            DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, inMelee, "", &sheet.tex, fxTint, &src);
+        } else {
+            DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, inMelee, "");
+        }
+        float hpPct = std::clamp(s.wildEngaged->hp / s.wildEngaged->maxHp, 0.0f, 1.0f);
+        Rectangle hpBg = { screenPos.x - 30, screenPos.y - kNodeRadius * 0.7f - 26, 60, 8 };
+        DrawRectangleRec(hpBg, Fade(BLACK, 0.4f));
+        DrawRectangleRec({ hpBg.x, hpBg.y, hpBg.width * hpPct, hpBg.height }, Color{ 122, 46, 46, 255 });
+        DrawRectangleLinesEx(hpBg, 1.0f, Fade(RAYWHITE, 0.8f));
+    } else {
+        // Roaming, not currently fought - patrolling or actively hunting the player
+        // (2026-09-23, "Rival hunts you" plan). Sub-label surfaces which, both for
+        // legibility and because "Hunting..." is a genuinely useful warning.
+        // While their death animation plays, the fading body at the kill site is
+        // drawn instead of the patrolling rival (no double-draw) - they retreat
+        // rather than die, see RivalFightEnded.
+        const GameState::DyingMonster* rivalDying2D = FindDyingRival(s);
+        {
+            const DirSpriteSheet& sheet = g_assets.rivalAdventurerSheet;
+            Vector2 screenPos = WorldToScreen(rivalDying2D ? rivalDying2D->pos : s.rivalPos, camera);
+            if (rivalDying2D) {
+                float fade = std::max(0.0f, rivalDying2D->timer / rivalDying2D->duration);
+                if (sheet.ok) {
+                    Vector2 dir = { s.wildernessPlayerPos.x - s.rivalPos.x, s.wildernessPlayerPos.y - s.rivalPos.y };
+                    float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+                    Vector2 facing = len > 0.001f ? Vector2{ dir.x / len, dir.y / len } : Vector2{ 0, 1 };
+                    Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
+                    DrawDyingWorldNode(screenPos, kNodeRadius * 0.7f, &sheet.tex, Fade(WHITE, fade), &src,
+                                       1.0f + 0.25f * (1.0f - fade));
+                }
+            } else {
+                bool near = nearestKind == WildNodeKind::Rival && inRange;
+                std::string sub = GuildActivityText(s.rivalActivity, s.rivalMind);
+                if (sheet.ok) {
+                    Vector2 dir = s.rivalActivity == GameState::RivalActivity::Patrol
+                        ? Vector2{ cosf(s.rivalMind.yaw), sinf(s.rivalMind.yaw) }
+                        : Vector2{ s.wildernessPlayerPos.x - s.rivalPos.x, s.wildernessPlayerPos.y - s.rivalPos.y };
+                    float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+                    Vector2 facing = len > 0.001f ? Vector2{ dir.x / len, dir.y / len } : Vector2{ 0, 1 };
+                    Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
+                    DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, RivalEpithetName(s), near, sub, &sheet.tex, WHITE, &src);
+                } else {
+                    DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, RivalEpithetName(s), near, sub);
+                }
+            }
+        }
+    }
+    // Murder Inc. blades - drawn like the champion's node but a darker dried-blood
+    // red, with numbered guild names and the same activity sub-labels. Unlike the
+    // champion's node they stay visible while you're fighting something else, so a
+    // pair-hunt partner closing in never surprises you unfairly.
+    for (int bi = 0; bi < kBladeCount; bi++) {
+        if (s.wildEngaged.has_value() && s.wildEngaged->bladeIdx == bi) continue; // drawn above with its HP bar
+        // While a blade's death animation plays, the fading body at the kill site
+        // is drawn instead of the patrolling blade (no double-draw) - same
+        // retreat-not-death treatment as the champion.
+        const GameState::DyingMonster* bladeDying2D = FindDyingBlade(s, bi);
+        const auto& b = s.blades[bi];
+        Vector2 bScreenPos = WorldToScreen(bladeDying2D ? bladeDying2D->pos : b.pos, camera);
+        bool bNear = nearestKind == WildNodeKind::Blade && nearestIdx == bi && inRange;
+        std::string bSub = GuildActivityText(b.activity, b.mind);
+        const DirSpriteSheet& bSheet = g_assets.rivalAdventurerSheet;
+        if (bSheet.ok) {
+            Vector2 bDir = b.activity == GameState::RivalActivity::Patrol
+                ? Vector2{ cosf(b.mind.yaw), sinf(b.mind.yaw) }
+                : Vector2{ s.wildernessPlayerPos.x - b.pos.x, s.wildernessPlayerPos.y - b.pos.y };
+            float bLen = std::sqrt(bDir.x * bDir.x + bDir.y * bDir.y);
+            Vector2 bFacing = bLen > 0.001f ? Vector2{ bDir.x / bLen, bDir.y / bLen } : Vector2{ 0, 1 };
+            Rectangle bSrc = ActorSrcRect(bSheet, bFacing, ActorAnim::Walk, s.worldTime);
+            if (bladeDying2D) {
+                float fade = std::max(0.0f, bladeDying2D->timer / bladeDying2D->duration);
+                DrawDyingWorldNode(bScreenPos, kNodeRadius * 0.7f, &bSheet.tex, Fade(WHITE, fade), &bSrc,
+                                   1.0f + 0.25f * (1.0f - fade));
+            } else {
+                DrawWorldNode(bScreenPos, kNodeRadius * 0.7f, Color{ 96, 28, 34, 255 }, BladeName(bi), bNear, bSub, &bSheet.tex, WHITE, &bSrc);
+            }
+        } else {
+            if (!bladeDying2D) DrawWorldNode(bScreenPos, kNodeRadius * 0.7f, Color{ 96, 28, 34, 255 }, BladeName(bi), bNear, bSub);
+        }
+    }
+    for (int who = -1; who < kBladeCount; who++) { // guild speech bubbles (2026-09-26)
+        const GameState::GuildMind& gm = who < 0 ? s.rivalMind : s.blades[who].mind;
+        Vector2 gp = who < 0 ? s.rivalPos : s.blades[who].pos;
+        if (gm.sayT <= 0.0f || GuildAbsent(gp)) continue;
+        Vector2 sp = WorldToScreen(gp, camera);
+        DrawGuildBubble({ sp.x, sp.y - 52.0f }, gm.say, std::min(1.0f, gm.sayT / 0.5f));
+    }
+    for (size_t i = 0; i < kWildernessInnocentSpots.size(); i++) {
+        if (!s.innocentSpots[i].present) continue;
+        bool near = nearestKind == WildNodeKind::Innocent && nearestIdx == (int)i && inRange;
+        Vector2 screenPos = WorldToScreen(WildernessInnocentLivePos((int)i, s.worldTime), camera);
+        int id = s.innocentSpots[i].identity;
+        DrawInnocentSprite2D(screenPos, id, InnocentName(id), near);
+    }
+    // An innocent you're escorting walks beside you in the world.
+    if (s.escortInnocent >= 0) {
+        Vector2 screenPos = WorldToScreen(s.escortPos, camera);
+        DrawInnocentSprite2D(screenPos, s.escortInnocent, InnocentName(s.escortInnocent), false);
+    }
+    for (size_t i = 0; i < kWildernessDungeonEntrances.size(); i++) {
+        const WildernessDungeonEntrance& entrance = kWildernessDungeonEntrances[i];
+        bool near = nearestKind == WildNodeKind::DungeonEntrance && nearestIdx == (int)i && inRange;
+        const DungeonDef& dungeon = kDungeons[entrance.dungeonIdx];
+        Vector2 screenPos = WorldToScreen(entrance.pos, camera);
+        const Texture2D* icon = g_assets.wildEntranceTexOk[entrance.dungeonIdx] ? &g_assets.wildEntranceTex[entrance.dungeonIdx] : nullptr;
+        DrawWorldNode(screenPos, kNodeRadius * 0.9f, entrance.color, dungeon.name, near, dungeon.theme, icon);
+    }
+    // Phase 6 - connective tissue landmarks, 2D.
+    for (size_t si = 0; si < kShrines.size(); si++) { // virtue shrines: gold-ringed white stones
+        bool near = nearestKind == WildNodeKind::Shrine && nearestIdx == (int)si && inRange;
+        Vector2 screenPos = WorldToScreen(kShrines[si].pos, camera);
+        DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 240, 230, 180, 255 },
+                      std::string("Shrine of ") + kShrines[si].name, near, "The virtuous find healing here");
+    }
+    { // the Fields of Sorrow: a gray haunted wash on the map
+        Vector2 screenPos = WorldToScreen(kFieldsOfSorrow, camera);
+        float r = kFieldsOfSorrowRadius; // 2D wilderness is 1:1 world->screen
+        if (screenPos.x > kViewport.x - r && screenPos.x < kViewport.x + kViewport.width + r &&
+            screenPos.y > kViewport.y - r && screenPos.y < kViewport.y + kViewport.height + r) {
+            DrawCircleV(screenPos, r, Color{ 120, 120, 130, 60 });
+            DrawCircleLinesV(screenPos, r, Color{ 90, 90, 100, 120 });
+            int tw = MeasureUIText("Fields of Sorrow", 12);
+            DrawUIText("Fields of Sorrow", (int)(screenPos.x - tw / 2), (int)(screenPos.y - r - 16), 12, Color{ 160, 160, 175, 255 });
+        }
+    }
+    { // Murder Inc.'s camp: a red-marked tent, wherever it currently squats
+        Vector2 campPos = kRivalCampSpots[s.rivalCampIdx];
+        Vector2 screenPos = WorldToScreen(campPos, camera);
+        DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 180, 50, 40, 255 }, "Murder Inc. Camp", false, "Kael Vorn's crew was seen here");
+    }
+    if (s.notoriety > 1.0f || s.refugeKnown) { // the outlaw refuge: hidden from the upstanding
+        bool near = nearestKind == WildNodeKind::Refuge && inRange;
+        Vector2 screenPos = WorldToScreen(kOutlawRefuge, camera);
+        DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 60, 50, 70, 255 }, "Outlaw Refuge", near, "No questions asked");
+    }
+    {
+        bool near = nearestKind == WildNodeKind::ReturnGate && inRange;
+        Vector2 screenPos = WorldToScreen(kWildernessReturnGatePos, camera);
+        DrawWorldNode(screenPos, kNodeRadius * 0.8f, kColorPanelBg, "Emberhold Gate", near);
+    }
+    {
+        // Gate to Town 2 (2026-09-22) - same treatment as the Town 1 gate just above,
+        // out in the newly added Wilderness space (kWildernessTown2GatePos).
+        bool near = nearestKind == WildNodeKind::Town2Gate && inRange;
+        Vector2 screenPos = WorldToScreen(kWildernessTown2GatePos, camera);
+        DrawWorldNode(screenPos, kNodeRadius * 0.9f, Color{ 140, 148, 156, 255 }, kTown2Name, near, "Coastal trade port");
+    }
+    {
+        // Gate to Town 3 / Frostmere (Phase 3) - same treatment as the Town 2 gate.
+        bool near = nearestKind == WildNodeKind::Town3Gate && inRange;
+        Vector2 screenPos = WorldToScreen(kWildernessTown3GatePos, camera);
+        DrawWorldNode(screenPos, kNodeRadius * 0.9f, Color{ 200, 218, 232, 255 }, kTown3Name, near, "Frozen northern town");
+    }
+    {
+        // Gate to Town 4 / Cragmoor (Phase 4) - same treatment as the Town 3 gate.
+        bool near = nearestKind == WildNodeKind::Town4Gate && inRange;
+        Vector2 screenPos = WorldToScreen(kWildernessTown4GatePos, camera);
+        DrawWorldNode(screenPos, kNodeRadius * 0.9f, Color{ 150, 142, 128, 255 }, kTown4Name, near, "Mountain mining town");
+    }
+    // AI companion (2026-09-23): now renders as a real animated creature instead of a
+    // colored circle, via WildCreatureSheetForRole - see that function's comment for
+    // why it's "a creature representative of this Pet's role", not its exact tamed
+    // species (Pet doesn't record which of the 11 kWildCreatures it came from, only
+    // its role/stats/name; adding that would mean touching the taming system, out of
+    // scope for this art pass).
+    if (Pet* companion = ActivePet(s)) {
+        Vector2 companionScreenPos = WorldToScreen(s.companionPos, camera);
+        const DirSpriteSheet& sheet = WildCreatureSheetForRole(companion->role);
+        if (sheet.ok) {
+            Vector2 toPlayer = { s.wildernessPlayerPos.x - s.companionPos.x, s.wildernessPlayerPos.y - s.companionPos.y };
+            float len = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
+            Vector2 facing = len > 0.001f ? Vector2{ toPlayer.x / len, toPlayer.y / len } : Vector2{ 0, 1 };
+            Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
+            DrawWorldNode(companionScreenPos, kNodeRadius * 0.5f, Color{ 63, 94, 63, 255 }, companion->name, false, "", &sheet.tex, WHITE, &src);
+        } else {
+            DrawWorldNode(companionScreenPos, kNodeRadius * 0.5f, Color{ 63, 94, 63, 255 }, companion->name, false);
+        }
+    }
+
+    // Weapon swing / spell cast (2026-09-23): the hero sheet now has real per-direction
+    // Attack and Cast frames (see LoadGameAssets' heroSheet column-range comments), so
+    // this picks the animation state instead of driving the old rotation-arc hack.
+    // Attack takes priority if somehow both timers are live at once (shouldn't overlap
+    // in practice - melee and magic are on separate cooldowns but not literally
+    // exclusive). Reads `s.wildEngaged` fresh rather than the frame-start `wasEngaged`,
+    // since updateEngagedMonsterAI() above can end the fight (and reset it) earlier in
+    // this same frame (same stale-optional pitfall documented elsewhere in this function).
+    ActorAnim wildCombatAnim = ActorAnim::Idle;
+    if (s.wildEngaged.has_value()) {
+        if (s.wildEngaged->swingEffectTimer > 0.0f) wildCombatAnim = ActorAnim::Attack;
+        else if (s.wildEngaged->castEffectTimer > 0.0f) wildCombatAnim = ActorAnim::Cast;
+    }
+    DrawWorldCorpses2D(s, 0, camera); // fallen monsters linger where they died
+    DrawPlayerLifeState(s, WorldToScreen(s.wildernessPlayerPos, camera), s.playerFacing, prompt, 1.0f, wildCombatAnim);
+    // Combat FX overlays (2026-09-24): flag marker, projectiles, impacts, heal
+    // aura, vigor aura, summoned fiend - drawn in world space inside the scissor.
+    Wild2DClickFlag(s, camera, screenW, screenH); // tap a monster to flag it
+    DrawFlagMarker2D(s, camera, 0);
+    DrawSpellFX2D(s, camera, 0);
+    EndScissorMode();
+    } // end else: 2D world view (3D renders via DrawWilderness3DWorld above)
     DrawVirtualJoystick();
     DrawTargetFrame(s, 0); // shared by the 2D and 3D views (tap it to cycle targets)
     DrawWyrmFrame(s, screenW); // the world boss's three heads (2026-09-27)
@@ -34353,6 +36241,205 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // in 3D instead. Movement, interaction, combat, and the HUD are shared.
     if (s.hunt3DView) {
         DrawDungeon3DWorld(s, screenW, screenH, prompt, inRange, nearest3DPos, nearest3DLabel);
+    } else {
+    Rectangle arenaViewport = { kViewport.x, (float)y + 14, kViewport.width, kViewport.y + kViewport.height - (y + 14) };
+    BeginScissorMode((int)arenaViewport.x, (int)arenaViewport.y, (int)arenaViewport.width, (int)arenaViewport.height);
+    Vector2 camera = CameraTopLeft(s.dungeonPlayerPos, kDungeonWorldSize);
+
+    const Texture2D* wallTex = ThemedDungeonWall(*s.selectedDungeon);
+    // Real rooms, not an open arena - see kDungeonRoomLayouts. Wall texture fills the
+    // whole viewport as solid rock, then each room/corridor rectangle punches a
+    // floor-textured hole in it, in one pass with no depth-buffer or masking trickery
+    // (floor is simply drawn on top). Each dungeon keeps its own themed floor/wall art
+    // (lava/volcanic for Emberveil, web-choked for the Nest (Phase 5), tomb for the Crypt, rock for
+    // Wyrmscar), falling back to a generic dungeon look if a themed texture is missing.
+    // Emberveil's wall and floor art are both mottled red/black lava-rock crops that read
+    // as nearly identical - Mark could tell monsters apart fine after the plate fix, but
+    // not walls from floor. Rather than source new art, darken just the wall tile via a
+    // multiply tint so it reads as cooled obsidian rock against the floor's bright lava,
+    // without touching the other 3 dungeons' walls.
+    Color wallTint = (*s.selectedDungeon == 3) ? Color{ 95, 70, 65, 255 } : // Ember Depths: cooled obsidian walls
+                     (*s.selectedDungeon == 4) ? Color{ 190, 215, 240, 255 } : WHITE; // Phase 3: icy tomb
+    DrawTiledGround(wallTex, arenaViewport, camera, 48.0f, Color{ 40, 40, 44, 255 }, wallTint);
+    const Texture2D* floorTex = ThemedDungeonFloor(*s.selectedDungeon);
+    Color floorTint = (*s.selectedDungeon == 4) ? Color{ 200, 222, 245, 255 } : WHITE; // Phase 3: icy tomb
+    for (const Rectangle& r : kDungeonRoomLayouts[*s.selectedDungeon])
+        DrawTiledRect(floorTex, r, camera, 48.0f, Color{ 60, 50, 46, 255 }, floorTint);
+    // The Sunken Crypt gets a water pool in its boss room - it's the one dungeon that's
+    // actually a *flooded* tomb; see assets/dungeon_themed/sunkencrypt_water.png
+    // (cropped from the same "Top down dungeon" pack's water-coast animation).
+    if (*s.selectedDungeon == 0 && g_assets.sunkenCryptWaterOk) { // Whisper Crypt's flooded boss room
+        DrawTiledRect(&g_assets.sunkenCryptWater, { 1260, 1260, 340, 340 }, camera, 32.0f, Color{ 55, 88, 143, 255 });
+    }
+    // The Ember Depths gets a few scattered braziers instead - a volcanic forge-deep
+    // calls for fire, not a tiled floor overlay (this pack's fire art is a
+    // standalone prop icon, not a floor texture like the water was); see
+    // assets/dungeon_themed/emberveil_brazier.png.
+    if (*s.selectedDungeon == 3 && g_assets.emberveilBrazierOk) {
+        // Spots sit inside the Depths' forge halls, clear of monster home spots
+        // (kCenters) and the shared dungeon spawn/exit point (kDungeonExitPos).
+        static const std::array<Vector2, 2> kBrazierSpots = {{ {840,900}, {960,1150} }};
+        for (const Vector2& pos : kBrazierSpots)
+            DrawIconCentered(g_assets.emberveilBrazier, WorldToScreen(pos, camera), 40.0f, WHITE);
+    }
+    // The Hollow Warrens gets its boss room floored with the fancy medallion-pattern
+    // rug from the same "Dungeon Tileset" sheet the walls/floor came from (CC0, Buch on
+    // OpenGameArt - see assets/dungeon/dungeon_tiles.png), plus a couple of scattered
+    // lit torches along the shaft - same "tiled rect for a themed room, icons for scattered
+    // props" split as the Sunken Crypt/Emberveil cases above.
+    if (*s.selectedDungeon == 5 && g_assets.hollowWarrensRugOk) { // The Hollow's boss-room rug
+        DrawTiledRect(&g_assets.hollowWarrensRug, { 680, 240, 440, 400 }, camera, 48.0f, Color{ 40, 45, 60, 255 });
+    }
+    if (*s.selectedDungeon == 5 && g_assets.hollowWarrensTorchOk) { // The Hollow's shaft torches
+        static const std::array<Vector2, 2> kWarrenTorchSpots = {{ {570,1030}, {1230,1030} }};
+        for (const Vector2& pos : kWarrenTorchSpots)
+            DrawIconCentered(g_assets.hollowWarrensTorch, WorldToScreen(pos, camera), 34.0f, WHITE);
+    }
+
+    // Dungeon monsters DO wander in place (DungeonMonsterLivePos already applies
+    // MonsterWanderOffset, same as Town NPCs) - they just never had a facing to match
+    // that motion until now (2026-09-23, "cheap wire-up" following the Carl-art
+    // integration). WanderFacing is that motion's own analytical derivative, so this
+    // costs nothing beyond what Town NPCs already do with it.
+    const DirSpriteSheet* monsterSheet = MonsterFamilySheet(*s.selectedDungeon);
+    bool dyingHere2D = false;
+    for (const auto& d : s.dyingMonsters)
+        if (d.zone == 1 && d.dungeonIdx == *s.selectedDungeon) { dyingHere2D = true; break; }
+    for (int i = 0; i < kDungeonRegularSlots; i++) {
+        // The engaged slot is drawn separately below, at its live position with an HP
+        // bar - same convention as Wilderness. Checks s.dungeonEngaged fresh (not
+        // wasDungeonEngaged) since updateEngagedDungeonMonsterAI() above may have just
+        // ended the fight this same frame.
+        if (s.dungeonEngaged.has_value() && !s.dungeonEngaged->isBoss && s.dungeonEngaged->monsterIdx == i) continue;
+        // Empty slots show nothing while their respawn timer runs - except a slot
+        // mid-death-animation, which draws the sinking body below instead. Pack
+        // attackers draw at their chase positions with a red flash while hurt.
+        const GameState::DyingMonster* dying2D = dyingHere2D ? FindDyingDungeonSlot(s, *s.selectedDungeon, i, false) : nullptr;
+        bool isDying2D = dying2D != nullptr;
+        const GameState::ActiveDungeonMonster* extra2D = !isDying2D ? FindDungeonExtra(s, i, false) : nullptr;
+        if (!isDying2D && !extra2D && s.dungeonSpawnRespawn[*s.selectedDungeon][i] > 0.0f) continue;
+        const DungeonMonster& m = DungeonSlotMonster(dungeon, i);
+        Vector2 screenPos = WorldToScreen(isDying2D ? dying2D->pos :
+                                          (extra2D ? extra2D->pos : DungeonMonsterLivePos(*s.selectedDungeon, i, s.worldTime)), camera);
+        bool near = !nearestIsBoss && nearestKey == std::to_string(i) && inRange;
+        std::string sub = TextFormat("lvl %d - %.0f%%", m.level, WinChancePreview(s, m.level));
+        Color frostTint2D = DungeonMonsterTint(*s.selectedDungeon); // Phase 3: icy tint in the Frostbound Tomb
+        Color hurtTint2D = CombatHitTint(extra2D ? extra2D->monsterHurtT : -1.0f, frostTint2D, Color{ 255, 130, 130, 255 });
+        Rectangle monsterSrc{};
+        if (monsterSheet && monsterSheet->ok) monsterSrc = ActorSrcRect(*monsterSheet, WanderFacing(i, s.worldTime), ActorAnim::Walk, s.worldTime);
+        if (isDying2D) {
+            float fade = std::max(0.0f, dying2D->timer / dying2D->duration);
+            DrawDyingWorldNode(screenPos, kNodeRadius * 0.8f,
+                               monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr,
+                               Fade(frostTint2D, fade), monsterSheet && monsterSheet->ok ? &monsterSrc : nullptr,
+                               1.0f + 0.25f * (1.0f - fade));
+        } else {
+            DrawWorldNode(screenPos, kNodeRadius * 0.8f, Color{ 122, 46, 46, 255 }, m.name, near, sub,
+                           monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr, hurtTint2D,
+                           monsterSheet && monsterSheet->ok ? &monsterSrc : nullptr);
+        }
+    }
+    bool engagedIsBossNow = s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss;
+    const GameState::DyingMonster* bossDying2D = dyingHere2D ? FindDyingDungeonSlot(s, *s.selectedDungeon, kDungeonBossSlot, true) : nullptr;
+    if (!engagedIsBossNow && !bossDying2D && s.dungeonSpawnRespawn[*s.selectedDungeon][kDungeonBossSlot] > 0.0f) {
+        // boss slot empty - nothing to draw
+    } else if (!engagedIsBossNow) {
+        Vector2 bossScreenPos = WorldToScreen(bossDying2D ? bossDying2D->pos :
+                                              DungeonMonsterLivePos(*s.selectedDungeon, kDungeonBossSlot, s.worldTime), camera);
+        if (bossUnlocked) {
+            const Texture2D* bossTex = BossFamilyTexture(*s.selectedDungeon);
+            Rectangle bossFallbackSrc{};
+            if (!bossTex && monsterSheet && monsterSheet->ok) bossFallbackSrc = ActorSrcRect(*monsterSheet, WanderFacing(kDungeonBossSlot, s.worldTime), ActorAnim::Walk, s.worldTime);
+            if (bossDying2D) {
+                float fade = std::max(0.0f, bossDying2D->timer / bossDying2D->duration);
+                DrawDyingWorldNode(bossScreenPos, kNodeRadius,
+                                   bossTex ? bossTex : (monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr),
+                                   Fade(DungeonMonsterTint(*s.selectedDungeon), fade),
+                                   bossTex ? nullptr : (monsterSheet && monsterSheet->ok ? &bossFallbackSrc : nullptr),
+                                   1.0f + 0.25f * (1.0f - fade));
+            } else {
+                DrawWorldNode(bossScreenPos, kNodeRadius, kColorSlate, dungeon.boss.name, nearestIsBoss && inRange,
+                               "BOSS lvl " + std::to_string(dungeon.boss.level),
+                               bossTex ? bossTex : (monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr),
+                               bossTex ? DungeonMonsterTint(*s.selectedDungeon) : kColorSlate, // distinct boss art if loaded; gold-tinted regular monster as fallback
+                               bossTex ? nullptr : (monsterSheet && monsterSheet->ok ? &bossFallbackSrc : nullptr));
+            }
+        } else {
+            DrawWorldNode(bossScreenPos, kNodeRadius, Fade(GRAY, 0.6f), "???",
+                           false, std::to_string(xp) + "/" + std::to_string(dungeon.bossUnlockXp) + " XP");
+        }
+    }
+    {
+        bool near = nearestIsExit && inRange;
+        Vector2 screenPos = WorldToScreen(kDungeonExitPos, camera);
+        DrawWorldNode(screenPos, kNodeRadius * 0.7f, kColorPanelBg, "Exit", near);
+    }
+    // Live, moving engaged monster + its own HP bar - same treatment as Wilderness's
+    // s.wildEngaged draw block.
+    if (s.dungeonEngaged.has_value()) {
+        const GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
+        const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
+        const Texture2D* bossTex = am.isBoss ? BossFamilyTexture(*s.selectedDungeon) : nullptr;
+        const Texture2D* tex = bossTex ? bossTex : (monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr);
+        // Faces the player during the actual fight - same "face the player directly"
+        // trick Wilderness's engaged-monster block already uses, rather than the
+        // wander-derived facing the not-yet-engaged loop above uses.
+        Rectangle engagedSrc{};
+        if (!bossTex && monsterSheet && monsterSheet->ok) {
+            Vector2 toPlayer = { s.dungeonPlayerPos.x - am.pos.x, s.dungeonPlayerPos.y - am.pos.y };
+            float len = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
+            Vector2 facing = len > 0.001f ? Vector2{ toPlayer.x / len, toPlayer.y / len } : Vector2{ 0, 1 };
+            engagedSrc = ActorSrcRect(*monsterSheet, facing, ActorAnim::Idle, s.worldTime);
+        }
+        const Rectangle* srcRect = bossTex ? nullptr : (monsterSheet && monsterSheet->ok ? &engagedSrc : nullptr);
+        Vector2 screenPos = WorldToScreen(am.pos, camera);
+        // Combat FX (2026-09-24): lunge on attack, red flash on hurt - same as Wilderness.
+        {
+            Vector2 toP = { s.dungeonPlayerPos.x - am.pos.x, s.dungeonPlayerPos.y - am.pos.y };
+            float tpl = std::sqrt(toP.x * toP.x + toP.y * toP.y);
+            if (tpl > 0.001f && am.monsterAttackT >= 0.0f) {
+                float lunge = CombatLungeCurve(am.monsterAttackT);
+                screenPos.x += toP.x / tpl * lunge;
+                screenPos.y += toP.y / tpl * lunge;
+            }
+        }
+        Color fxTint = CombatHitTint(am.monsterHurtT, DungeonMonsterTint(*s.selectedDungeon), Color{ 255, 130, 130, 255 }); // Phase 3: icy tint in the Frostbound Tomb
+        bool inMelee = Dist(am.pos, s.dungeonPlayerPos) < kWildMeleeRange;
+        DrawWorldNode(screenPos, am.isBoss ? kNodeRadius : kNodeRadius * 0.8f, Color{ 122, 46, 46, 255 }, m.name, inMelee, "", tex, fxTint, srcRect);
+        float hpPct = std::clamp(am.hp / am.maxHp, 0.0f, 1.0f);
+        Rectangle hpBg = { screenPos.x - 30, screenPos.y - kNodeRadius * 0.8f - 26, 60, 8 };
+        DrawRectangleRec(hpBg, Fade(BLACK, 0.4f));
+        DrawRectangleRec({ hpBg.x, hpBg.y, hpBg.width * hpPct, hpBg.height }, Color{ 122, 46, 46, 255 });
+        DrawRectangleLinesEx(hpBg, 1.0f, Fade(RAYWHITE, 0.8f));
+    }
+    if (Pet* companion = ActivePet(s)) {
+        Vector2 companionScreenPos = WorldToScreen(s.companionPos, camera);
+        const DirSpriteSheet& sheet = WildCreatureSheetForRole(companion->role);
+        if (sheet.ok) {
+            Vector2 toPlayer = { s.dungeonPlayerPos.x - s.companionPos.x, s.dungeonPlayerPos.y - s.companionPos.y };
+            float len = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
+            Vector2 facing = len > 0.001f ? Vector2{ toPlayer.x / len, toPlayer.y / len } : Vector2{ 0, 1 };
+            Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
+            DrawWorldNode(companionScreenPos, kNodeRadius * 0.5f, Color{ 63, 94, 63, 255 }, companion->name, false, "", &sheet.tex, WHITE, &src);
+        } else {
+            DrawWorldNode(companionScreenPos, kNodeRadius * 0.5f, Color{ 63, 94, 63, 255 }, companion->name, false);
+        }
+    }
+    // Weapon swing / spell cast - same real Attack/Cast animation states as Wilderness
+    // (see its call site's comment).
+    ActorAnim dungeonCombatAnim = ActorAnim::Idle;
+    if (s.dungeonEngaged.has_value()) {
+        if (s.dungeonEngaged->swingEffectTimer > 0.0f) dungeonCombatAnim = ActorAnim::Attack;
+        else if (s.dungeonEngaged->castEffectTimer > 0.0f) dungeonCombatAnim = ActorAnim::Cast;
+    }
+    DrawWorldCorpses2D(s, 1, camera); // fallen monsters linger where they died
+    DrawPlayerLifeState(s, WorldToScreen(s.dungeonPlayerPos, camera), s.playerFacing, prompt, 1.0f, dungeonCombatAnim);
+    // Combat FX overlays (2026-09-24): flag marker, projectiles, impacts, heal
+    // aura, vigor aura, summoned fiend - drawn in world space inside the scissor.
+    Dungeon2DClickFlag(s, camera, screenW, screenH); // tap a monster to flag it
+    DrawFlagMarker2D(s, camera, 1);
+    DrawSpellFX2D(s, camera, 1);
+    EndScissorMode();
     } // end 2D arena branch - the touch/combat HUD below is shared with the 3D view
 
     // --- Shared touch/combat HUD (view-independent): virtual joystick, quick
@@ -36855,6 +38942,10 @@ static float DrawGuildCityProgress(GameState& s,float x,float y,float w,Rectangl
     }
     return y+10;
 }
+static void DrawDottedLineH(float x1, float x2, float y, Color color) {
+    for (float x = x1; x < x2; x += 6.0f) DrawRectangle((int)x, (int)y, 3, 2, color);
+}
+
 static void DrawWarWeek(GameState& s, int screenW, int screenH) {
     Rectangle G = { 10, 112, (float)screenW - 20, (float)screenH - 124 };
     UODrawGump(G, kUoParchment);
@@ -36957,6 +39048,11 @@ static void DrawWarWeek(GameState& s, int screenW, int screenH) {
                 JS_GuildNetJoin(g.id.c_str(), WarCharName(s).c_str(), WarPower(s));
             y += 44;
         }
+// Dotted horizontal rule - used by the Character screen's ornate equipment card to
+// separate rows (2026-09-23 redesign) instead of a solid line, matching the reference
+// layout Mark supplied. Plain small filled rectangles rather than a dashed line style
+// (raylib has no built-in dashed-line primitive), spaced by eye to read as "dotted" at
+// this line thickness.
     } else {
         int rank = 0;
         long long myPts = 0;
@@ -37541,6 +39637,7 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     toggle("Sound effects", "Footsteps, swords, spells, coins and the rest.", s.optSfx);
     slider("Sound volume", s.optSfxVol);
     toggle("Always daytime", "Keep the world in daylight instead of following your real clock.", s.optAlwaysDay);
+    toggle("Classic 2D view", "The old top-down view - try it if 3D runs slowly on your device.", s.optClassic2D);
     // Character appearance follows equipment in both the world and Me screen.
     toggle("Play online", "See other players in town and the wilds, and chat with them.", s.optOnline);
     toggle("Auto-restock reagents", "Top up to 30 reagents whenever you enter a town (1 gold each).", s.autoReagents);
@@ -38974,6 +41071,7 @@ static void WarmWildernessCache(const GameState& s) {
         case 3:WildMapEnsureTexture();break;
     }
 }
+
 static void UpdateDrawFrame() {
     UIFrameReset(); // (2026-09-28) buttons drawn last frame guard this frame's world taps
 #ifdef __EMSCRIPTEN__
@@ -39085,7 +41183,10 @@ static void UpdateDrawFrame() {
         g_alwaysDay = state.optAlwaysDay;
         g_sfxOn = state.optSfx; g_musicOn = state.optMusic;
         g_calmMusic = state.optCalmMusic; g_musicVol = state.optMusicVol; g_sfxVol = state.optSfxVol;
-        state.town3DView = state.wild3DView = state.interior3DView = state.hunt3DView = true; // 3D only (the classic 2D view was retired 2026-09-28)
+        { // (2026-09-28, #75) 3D everywhere unless Options asks for the classic 2D view
+            bool v3 = !state.optClassic2D;
+            state.town3DView = state.wild3DView = state.interior3DView = state.hunt3DView = v3;
+        }
         { // stat buffs run out; HP and mana follow the effective stats (2026-09-27)
             for (float* t : { &state.blessT, &state.strPotT, &state.agiPotT }) if (*t > 0.0f && (*t -= dt) <= 0.0f) {
                 *t = 0.0f;
@@ -39154,8 +41255,10 @@ static void UpdateDrawFrame() {
         // --- Input: keyboard shortcuts for gathering (1/2/3) and closing the building
         // panel (ESC); movement (WASD/arrows) and interaction (E) are handled inside
         // DrawTownScreen itself, since they need the frame's nearest-node lookup. ---
+            if (IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D; // (2026-09-28) unadvertised: Options holds the switch
         if (!encounterPending && state.screen == Screen::Town) {
             if (IsKeyPressed(KEY_ESCAPE)) state.selectedTile.reset();
+            if (IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
         }
         if (!encounterPending && state.screen == Screen::Wilderness) {
             if (IsKeyPressed(KEY_M)) { // minimap toggle
@@ -39165,7 +41268,9 @@ static void UpdateDrawFrame() {
             }
         }
         if (!encounterPending && state.screen == Screen::Interior) {
-            // Interiors stay part of the town: ESC closes a popup or steps back outside through the door.
+            // Interiors stay part of the town: V toggles the indoor 2D/3D view,
+            // ESC closes a popup or steps back outside through the door.
+            if (IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
             if (IsKeyPressed(KEY_ESCAPE)) {
                 if (state.selectedTile.has_value() || state.interiorGreeted) {
                     state.selectedTile.reset();
@@ -39174,6 +41279,7 @@ static void UpdateDrawFrame() {
             }
         }
         if (!encounterPending && state.screen == Screen::Hunt && !state.combat.has_value()) {
+            if (IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
         }
         // --- Input: combat shortcuts, only meaningful on Hunt while fighting ---
         if (!encounterPending && state.screen == Screen::Hunt && state.combat.has_value()) {
@@ -39444,6 +41550,82 @@ static void UpdateDrawFrame() {
         EndDrawing();
         WarmWildernessCache(state);
     }
+}
+
+static void CleanupAndClose() {
+    GameState& state = g_state;
+    SaveGame(state); // final save on quit
+    if (g_assets.uiFontOk) UnloadFont(g_assets.uiFont);
+    if (g_assets.playerOk) UnloadTexture(g_assets.player);
+    for (int i = 0; i < 10; i++) if (g_assets.buildingOk[i]) UnloadTexture(g_assets.building[i].second);
+    for (int i = 0; i < 10; i++) if (g_assets.townBuildingOk[i]) UnloadTexture(g_assets.townBuilding[i].second);
+    for (int i = 0; i < 6; i++) if (g_assets.monsterFamily[i].ok) UnloadTexture(g_assets.monsterFamily[i].tex);
+    for (int i = 0; i < 6; i++) if (g_assets.bossFamilyOk[i]) UnloadTexture(g_assets.bossFamily[i]);
+    for (int i = 0; i < 6; i++) if (g_assets.dungeonFloorThemedOk[i]) UnloadTexture(g_assets.dungeonFloorThemed[i]);
+    for (int i = 0; i < 6; i++) if (g_assets.dungeonWallThemedOk[i]) UnloadTexture(g_assets.dungeonWallThemed[i]);
+    if (g_assets.hollowWarrensRugOk) UnloadTexture(g_assets.hollowWarrensRug);
+    if (g_assets.hollowWarrensTorchOk) UnloadTexture(g_assets.hollowWarrensTorch);
+    for (int i = 0; i < 4; i++) if (g_assets.craftFloorThemedOk[i]) UnloadTexture(g_assets.craftFloorThemed[i]);
+    for (int i = 0; i < 4; i++) if (g_assets.craftWallThemedOk[i]) UnloadTexture(g_assets.craftWallThemed[i]);
+    if (g_assets.provisionerFloorOk) UnloadTexture(g_assets.provisionerFloor);
+    if (g_assets.provisionerWallOk) UnloadTexture(g_assets.provisionerWall);
+    if (g_assets.groundGrassOk) UnloadTexture(g_assets.groundGrass);
+    if (g_assets.groundDirtOk) UnloadTexture(g_assets.groundDirt);
+    if (g_assets.dungeonWallOk) UnloadTexture(g_assets.dungeonWall);
+    if (g_assets.dungeonFloorOk) UnloadTexture(g_assets.dungeonFloor);
+    if (g_assets.buildingDoorOk) UnloadTexture(g_assets.buildingDoor);
+    for (size_t i = 0; i < g_assets.paperdollTex.size(); i++) if (g_assets.paperdollOk[i]) UnloadTexture(g_assets.paperdollTex[i]);
+    for (size_t i = 0; i < g_assets.itemIconTex.size(); i++) if (g_assets.itemIconOk[i]) UnloadTexture(g_assets.itemIconTex[i]);
+    for (const SpriteSheet* sheet : { &g_assets.knightIdle, &g_assets.knightAttack1, &g_assets.knightAttack2,
+                                        &g_assets.knightHurt, &g_assets.knightDefend, &g_assets.knightProtect,
+                                        &g_assets.skeletonIdle, &g_assets.skeletonAttack1, &g_assets.skeletonHurt })
+        if (sheet->ok) UnloadTexture(sheet->tex);
+    if (g_assets.heroSheet.ok) UnloadTexture(g_assets.heroSheet.tex);
+    for (const SpriteSheet* sheet : { &g_assets.doorSmith, &g_assets.doorCarpenter, &g_assets.doorTailor, &g_assets.doorAlchemy })
+        if (sheet->ok) UnloadTexture(sheet->tex);
+    if (g_assets.fencePostOk) UnloadTexture(g_assets.fencePost);
+    if (g_assets.farmlandOk) UnloadTexture(g_assets.farmland);
+    if (g_assets.townFountainOk) UnloadTexture(g_assets.townFountain);
+    if (g_assets.townStatueOk) UnloadTexture(g_assets.townStatue);
+    if (g_assets.townAutumnBushOk) UnloadTexture(g_assets.townAutumnBush);
+    if (g_assets.spellIconOffensiveOk) UnloadTexture(g_assets.spellIconOffensive);
+    if (g_assets.spellIconDebuffOk) UnloadTexture(g_assets.spellIconDebuff);
+    if (g_assets.spellIconBuffOk) UnloadTexture(g_assets.spellIconBuff);
+    if (g_assets.spellIconUtilityOk) UnloadTexture(g_assets.spellIconUtility);
+    for (int i = 0; i < (int)g_assets.spellIconPerSpell.size(); i++) if (g_assets.spellIconPerSpellOk[i]) UnloadTexture(g_assets.spellIconPerSpell[i]);
+    if (g_assets.gearIconSwordOk) UnloadTexture(g_assets.gearIconSword);
+    if (g_assets.gearIconShieldOk) UnloadTexture(g_assets.gearIconShield);
+    if (g_assets.gearIconShield2Ok) UnloadTexture(g_assets.gearIconShield2);
+    if (g_assets.gearIconHelmetOk) UnloadTexture(g_assets.gearIconHelmet);
+    if (g_assets.gearIconGauntletOk) UnloadTexture(g_assets.gearIconGauntlet);
+    if (g_assets.gearIconAmuletOk) UnloadTexture(g_assets.gearIconAmulet);
+    if (g_assets.townLampOk) UnloadTexture(g_assets.townLamp);
+    if (g_assets.townSignSmithOk) UnloadTexture(g_assets.townSignSmith);
+    if (g_assets.townStall1Ok) UnloadTexture(g_assets.townStall1);
+    if (g_assets.townStall2Ok) UnloadTexture(g_assets.townStall2);
+    if (g_assets.townStall3Ok) UnloadTexture(g_assets.townStall3);
+    if (g_assets.townLumberpileOk) UnloadTexture(g_assets.townLumberpile);
+    if (g_assets.townBarrelOk) UnloadTexture(g_assets.townBarrel);
+    if (g_assets.townCrateOk) UnloadTexture(g_assets.townCrate);
+    if (g_assets.townAnvilOk) UnloadTexture(g_assets.townAnvil);
+    if (g_assets.sunkenCryptWaterOk) UnloadTexture(g_assets.sunkenCryptWater);
+    if (g_assets.emberveilBrazierOk) UnloadTexture(g_assets.emberveilBrazier);
+    if (g_assets.wildTreeOk) UnloadTexture(g_assets.wildTree);
+    if (g_assets.wildRockOk) UnloadTexture(g_assets.wildRock);
+    for (int i = 0; i < (int)g_assets.wildCreatureTex.size(); i++) if (g_assets.wildCreatureTex[i].ok) UnloadTexture(g_assets.wildCreatureTex[i].tex);
+    for (int i = 0; i < (int)g_assets.wildPropTex.size(); i++) if (g_assets.wildPropTexOk[i]) UnloadTexture(g_assets.wildPropTex[i]);
+    for (int i = 0; i < 3; i++) if (g_assets.wildOreTexOk[i]) UnloadTexture(g_assets.wildOreTex[i]);
+    if (g_assets.wildBush1Ok) UnloadTexture(g_assets.wildBush1);
+    if (g_assets.wildBush2Ok) UnloadTexture(g_assets.wildBush2);
+    if (g_assets.wildFern1Ok) UnloadTexture(g_assets.wildFern1);
+    for (int i = 0; i < 5; i++) if (g_assets.wildMonsterTex[i].ok) UnloadTexture(g_assets.wildMonsterTex[i].tex);
+    if (g_assets.rivalAdventurerSheet.ok) UnloadTexture(g_assets.rivalAdventurerSheet.tex);
+    for (int i = 0; i < 6; i++) if (g_assets.wildEntranceTexOk[i]) UnloadTexture(g_assets.wildEntranceTex[i]);
+#ifndef __EMSCRIPTEN__
+    UnloadRenderTexture(g_zoomTarget);
+#endif
+    UnloadSfx();
+    CloseWindow();
 }
 
 
