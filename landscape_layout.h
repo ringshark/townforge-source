@@ -213,32 +213,31 @@ static Ray LandscapeRay(Vector2 pos,Camera camera,int w,int h) {
     if(g_landscapeActive && g_landscapeWorld){pos.x*=tflayout::aspectFactor;return ::GetScreenToWorldRayEx(pos,camera,(int)(w*tflayout::aspectFactor),h);}
     return ::GetScreenToWorldRayEx(pos,camera,w,h);
 }
-static Rectangle LandscapePanelUp(){return {12,190,96,48};}
-static Rectangle LandscapePanelDown(){return {12,302,96,48};}
-static Rectangle LandscapePanelTop(){return {852,28,96,48};}
-static Rectangle LandscapePanelBottom(){return {852,464,96,48};}
-static Rectangle LandscapePanelRail(){return {852,96,96,344};}
-// Handle native menu controls before drawing the page, so the displayed slice
+static Rectangle LandscapePanelRect(){return {tflayout::panelX,0,tflayout::panelScale*tflayout::legacyWidth,tflayout::height};}
+// Handle panel scrolling before drawing the page, so the displayed slice
 // and every content hit test use the same scroll offset for this frame.
+// There are no sidebar page buttons or a scrollbar rail: dragging on empty
+// panel space scrolls (a press that starts on a control belongs to that
+// control), and the mouse wheel works anywhere over the panel.
 static void LandscapePanelInput() {
-    static bool held=false,dragging=false;
+    static bool held=false,scrolling=false;
+    static float startY=0,startScroll=0;
     Vector2 mouse=::GetMousePosition();
     bool down=::IsMouseButtonDown(MOUSE_BUTTON_LEFT);
     bool press=::IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || (down && !held);
-    Rectangle rail=LandscapePanelRail();
+    Rectangle panel=LandscapePanelRect();
     if(press) {
-        dragging=CheckCollisionPointRec(mouse,rail);
-        const float page=tflayout::panelBody*.85f;
-        if(CheckCollisionPointRec(mouse,LandscapePanelUp()))g_landscapeScroll=tflayout::Scroll(g_landscapeScroll-page);
-        if(CheckCollisionPointRec(mouse,LandscapePanelDown()))g_landscapeScroll=tflayout::Scroll(g_landscapeScroll+page);
-        if(CheckCollisionPointRec(mouse,LandscapePanelTop()))g_landscapeScroll=0;
-        if(CheckCollisionPointRec(mouse,LandscapePanelBottom()))g_landscapeScroll=tflayout::maxScroll;
+        scrolling=false;
+        if(CheckCollisionPointRec(mouse,panel)) {
+            auto p=tflayout::Map({mouse.x,mouse.y},mouse.y<tflayout::panelHeader ? tflayout::Region::PanelHeader:tflayout::Region::Panel,g_landscapeScroll);
+            bool onControl=false;
+            for(auto r:g_landscapeHitRects)if(CheckCollisionPointRec({p.x,p.y},r)){onControl=true;break;}
+            if(!onControl){scrolling=true;startY=mouse.y;startScroll=g_landscapeScroll;}
+        }
     }
-    // Must match the thumb's actual drawn geometry (top 100..376, i.e. a 276px
-    // travel span, 60px tall) so the thumb tracks the cursor 1:1 while dragging.
-    if(dragging && down)g_landscapeScroll=tflayout::Scroll((mouse.y-130.0f)/276.0f*tflayout::maxScroll);
-    if(!down)dragging=false;
-    if(CheckCollisionPointRec(mouse,rail))
+    if(scrolling && down)g_landscapeScroll=tflayout::Scroll(startScroll-(mouse.y-startY)/tflayout::panelScale);
+    if(!down)scrolling=false;
+    if(CheckCollisionPointRec(mouse,panel))
         g_landscapeScroll=tflayout::Scroll(g_landscapeScroll-::GetMouseWheelMove()*48);
     held=down;
 }
@@ -339,29 +338,13 @@ static void LandscapePresent(Font font,const std::vector<Rectangle>& controls) {
         g_landscapeScroll=0;
     }
     else if(!g_landscapeWorld || g_landscapeDialog) {
-        Rectangle top=LandscapePanelTop(),more=LandscapePanelBottom();
-        if(g_landscapeWorld)::DrawRectangle(0,0,960,540,Color{6,12,18,155});
-        ::DrawRectangleGradientH(0,0,120,540,Color{12,21,28,255},Color{28,38,44,255});
-        ::DrawRectangleGradientH(840,0,120,540,Color{28,38,44,255},Color{12,21,28,255});
-        ::DrawLine(118,24,118,516,Color{141,114,71,255});
-        ::DrawLine(842,24,842,516,Color{141,114,71,255});
-        for(auto r:{LandscapePanelUp(),LandscapePanelDown()})LandscapePlate(r,Color{163,132,82,255});
-        ::DrawTextEx(font,"Page up",{23,206},16,1,Color{238,220,183,255});
-        ::DrawTextEx(font,"Page down",{16,318},15,1,Color{238,220,183,255});
-        int progress=(int)std::round(g_landscapeScroll/tflayout::maxScroll*100);
-        std::string position=std::to_string(progress)+"%";
-        float pw=::MeasureTextEx(font,position.c_str(),16,1).x;
-        ::DrawTextEx(font,position.c_str(),{60-pw*.5f,266},16,1,Color{160,177,182,255});
+        // One solid backdrop: a framed panel never blends with the world or
+        // the map behind it, and there is no sidebar chrome around it.
+        ::DrawRectangle(0,0,960,540,Color{22,33,42,255});
         // Scale uniformly for legible text; the entire header remains pinned.
         blit(g_landscapeUI.texture,{0,0,540,110},{120,0,720,tflayout::panelHeader});
         blit(g_landscapeUI.texture,{0,110+g_landscapeScroll,540,tflayout::panelBody},
              {120,tflayout::panelHeader,720,540-tflayout::panelHeader});
-        for(auto r:{top,more})LandscapePlate(r,Color{163,132,82,255});
-        ::DrawTextEx(font,"Top",{885,44},16,1,Color{238,220,183,255});
-        ::DrawTextEx(font,"Bottom",{867,480},16,1,Color{238,220,183,255});
-        ::DrawRectangleRounded({892,96,16,344},.6f,6,Color{9,17,23,255});
-        ::DrawRectangleRounded({894,100+g_landscapeScroll/tflayout::maxScroll*276,12,60},.6f,6,Color{177,145,91,255});
-        ::DrawTextEx(font,"Drag",{881,444},12,1,Color{160,177,182,255});
     }
     else {
         // Field labels follow the wider projection. HUD and touch controls keep native sizes.
