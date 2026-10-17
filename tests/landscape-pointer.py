@@ -77,38 +77,42 @@ print('PASS production landscape pointer capture, fresh gestures, and ground rou
 # Native page controls must change the offset before content is rendered.
 panel=r"""#include <cassert>
 #include <cmath>
+#include <vector>
 struct Vector2{float x,y;};struct Rectangle{float x,y,width,height;};
 enum{MOUSE_BUTTON_LEFT};Vector2 raw{};bool pressed=false,down=false;float wheel=0,g_landscapeScroll=0;
+std::vector<Rectangle> g_landscapeHitRects;
 Vector2 GetMousePosition(){return raw;}
 bool IsMouseButtonPressed(int){return pressed;}bool IsMouseButtonDown(int){return down;}
 float GetMouseWheelMove(){return wheel;}
 bool CheckCollisionPointRec(Vector2 p,Rectangle r){return p.x>=r.x && p.x<=r.x+r.width && p.y>=r.y && p.y<=r.y+r.height;}
-"""+f'#include "{rules}"\n'+section('static Rectangle LandscapePanelUp()', 'static void LandscapeBeginFrame(')
+"""+f'#include "{rules}"\n'+section('static Rectangle LandscapePanelRect()', 'static void LandscapeBeginFrame(')
 panel+=r"""int main(){
 auto near=[](float a,float b){return std::fabs(a-b)<.01;};
-
-raw={900,488};pressed=down=true;LandscapePanelInput();assert(near(g_landscapeScroll,tflayout::maxScroll));
-pressed=down=false;LandscapePanelInput();
-raw={900,52};down=true; // touch-down fallback when the one-frame press was missed
-LandscapePanelInput();assert(g_landscapeScroll==0);
+// Dragging empty panel space scrolls the framed panel in both directions.
+raw={480,300};pressed=down=true;LandscapePanelInput();assert(near(g_landscapeScroll,0));
+pressed=false;raw.y=165;LandscapePanelInput();assert(near(g_landscapeScroll,135/tflayout::panelScale));
+raw.y=435;LandscapePanelInput();assert(near(g_landscapeScroll,0));
 down=false;LandscapePanelInput();
-raw={900,268};pressed=down=true;LandscapePanelInput();assert(near(g_landscapeScroll,tflayout::maxScroll*.5f));
-pressed=false;raw.y=430;LandscapePanelInput();assert(g_landscapeScroll>tflayout::maxScroll*.9f);
+// The missed-press touch fallback also starts a scroll drag.
+raw={480,300};down=true;LandscapePanelInput();
+pressed=false;raw.y=165;LandscapePanelInput();assert(near(g_landscapeScroll,135/tflayout::panelScale));
+down=false;LandscapePanelInput();g_landscapeScroll=0;
+// A press that starts on a control belongs to the control, never a scroll.
+g_landscapeHitRects.push_back({200,250,200,100});
+g_landscapeScroll=100;raw={480,300};pressed=down=true;LandscapePanelInput();
+pressed=false;raw.y=165;LandscapePanelInput();assert(near(g_landscapeScroll,100));
 down=false;LandscapePanelInput();
-raw={900,300};wheel=1;float before=g_landscapeScroll;LandscapePanelInput();assert(near(g_landscapeScroll,before-48));
-wheel=0;pressed=down=false;LandscapePanelInput();g_landscapeScroll=0;
-raw={60,326};pressed=down=true;LandscapePanelInput();assert(near(g_landscapeScroll,tflayout::panelBody*.85f));
-pressed=down=false;LandscapePanelInput();
-raw={60,214};pressed=down=true;LandscapePanelInput();assert(g_landscapeScroll==0);
-pressed=down=false;LandscapePanelInput();
-raw={60,214};pressed=down=true;LandscapePanelInput();assert(g_landscapeScroll==0);
+// The wheel scrolls anywhere over the panel; the side margins stay dead.
+raw={480,300};wheel=1;LandscapePanelInput();assert(near(g_landscapeScroll,52));
+wheel=0;raw={60,300};wheel=1;LandscapePanelInput();assert(near(g_landscapeScroll,52));
+wheel=0;
 assert(tflayout::Map({900,488},tflayout::Region::PanelChrome).x<0);
 } """
 with tempfile.TemporaryDirectory() as tmp:
     cpp=Path(tmp)/'panel.cpp';exe=Path(tmp)/'panel';cpp.write_text(panel)
     subprocess.run(['g++','-std=c++17',str(cpp),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
-print('PASS production Top/Bottom, missed-press touch fallback, rail drag, wheel and sidebar isolation')
+print('PASS production panel drag scroll, control-owned presses, missed-press touch fallback, wheel and margin isolation')
 
 # Exercise the production modal selector rather than inferring dialogs from
 # control dimensions (which missed menus and mistook broad HUD bars for panels).
