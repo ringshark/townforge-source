@@ -33578,7 +33578,11 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // Settlement buildings (2026-10-05): walk up to one you've actually built (or
     // that's mid-construction) and manage/collect it directly, same as every other
     // world object here - no more opening the Settlement gump just to collect wood.
-    if (SettleOwned(s)) for (int k = 0; k < kSbCount; k++) {
+    // 3D-only (2026-10-17): the classic 2D view predates Settlement and has no art
+    // for any of these buildings, so without this gate a 2D player could land an
+    // "[E] Manage the Lumber Camp" prompt for a building they can't see or tap -
+    // they can still reach the Settlement gump normally, from the House menu.
+    if (s.wild3DView && SettleOwned(s)) for (int k = 0; k < kSbCount; k++) {
         if (s.settle[(size_t)k].level <= 0 && s.settleUpgrading != k) continue; // nothing standing there yet
         float d = Dist(s.wildernessPlayerPos, SettleSlotPos(s, k));
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Settlement; nearestIdx = k; }
