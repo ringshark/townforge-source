@@ -2306,7 +2306,13 @@ static const Vector2 kWildernessTown4GatePos = WP(300, 1050);
 // adds to each building's footprint, so nothing overlaps.
 static const float kTownVisualScale = 1.15f;
                                                    // instead of the small arena Town/Bloodstained still use
-static const Rectangle kViewport = { 0, 110, 540, 790 }; // screen-space area the world renders into
+static const Rectangle kViewportDefault = { 0, 110, 540, 790 }; // screen-space area the world renders into
+// (2026-10-18) no longer const: Town's 2D-wide mode (see DrawTownScreen)
+// widens this for one frame to fill the window instead of the old fixed
+// portrait box. Reset to kViewportDefault at the top of every frame in
+// UpdateDrawFrame; any screen that hasn't adopted the wide mode yet must
+// never rely on it still holding the default without that reset.
+static Rectangle kViewport = kViewportDefault;
 
 static Vector2 ClampToWorld(Vector2 p, float margin, float worldSize = kWorldSize) {
     return { std::clamp(p.x, margin, worldSize - margin), std::clamp(p.y, margin, worldSize - margin) };
@@ -2339,7 +2345,10 @@ static Vector2 WorldToScreen(Vector2 worldPos, Vector2 cameraTopLeft) {
 // DrawVirtualJoystick() call near the end of each movement screen's draw function.
 // ---------------------------------------------------------------------
 static const float kJoystickMaxDrag = 50.0f;
-static const Rectangle kJoystickZone = { 0, kViewport.y + kViewport.height - 170.0f, 170.0f, 170.0f };
+// A function, not a static const: kViewport can change at runtime now
+// (Town's 2D-wide mode), and a static const computed at global-init time
+// would have frozen this at the original portrait-box position forever.
+static Rectangle JoystickZone() { return { 0, kViewport.y + kViewport.height - 170.0f, 170.0f, 170.0f }; }
 static Vector2 g_joystickOrigin = { 0, 0 };
 static Vector2 g_joystickCurrent = { 0, 0 };
 static bool g_joystickActive = false;
@@ -2347,7 +2356,7 @@ static bool g_joystickActive = false;
 static bool UIHit(Vector2 m);
 static Vector2 VirtualJoystickDir() {
     Vector2 mouse = GetMousePosition();
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, kJoystickZone) && !UIHit(mouse)) {
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, JoystickZone()) && !UIHit(mouse)) {
         g_joystickActive = true;
         g_joystickOrigin = mouse;
     }
@@ -18194,7 +18203,14 @@ static bool IsMenuScreen(Screen sc) {
            sc == Screen::MinersGuild || sc == Screen::Refuge || sc == Screen::Guide;
 }
 static bool ExploreHeaderCollapsed(const GameState& s) {
-    return (s.screen == Screen::Town && s.town3DView) ||
+    // (2026-10-18) Town now collapses in 2D too, not just 3D - see the
+    // Screen::Town 2D-wide block in DrawTownScreen and the g_landscapePage
+    // wiring in UpdateDrawFrame for the matching render-target change this
+    // depends on. Wilderness/Interior are NOT done yet - deliberately still
+    // gated on their own 3DView flag (unchanged, original behavior) so they
+    // aren't regressed by this change; they need the same treatment as a
+    // separate follow-up before they'd be safe to flip too.
+    return (s.screen == Screen::Town) ||
            (s.screen == Screen::Wilderness && s.wild3DView) ||
            (s.screen == Screen::Interior && s.interior3DView) || s.screen == Screen::Blackwake || IsMenuScreen(s.screen);
 }
@@ -18219,7 +18235,7 @@ static bool Town3DPointInUI(Vector2 m, const GameState& s, int screenW) {
     if (CheckCollisionPointRec(m, { kViewport.x + kViewport.width - 150.0f,
                                     kViewport.y + kViewport.height - 90.0f, 130.0f, 60.0f })) return true; // tap-to-interact
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return true; // TARGET button
-    if (CheckCollisionPointRec(m, kJoystickZone)) return true;
+    if (CheckCollisionPointRec(m, JoystickZone())) return true;
     if (s.selectedTile.has_value() &&
         CheckCollisionPointRec(m, { 20, 500, (float)(screenW - 40), 220 })) return true; // detail panel
     if (s.greetedNPC.has_value() &&
@@ -23789,7 +23805,7 @@ static bool Wild3DPointInUI(Vector2 m, const GameState& s) {
     if (s.worldMapOpen) return true; // full map: any tap closes it
     if (s.minimapOpen && CheckCollisionPointRec(m, MinimapRect())) return true; // minimap (tap opens the full map)
     if (!s.minimapOpen && CheckCollisionPointRec(m, MinimapToggleRect())) return true; // MAP button
-    if (CheckCollisionPointRec(m, kJoystickZone)) return true;
+    if (CheckCollisionPointRec(m, JoystickZone())) return true;
     if (BeltPointIn(m)) return true; // bandages / potions / spells belt (2026-09-27)
     if (CheckCollisionPointRec(m, JournalWildButtonRect())) return true; // LOG button
     if (s.journalOpen && CheckCollisionPointRec(m, JournalPanelRect())) return true; // journal panel
@@ -27540,6 +27556,13 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
 
 static void DrawSnowfall(int screenW, int screenH, float worldTime); // Phase 3 (defined above DrawWildernessScreen)
 static void DrawTownScreen(GameState& s, int screenW, int screenH) {
+    // 2D-wide mode (2026-10-18): fill the whole 960x540 page target instead
+    // of the old fixed 540x790 portrait box - screenW/screenH are already
+    // 960x540 here (see the g_landscapePage wiring in UpdateDrawFrame). This
+    // widens the camera's view (CameraTopLeft, WorldToScreen) to show more
+    // world at native scale, not a stretched version of the old view. 3D
+    // leaves kViewport at its default - unrelated to this change.
+    if (!s.town3DView) kViewport = { 0, 0, (float)screenW, (float)screenH };
     bool canGather = !s.gatheringResource.has_value();
     // Second town (2026-09-22) - reuses Town 1's exact building positions/plaza/roads/
     // collision/foliage/props unchanged (see GameState::selectedTown's comment); only
@@ -30787,7 +30810,7 @@ static void Wild2DClickFlag(GameState& s, Vector2 camera, int screenW, int scree
     Vector2 m = GetMousePosition();
     if (!CheckCollisionPointRec(m, kViewport)) return;
     if (m.y < 200) return; // top HUD strip
-    if (CheckCollisionPointRec(m, kJoystickZone)) return;
+    if (CheckCollisionPointRec(m, JoystickZone())) return;
     if (m.x > screenW - 170 && m.y > screenH - 170) return; // interact button
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return; // TARGET button (shared HUD handles it)
     if (s.worldMapOpen) return; // full map: any tap closes it
@@ -30873,7 +30896,7 @@ static void Dungeon2DClickFlag(GameState& s, Vector2 camera, int screenW, int sc
     Vector2 m = GetMousePosition();
     if (!CheckCollisionPointRec(m, kViewport)) return;
     if (m.y < 200) return; // top HUD strip + dungeon sub-tabs
-    if (CheckCollisionPointRec(m, kJoystickZone)) return;
+    if (CheckCollisionPointRec(m, JoystickZone())) return;
     if (m.x > screenW - 170 && m.y > screenH - 170) return; // interact button
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return; // TARGET button (shared HUD handles it)
     if (s.recallPickerOpen && CheckCollisionPointRec(m, RecallPickerRect())) return; // recall modal
@@ -40487,7 +40510,7 @@ static void DrawBlackwakeScreen(GameState& s,int screenW,int screenH) {
     const bool groundTap=groundGesture.Update(pointer,IsMouseButtonPressed(MOUSE_BUTTON_LEFT),
         IsMouseButtonDown(MOUSE_BUTTON_LEFT),IsMouseButtonReleased(MOUSE_BUTTON_LEFT),
         !s.exploreMenuOpen && !g_denPanel && !DenFighting() && !UIHit(pointer) &&
-        CheckCollisionPointRec(pointer,kViewport) && !CheckCollisionPointRec(pointer,kJoystickZone));
+        CheckCollisionPointRec(pointer,kViewport) && !CheckCollisionPointRec(pointer,JoystickZone()));
     const Rectangle view=kViewport;
     if(!scene.id) {scene=LandscapeLoadScene((int)view.width,(int)view.height);SetTextureFilter(scene.texture,TEXTURE_FILTER_BILINEAR);}
     bool fighting=DenFighting(),sideA=g_den.a==g_mpMyId;
@@ -41313,7 +41336,14 @@ static void UpdateDrawFrame() {
         // main 3D pass needs. Must run while the default framebuffer is bound,
         // before BeginTextureMode(g_zoomTarget)/BeginDrawing below. 2D screens
         // are untouched (guarded by town3DView).
-        g_landscapePage=IsMenuScreen(state.screen);
+        // Town's 2D-wide mode (2026-10-18) reuses the same 960x540 "page"
+        // render target menu screens already use, instead of the old fixed
+        // 540x900 g_landscapeUI texture - that's a hard physical size limit,
+        // not just a logical one, so drawing wider than 540px would simply
+        // clip. kViewport resets here every frame; only Screen::Town's 2D
+        // branch (DrawTownScreen) widens it, for that frame only.
+        kViewport = kViewportDefault;
+        g_landscapePage=IsMenuScreen(state.screen) || (state.screen==Screen::Town && !state.town3DView);
         screenW=g_landscapePage ? 960:kScreenW;screenH=g_landscapePage ? 540:kScreenH;
         if (state.screen != Screen::Character) g_pdTryOn.reset();
         if (state.screen == Screen::Character) PaperdollRenderPass(state); // the 3D body for the paperdoll
@@ -41327,6 +41357,8 @@ static void UpdateDrawFrame() {
         }
 
         // --- Draw ---
+        // Hunt/dungeon full-screen is not part of this pass - still 3D-only,
+        // same as Wilderness/Interior (see ExploreHeaderCollapsed's comment).
         bool wideWorld=!IsMenuScreen(state.screen) && (ExploreHeaderCollapsed(state) || (state.screen==Screen::Hunt && state.selectedDungeon.has_value() && state.hunt3DView)) && !state.ambush.has_value() && !state.innocentEncounter.has_value();
         const Screen frameScreen=state.screen;
         g_landscapeCombat=state.wildEngaged.has_value() || state.dungeonEngaged.has_value();
