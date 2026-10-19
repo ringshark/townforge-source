@@ -36,3 +36,43 @@ Existing themed props, room/corridor layout and collision remain in use.
 Emscripten compilation and packaging passed locally. Guild client tests passed.
 Embedded PostgreSQL validated rerunnable migration, permissions, per-day limits,
 receipt replay, build help and completion. Runtime art review is still required.
+
+## Two games from one source (2026-10-19)
+
+Mark asked for a 2D version and a 3D version. They are the same source built twice with
+`TF_VARIANT` (`web/build_web.sh`, `web/deploy_web.sh`):
+
+| `TF_VARIANT` | Game | Output |
+|---|---|---|
+| `2d` | the classic top-down game only (`kVariantView == 2`, `-DTF_VARIANT_2D`) | `build-web-2d` |
+| `3d` | the 3D game only (`kVariantView == 3`, `-DTF_VARIANT_3D`) | `build-web-3d` |
+| empty | the old combined build: 2D by default with the V key and the Options row to switch | `build-web` |
+
+In a variant the view is forced in the one place it is derived each frame, and the switch
+(the V key and the "Classic 2D view" Options row) does not exist. The 3D site is named
+"Town Forge 3D" (home-screen name and page title); the 2D site stays "Town Forge".
+The source workflow builds and packages both (`townforge-web-2d`, `townforge-web-3d`
+artifacts). Publishing: the 3D site is `ringshark/townforge-3d-preview` (its `townforge.yml`
+must set `TF_VARIANT=3d` for the compile and package steps); the 2D site is `ringshark/townforge`
+with its own workflow of the same shape and `TF_VARIANT=2d`.
+
+Both sites are on one web address, so the browser shares their storage:
+- **Saves** (`/persist/townforge_save.txt` in IndexedDB, plus the cloud and guild keys in
+  localStorage) are shared: a character made in one site opens in the other. Do not run both
+  at once (each autosaves every 2 s; the last write wins). An installed iPhone home-screen app
+  keeps its own storage apart from Safari.
+- **Cache storage** is shared too, so each service worker names its caches `townforge-<variant>-<version>`
+  and only deletes its own (the 3D one also clears the old untagged `townforge-<timestamp>-<commit>`
+  caches). `tests/build-variants.cjs` checks this.
+
+The game data is still the whole `assets` folder in every variant (about 93 MB). Slimming the 2D data
+pack (leaving out the 3D models and art) needs a test that the 2D game never asks for them first.
+
+### Backup code
+
+Options (web builds) has "Back up my save" and "Restore from a backup". The code is
+`TFSAVE1:` + a checksum + the save file as base64, copied to the clipboard (or shown in a box to
+copy by hand). Restoring checks the format, the checksum and the `version=` header, asks to
+confirm, keeps the replaced save as `townforge_save.prev.txt`, blocks the autosave, writes the
+save, syncs IndexedDB and reloads. It carries a character between phones, browsers, an installed
+app and Safari, and between the 2D and 3D sites, and survives Safari clearing a site's data.

@@ -24,6 +24,8 @@ jobs:
           node tests/guild-project.cjs
           python tests/guild-parser.py
           node tests/guild-city-cloud.cjs
+      - name: Check the 2D and 3D build variants and the backup code
+        run: node tests/build-variants.cjs
       - name: Check combat and movement
         run: |
           g++ -std=c++17 tests/combat-motion.cpp -o /tmp/tf-combat-test
@@ -62,4 +64,29 @@ jobs:
         with:
           name: townforge-web
           path: site/
+          if-no-files-found: error
+      # The 2D and 3D games (2026-10-19): the same source built twice, each with the view
+      # switch removed. The preview repositories publish these (3D at townforge-3d-preview,
+      # 2D at townforge); building both here keeps either from silently breaking.
+      - name: Build the 2D and 3D games
+        run: |
+          RAYLIB_DIR=/tmp/raylib TF_VARIANT=2d bash web/build_web.sh
+          RAYLIB_DIR=/tmp/raylib TF_VARIANT=3d bash web/build_web.sh
+      - name: Package the 2D and 3D games
+        env:
+          TF_MP_URL: ${{ secrets.TF_MP_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          TF_VARIANT=2d bash web/deploy_web.sh build-web-2d site-2d
+          TF_VARIANT=3d bash web/deploy_web.sh build-web-3d site-3d
+      - uses: actions/upload-artifact@v4
+        with:
+          name: townforge-web-2d
+          path: site-2d/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: townforge-web-3d
+          path: site-3d/
           if-no-files-found: error

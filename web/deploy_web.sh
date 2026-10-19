@@ -29,5 +29,14 @@ fi
 mkdir -p "$dst"/icons && cp "$here"/icons/*.png "$dst"/icons/
 mkdir -p "$dst"/wiki && cp "$here"/wiki/index.html "$dst"/wiki/ # the player wiki, public at <site>/wiki/
 stamp=$(date -u +%Y%m%d%H%M%S)-$(git -C "$here" rev-parse --short HEAD)
-sed "s/__VERSION__/$stamp/" "$here"/sw.js > "$dst"/sw.js
-echo "deployed web app version $stamp"
+# TF_VARIANT (2026-10-19): 2d / 3d / empty (the old combined build). The service worker names its
+# caches after the variant, and the two sites are told apart by name where a player sees it.
+variant=${TF_VARIANT:-}
+sed -e "s/__VERSION__/$stamp/" -e "s/__VARIANT__/$variant/" "$here"/sw.js > "$dst"/sw.js
+if [ "$variant" = "3d" ]; then
+  sed -i -e 's/"name": "Town Forge"/"name": "Town Forge 3D"/' -e 's/"short_name": "Town Forge"/"short_name": "Town Forge 3D"/' "$dst"/manifest.webmanifest
+  sed -i -e 's#<title>Town Forge</title>#<title>Town Forge 3D</title>#' -e 's#content="Town Forge"name=apple-mobile-web-app-title#content="Town Forge 3D"name=apple-mobile-web-app-title#' "$dst"/index.html
+elif [ "$variant" = "2d" ]; then
+  sed -i -e 's/in a living 3D world\./in a classic top-down world./' "$dst"/manifest.webmanifest
+fi
+echo "deployed web app version $stamp${variant:+ ($variant)}"
