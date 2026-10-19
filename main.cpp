@@ -161,6 +161,21 @@
 #endif
 
 // ---------------------------------------------------------------------
+// Build variants (2026-10-19, Mark: "can we split them? a 2D version and a 3D version"):
+// the web game is built twice from this one source. TF_VARIANT_2D starts and stays in the
+// classic top-down view, TF_VARIANT_3D in the 3D view; in both the switch (the Options row
+// and the V key) is gone. With neither defined the build is the old combined one: 2D by
+// default and a switch between the two. kVariantView: 0 = switchable, 2 = 2D only, 3 = 3D only.
+// ---------------------------------------------------------------------
+#if defined(TF_VARIANT_2D)
+static constexpr int kVariantView = 2;
+#elif defined(TF_VARIANT_3D)
+static constexpr int kVariantView = 3;
+#else
+static constexpr int kVariantView = 0;
+#endif
+
+// ---------------------------------------------------------------------
 // Combat feel: hit-stop + camera shake (2026-09-25).
 // GameDt() is the game-world frame delta, used everywhere the game used to call
 // GetFrameTime() directly. For a few frames right after a landed hit it runs at
@@ -7542,6 +7557,52 @@ EM_JS(void, JS_CloudOpen, (), { if (window.TFCloud) window.TFCloud.open(); });
 EM_JS(void, JS_OpenWiki, (), { window.open('wiki/', '_blank'); }); // the player wiki (2026-09-27)
 EM_JS(int, JS_SaveBlocked, (), { return Module._TF_blockSave ? 1 : 0; });
 EM_JS(void, JS_CloudOnReset, (), { if (window.TFCloud) window.TFCloud.onReset(); });
+// Backup code (2026-10-19): the whole save as one piece of text to copy somewhere safe, and
+// back again. Safari clears a website's stored data after about a week without a visit, and
+// an installed home-screen app keeps its own storage apart from Safari tabs; a backup code
+// carries a character across both of those and between the 2D and 3D sites. The code is
+// "TFSAVE1:" + a checksum + the save as base64; restoring checks all three before it writes,
+// keeps the replaced save as townforge_save.prev.txt, blocks the autosave, and reloads.
+EM_JS(int, JS_BackupSave, (), {
+    try {
+        var text = FS.readFile('/persist/townforge_save.txt', { encoding: 'utf8' });
+        var sum = 0;
+        for (var i = 0; i < text.length; i++) sum = (sum * 31 + text.charCodeAt(i)) >>> 0;
+        var code = 'TFSAVE1:' + sum.toString(16) + ':' + btoa(unescape(encodeURIComponent(text)));
+        var show = function() { window.prompt('Your backup code. Copy ALL of it and keep it somewhere safe:', code); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(code).then(function() {
+                alert('Backup code copied. Paste it into a note or a message to yourself.');
+            }, show);
+        } else {
+            show();
+        }
+        return 1;
+    } catch (e) {
+        alert('There is no save to back up yet. Play a little first.');
+        return 0;
+    }
+});
+EM_JS(int, JS_RestoreSave, (), {
+    var code = window.prompt('Paste your backup code here:');
+    if (!code) return 0;
+    code = code.replace(/\s+/g, '');
+    var parts = code.split(':');
+    if (parts.length < 3 || parts[0] !== 'TFSAVE1') { alert('That is not a Town Forge backup code.'); return 0; }
+    var text;
+    try { text = decodeURIComponent(escape(atob(parts.slice(2).join(':')))); }
+    catch (e) { alert('The backup code is damaged. Copy it again, all of it.'); return 0; }
+    var sum = 0;
+    for (var i = 0; i < text.length; i++) sum = (sum * 31 + text.charCodeAt(i)) >>> 0;
+    if (sum.toString(16) !== parts[1]) { alert('The backup code is incomplete or damaged. Copy it again, all of it.'); return 0; }
+    if (text.indexOf('version=') !== 0 || text.indexOf('\n') < 0) { alert('That code does not hold a Town Forge save.'); return 0; }
+    if (!window.confirm('Replace your current progress with this backup? Your current save is kept on this device as a spare.')) return 0;
+    Module._TF_blockSave = 1;
+    try { FS.writeFile('/persist/townforge_save.prev.txt', FS.readFile('/persist/townforge_save.txt', { encoding: 'utf8' })); } catch (e) {}
+    FS.writeFile('/persist/townforge_save.txt', text);
+    FS.syncfs(false, function() { location.reload(); });
+    return 1;
+});
 EM_JS(void, JS_FlushPersistence, (), {
     FS.syncfs(false, function(err) {
         if (err) console.error('Town Forge: IDBFS save flush failed', err);
@@ -39664,10 +39725,25 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     toggle("Sound effects", "Footsteps, swords, spells, coins and the rest.", s.optSfx);
     slider("Sound volume", s.optSfxVol);
     toggle("Always daytime", "Keep the world in daylight instead of following your real clock.", s.optAlwaysDay);
-    toggle("Classic 2D view", "The old top-down view - try it if 3D runs slowly on your device.", s.optClassic2D);
+    if (kVariantView == 0) toggle("Classic 2D view", "The old top-down view - try it if 3D runs slowly on your device.", s.optClassic2D);
     // Character appearance follows equipment in both the world and Me screen.
     toggle("Play online", "See other players in town and the wilds, and chat with them.", s.optOnline);
     toggle("Auto-restock reagents", "Top up to 30 reagents whenever you enter a town (1 gold each).", s.autoReagents);
+#ifdef __EMSCRIPTEN__
+    auto action = [&](const char* title, const char* what, const char* label) -> bool { // a row with one button (2026-10-19)
+        place();
+        DrawUIText(title, (int)x, (int)y + 4, 15, ink);
+        auto lines=WrapJournalText(what,w-148);
+        for(size_t i=0;i<lines.size();++i) DrawUIText(lines[i].c_str(),(int)x,(int)y+26+(int)i*15,12,soft);
+        Rectangle b = { x + w - 130, y + 4, 130, 44 };
+        bool hit = UOButton(b, label);
+        if (hit) PlaySfx(SfxId::Click);
+        advance(std::max(68.0f,42.0f+lines.size()*15));
+        return hit;
+    };
+    if (action("Back up my save", "Copy a code that holds your whole character. Keep it safe: it also moves your character to another phone, browser or version.", "Copy code")) JS_BackupSave();
+    if (action("Restore from a backup", "Paste a code you copied before. It replaces your current progress (a spare copy is kept).", "Paste code")) JS_RestoreSave();
+#endif
     x=G.x+22;y += 6;
     DrawUIText("Alert history is in Journal > Events.", (int)x, (int)y, 12, soft);
     content=y+26-start;UIEndScissorMode();
@@ -41211,6 +41287,8 @@ static void UpdateDrawFrame() {
         g_sfxOn = state.optSfx; g_musicOn = state.optMusic;
         g_calmMusic = state.optCalmMusic; g_musicVol = state.optMusicVol; g_sfxVol = state.optSfxVol;
         { // (2026-09-28, #75) 3D everywhere unless Options asks for the classic 2D view
+            if (kVariantView == 2) state.optClassic2D = true;        // this build is the 2D game
+            else if (kVariantView == 3) state.optClassic2D = false;  // this build is the 3D game
             bool v3 = !state.optClassic2D;
             state.town3DView = state.wild3DView = state.interior3DView = state.hunt3DView = v3;
         }
@@ -41282,10 +41360,10 @@ static void UpdateDrawFrame() {
         // --- Input: keyboard shortcuts for gathering (1/2/3) and closing the building
         // panel (ESC); movement (WASD/arrows) and interaction (E) are handled inside
         // DrawTownScreen itself, since they need the frame's nearest-node lookup. ---
-            if (IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D; // (2026-09-28) unadvertised: Options holds the switch
+            if (kVariantView == 0 && IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D; // (2026-09-28) unadvertised: Options holds the switch
         if (!encounterPending && state.screen == Screen::Town) {
             if (IsKeyPressed(KEY_ESCAPE)) state.selectedTile.reset();
-            if (IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
+            if (kVariantView == 0 && IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
         }
         if (!encounterPending && state.screen == Screen::Wilderness) {
             if (IsKeyPressed(KEY_M)) { // minimap toggle
@@ -41297,7 +41375,7 @@ static void UpdateDrawFrame() {
         if (!encounterPending && state.screen == Screen::Interior) {
             // Interiors stay part of the town: V toggles the indoor 2D/3D view,
             // ESC closes a popup or steps back outside through the door.
-            if (IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
+            if (kVariantView == 0 && IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
             if (IsKeyPressed(KEY_ESCAPE)) {
                 if (state.selectedTile.has_value() || state.interiorGreeted) {
                     state.selectedTile.reset();
@@ -41306,7 +41384,7 @@ static void UpdateDrawFrame() {
             }
         }
         if (!encounterPending && state.screen == Screen::Hunt && !state.combat.has_value()) {
-            if (IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
+            if (kVariantView == 0 && IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
         }
         // --- Input: combat shortcuts, only meaningful on Hunt while fighting ---
         if (!encounterPending && state.screen == Screen::Hunt && state.combat.has_value()) {
