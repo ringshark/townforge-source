@@ -38,6 +38,22 @@ for(int i=0;i<30;i++){Item it{};it.id=900+i;it.name="Test equipment "+std::to_st
 Pet pet{};pet.name="Test companion";s.pets.push_back(pet);
 s.housePlotIdx=0;s.settle[kSbHall].level=3;
 reset();bool open=false;
+// Every native menu destination must preserve its action and fit the canvas.
+auto menuReset=[&](){reset();g_landscapePage=g_presentedPage=false;g_presentedNativeMenu=true;g_uiShieldBypass=true;open=true;s.screen=Screen::Town;};
+const Vector2 targets[]={{60,178},{60,250},{60,322},{60,394},{370,178},{370,250},{680,178},{680,250},{370,322},{370,394},{680,322},{680,394}};
+const Screen screens[]={Screen::Character,Screen::Character,Screen::Skills,Screen::Magic,Screen::Craft,Screen::Pets,Screen::Bank,Screen::House,Screen::House,Screen::House,Screen::House,Screen::Guide};
+for(int i=0;i<12;i++){
+ menuReset();testPressed=true;testMouse=targets[i];DrawLandscapeMainMenu(s,open,false);
+ assert(!open && s.screen==screens[i]);check("main menu destination");
+ if(i==0)assert(!g_characterPack);if(i==1)assert(g_characterPack);
+ if(i==8)assert(g_warOpen);if(i==9)assert(g_questOpen);if(i==10)assert(g_optOpen);
+}
+menuReset();testPressed=true;testMouse={800,52};DrawLandscapeMainMenu(s,open,false);assert(!open && s.screen==Screen::Town);
+menuReset();s.playerIsGhost=true;testPressed=true;testMouse=targets[0];DrawLandscapeMainMenu(s,open,false);assert(open && s.screen==Screen::Town);s.playerIsGhost=false;
+menuReset();testPressed=true;testMouse={750,480};DrawLandscapeMainMenu(s,open,false);assert(!open && s.screen==Screen::Blackwake);
+menuReset();s.screen=Screen::Blackwake;testPressed=true;testMouse={750,480};DrawLandscapeMainMenu(s,open,false);assert(!open && s.screen==Screen::Town && s.selectedTown==1);
+menuReset();DrawLandscapeMainMenu(s,open,true);check("dungeon menu");
+reset();open=false;
 s.screen=Screen::Character;DrawLandscapePageHeader(s,open);check("header");
 reset();testPressed=true;testMouse={360,88};DrawLandscapePageHeader(s,open);assert(g_characterPack);
 reset();s.screen=Screen::Bank;DrawLandscapePageHeader(s,open);check("bank header");
@@ -144,3 +160,4 @@ try:
     subprocess.run([str(exe)],check=True,cwd=run_dir)
     print('PASS production landscape pages: full inventories, pets, all craft modes, journal tabs, guild tabs, vendors, help, native navigation and visible control bounds')
 finally:shutil.rmtree(run_dir)
+
