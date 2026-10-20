@@ -22,6 +22,7 @@ for ret,name,args in re.findall(r'RLAPI[ \t]+([^\n;]+?)\b(\w+)\(([^;]*?)\);',h):
  ret=ret.strip();stubs+=f'{ret} {name}({args}) {{'+special.get(name, '' if ret=='void' else 'return {};')+'}\n'
 stubs+='extern "C" {void rlViewport(int,int,int,int){}void rlLoadIdentity(){}void rlDrawRenderBatchActive(){}void rlMatrixMode(int){}void rlOrtho(double,double,double,double,double,double){}void rlFrustum(double,double,double,double,double,double){}void rlMultMatrixf(const float*){}void rlPushMatrix(){}void rlPopMatrix(){}void rlTranslatef(float,float,float){}void rlRotatef(float,float,float,float){}void rlScalef(float,float,float){}}\n'
 stubs+='\n#define CGLTF_IMPLEMENTATION\n#include \"external/cgltf.h\"\nextern \"C\" {void rlEnableFramebuffer(unsigned int){}unsigned int rlGetTextureIdDefault(){return 0;}void rlDisableBackfaceCulling(){}void rlEnableBackfaceCulling(){}void rlBegin(int){}void rlEnd(){}void rlSetTexture(unsigned int){}void rlNormal3f(float,float,float){}void rlTexCoord2f(float,float){}void rlVertex3f(float,float,float){}void rlColor4ub(unsigned char,unsigned char,unsigned char,unsigned char){}}\n'
+stubs+='extern "C" {void rlDisableDepthMask(){}void rlEnableDepthMask(){}bool rlEnableVertexArray(unsigned int){return false;}unsigned int rlLoadVertexBuffer(const void*,int,bool){return 0;}void rlSetVertexAttribute(unsigned int,int,int,bool,int,int){}void rlEnableVertexAttribute(unsigned int){}void rlDisableVertexArray(){}Matrix rlGetMatrixProjection(){return {};}Matrix rlGetMatrixModelview(){return {};}}\n'
 (run_dir/'stubs.cpp').write_text(stubs)
 root=Path(__file__).resolve().parents[1]
 test='''#include <cassert>
@@ -59,6 +60,16 @@ reset();testPressed=true;testMouse={360,88};DrawLandscapePageHeader(s,open);asse
 reset();s.screen=Screen::Bank;DrawLandscapePageHeader(s,open);check("bank header");
 reset();testPressed=true;testMouse={860,42};DrawLandscapePageHeader(s,open);assert(s.screen==g_playScreen);
 s.screen=Screen::Character;
+// New avatar renders through the same production path in every action state.
+for(int state=0;state<10;state++) {
+ HumanPose pose;pose.move=state==1 ? 1:0;pose.attackT=state==2 ? .5f:-1;
+ pose.castT=state==3 ? .5f:-1;pose.hurtT=state==4 ? .5f:-1;
+ pose.deathT=state==5 ? 1:-1;pose.gather=state>=7 ? state-6:0;
+ assert(DrawEquippedHero(1,10,20,.7f,WHITE,s.equipped,pose,false,state==6,state==4));
+ assert(DrawEquippedHero(1,10,20,.7f,WHITE,s.equipped,pose,true));
+}
+assert(kCompactHeroHeight==46.f && kCompactHeroHeight<66.f*.71f);
+std::cout<<"PASS compact 3D avatar: idle, walk, attack, cast, hit, death, sneak, wood, ore, fish and shadow paths"<<std::endl;
 reset();DrawCharacterScreen(s,960,540);check("gear");
 reset();g_characterPack=true;DrawCharacterScreen(s,960,540);check("backpack");
 reset();DrawSkillsScreen(s,960,540);check("skills");

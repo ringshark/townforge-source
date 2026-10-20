@@ -2929,6 +2929,8 @@ struct GameAssets {
     Font uiFont{}; bool uiFontOk = false;
 };
 static GameAssets g_assets;
+static bool g_compactHeroAtlas = false;
+static std::array<Rectangle,16> g_compactHeroFrames{};
 
 // Mark found raylib's built-in default font hard to read across every text-heavy
 // screen (Town/Skills/Magic/Craft in particular). Nunito (Google Fonts, OFL-licensed,
@@ -3271,6 +3273,42 @@ static void LoadGameAssets() {
         g_assets.heroSheet.walkStart[3] = 1; g_assets.heroSheet.walkCount[3] = 3;
         g_assets.heroSheet.attackStart[3] = 5; g_assets.heroSheet.attackCount[3] = 3;
         g_assets.heroSheet.castStart[3] = 0; g_assets.heroSheet.castCount[3] = 1;
+    }
+
+    // Original 4x4 adventurer atlas: Down / Left / Right / Up. Keep the old
+    // sheet as a fallback if loading fails. Floating cell bounds avoid seams on
+    // atlases whose dimensions are not divisible by four.
+    DirSpriteSheet compact=LoadDirSpriteSheet("assets/hero/compact_adventurer.png",1,1,4);
+    if(compact.ok) {
+        if(g_assets.heroSheet.ok)UnloadTexture(g_assets.heroSheet.tex);
+        g_assets.heroSheet=compact;g_compactHeroAtlas=true;
+        g_assets.heroSheet.framesPerRow=4;
+        g_assets.heroSheet.frameW=compact.tex.width/4;
+        g_assets.heroSheet.frameH=compact.tex.height/4;
+        g_assets.heroSheet.rowMap={0,1,2,3};
+        g_assets.heroSheet.rowFlip={false,false,false,false};
+        // Register each generated frame by its opaque silhouette. This removes
+        // uneven atlas padding without editing the art or shifting the world position.
+        Image atlas=LoadImage("assets/hero/compact_adventurer.png");
+        Color* pixels=LoadImageColors(atlas);
+        for(int row=0;row<4;row++)for(int col=0;col<4;col++) {
+            int x0=(int)roundf(col*atlas.width/4.f),x1=(int)roundf((col+1)*atlas.width/4.f);
+            int y0=(int)roundf(row*atlas.height/4.f),y1=(int)roundf((row+1)*atlas.height/4.f);
+            int left=x1,top=y1,right=x0,bottom=y0;
+            for(int y=y0;y<y1;y++)for(int x=x0;x<x1;x++)if(pixels && pixels[y*atlas.width+x].a>128) {
+                left=std::min(left,x);right=std::max(right,x+1);top=std::min(top,y);bottom=std::max(bottom,y+1);
+            }
+            g_compactHeroFrames[row*4+col]=right>left && bottom>top ? Rectangle{(float)left,(float)top,(float)(right-left),(float)(bottom-top)}
+                :Rectangle{(float)x0,(float)y0,(float)(x1-x0),(float)(y1-y0)};
+        }
+        UnloadImageColors(pixels);UnloadImage(atlas);
+        SetTextureFilter(compact.tex,TEXTURE_FILTER_POINT);
+        for(int row=0;row<4;row++) {
+            g_assets.heroSheet.idleCol[row]=1;
+            g_assets.heroSheet.walkStart[row]=0;g_assets.heroSheet.walkCount[row]=4;
+            g_assets.heroSheet.attackStart[row]=1;g_assets.heroSheet.attackCount[row]=1;
+            g_assets.heroSheet.castStart[row]=1;g_assets.heroSheet.castCount[row]=1;
+        }
     }
 
     g_assets.doorSmith = LoadSpriteSheet("assets/village/door_smith.png", 64);
@@ -4614,7 +4652,31 @@ static void DrawPlayer(const GameState& s, Vector2 screenPos, Vector2 facing, co
                          Color tint = WHITE) {
     float kPlayerRadius = ::kPlayerRadius * visualScale; // shadows the global on purpose - see
                                                            // DrawBuildingNode's identical trick.
-    if (g_assets.heroSheet.ok) {
+    if(g_compactHeroAtlas && g_assets.heroSheet.ok) {
+        const int row=DirRowForFacing(facing);
+        const bool moving=AnyMoveKeyDown() || VirtualJoystickIsMoving() || g_walkOn;
+        const int frame=moving && combatAnim==ActorAnim::Idle ? (int)(s.worldTime*kHeroWalkFps)%4:1;
+        const float cw=g_assets.heroSheet.tex.width/4.f,ch=g_assets.heroSheet.tex.height/4.f;
+        const float size=kPlayerRadius*1.85f;
+        float bob=moving ? sinf(s.worldTime*12.f)*.5f*visualScale:0;
+        float attack=combatAnim==ActorAnim::Attack ? sinf(s.worldTime*15.f)*22.f:0;
+        Rectangle src=g_compactHeroFrames[row*4+frame];
+        if(src.height<=0)src={cw*frame,ch*row,cw,ch};
+        const float width=size*src.width/src.height;
+        DrawEllipse((int)screenPos.x,(int)(screenPos.y+size*.39f),size*.20f,size*.055f,Fade(BLACK,.22f));
+        DrawTexturePro(g_assets.heroSheet.tex,src,{screenPos.x,screenPos.y+bob,width,size},{width/2,size/2},attack*.12f,tint);
+        auto held=[&](const std::optional<Item>& it,bool right) {
+            if(!it)return;
+            if(!right && s.equipped.rightHand && it->id==s.equipped.rightHand->id)return;
+            const Texture2D* tex=GearIconForItem(*it);if(!tex)return;
+            float sign=right ? -1.f:1.f;if(row==3)sign=-sign;
+            float gs=size*(it->type==ItemType::Weapon ? .48f:.37f);
+            Rectangle dst={screenPos.x+sign*size*.22f,screenPos.y+size*.16f+bob,gs,gs};
+            DrawTexturePro(*tex,{0,0,(float)tex->width,(float)tex->height},dst,{gs/2,gs/2},right ? attack:0,tint);
+        };
+        held(s.equipped.rightHand,true);held(s.equipped.leftHand,false);
+        if(combatAnim==ActorAnim::Cast)DrawCircleLines((int)screenPos.x,(int)screenPos.y,size*.48f,Fade(SKYBLUE,.65f));
+    } else if (g_assets.heroSheet.ok) {
         bool moving = AnyMoveKeyDown() || VirtualJoystickIsMoving();
         ActorAnim anim = (combatAnim != ActorAnim::Idle) ? combatAnim : (moving ? ActorAnim::Walk : ActorAnim::Idle);
         DrawActorSprite(g_assets.heroSheet, facing, anim, s.worldTime, screenPos, kPlayerRadius * kHeroSpriteScale, kHeroWalkFps, 0.0f, tint);
@@ -15718,9 +15780,11 @@ static HumanOutfit SkinHeldGearFor(HumanOutfit o) {
 // One avatar and equipment path for the world and the Me/try-on preview.
 // skin: a complete baked look from HeroLookFor (e.g. "hero_knight"), or
 // nullptr for the base hero body with modular attached armor and dyes.
+#include "compact_adventurer.h"
 static bool DrawEquippedHero(int track, float x, float z, float yaw, Color tint,
                              const Equipment& equipment, const HumanPose& hp, bool shadowPass,
                              bool sneaking = false, bool blocking = false, const char* skin = nullptr) {
+    if(DrawCompactAdventurer(track,x,z,yaw,tint,equipment,hp,shadowPass,sneaking,blocking))return true;
     HumanEnsure();
     HumanOutfit outfit = HumanOutfitFor(equipment);
     SkinPose pose;
