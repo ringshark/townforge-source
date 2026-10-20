@@ -41445,7 +41445,6 @@ static void UpdateDrawFrame() {
             if (kVariantView == 0 && IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D; // (2026-09-28) unadvertised: Options holds the switch
         if (!encounterPending && state.screen == Screen::Town) {
             if (IsKeyPressed(KEY_ESCAPE)) state.selectedTile.reset();
-            if (kVariantView == 0 && IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
         }
         if (!encounterPending && state.screen == Screen::Wilderness) {
             if (IsKeyPressed(KEY_M)) { // minimap toggle
@@ -41457,16 +41456,12 @@ static void UpdateDrawFrame() {
         if (!encounterPending && state.screen == Screen::Interior) {
             // Interiors stay part of the town: V toggles the indoor 2D/3D view,
             // ESC closes a popup or steps back outside through the door.
-            if (kVariantView == 0 && IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
             if (IsKeyPressed(KEY_ESCAPE)) {
                 if (state.selectedTile.has_value() || state.interiorGreeted) {
                     state.selectedTile.reset();
                     state.interiorGreeted = false;
                 } else ExitInterior(state);
             }
-        }
-        if (!encounterPending && state.screen == Screen::Hunt && !state.combat.has_value()) {
-            if (kVariantView == 0 && IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D;
         }
         // --- Input: combat shortcuts, only meaningful on Hunt while fighting ---
         if (!encounterPending && state.screen == Screen::Hunt && state.combat.has_value()) {
