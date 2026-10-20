@@ -104,6 +104,9 @@ float g_landscapeScroll=0;
 RenderTexture2D LoadRenderTexture(int,int){return {1,1};}
 void SetTextureFilter(int,int){}void BeginTextureMode(RenderTexture2D){}void EndTextureMode(){}
 void DrawRectangleRounded(Rectangle,float,int,Color){}void DrawRectangleLinesEx(Rectangle,float,Color){}
+void DrawRectangleRoundedLines(Rectangle,float,int,Color){}void DrawRectangleRec(Rectangle,Color){}
+void DrawRectangle(int,int,int,int,Color){}void DrawLine(int,int,int,int,Color){}
+int MeasureUIText(const char* t,int size){return (int)std::string(t).size()*size/2;}
 void ClearBackground(Color){}void DrawRectangleGradientV(int,int,int,int,Color,Color){}
 void DrawUIText(const char*,int,int,int,Color){}void LandscapePlate(Rectangle,Color){}
 const char* TextFormat(const char*,...){return "resources";}
@@ -124,18 +127,19 @@ Vector2 TS(float x,float y){return {x,y};}void WalkTargetClear(){}void TryStartL
 native+='''int main(){
 Screen pages[]={Screen::Character,Screen::Character,Screen::Skills,Screen::Magic,Screen::Craft,Screen::Pets,Screen::Bank,Screen::House,Screen::House,Screen::House,Screen::House,Screen::Guide};
 for(int slot=0;slot<12;slot++){
- GameState s;bool open=true;int col[]={0,0,0,1,1,0,2,2,1,1,2,2},row[]={0,1,2,0,1,3,0,1,2,3,2,3};mouse={28.f+col[slot]*312.f+100,150.f+row[slot]*72.f+30};pressed=down=true;UIFrameReset();g_uiShieldBypass=true;
+ GameState s;bool open=true;int col[]={0,0,0,0,1,1,2,2,1,1,2,2},row[]={0,1,2,3,0,1,0,1,2,3,2,3};mouse={28.f+col[slot]*312.f+100,150.f+row[slot]*72.f+30};pressed=down=true;UIFrameReset();g_uiShieldBypass=true;
  DrawLandscapeMainMenu(s,open,false);assert(!open && s.screen==pages[slot]);
  if(slot==1)assert(g_characterPack);if(slot==9)assert(g_questOpen);if(slot==10)assert(g_optOpen);
  for(auto r:g_uiRects)assert(r.x>=0 && r.y>=0 && r.x+r.width<=960 && r.y+r.height<=540 && r.height>=48);
  pressed=down=false;UIFrameReset();
 }
-GameState s;bool open=true;mouse={72,80};pressed=down=true;UIFrameReset();DrawLandscapeMainMenu(s,open,false);assert(!open && s.screen==Screen::Town);
-pressed=down=false;UIFrameReset();open=true;s.screen=Screen::Character;mouse={100,462};pressed=down=true;UIFrameReset();DrawLandscapeMainMenu(s,open,false);assert(!open && s.screen==Screen::Town);
-pressed=down=false;UIFrameReset();open=true;s.playerIsGhost=true;mouse={100,170};pressed=down=true;UIFrameReset();DrawLandscapeMainMenu(s,open,false);assert(open && s.screen==Screen::Town);
+GameState s;bool open=true;mouse={800,52};pressed=down=true;UIFrameReset();DrawLandscapeMainMenu(s,open,false);assert(!open && s.screen==Screen::Town);
+pressed=down=false;UIFrameReset();open=true;s.screen=Screen::Character;mouse={800,52};pressed=down=true;UIFrameReset();DrawLandscapeMainMenu(s,open,false);assert(!open && s.screen==Screen::Character);
+pressed=down=false;UIFrameReset();open=true;s.screen=Screen::Town;s.playerIsGhost=true;mouse={100,170};pressed=down=true;UIFrameReset();DrawLandscapeMainMenu(s,open,false);assert(open && s.screen==Screen::Town);
 }'''
 with tempfile.TemporaryDirectory() as tmp:
     cpp=Path(tmp)/'native-menu.cpp';exe=Path(tmp)/'native-menu';cpp.write_text(native)
     subprocess.run(['g++','-std=c++17',str(cpp),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
-print('PASS native landscape menu: all twelve destinations, Close, Resume, disabled actions and visible touch targets')
+print('PASS native landscape menu: all twelve destinations, Return to game, disabled actions and visible touch targets')
+
