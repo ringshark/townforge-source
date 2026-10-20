@@ -35366,11 +35366,23 @@ static void DrawMenuGroupTabs(GameState& s) {
     }
 }
 // Main navigation uses a single native landscape canvas and identity picking.
+// Native navigation shares one readable, warm palette in both world views.
 static bool LandscapeMenuCard(Rectangle r, const std::string& title, const std::string& detail, bool enabled=true) {
-    DrawRectangleRounded(r,.12f,4,enabled ? Color{34,49,59,255}:Color{29,38,44,255});
-    DrawRectangleLinesEx(r,1,Color{84,103,114,150});
-    DrawUIText(title.c_str(),(int)r.x+16,(int)r.y+14,20,enabled ? Color{245,229,195,255}:Color{133,142,147,255});
-    if(!detail.empty())DrawUIText(detail.c_str(),(int)r.x+16,(int)r.y+38,13,Color{170,186,192,255});
+    const bool hover=enabled && UIContains(GetMousePosition(),r);
+    const Color paper=Color{246,233,204,255}, muted=Color{188,175,152,255};
+    DrawRectangleRounded(r,.10f,6,enabled ? (hover ? Color{75,61,45,255}:Color{47,41,34,255}):Color{34,32,29,255});
+    DrawRectangleRoundedLines(r,.10f,6,hover ? Color{221,181,106,255}:Color{104,86,59,255});
+    if(hover)DrawRectangleRec({r.x+1,r.y+12,3,r.height-24},Color{221,181,106,255});
+    int fs=20;while(MeasureUIText(title.c_str(),fs)>r.width-50 && fs>14)--fs;
+    const int ty=(int)r.y+(detail.empty() ? (int)(r.height-fs)/2:12);
+    DrawUIText(title.c_str(),(int)r.x+16,ty,fs,enabled ? paper:Color{139,132,119,255});
+    if(!detail.empty()) {
+        int ds=13;while(MeasureUIText(detail.c_str(),ds)>r.width-32 && ds>10)--ds;
+        std::string line=detail;
+        while(MeasureUIText(line.c_str(),ds)>r.width-32 && line.size()>4)line=line.substr(0,line.size()-4)+"...";
+        DrawUIText(line.c_str(),(int)r.x+16,(int)r.y+38,ds,enabled ? muted:Color{139,132,119,255});
+    }
+    if(enabled)DrawUIText(">",(int)(r.x+r.width-23),ty,16,hover ? Color{241,206,140,255}:muted);
     bool tapped=UIClick(r,enabled);if(tapped)PlaySfx(SfxId::Click);return tapped;
 }
 static void DrawLandscapeMainMenu(GameState& s,bool& open,bool inDungeon) {
@@ -35379,42 +35391,48 @@ static void DrawLandscapeMainMenu(GameState& s,bool& open,bool inDungeon) {
         SetTextureFilter(g_landscapeNativeMenuTarget.texture,TEXTURE_FILTER_BILINEAR);
     }
     g_landscapeNativeMenu=true;g_landscapeNativeMenuDrawing=true;g_landscapeDialog=true;g_landscapeScroll=0;
-    BeginTextureMode(g_landscapeNativeMenuTarget);ClearBackground(Color{12,21,28,255});
-    DrawRectangleGradientV(0,0,960,540,Color{31,43,48,255},Color{9,17,23,255});
-    DrawUIText("MENU",160,28,26,Color{243,221,180,255});
-    DrawUIText("Choose what you want to do",160,72,16,Color{175,191,197,255});
-    DrawUIText("CHARACTER",28,124,14,Color{202,182,136,255});
-    DrawUIText("ACTIVITIES",340,124,14,Color{202,182,136,255});
-    DrawUIText("MANAGE",652,124,14,Color{202,182,136,255});
-    if(LandscapeMenuCard({20,56,104,48},"Close",""))open=false;
+    BeginTextureMode(g_landscapeNativeMenuTarget);ClearBackground(Color{24,22,19,255});
+    DrawRectangleGradientV(0,0,960,540,Color{45,37,28,255},Color{22,22,20,255});
+    DrawRectangle(28,28,4,55,Color{210,169,94,255});
+    DrawUIText("TOWN FORGE",48,24,13,Color{210,169,94,255});
+    DrawUIText("Your adventure",48,46,30,Color{246,233,204,255});
+    if(LandscapeMenuCard({700,26,232,58},"Return to game",""))open=false;
+    DrawLine(28,103,932,103,Color{104,86,59,255});
+    DrawUIText("CHARACTER",28,123,14,Color{210,169,94,255});
+    DrawUIText("ACTIVITIES",340,123,14,Color{210,169,94,255});
+    DrawUIText("TOWN & SYSTEM",652,123,14,Color{210,169,94,255});
     bool enabled=!DenFighting() && !s.combat && !s.playerIsGhost && s.playerDeathAnimT<=0;
     auto card=[&](int slot,const std::string& label,const std::string& detail,bool en=true) {
-        static const int column[]={0,0,0,1,1,0,2,2,1,1,2,2};
-        static const int row[]={0,1,2,0,1,3,0,1,2,3,2,3};
+        static const int column[]={0,0,0,0,1,1,2,2,1,1,2,2};
+        static const int row[]={0,1,2,3,0,1,0,1,2,3,2,3};
         return LandscapeMenuCard({28.f+column[slot]*312.f,150.f+row[slot]*72.f,288,62},label,detail,en);
     };
     auto page=[&](Screen sc){MenuGoScreen(s,sc);open=false;};
-    if(card(0,"Gear","Equipment & character",enabled)){g_characterPack=false;g_pdSel=-1;page(Screen::Character);}
-    if(card(1,"Backpack","Items & supplies",enabled)){g_characterPack=true;g_pdSel=-1;s.backpackScroll=0;page(Screen::Character);}
+    if(card(0,"Equipment","Armor, weapons & character",enabled)){g_characterPack=false;g_pdSel=-1;page(Screen::Character);}
+    if(card(1,"Backpack","Items, loot & supplies",enabled)){g_characterPack=true;g_pdSel=-1;s.backpackScroll=0;page(Screen::Character);}
     if(card(2,"Skills","Training & progression",enabled))page(Screen::Skills);
-    if(card(3,"Spells","Spellbook & magic",enabled))page(Screen::Magic);
-    if(card(4,"Crafting","Make gear & supplies",enabled))page(Screen::Craft);
-    if(card(5,"Pets","Companions & followers",enabled))page(Screen::Pets);
+    if(card(3,"Spellbook","Spells & combat slots",enabled))page(Screen::Magic);
+    if(card(4,"Crafting","Workshops & recipes",enabled))page(Screen::Craft);
+    if(card(5,"Pets","Taming & companions",enabled))page(Screen::Pets);
     if(card(6,"Bank","Stored items & gold",enabled))page(Screen::Bank);
     if(card(7,"Home","House & settlement",enabled))page(Screen::House);
     if(card(8,"Guild",GuildAttentionLabel(),enabled)){page(Screen::House);OpenWarWeek(s);g_guildTab=1;}
     if(card(9,"Journal",JournalAttentionLabel(s),enabled)){page(Screen::House);g_questOpen=true;g_questTab=0;}
-    if(card(10,"Settings","Options & saves",!DenFighting())){page(Screen::House);g_optOpen=true;}
-    if(card(11,"Help","How to play",enabled)){page(Screen::Guide);s.guidePage=0;}
-    if(LandscapeMenuCard({28,454,282,64},"Resume game","Return to the world")){s.screen=g_playScreen;open=false;}
+    if(card(10,"Settings","Options & cloud saves",!DenFighting())){page(Screen::House);g_optOpen=true;}
+    if(card(11,"Help","Controls & how to play",enabled)){page(Screen::Guide);s.guidePage=0;}
+    DrawLine(28,447,932,447,Color{104,86,59,255});
     bool ferry=enabled && (s.screen==Screen::Town || s.screen==Screen::Blackwake);
-    if(LandscapeMenuCard({326,454,282,64},s.screen==Screen::Blackwake ? "Return to Saltmere":"Blackwake Den",ferry ? "Travel by ferry":"Visit the ferry from town",ferry)) {
-        if(s.screen==Screen::Blackwake){s.screen=Screen::Town;s.selectedTown=1;s.townPlayerPos=TS(450,830);}
-        else{s.screen=Screen::Blackwake;s.townPlayerPos={750,1250};}
-        g_denPanel=0;open=false;WalkTargetClear();
+    if(inDungeon) {
+        if(LandscapeMenuCard({652,461,280,54},"Leave dungeon","Magery recall",!s.playerIsGhost && s.playerDeathAnimT<=0 && s.leaveDungT<0)) {TryStartLeaveDungeon(s);open=false;}
+    } else if(ferry) {
+        if(LandscapeMenuCard({652,461,280,54},s.screen==Screen::Blackwake ? "Return to Saltmere":"Blackwake Den","Travel by ferry")) {
+            if(s.screen==Screen::Blackwake){s.screen=Screen::Town;s.selectedTown=1;s.townPlayerPos=TS(450,830);}
+            else{s.screen=Screen::Blackwake;s.townPlayerPos={750,1250};}
+            g_denPanel=0;open=false;WalkTargetClear();
+        }
     }
-    if(inDungeon && LandscapeMenuCard({624,454,308,64},"Leave dungeon","Magery recall",!s.playerIsGhost && s.playerDeathAnimT<=0 && s.leaveDungT<0)) {TryStartLeaveDungeon(s);open=false;}
-    if(!enabled)DrawUIText("Finish combat to open character and activity pages.",28,524,12,Color{230,183,119,255});
+    DrawUIText(TextFormat("Gold %d   |   Wood %d   |   Ore %d   |   Leather %d",s.gold,s.wood,s.ore,s.leather),28,467,15,Color{246,233,204,255});
+    DrawUIText(enabled ? "Choose a destination. Return to game closes this menu.":"Character and activities are unavailable during combat or recovery.",28,497,12,Color{188,175,152,255});
     EndTextureMode();g_landscapeNativeMenuDrawing=false;
 }
 static const char* LandscapePageTitle(const GameState& s) {
@@ -35430,8 +35448,8 @@ static const char* LandscapePageTitle(const GameState& s) {
     }
 }
 static void DrawLandscapePageHeader(GameState& s,bool& open) {
-    DrawRectangle(0,0,960,110,Color{16,26,33,255});
-    DrawLine(20,109,940,109,Color{148,118,74,255});
+    DrawRectangle(0,0,960,110,Color{37,32,26,255});
+    DrawLine(20,109,940,109,Color{175,137,76,255});
     DrawUIText(LandscapePageTitle(s),160,22,24,Color{243,225,192,255});
 
     if(Button({20,20,112,48},"MENU",true))open=true;
@@ -41792,3 +41810,4 @@ int main() {
 #endif
     return 0;
 }
+
