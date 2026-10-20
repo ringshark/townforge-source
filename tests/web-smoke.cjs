@@ -28,7 +28,7 @@ function change(a,b){const x=PNG.sync.read(a),y=PNG.sync.read(b);let n=0,total=0
    async function tap(x,y){const p=await position(x,y);if(spec.hasTouch)await page.touchscreen.tap(p.x,p.y);else await page.mouse.click(p.x,p.y);await page.waitForTimeout(350);}
    await tap(580,337); // Explore freely: use a fresh save for each context.
    const first=await page.screenshot({path:`browser-checks/${name}-first-view.png`});nonblank(first);
-   await canvas.focus();await page.keyboard.press('v');await page.waitForTimeout(1500);
+   await canvas.focus();await page.keyboard.press('v',{delay:150});await page.waitForTimeout(1500);
    const second=await page.screenshot({path:`browser-checks/${name}-other-view.png`});nonblank(second);
    assert(change(first,second)>.15,'Both 2D and 3D views render and the view switch changes the world');
    if(spec.hasTouch){
