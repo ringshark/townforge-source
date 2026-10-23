@@ -50,6 +50,8 @@ jobs:
         run: |
           git clone --depth 1 --branch 6.0 https://github.com/raysan5/raylib.git /tmp/raylib
           make -C /tmp/raylib/src PLATFORM=PLATFORM_WEB -j2
+          g++ -std=c++17 -I /tmp/raylib/src tests/town-2d-art.cpp -o /tmp/tf-art-test
+          /tmp/tf-art-test
           RAYLIB_DIR=/tmp/raylib python tests/avatar-motion.py
           RAYLIB_DIR=/tmp/raylib python tests/landscape-menus.py
       - name: Build game

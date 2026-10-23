@@ -2745,6 +2745,8 @@ struct DirSpriteSheet {
     std::array<bool, 4> rowFlip{false, false, false, false};
 };
 
+#include "town_2d_art.h"
+
 struct GameAssets {
     Texture2D player{};
     bool playerOk = false;
@@ -2941,7 +2943,7 @@ static std::array<Rectangle,16> g_compactHeroFrames{};
 // same argument order, just backed by uiFont instead of GetFontDefault().
 static inline Font UiFont() { return g_assets.uiFontOk ? g_assets.uiFont : GetFontDefault(); }
 static inline void DrawUIText(const char* text, int posX, int posY, int fontSize, Color color) {
-    bool field=g_landscapeActive && g_landscapeWorld && !g_landscapeDialog && posY>=230 && posY<600;
+    bool field=g_landscapeActive && g_landscapeWorld && !g_landscapePage && !g_landscapeDialog && posY>=230 && posY<600;
     if(field){rlPushMatrix();rlTranslatef((float)posX,(float)posY,0);rlScalef(540.0f/960.0f,900.0f/540.0f,1);}
     DrawTextEx(UiFont(), text, { field ? 0.0f:(float)posX, field ? 0.0f:(float)posY }, (float)fontSize, 1.0f, color);
     if(field)rlPopMatrix();
@@ -2950,7 +2952,7 @@ static inline int MeasureUIText(const char* text, int fontSize) {
     return (int)MeasureTextEx(UiFont(), text, (float)fontSize, 1.0f).x;
 }
 static void DrawWorldLabel(const std::string& text,Vector2 point,int size,Color color,float alpha=1) {
-    if(g_landscapeActive && g_landscapeWorld && !g_landscapeDialog) {
+    if(g_landscapeActive && g_landscapeWorld && !g_landscapePage && !g_landscapeDialog) {
         auto p=tflayout::WorldPoint({point.x,point.y});
         g_landscapeLabels.push_back({text,{p.x,p.y},size,color,alpha});return;
     }
@@ -3057,6 +3059,7 @@ static DirSpriteSheet LoadCarlActorSheet(const std::string& path, int cols, int 
 }
 
 static void LoadGameAssets() {
+    if(kVariantView!=3)tf2dart::Load();
     // Loaded at 48px (0/nullptr = default codepoints, just standard ASCII - every string
     // in the game is plain English) so it covers the largest UI text (title, 22px)
     // without much upscale blur while not needing an extreme downscale for the smallest
@@ -27680,6 +27683,34 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
 
 
 static void DrawSnowfall(int screenW, int screenH, float worldTime); // Phase 3 (defined above DrawWildernessScreen)
+static void DrawPolishedTownBuilding(Vector2 pos, const Texture2D& tex,
+    const std::string& label, const std::string& sub, bool near, float night, float time) {
+    float scale=tf2dart::kBuildingSize/std::max(tex.width,tex.height);
+    float w=tex.width*scale,h=tex.height*scale, foot=pos.y+kNodeRadius*kTownVisualScale*.6f;
+    if(pos.x+w/2<kViewport.x || pos.x-w/2>kViewport.x+kViewport.width ||
+       foot<kViewport.y || foot-h>kViewport.y+kViewport.height)return;
+    tf2dart::Shadow({pos.x,foot},w*.43f,12);
+    if(near) {
+        DrawEllipse((int)pos.x,(int)foot,w*.48f,14,Fade(Color{224,183,91,255},.14f));
+        DrawEllipseLines((int)pos.x,(int)foot,w*.48f,14,Fade(Color{236,196,105,255},.8f));
+    }
+    Color tint={ (unsigned char)(255-night*66),(unsigned char)(255-night*59),(unsigned char)(255-night*36),255};
+    DrawTextureEx(tex,{roundf(pos.x-w/2),roundf(foot-h)},0,scale,tint);
+    if(night>.05f) {
+        float pulse=1+.05f*sinf(time*3.2f+pos.x);
+        BeginBlendMode(BLEND_ADDITIVE);
+        for(int i=3;i>0;i--)DrawEllipse((int)pos.x,(int)(foot+2),w*(.10f+i*.035f)*pulse,
+            4+i*3,Fade(Color{255,173,69,255},night*.035f));
+        EndBlendMode();
+    }
+    // Quiet nameplates; contextual level text appears only at the door.
+    int width=MeasureUIText(label.c_str(),12);
+    Rectangle plate={pos.x-width/2.f-6,foot+5,(float)width+12,18};
+    DrawRectangleRounded(plate,.25f,4,Fade(Color{29,34,31,255},.84f));
+    DrawUIText(label.c_str(),(int)(pos.x-width/2.f),(int)(foot+8),12,Color{231,221,194,255});
+    if(near && !sub.empty())DrawWorldLabel(sub,{pos.x,foot+38},11,Color{238,205,135,255});
+}
+
 static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     // 2D-wide mode (2026-10-18): fill the whole 960x540 page target instead
     // of the old fixed 540x790 portrait box - screenW/screenH are already
@@ -27805,6 +27836,8 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     if (s.town3DView) { DrawTown3DWorld(s, screenW, screenH); } else {
     BeginScissorMode((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height);
     Vector2 camera = CameraTopLeft(s.townPlayerPos, kTownWorldSize);
+    const bool polished = s.selectedTown == 0 && tf2dart::grass.id && tf2dart::paving.id;
+    const float night=std::clamp((.62f-T3DLightAt(T3DLocalTimeOfDay()).sunI)/.34f,0.f,1.f);
     // Town 2 uses the dirt/road texture as its primary ground (already loaded, no new
     // asset needed) instead of grass, for an immediately different first impression -
     // a "packed earth trading post" feel vs. Town 1's tended grass.
@@ -27819,7 +27852,9 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     Color activeGroundFallback = (s.selectedTown == 0) ? Color{ 210, 198, 168, 255 }
         : (s.selectedTown == 2) ? Color{ 228, 238, 248, 255 }
         : town4 ? Color{ 148, 144, 136, 255 } : Color{ 176, 158, 132, 255 };
-    DrawTiledGround(activeGroundTex, kViewport, camera, 48.0f * kTownVisualScale, activeGroundFallback);
+    if(polished) DrawTiledGround(&tf2dart::grass,kViewport,camera,(float)tf2dart::kTile,
+        activeGroundFallback,Color{(unsigned char)(255-night*80),(unsigned char)(255-night*65),(unsigned char)(255-night*40),255});
+    else DrawTiledGround(activeGroundTex, kViewport, camera, 48.0f * kTownVisualScale, activeGroundFallback);
     if (s.selectedTown == 2) { // Frostmere: snow wash over the whole town ground
         DrawRectangle((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height,
                       Color{ 232, 242, 252, 110 });
@@ -27879,11 +27914,17 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
                                  : f.variant == 3 ? (g_assets.wildBush2Ok ? &g_assets.wildBush2 : nullptr)
                                  : f.variant == 4 ? (g_assets.wildFern1Ok ? &g_assets.wildFern1 : nullptr)
                                  : (g_assets.townAutumnBushOk ? &g_assets.townAutumnBush : nullptr);
+        if(polished) {
+            int idx=f.variant==1 ? (int)(tf2dart::Noise((int)f.pos.x,(int)f.pos.y)*2.99f):f.variant==5?1:3;
+            if(tf2dart::scenery[idx].id)icon=&tf2dart::scenery[idx];
+        }
         if (!icon) continue;
         Vector2 screenPos = WorldToScreen(f.pos, camera);
-        if (screenPos.x < kViewport.x - 30 || screenPos.x > kViewport.x + kViewport.width + 30 ||
-            screenPos.y < kViewport.y - 30 || screenPos.y > kViewport.y + kViewport.height + 30) continue;
-        DrawIconCentered(*icon, screenPos, 34.0f * kTownVisualScale, WHITE);
+        if (screenPos.x < kViewport.x - 80 || screenPos.x > kViewport.x + kViewport.width + 80 ||
+            screenPos.y < kViewport.y - 80 || screenPos.y > kViewport.y + kViewport.height + 80) continue;
+        float size=(polished && (f.variant==1 || f.variant==5) ? 94.f:34.f)*kTownVisualScale;
+        tf2dart::Shadow({screenPos.x,screenPos.y+size*.32f},size*.26f,size*.08f,.12f);
+        DrawIconCentered(*icon, screenPos, size, WHITE);
     }
 
     // Phase 3 - Frostmere winter dressing: snow drifts and frost-dusted pines,
@@ -27918,14 +27959,19 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
     const Texture2D* dirtTex = g_assets.groundDirtOk ? &g_assets.groundDirt : nullptr;
     Color roadTint = (s.selectedTown == 0) ? Color{ 196, 164, 100, 255 }
         : (s.selectedTown == 2) ? Color{ 190, 205, 220, 255 } : Color{ 140, 148, 156, 255 };
-    DrawWallBand(kTownPlaza, camera, dirtTex, 48.0f * kTownVisualScale, roadTint);
-    for (auto& node : ActiveTownNodes(s.selectedTown)) DrawRoadToPlaza(node.pos, kTownPlaza, camera, dirtTex);
-    // Extends Bank's own straight road (same central column, x=450) on past it to the
-    // Wilderness Gate - one continuous main street from the plaza straight out of town,
-    // instead of the gate sitting unconnected off in a corner.
-    DrawWallBand({ kWildernessGatePos.x - 14, kTownPlaza.y + kTownPlaza.height, 28,
-                    kWildernessGatePos.y - (kTownPlaza.y + kTownPlaza.height) },
-                  camera, dirtTex, 48.0f * kTownVisualScale, roadTint);
+    if(polished) {
+        Color stoneTint={(unsigned char)(255-night*72),(unsigned char)(255-night*60),(unsigned char)(255-night*32),255};
+        tf2dart::Band(kTownPlaza,camera,kViewport,stoneTint);
+        for(auto& node:ActiveTownNodes(s.selectedTown))tf2dart::Road(node.pos,kTownPlaza,camera,kViewport,stoneTint);
+        tf2dart::Band({kWildernessGatePos.x-19,kTownPlaza.y+kTownPlaza.height,38,
+            kWildernessGatePos.y-(kTownPlaza.y+kTownPlaza.height)},camera,kViewport,stoneTint);
+    } else {
+        DrawWallBand(kTownPlaza, camera, dirtTex, 48.0f * kTownVisualScale, roadTint);
+        for (auto& node : ActiveTownNodes(s.selectedTown)) DrawRoadToPlaza(node.pos, kTownPlaza, camera, dirtTex);
+        DrawWallBand({ kWildernessGatePos.x - 14, kTownPlaza.y + kTownPlaza.height, 28,
+            kWildernessGatePos.y - (kTownPlaza.y + kTownPlaza.height) },
+            camera, dirtTex, 48.0f * kTownVisualScale, roadTint);
+    }
 
     // Town-flavor props (well/lamps/signage/stalls/clutter) - see kTownProps.
     for (const TownProp& p : kTownProps) {
@@ -27950,6 +27996,13 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
             case 16: icon = g_assets.townChestOk ? &g_assets.townChest : nullptr; break;
             case 17: icon = g_assets.townBookshelfOk ? &g_assets.townBookshelf : nullptr; break;
         }
+        float propSize=p.size*kTownVisualScale;
+        if(polished) {
+            int idx=p.kind==0?5:p.kind==1?4:p.kind==7?6:p.kind==8?7:-1;
+            if(idx>=0 && tf2dart::scenery[idx].id)icon=&tf2dart::scenery[idx];
+            if(p.kind==0)propSize=68;
+            if(p.kind==1)propSize=54;
+        }
         if (!icon) continue;
         Vector2 screenPos = WorldToScreen(p.pos, camera);
         if (screenPos.x < kViewport.x - 30 || screenPos.x > kViewport.x + kViewport.width + 30 ||
@@ -27967,7 +28020,13 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
             DrawCircleV(screenPos, glowR * 0.66f, Fade(glow, 0.16f));
             DrawCircleV(screenPos, glowR * 0.33f, Fade(glow, 0.22f));
         }
-        DrawIconCentered(*icon, screenPos, p.size * kTownVisualScale, WHITE);
+        tf2dart::Shadow({screenPos.x,screenPos.y+p.size*kTownVisualScale*.3f},p.size*.30f,4,.12f);
+        DrawIconCentered(*icon, screenPos, propSize, WHITE);
+        if(polished && p.kind==0) {
+            float ripple=fmodf(s.worldTime*.5f,1.f);
+            DrawEllipseLines((int)screenPos.x,(int)screenPos.y,8+ripple*10,2+ripple*3,
+                Fade(Color{210,238,231,255},(1-ripple)*.45f));
+        }
     }
 
     // Phase 1 - Emberhold capital dressing (town 1 only).
@@ -28027,55 +28086,56 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         }
     }
 
-    for (auto& node : ActiveTownNodes(s.selectedTown)) {
-        Vector2 screenPos = WorldToScreen(node.pos, camera);
-        bool near = (node.key == nearestKey) && inRange;
-        std::string sub;
-        // Saltmere got its own real building art 2026-09-23 (Mark's "Carl" art drop,
-        // assets/saltmere_buildings/) - before that, Town 2 had no dedicated art at all
-        // and fell back to the generic wall+roof+door composite tinted slate-blue. Real
-        // art always renders at its own true colors (bodyTint WHITE); the slate tint is
-        // now only a defensive fallback for the rare case a given key's file is missing.
-        // Phase 3: Frostmere (assets/frostmere_buildings/) works the same way.
-        const Texture2D* realTex = (s.selectedTown == 0) ? FindTownBuildingTexture(node.key)
-            : (s.selectedTown == 2) ? FindFrostmereBuildingTexture(node.key)
-            : (s.selectedTown == 3) ? FindCragmoorBuildingTexture(node.key) // Phase 4
-            : FindSaltmereBuildingTexture(node.key);
-        Color bodyTint = realTex ? WHITE : Color{ 150, 170, 185, 255 };
-        if (int idx = FindCraftBuildingIndex(node.key); idx >= 0)
-            sub = "Lv " + std::to_string(s.buildingLevel[idx]);
-        DrawBuildingNode(screenPos, TileColorFor(node.key), TileNameFor(node.key), near, sub,
-                           FindBuildingTexture(node.key), DoorAnimForBuilding(node.key),
-                           realTex, bodyTint, kTownVisualScale);
-    }
-    {
-        // The Wilderness Gate - drawn with the generic wall+roof fallback (no CraftPix
-        // building art fits "gate to the wilds"), colored sage to read as an outdoor
-        // threshold rather than a shop.
-        Vector2 gateScreenPos = WorldToScreen(kWildernessGatePos, camera);
-        DrawBuildingNode(gateScreenPos, kColorPanelBg, "Wilderness Gate", gateIsNearest && inRange, "",
-                           nullptr, nullptr, nullptr, WHITE, kTownVisualScale);
-    }
-    // Wandering townsfolk (2026-09-23: real animated art, Mark's "Carl" drop - used to
-    // be a plain colored circle, see kTownNPCs' comment history) - faces its own wander
-    // motion via WanderFacing rather than always Down, since Town is the one screen
-    // players linger on long enough for that polish to actually read.
-    const auto& activeNPCSheets = (s.selectedTown == 0) ? g_assets.townNPCSheets : g_assets.saltmereNPCSheets;
-    for (int i = 0; i < (int)activeNPCs.size(); i++) {
-        Vector2 screenPos = WorldToScreen(TownNPCLivePos(i, s.worldTime, s.selectedTown), camera);
-        bool near = npcIsNearest && nearestNPCIdx == i && inRange;
-        const DirSpriteSheet& sheet = activeNPCSheets[i];
-        if (sheet.ok) {
-            Vector2 facing = WanderFacing(i, s.worldTime);
-            Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
-            DrawWorldNode(screenPos, kNodeRadius * 0.5f * kTownVisualScale, kColorPanelBg, activeNPCs[i].name, near,
-                           "", &sheet.tex, WHITE, &src);
+    // Sort by ground position so walking behind a facade actually hides the hero.
+    struct TownDrawItem {float foot; int kind,index;};
+    std::vector<TownDrawItem> drawItems;
+    auto nodes=ActiveTownNodes(s.selectedTown);
+    for(int i=0;i<(int)nodes.n;i++)drawItems.push_back({nodes.begin()[i].pos.y+kNodeRadius*kTownVisualScale*.6f,0,i});
+    drawItems.push_back({kWildernessGatePos.y+kNodeRadius*kTownVisualScale*.6f,1,0});
+    for(int i=0;i<(int)activeNPCs.size();i++)drawItems.push_back({TownNPCLivePos(i,s.worldTime,s.selectedTown).y+15,2,i});
+    drawItems.push_back({s.townPlayerPos.y+15,3,0});
+    std::stable_sort(drawItems.begin(),drawItems.end(),[](const TownDrawItem& a,const TownDrawItem& b){return a.foot<b.foot;});
+    const auto& activeNPCSheets=(s.selectedTown==0)?g_assets.townNPCSheets:g_assets.saltmereNPCSheets;
+    for(const auto& item:drawItems) {
+        if(item.kind==0) {
+            const auto& node=nodes.begin()[item.index];
+            Vector2 screenPos=WorldToScreen(node.pos,camera);
+            bool near=node.key==nearestKey && inRange && !gateIsNearest && !npcIsNearest;
+            std::string sub;
+            if(int idx=FindCraftBuildingIndex(node.key);idx>=0)sub="Lv "+std::to_string(s.buildingLevel[idx]);
+            const Texture2D* fresh=polished?tf2dart::Building(node.key):nullptr;
+            if(fresh)DrawPolishedTownBuilding(screenPos,*fresh,TileNameFor(node.key),sub,near,night,s.worldTime);
+            else {
+                const Texture2D* realTex=s.selectedTown==0?FindTownBuildingTexture(node.key):
+                    s.selectedTown==2?FindFrostmereBuildingTexture(node.key):
+                    s.selectedTown==3?FindCragmoorBuildingTexture(node.key):FindSaltmereBuildingTexture(node.key);
+                DrawBuildingNode(screenPos,TileColorFor(node.key),TileNameFor(node.key),near,sub,
+                    FindBuildingTexture(node.key),DoorAnimForBuilding(node.key),realTex,
+                    realTex?WHITE:Color{150,170,185,255},kTownVisualScale);
+            }
+        } else if(item.kind==1) {
+            DrawBuildingNode(WorldToScreen(kWildernessGatePos,camera),kColorPanelBg,"Wilderness Gate",
+                gateIsNearest && !npcIsNearest && inRange,"",nullptr,nullptr,nullptr,WHITE,kTownVisualScale);
+        } else if(item.kind==2) {
+            int i=item.index;
+            Vector2 sp=WorldToScreen(TownNPCLivePos(i,s.worldTime,s.selectedTown),camera);
+            bool near=npcIsNearest && nearestNPCIdx==i && inRange;
+            const DirSpriteSheet& sheet=activeNPCSheets[i];
+            if(sheet.ok && polished) {
+                tf2dart::Shadow({sp.x,sp.y+14},10,3,.18f);
+                DrawActorSprite(sheet,WanderFacing(i,s.worldTime),ActorAnim::Walk,s.worldTime,sp,46);
+                if(near)DrawWorldLabel(activeNPCs[i].name,{sp.x,sp.y-27},12,Color{239,217,165,255});
+            } else if(sheet.ok) {
+                Rectangle src=ActorSrcRect(sheet,WanderFacing(i,s.worldTime),ActorAnim::Walk,s.worldTime);
+                DrawWorldNode(sp,kNodeRadius*.5f*kTownVisualScale,kColorPanelBg,activeNPCs[i].name,near,"",&sheet.tex,WHITE,&src);
+            } else DrawWorldNode(sp,kNodeRadius*.5f*kTownVisualScale,kColorPanelBg,activeNPCs[i].name,near);
         } else {
-            DrawWorldNode(screenPos, kNodeRadius * 0.5f * kTownVisualScale, kColorPanelBg, activeNPCs[i].name, near);
+            DrawPlayer(s,WorldToScreen(s.townPlayerPos,camera),s.playerFacing,
+                (inRange && !s.selectedTile.has_value())?"[E] "+interactLabel:"",
+                kTownVisualScale*(polished?tf2dart::kActorScale:1.f));
         }
     }
-    DrawPlayer(s, WorldToScreen(s.townPlayerPos, camera), s.playerFacing,
-                (inRange && !s.selectedTile.has_value()) ? "[E] " + interactLabel : "", kTownVisualScale);
+    if(polished)tf2dart::Motes(camera,kViewport,s.worldTime,kTownWorldSize,night);
     EndScissorMode();
     } // end else: 2D world view (3D renders via DrawTown3DWorld above)
     DrawVirtualJoystick();
@@ -35553,6 +35613,10 @@ static void DrawLandscapePageHeader(GameState& s,bool& open) {
 static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
     g_uiShieldBypass = true; // this panel's own buttons sit inside the shield
     if(g_landscapeActive && open){DrawLandscapeMainMenu(s,open,inDungeon);g_uiShieldBypass=false;return;}
+    if(g_landscapePage && s.screen==Screen::Town) {
+        if(Button({20,20,112,48},"MENU",true))open=true;
+        g_uiShieldBypass=false;return;
+    }
     if(g_landscapePage){DrawLandscapePageHeader(s,open);g_uiShieldBypass=false;return;}
     if (IsPlayScreen(s.screen) && s.screen!=Screen::Blackwake) { // HP and mana (2026-09-28, #58): down beside the hotbar, where your eyes are in a fight
         const float px = 8, py = g_landscapeWorld && !open ? 610.0f:kViewport.y + kViewport.height - 88, pw = 152, ph = 78;
@@ -41745,6 +41809,7 @@ static void UpdateDrawFrame() {
 
 static void CleanupAndClose() {
     GameState& state = g_state;
+    tf2dart::Unload();
     SaveGame(state); // final save on quit
     if (g_assets.uiFontOk) UnloadFont(g_assets.uiFont);
     if (g_assets.playerOk) UnloadTexture(g_assets.player);
