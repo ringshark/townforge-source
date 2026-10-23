@@ -14,7 +14,7 @@ const main = read('main.cpp');
 check(/#if defined\(TF_VARIANT_2D\)\nstatic constexpr int kVariantView = 2;\n#elif defined\(TF_VARIANT_3D\)\nstatic constexpr int kVariantView = 3;\n#else\nstatic constexpr int kVariantView = 0;\n#endif/.test(main), 'main.cpp: 2 = 2D only, 3 = 3D only, 0 = the combined build');
 check(/if \(kVariantView == 2\) state\.optClassic2D = true;[^\n]*\n\s*else if \(kVariantView == 3\) state\.optClassic2D = false;[^\n]*\n\s*bool v3 = !state\.optClassic2D;/.test(main), 'each build forces its own view in the one place the view is derived each frame');
 const vKeys = main.split('\n').filter((l) => l.includes('IsKeyPressed(KEY_V)'));
-check(vKeys.length >= 4 && vKeys.every((l) => l.includes('kVariantView == 0 && IsKeyPressed(KEY_V)')), 'the V key only switches views in the combined build (' + vKeys.length + ' places)');
+check(vKeys.length === 1 && vKeys.every((l) => l.includes('kVariantView == 0 && IsKeyPressed(KEY_V)')), 'the centralized V key only switches views in the combined build (' + vKeys.length + ' places)');
 check(/if \(kVariantView == 0\) toggle\("Classic 2D view"/.test(main), 'the Options row for the view only exists in the combined build');
 check(/EM_JS\(int, JS_BackupSave/.test(main) && /EM_JS\(int, JS_RestoreSave/.test(main) && /"Back up my save"/.test(main) && /"Restore from a backup"/.test(main), 'Options has the backup and restore rows (web builds)');
 
