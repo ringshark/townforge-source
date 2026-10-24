@@ -15,9 +15,12 @@ int main() {
             assert(Dist(local,node.pos)<.01f);
             assert(OpenTownAt(w)==ti);
             assert(w.x>kPlayerEdgeMargin && w.y>kPlayerEdgeMargin);
+            printf("  %s %.1f %.1f world %.1f margin %.1f\n",node.key.c_str(),w.x,w.y,kWildernessWorldSize,kPlayerEdgeMargin);
             assert(w.x<kWildernessWorldSize-kPlayerEdgeMargin && w.y<kWildernessWorldSize-kPlayerEdgeMargin);
             assert(!WildBlocked(w));
         }
+        for(const auto& plot:kHousePlots)if(OpenTownAt(plot.pos)==ti)
+            printf("  NOTE town contains plot %s\n",plot.name);
         // Walk both directions through the actual arch and terrain, at frame-sized steps.
         for(int dir:{-1,1}) {
             Vector2 p=GateWorld({0,dir==1?-70.f:70.f},gate,f);

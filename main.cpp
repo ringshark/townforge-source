@@ -21696,21 +21696,31 @@ static Vector2 GateWorld(Vector2 l, Vector2 gate, Vector2 f) {
 }
 static constexpr float kOpenTownScale = .36f;
 static constexpr float kOpenTownDepth = 550.0f;
-static constexpr float kOpenTownApron = 80.0f;
+static constexpr float kOpenTownApron = 60.0f;
+static constexpr float kOpenCoastalTownScale = .30f;
+static constexpr float kOpenTownHalfW = 286.f;
+static float OpenTownScale(int ti) {return ti==1?kOpenCoastalTownScale:kOpenTownScale;}
+static float OpenTownDepth(int ti) {
+    Vector2 g=kTownGates[ti].wildernessPos,f=TownGateFacing(ti);
+    float d=kOpenTownDepth;
+    if(fabsf(f.x)>.001f) d=std::min(d,((f.x>0?g.x:kWildernessWorldSize-g.x)-kPlayerEdgeMargin-kOpenTownHalfW*fabsf(f.y))/fabsf(f.x));
+    if(fabsf(f.y)>.001f) d=std::min(d,((f.y>0?g.y:kWildernessWorldSize-g.y)-kPlayerEdgeMargin-kOpenTownHalfW*fabsf(f.x))/fabsf(f.y));
+    return d;
+}
 static Vector2 OpenTownWorld(int ti, Vector2 p) {
-    Vector2 l = {(p.x - kWildernessGatePos.x) * kOpenTownScale,
-                 (p.y - kWildernessGatePos.y) * kOpenTownScale - kOpenTownApron};
+    Vector2 l = {(p.x - kWildernessGatePos.x) * OpenTownScale(ti),
+                 (p.y - kWildernessGatePos.y) * OpenTownScale(ti) - kOpenTownApron};
     return GateWorld(l, kTownGates[ti].wildernessPos, TownGateFacing(ti));
 }
 static Vector2 OpenTownLocal(int ti, Vector2 p) {
     Vector2 l = GateLocal(p, kTownGates[ti].wildernessPos, TownGateFacing(ti));
-    return {l.x / kOpenTownScale + kWildernessGatePos.x,
-            (l.y + kOpenTownApron) / kOpenTownScale + kWildernessGatePos.y};
+    return {l.x / OpenTownScale(ti) + kWildernessGatePos.x,
+            (l.y + kOpenTownApron) / OpenTownScale(ti) + kWildernessGatePos.y};
 }
 static int OpenTownAt(Vector2 p) {
     for (int ti=0;ti<4;ti++) {
         Vector2 l=GateLocal(p,kTownGates[ti].wildernessPos,TownGateFacing(ti));
-        if(fabsf(l.x)<280 && l.y<35 && l.y>-kOpenTownDepth) return ti;
+        if(fabsf(l.x)<280 && l.y<35 && l.y>-OpenTownDepth(ti)) return ti;
     }
     return -1;
 }
@@ -21737,7 +21747,7 @@ static Vector2 TownGateFacing(int townIdx);
 static const float kCompoundHalfW = 286.0f;
 static float TownCompoundBaseDepth(int ti) { static const float d[4] = { 340.0f, 360.0f, 250.0f, 320.0f }; return d[std::clamp(ti, 0, 3)]; }
 static float TownCompoundDepth(const GameState& s, int ti) {
-    if (g_openWorld2D) return kOpenTownDepth;
+    if (g_openWorld2D) return OpenTownDepth(ti);
     float D = TownCompoundBaseDepth(ti);
     if (s.housePlotIdx >= 0 && s.housePlotIdx < (int)kHousePlots.size()) {
         const HousePlot& hp = kHousePlots[(size_t)s.housePlotIdx];

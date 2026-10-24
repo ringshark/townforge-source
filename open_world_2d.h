@@ -36,12 +36,8 @@ static void OpenWildGround(Vector2 camera) {
         {p.x,p.y,kWildernessWorldSize,kWildernessWorldSize},{0,0},0,WHITE);
 }
 static bool OpenNearRoad(Vector2 p) {
-    for(const auto& road:g_wtRoads)for(size_t i=1;i<road.size();i++) {
-        Vector2 a=road[i-1],b=road[i];
-        float dx=b.x-a.x,dy=b.y-a.y,dd=dx*dx+dy*dy;
-        float t=dd>0?std::clamp(((p.x-a.x)*dx+(p.y-a.y)*dy)/dd,0.f,1.f):0;
-        if(Dist(p,{a.x+t*dx,a.y+t*dy})<48)return true;
-    }
+    for(float dx:{-40.f,0.f,40.f})for(float dy:{-40.f,0.f,40.f})
+        if(WildTerrainAt(p.x+dx,p.y+dy)&kWTRoad)return true;
     return false;
 }
 static void OpenWildScenery(const GameState& s,Vector2 camera,bool foreground) {
@@ -90,7 +86,7 @@ static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
         auto screen=[&](Vector2 p){return WorldToScreen(world(p),camera);};
         if(!foreground) {
             auto corner=[&](float x,float y){return WorldToScreen(GateWorld({x,y},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);};
-            Vector2 corners[4]={corner(-286,-kOpenTownDepth),corner(286,-kOpenTownDepth),corner(286,0),corner(-286,0)};
+            Vector2 corners[4]={corner(-286,-OpenTownDepth(ti)),corner(286,-OpenTownDepth(ti)),corner(286,0),corner(-286,0)};
             Color ground=ti==2?Color{205,220,220,255}:ti==3?Color{121,122,109,255}:Color{79,92,57,255};
             DrawTriangle(corners[0],corners[2],corners[1],ground);
             DrawTriangle(corners[0],corners[3],corners[2],ground);
@@ -104,11 +100,11 @@ static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
             // Stone perimeter and an open gateway on the same terrain/camera.
             for(int side=-1;side<=1;side+=2) {
                 Vector2 a=WorldToScreen(GateWorld({side*286.f,0},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
-                Vector2 b=WorldToScreen(GateWorld({side*286.f,-kOpenTownDepth},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
+                Vector2 b=WorldToScreen(GateWorld({side*286.f,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
                 DrawLineEx(a,b,14,Color{91,94,82,255});DrawLineEx({a.x-2,a.y-3},{b.x-2,b.y-3},6,Color{164,162,140,255});
             }
-            Vector2 a=WorldToScreen(GateWorld({-286,-kOpenTownDepth},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
-            Vector2 b=WorldToScreen(GateWorld({286,-kOpenTownDepth},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
+            Vector2 a=WorldToScreen(GateWorld({-286,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
+            Vector2 b=WorldToScreen(GateWorld({286,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
             DrawLineEx(a,b,14,Color{125,127,108,255});
         }
         for(const auto& node:ActiveTownNodes(ti)) {

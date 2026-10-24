@@ -34,10 +34,10 @@ const engine=process.env.TF_BROWSER==='webkit'?webkit:chromium;
  }
  fs.mkdirSync('browser-checks',{recursive:true});
  await page.screenshot({path:'browser-checks/open-world-town.png'});
- await walk(world(-81,-242));await walk(world(-81,-65));await walk(world(0,-65));
+ await walk(world(-81,-222));await walk(world(-81,-50));await walk(world(0,-50));
  await walk(world(0,100));assert.equal((await state()).town,-1,'walks into wilderness');
  await page.screenshot({path:'browser-checks/open-world-wilderness.png'});
- await walk(world(0,-65));assert.equal((await state()).town,0,'walks back into Emberhold');
+ await walk(world(0,-50));assert.equal((await state()).town,0,'walks back into Emberhold');
  await page.screenshot({path:'browser-checks/open-world-return.png'});
  const samples=await page.evaluate(()=>{clearInterval(worldSampler);return worldSamples});
  assert(samples.length>20);
