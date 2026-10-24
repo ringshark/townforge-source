@@ -52,6 +52,8 @@ jobs:
           make -C /tmp/raylib/src PLATFORM=PLATFORM_WEB -j2
           g++ -std=c++17 -I /tmp/raylib/src tests/town-2d-art.cpp -o /tmp/tf-art-test
           /tmp/tf-art-test
+          g++ -std=c++17 -I /tmp/raylib/src tests/world-visuals.cpp -o /tmp/tf-world-visuals
+          /tmp/tf-world-visuals
           RAYLIB_DIR=/tmp/raylib python tests/avatar-motion.py
           RAYLIB_DIR=/tmp/raylib python tests/landscape-menus.py
       - name: Build game
