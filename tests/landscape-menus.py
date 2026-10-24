@@ -6,6 +6,7 @@ if (raylib/'src'/'raylib.h').exists():raylib=raylib/'src'
 h=(raylib/'raylib.h').read_text()
 special={
  'GetMousePosition':'return testMouse;', 'IsMouseButtonPressed':'return testPressed;', 'IsMouseButtonDown':'return testPressed;',
+ 'IsKeyDown':'return key==testMoveKey;',
  'GetFrameTime':'return 1.f/60;', 'GetTime':'return 10;', 'GetRandomValue':'return min;',
  'GetFontDefault':'Font f{};f.baseSize=16;return f;',
  'MeasureTextEx':'return {(float)strlen(text)*fontSize*.55f,fontSize};',
@@ -17,11 +18,11 @@ special={
  'ColorBrightness':'return color;',
  'LoadRenderTexture':'RenderTexture2D t{};t.id=1;t.texture.id=1;t.texture.width=width;t.texture.height=height;return t;'
 }
-stubs='#include "raylib.h"\n#include <cstring>\n#include <cstdio>\n#include <cstdarg>\n#include <string>\n#include <vector>\nstruct Label{std::string text;Vector2 pos;float size;};std::vector<Label> testTexts;Vector2 testMouse{};bool testPressed=false;\n'
+stubs='#include "raylib.h"\n#include <cstring>\n#include <cstdio>\n#include <cstdarg>\n#include <string>\n#include <vector>\nstruct Label{std::string text;Vector2 pos;float size;};std::vector<Label> testTexts;Vector2 testMouse{};bool testPressed=false;int testMoveKey=-1;\n'
 for ret,name,args in re.findall(r'RLAPI[ \t]+([^\n;]+?)\b(\w+)\(([^;]*?)\);',h):
  ret=ret.strip();stubs+=f'{ret} {name}({args}) {{'+special.get(name, '' if ret=='void' else 'return {};')+'}\n'
 stubs+='extern "C" {void rlViewport(int,int,int,int){}void rlLoadIdentity(){}void rlDrawRenderBatchActive(){}void rlMatrixMode(int){}void rlOrtho(double,double,double,double,double,double){}void rlFrustum(double,double,double,double,double,double){}void rlMultMatrixf(const float*){}void rlPushMatrix(){}void rlPopMatrix(){}void rlTranslatef(float,float,float){}void rlRotatef(float,float,float,float){}void rlScalef(float,float,float){}}\n'
-stubs+='\n#define CGLTF_IMPLEMENTATION\n#include \"external/cgltf.h\"\nextern \"C\" {void rlEnableFramebuffer(unsigned int){}unsigned int rlGetTextureIdDefault(){return 0;}void rlDisableBackfaceCulling(){}void rlEnableBackfaceCulling(){}void rlBegin(int){}void rlEnd(){}void rlSetTexture(unsigned int){}void rlNormal3f(float,float,float){}void rlTexCoord2f(float,float){}void rlVertex3f(float,float,float){}void rlColor4ub(unsigned char,unsigned char,unsigned char,unsigned char){}}\n'
+stubs+='\n#define CGLTF_IMPLEMENTATION\n#include \"external/cgltf.h\"\nextern \"C\" {void rlEnableShader(unsigned int){}unsigned int rlGetShaderIdDefault(){return 0;}void rlEnableFramebuffer(unsigned int){}unsigned int rlGetTextureIdDefault(){return 0;}void rlDisableBackfaceCulling(){}void rlEnableBackfaceCulling(){}void rlBegin(int){}void rlEnd(){}void rlSetTexture(unsigned int){}void rlNormal3f(float,float,float){}void rlTexCoord2f(float,float){}void rlVertex3f(float,float,float){}void rlColor4ub(unsigned char,unsigned char,unsigned char,unsigned char){}}\n'
 stubs+='extern "C" {void rlDisableDepthMask(){}void rlEnableDepthMask(){}bool rlEnableVertexArray(unsigned int){return false;}unsigned int rlLoadVertexBuffer(const void*,int,bool){return 0;}void rlSetVertexAttribute(unsigned int,int,int,bool,int,int){}void rlEnableVertexAttribute(unsigned int){}void rlDisableVertexArray(){}Matrix rlGetMatrixProjection(){return {};}Matrix rlGetMatrixModelview(){return {};}}\n'
 (run_dir/'stubs.cpp').write_text(stubs)
 root=Path(__file__).resolve().parents[1]
@@ -31,13 +32,44 @@ void JS_CloudOpen(){}
 #define main game_main
 #include "'''+str(root/'main.cpp')+'''"
 #undef main
-extern bool testPressed;extern Vector2 testMouse;
+extern bool testPressed;extern int testMoveKey;extern Vector2 testMouse;
 static void reset(){g_uoTexReady=true;g_landscapePage=true;g_presentedPage=true;g_presentedWorld=false;g_presentedNativeMenu=false;g_landscapeNativeMenu=false;g_landscapeNativeMenuDrawing=false;g_landscapeActive=true;g_uiShieldOn=false;g_uiClips.clear();g_uiRects.clear();g_uiClickTaken=false;testPressed=false;g_landscapePointerHeld=false;}
 static void check(const char* name){assert(g_uiClips.empty());for(auto r:g_uiRects){if(r.x<0 || r.y<0 || r.x+r.width>961 || r.y+r.height>541){std::cerr<<name<<" out of bounds "<<r.x<<","<<r.y<<","<<r.width<<","<<r.height<<"\\n";abort();}}std::cout<<name<<" controls="<<g_uiRects.size()<<"\\n";}
 int main(){g_assets.itemIconOk.resize(kItemIconManifest.size());g_assets.itemIconTex.resize(kItemIconManifest.size());g_assets.paperdollOk.resize(kPaperdollManifest.size());g_assets.paperdollTex.resize(kPaperdollManifest.size());GameState s;s.gold=2000;s.magery=s.necromancy=s.chivalry=99;for(auto& v:s.buildingSkill)v=99;
 for(int i=0;i<30;i++){Item it{};it.id=900+i;it.name="Test equipment "+std::to_string(i);it.type=ItemType::Armor;it.slot="helmet";it.power=3;s.backpack.push_back(it);if(i<10)s.bankItems.push_back(it);}
 Pet pet{};pet.name="Test companion";s.pets.push_back(pet);
 s.housePlotIdx=0;s.settle[kSbHall].level=3;
+// Dungeons must render as a native world, with the hero inside the visible view.
+for(int di=0;di<(int)kDungeons.size();++di) {
+ GameState dungeon;dungeon.screen=Screen::Hunt;dungeon.selectedDungeon=di;dungeon.hunt3DView=false;
+ assert(NativeLandscapePage(dungeon));
+ for(Vector2 pos:std::vector<Vector2>{{900,1300},{900,1000},{900,700},{700,700},{1100,700}}) {
+  if(!DungeonIsFloor(di,pos))continue;
+  reset();g_landscapeWorld=true;g_presentedWorld=true;g_landscapeScroll=180;
+  dungeon.dungeonPlayerPos=pos;DrawHuntScreen(dungeon,960,540);
+  assert(kViewport.x==0 && kViewport.y==0 && kViewport.width==960 && kViewport.height==540);
+  auto hero=WorldToScreen(dungeon.dungeonPlayerPos,CameraTopLeft(dungeon.dungeonPlayerPos,kDungeonWorldSize));
+  assert(hero.x>=32 && hero.x<=928 && hero.y>=32 && hero.y<=508);
+  if(pos.x>=480 && pos.x<=kDungeonWorldSize-480 && pos.y>=270 && pos.y<=kDungeonWorldSize-270)
+   assert(std::abs(hero.x-480)<.01 && std::abs(hero.y-270)<.01);
+  assert(LandscapeRegion({480,270})==tflayout::Region::NativePage);
+  auto input=LandscapePointerMap({480,270},tflayout::Region::NativePage);
+  assert(input.x==480 && input.y==270); // stale panel scroll cannot move the world or its picking
+  check("dungeon world");
+ }
+ reset();dungeon.dungeonPlayerPos={900,1300};dungeon.playerIsGhost=true;testMoveKey=KEY_S;
+ const auto start=dungeon.dungeonPlayerPos;
+ for(int frame=0;frame<20;++frame) {
+  DrawHuntScreen(dungeon,960,540);
+  auto hero=WorldToScreen(dungeon.dungeonPlayerPos,CameraTopLeft(dungeon.dungeonPlayerPos,kDungeonWorldSize));
+  assert(std::abs(hero.x-480)<.01 && std::abs(hero.y-270)<.01);
+ }
+ testMoveKey=-1;assert(Dist(start,dungeon.dungeonPlayerPos)>10);dungeon.playerIsGhost=false;
+ reset();dungeon.dungeonMenuOpen=true;DrawHuntScreen(dungeon,960,540);check("dungeon open menu");
+ assert(g_landscapeNativeMenu);dungeon.dungeonMenuOpen=false;
+ dungeon.hunt3DView=true;assert(!NativeLandscapePage(dungeon));
+}
+std::cout<<"PASS all six dungeon layouts: full landscape viewport, hero camera follow, identity input without panel scrolling, visible HUD and menu controls"<<std::endl;
 reset();bool open=false;
 // Every native menu destination must preserve its action and fit the canvas.
 auto menuReset=[&](){reset();g_landscapePage=g_presentedPage=false;g_presentedNativeMenu=true;g_uiShieldBypass=true;open=true;s.screen=Screen::Town;};

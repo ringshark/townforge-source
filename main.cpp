@@ -31183,7 +31183,7 @@ static void Dungeon2DClickFlag(GameState& s, Vector2 camera, int screenW, int sc
     if (s.combat.has_value() || s.playerIsGhost || s.playerDeathAnimT > 0.0f) return;
     Vector2 m = GetMousePosition();
     if (!CheckCollisionPointRec(m, kViewport)) return;
-    if (m.y < 200) return; // top HUD strip + dungeon sub-tabs
+    if (g_landscapePage ? UIHit(m) : m.y < 200) return; // native HUD or legacy dungeon tabs
     if (CheckCollisionPointRec(m, JoystickZone())) return;
     if (m.x > screenW - 170 && m.y > screenH - 170) return; // interact button
     if (g_touchSeen && CheckCollisionPointRec(m, TargetButtonRect())) return; // TARGET button (shared HUD handles it)
@@ -32912,7 +32912,7 @@ static void CastLiveUtilitySpell(GameState& s, int spellIdx, int zone) {
 // ---------------------------------------------------------------------
 static Rectangle JournalPanelRect() { return { 180, 160, 340, 290 }; }
 static Rectangle JournalWildButtonRect() { return { 372, 120, 68, 30 }; }
-static Rectangle JournalHuntButtonRect() { return { 132, 56, 88, 40 }; }
+static Rectangle JournalHuntButtonRect() { return g_landscapePage ? Rectangle{194,20,88,40}:Rectangle{132,56,88,40}; }
 
 static std::string JournalTimestamp(float t) {
     int total = (int)t;
@@ -33716,6 +33716,16 @@ static void EnforceDuelInvariants(GameState& s) {
 }
 
 #include "open_world_2d.h"
+static void DrawNativeWorldVitals(const GameState& s) {
+    Rectangle hud={20,76,160,48};
+    DrawRectangleRounded(hud,.15f,4,Fade(Color{19,27,29,255},.85f));
+    DrawUIText(TextFormat("HP %d / %d",s.hp,s.maxHp),28,82,12,Color{232,225,197,255});
+    DrawRectangle(28,99,144,5,Color{55,48,42,255});
+    DrawRectangle(28,99,(int)(144.f*s.hp/std::max(1,s.maxHp)),5,Color{103,151,91,255});
+    DrawRectangle(28,110,144,5,Color{32,44,58,255});
+    DrawRectangle(28,110,(int)(144.f*s.mana/std::max(1.f,MaxMana(s))),5,Color{95,151,185,255});
+    UIRegister(hud);
+}
 static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     g_openWorld2D=!s.wild3DView;
     if(g_openWorld2D) kViewport={0,0,(float)screenW,(float)screenH};
@@ -35283,16 +35293,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     DrawRectangleRec(kViewport,Fade(Color{10,18,36,255},night*.30f));
     EndScissorMode();
     } // end else: 2D world view (3D renders via DrawWilderness3DWorld above)
-    if(g_openWorld2D && !s.exploreMenuOpen) {
-        Rectangle hud={20,76,160,48};
-        DrawRectangleRounded(hud,.15f,4,Fade(Color{19,27,29,255},.85f));
-        DrawUIText(TextFormat("HP %d / %d",s.hp,s.maxHp),28,82,12,Color{232,225,197,255});
-        DrawRectangle(28,99,144,5,Color{55,48,42,255});
-        DrawRectangle(28,99,(int)(144.f*s.hp/std::max(1,s.maxHp)),5,Color{103,151,91,255});
-        DrawRectangle(28,110,144,5,Color{32,44,58,255});
-        DrawRectangle(28,110,(int)(144.f*s.mana/std::max(1.f,MaxMana(s))),5,Color{95,151,185,255});
-        UIRegister(hud);
-    }
+    if(g_openWorld2D && !s.exploreMenuOpen) DrawNativeWorldVitals(s);
     DrawVirtualJoystick();
     DrawTargetFrame(s, 0); // shared by the 2D and 3D views (tap it to cycle targets)
     DrawWyrmFrame(s, screenW); // the world boss's three heads (2026-09-27)
@@ -35856,11 +35857,12 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
 }
 
 static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
+    if(g_landscapePage && !s.hunt3DView) kViewport={0,0,(float)screenW,(float)screenH};
     if (GetTouchPointCount() > 0) g_touchSeen = true; // latch: TARGET button appears on touch devices
     // In-dungeon collapsed mode (2026-09-25): the header stack (HP/stats, corpses,
     // dungeon picker) collapses behind one MENU toggle so the dungeon gets nearly
     // the full screen. The picker (no dungeon selected) is never collapsed.
-    bool menuCollapsed = s.selectedDungeon.has_value() && !s.dungeonMenuOpen;
+    bool menuCollapsed = s.selectedDungeon.has_value() && (g_landscapePage || !s.dungeonMenuOpen);
     if (!menuCollapsed) {
     // HP bar (always visible on this screen, like the Character tab's HP bar)
     DrawUIText(TextFormat("HP: %d / %d", s.hp, s.maxHp), 20, 116, 16, kColorText);
@@ -36642,7 +36644,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     if (s.hunt3DView) {
         DrawDungeon3DWorld(s, screenW, screenH, prompt, inRange, nearest3DPos, nearest3DLabel);
     } else {
-    Rectangle arenaViewport = { kViewport.x, (float)y + 14, kViewport.width, kViewport.y + kViewport.height - (y + 14) };
+    Rectangle arenaViewport = g_landscapePage ? kViewport : Rectangle{ kViewport.x, (float)y + 14, kViewport.width, kViewport.y + kViewport.height - (y + 14) };
     BeginScissorMode((int)arenaViewport.x, (int)arenaViewport.y, (int)arenaViewport.width, (int)arenaViewport.height);
     Vector2 camera = CameraTopLeft(s.dungeonPlayerPos, kDungeonWorldSize);
 
@@ -36841,6 +36843,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     DrawSpellFX2D(s, camera, 1);
     EndScissorMode();
     } // end 2D arena branch - the touch/combat HUD below is shared with the 3D view
+    if(g_landscapePage && !s.dungeonMenuOpen) DrawNativeWorldVitals(s);
 
     // --- Shared touch/combat HUD (view-independent): virtual joystick, quick
     // items / interact button, engaged spell hotbar, hotbar picker. Runs for
@@ -41465,6 +41468,11 @@ static const float kZoom = 1.125f;
 // A distinct nonzero tag per dialog kind, not just "some dialog is open" - so
 // Landscape can tell two different dialogs on the same screen apart and reset
 // the scroll position between them, instead of only on an open/closed edge.
+static bool NativeLandscapePage(const GameState& s) {
+    return IsMenuScreen(s.screen) || (s.screen==Screen::Town && !s.town3DView) ||
+        (s.screen==Screen::Wilderness && !s.wild3DView) ||
+        (s.screen==Screen::Hunt && s.selectedDungeon.has_value() && !s.hunt3DView && !s.combat && s.huntSubView==0);
+}
 static int LandscapeDialogOpen(const GameState& s) {
     // Only panels rendered by this screen may switch the world into a scroll page.
     // A remembered journal, town greeting or home workshop is invisible elsewhere.
@@ -41749,14 +41757,11 @@ static void UpdateDrawFrame() {
         // main 3D pass needs. Must run while the default framebuffer is bound,
         // before BeginTextureMode(g_zoomTarget)/BeginDrawing below. 2D screens
         // are untouched (guarded by town3DView).
-        // Town's 2D-wide mode (2026-10-18) reuses the same 960x540 "page"
-        // render target menu screens already use, instead of the old fixed
-        // 540x900 g_landscapeUI texture - that's a hard physical size limit,
-        // not just a logical one, so drawing wider than 540px would simply
-        // clip. kViewport resets here every frame; only Screen::Town's 2D
-        // branch (DrawTownScreen) widens it, for that frame only.
+        // Native 2D worlds and menus share a 960x540 target. Dungeons must
+        // use it too: the old 540x900 panel scrolls independently of the hero.
+        // Each native world sets its viewport to the actual target dimensions.
         kViewport = kViewportDefault;
-        g_landscapePage=IsMenuScreen(state.screen) || (state.screen==Screen::Town && !state.town3DView) || (state.screen==Screen::Wilderness && !state.wild3DView);
+        g_landscapePage=NativeLandscapePage(state);
         screenW=g_landscapePage ? 960:kScreenW;screenH=g_landscapePage ? 540:kScreenH;
         if (state.screen != Screen::Character) g_pdTryOn.reset();
         if (state.screen == Screen::Character) PaperdollRenderPass(state); // the 3D body for the paperdoll
@@ -41770,9 +41775,8 @@ static void UpdateDrawFrame() {
         }
 
         // --- Draw ---
-        // Hunt/dungeon full-screen is not part of this pass - still 3D-only,
-        // same as Wilderness/Interior (see ExploreHeaderCollapsed's comment).
-        bool wideWorld=!IsMenuScreen(state.screen) && (ExploreHeaderCollapsed(state) || (state.screen==Screen::Hunt && state.selectedDungeon.has_value() && state.hunt3DView)) && !state.ambush.has_value() && !state.innocentEncounter.has_value();
+        // Live dungeons use a world view in both render modes; 2D uses the native wide target.
+        bool wideWorld=!IsMenuScreen(state.screen) && (ExploreHeaderCollapsed(state) || (state.screen==Screen::Hunt && state.selectedDungeon.has_value())) && !state.ambush.has_value() && !state.innocentEncounter.has_value();
         const Screen frameScreen=state.screen;
         g_landscapeCombat=state.wildEngaged.has_value() || state.dungeonEngaged.has_value();
         LandscapeBeginFrame(wideWorld,LandscapeDialogOpen(state),(int)state.screen,false,g_landscapePage);
@@ -41784,14 +41788,14 @@ static void UpdateDrawFrame() {
         // nearly the full screen. The 3D views draw over this strip anyway, so
         // skipping it also stops invisible tabs/Reset from taking taps.
         bool inDungeon = (state.screen == Screen::Hunt && state.selectedDungeon.has_value());
-        bool explore3D = ExploreHeaderCollapsed(state) && !state.ambush.has_value() &&
+        bool explore3D = (ExploreHeaderCollapsed(state) || inDungeon) && !state.ambush.has_value() &&
                          !state.innocentEncounter.has_value();
         if (!explore3D) state.exploreMenuOpen = false;
         // Shield the MENU button (and the open dropdown) from the screen's own
         // buttons, which are drawn before it.
         if (state.screen != Screen::Wilderness) state.worldMapOpen = false;
         g_uiShieldOn = explore3D;
-        g_uiShield = state.exploreMenuOpen ? CompactMenuPanelRect(false) : g_landscapePage ? Rectangle{20,20,112,48}:kCompactMenuBtn;
+        g_uiShield = (inDungeon ? state.dungeonMenuOpen:state.exploreMenuOpen) ? CompactMenuPanelRect(inDungeon) : g_landscapePage ? Rectangle{20,20,112,48}:kCompactMenuBtn;
         if (state.worldMapOpen || state.guideOpen) { g_uiShieldOn = true; g_uiShield = { 0, 0, (float)screenW, (float)screenH }; }
         if (state.exploreMenuOpen && !state.worldMapOpen && !state.guideOpen) {
             g_uiShield.y = kCompactMenuBtn.y; // cover the toggle too
