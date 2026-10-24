@@ -114,6 +114,14 @@
     <script src="landscape.js"></script>
     <script type='text/javascript'>
         var loadingEl = document.querySelector('#loading');
+        var startupFailed = false;
+        function showStartupError() {
+            startupFailed = true;
+            if (loadingEl) {
+                loadingEl.textContent = 'The game could not start. Please reload this page, or open it in your browser.';
+                loadingEl.style.display = 'flex';
+            }
+        }
         var Module = {
             preRun: [],
             postRun: [],
@@ -128,15 +136,19 @@
             canvas: (function() {
                 var canvas = document.querySelector('#canvas');
                 canvas.addEventListener("webglcontextlost", function(e) {
-                    alert('WebGL context lost. You will need to reload the page.');
+                    showStartupError();
                     e.preventDefault();
                 }, false);
                 return canvas;
             })(),
             setStatus: function(text) {
-                if (loadingEl) loadingEl.textContent = text || '';
-                if (!text && loadingEl) loadingEl.style.display = 'none';
+                if (startupFailed) return;
+                if (loadingEl) {
+                    loadingEl.textContent = text || '';
+                    loadingEl.style.display = text ? 'flex' : 'none';
+                }
             },
+            onAbort: showStartupError,
             totalDependencies: 0,
             monitorRunDependencies: function(left) {
                 this.totalDependencies = Math.max(this.totalDependencies, left);
@@ -145,17 +157,25 @@
         };
 
         Module.setStatus('Loading...');
-        window.onerror = function() {
-            Module.setStatus('Something went wrong - check the console.');
-        };
+        window.onerror = showStartupError;
+        window.addEventListener('error', function(event) {
+            if (event.target && /\/townforge\.js(?:\?|$)/.test(event.target.src || '')) showStartupError();
+        }, true);
 
         // Browsers block audio until a user gesture; resume any suspended
         // AudioContext on first tap/click anywhere (no visible button needed -
         // orbiting/tapping the 3D view already provides that first gesture).
         const audioContexts = [];
-        self.AudioContext = new Proxy(self.AudioContext, {
+        const AudioCtor = self.AudioContext || self.webkitAudioContext;
+        if (AudioCtor) self.AudioContext = new Proxy(AudioCtor, {
             construct(target, args) {
                 const ctx = new target(...args);
+                // A denied/unavailable audio device must not reject into the game loop.
+                const resume = ctx.resume.bind(ctx);
+                ctx.resume = function () {
+                    try { return Promise.resolve(resume()).catch(function () {}); }
+                    catch (_) { return Promise.resolve(); }
+                };
                 audioContexts.push(ctx);
                 return ctx;
             }
