@@ -175,6 +175,9 @@ static constexpr int kVariantView = 3;
 static constexpr int kVariantView = 0;
 #endif
 
+// Retired management systems keep their save data and earned benefits.
+static constexpr bool kHomesteadFocus = true;
+
 // ---------------------------------------------------------------------
 // Combat feel: hit-stop + camera shake (2026-09-25).
 // GameDt() is the game-world frame delta, used everywhere the game used to call
@@ -4764,6 +4767,7 @@ static void WarCheckWeek(GameState& s) {
     if (s.warWeek != w) { s.warWeek = w; s.warPts.fill(0); s.warPlayAcc = 0.0f; s.warPlayMin = 0; }
 }
 static void WarAward(GameState& s, int day, int pts) {
+    if(kHomesteadFocus)return;
     if (pts <= 0) return;
     WarCheckWeek(s);
     if (day != WarDayNow()) return;
@@ -5478,12 +5482,13 @@ static int PetFollowerCost(const Pet& p) {
 // (2026-09-30) Everyone who fights beside you shares the same five slots, as in UO:
 // pets by their size, warband guildmates 2 each (UO's hirelings), a raised
 // bonewalker 1 and a glacier wight 2, the summoned fiend 3.
+static bool GuildWarActive(const GameState& s,int side) { return !kHomesteadFocus && s.guildWarOn[side]; }
 static const int kRecruitFollowerCost = 2, kFiendFollowerCost = 3;
 static int MinionFollowerCost(int kind) { return kind == 0 ? 1 : 2; }
 static int FollowersUsed(const GameState& s) {
     int n = 0;
     for (const auto& p : s.pets) if (p.active) n += PetFollowerCost(p);
-    for (const auto& r : s.guildRecruits) if (r.along) n += kRecruitFollowerCost;
+    if(!kHomesteadFocus)for (const auto& r : s.guildRecruits) if (r.along) n += kRecruitFollowerCost;
     for (const auto& m : s.minions) n += MinionFollowerCost(m.kind);
     if (s.fiendT > 0.0f) n += kFiendFollowerCost;
     return n;
@@ -7853,7 +7858,7 @@ static float SettleDefense(const GameState& s) {
 static float SettleRaidStrength(const GameState& s) {
     int sum = 0;
     for (const SettleBuilding& b : s.settle) sum += b.level;
-    bool war = s.guildWarOn[kGuildWarOrcs] || s.guildWarOn[kGuildWarMurderInc];
+    bool war = GuildWarActive(s,kGuildWarOrcs) || GuildWarActive(s,kGuildWarMurderInc);
     return 8.0f + SettleHall(s) * 8.0f + sum * 1.5f + (war ? 20.0f : 0.0f);
 }
 static float SettleTravelMult(const GameState& s) { return 1.0f + 0.02f * SettleEff(s, kSbStable); }
@@ -8769,10 +8774,12 @@ static int BuiltHouseModuleCount(const GameState& s) {
     for (int lvl : s.houseModuleLevel) if (lvl > 0) n++;
     return n;
 }
+static int HomeWingLevel(const GameState& s, int m);
 static void BuildHouseModule(GameState& s, int moduleIdx) {
+    if(kHomesteadFocus && s.housePlotIdx<0)return;
     if (moduleIdx < 0 || moduleIdx >= (int)kHomeModuleDefs.size()) return;
-    if (s.houseModuleLevel[moduleIdx] > 0) return;
-    if (BuiltHouseModuleCount(s) >= kHouseTiers[s.houseTierIdx].moduleSlots) return;
+    if (HomeWingLevel(s,moduleIdx) > 0) return;
+    if (BuiltHouseModuleCount(s) >= (kHomesteadFocus ? 4:kHouseTiers[s.houseTierIdx].moduleSlots)) return;
     int cost = kHomeModuleLevels[0].cost;
     if (!CanAfford(s, cost)) return;
     PayGold(s, cost);
@@ -8780,8 +8787,9 @@ static void BuildHouseModule(GameState& s, int moduleIdx) {
     s.logLine = "Built a " + kHomeModuleDefs[moduleIdx].label + " onto your home for " + std::to_string(cost) + " gold.";
 }
 static void UpgradeHouseModule(GameState& s, int moduleIdx) {
+    if(kHomesteadFocus && s.housePlotIdx<0)return;
     if (moduleIdx < 0 || moduleIdx >= (int)kHomeModuleDefs.size()) return;
-    int current = s.houseModuleLevel[moduleIdx];
+    int current = HomeWingLevel(s,moduleIdx);
     if (current <= 0 || current >= (int)kHomeModuleLevels.size()) return;
     int cost = kHomeModuleLevels[current].cost; // levels are 1-based; index by current = next level's cost entry
     if (!CanAfford(s, cost)) return;
@@ -10084,7 +10092,7 @@ static int GuildWalk(GameState::GuildMind& m, Vector2& pos, Vector2 target, floa
 static void GuildLive(GameState& s, int who, float& level, float dt) {
     GameState::GuildMind& m = GuildMindOf(s, who);
     Vector2& pos = GuildPosOf(s, who);
-    m.sayT -= dt; m.sayCooldown -= dt; m.huntCooldown -= dt * (s.guildWarOn[kGuildWarMurderInc] ? 1.8f : 1.0f); // at war: they come for you more often
+    m.sayT -= dt; m.sayCooldown -= dt; m.huntCooldown -= dt * (GuildWarActive(s,kGuildWarMurderInc) ? 1.8f : 1.0f); // at war: they come for you more often
     if (who < 0) s.rivalGrudge = std::max(0.0f, s.rivalGrudge - dt / 900.0f); // grudges fade over ~15 min each
     if (m.downT > 0.0f) { // beaten: out of the world until it recovers
         m.downT -= dt;
@@ -14982,6 +14990,7 @@ static void HumanGive(HumanOutfit& o, int weapon, int style, float scale = 1.0f)
 }
 // Your guildmates (2026-09-27): tabards in the guild's color, kit by calling.
 static void DrawGuildRecruits(const GameState& s, bool shadowPass) {
+    if(kHomesteadFocus)return;
     if (s.guildName.empty()) return;
     Color tab = kDyeHues[std::clamp(s.guildHue, 0, kDyeHueCount - 1)].c;
     static const Color skins[3] = { { 220, 180, 142, 255 }, { 176, 128, 92, 255 }, { 236, 200, 168, 255 } };
@@ -27197,7 +27206,7 @@ static HdPlace HouseResolvePlace(const GameState& s, int kind, Vector2 p, int ro
     return r;
 }
 static bool HouseDecorAfford(const GameState& s, const HouseDecorDef& k, std::string* why) {
-    if (k.module >= 0 && HomeWingLevel(s, k.module) <= 0) { if (why) *why = std::string("Needs a ") + kSettleDefs[kWingSettleKind[k.module]].name + " in your settlement."; return false; }
+    if (k.module >= 0 && HomeWingLevel(s, k.module) <= 0) { if (why) *why = std::string("Build the ") + kHomeModuleDefs[k.module].label + " on the Home page."; return false; }
     if (s.gold < k.gold) { if (why) *why = "Not enough gold."; return false; }
     if (s.wood < k.wood) { if (why) *why = "Not enough wood."; return false; }
     return true;
@@ -27506,7 +27515,7 @@ static void DrawHouseDecorateUI(GameState& s, int screenW, int screenH) {
         DrawUIText(k.name, (int)r.x + 34, (int)r.y + 5, 12, ok ? Color{ 250, 240, 220, 255 } : Color{ 160, 150, 140, 255 });
         std::string price = std::to_string(k.gold) + "g" + (k.wood > 0 ? " " + std::to_string(k.wood) + "w" : "");
         if (k.storage > 0) price += "  (opens your bank)";
-        if (k.module >= 0 && HomeWingLevel(s, k.module) <= 0) price = std::string("needs ") + kSettleDefs[kWingSettleKind[k.module]].name;
+        if (k.module >= 0 && HomeWingLevel(s, k.module) <= 0) price = std::string("needs ") + kHomeModuleDefs[k.module].label;
         DrawUIText(price.c_str(), (int)r.x + 34, (int)r.y + 22, 11, ok ? kUoGoldText : Color{ 200, 120, 100, 255 });
         UIRegister(r);
         if (tap && UIContains(m, r) && !g_uiClickTaken) {
@@ -27537,7 +27546,7 @@ static void DrawHouseCraftGump(GameState& s) {
     int level = HomeWingLevel(s, mIdx);
     Color ink = { 60, 40, 24, 255 };
     if (level <= 0) {
-        DrawUIText((std::string("Raise a ") + kSettleDefs[kWingSettleKind[mIdx]].name + " in your settlement").c_str(), (int)G.x + 24, (int)G.y + 40, 14, ink);
+        DrawUIText((std::string("Build the ") + kHomeModuleDefs[mIdx].label + " on the Home page").c_str(), (int)G.x + 24, (int)G.y + 40, 14, ink);
         DrawUIText("to work at this station.", (int)G.x + 24, (int)G.y + 60, 14, ink);
         return;
     }
@@ -28652,14 +28661,15 @@ static bool GuildFounded(const GameState& s) { return !s.guildName.empty(); }
 static const char* GuildRecruitKindName(int k) { return k == 0 ? "Warrior" : (k == 1 ? "Archer" : "Healer"); }
 static int GuildRecruitCost(int k) { return k == 2 ? 300 : 250; }
 static bool GuildWarFoe(const GameState& s, const GameState::ActiveMonster& am) {
-    if (am.isRival || am.bladeIdx >= 0) return s.guildWarOn[kGuildWarMurderInc];
+    if (am.isRival || am.bladeIdx >= 0) return GuildWarActive(s,kGuildWarMurderInc);
     if (am.spotIdx >= 0 && am.spotIdx < (int)kWildernessMonsterSpots.size())
-        return s.guildWarOn[kGuildWarOrcs] && kWildernessMonsterSpots[am.spotIdx].name.rfind("Orc ", 0) == 0;
+        return GuildWarActive(s,kGuildWarOrcs) && kWildernessMonsterSpots[am.spotIdx].name.rfind("Orc ", 0) == 0;
     return false;
 }
 // Guildmates walk with you: a loose wedge behind you, and in a fight they
 // close in on your foe (archers and healers keep their distance).
 static void GuildRecruitsFollow(GameState& s, float dt) {
+    if(kHomesteadFocus)return;
     if (!GuildFounded(s)) return;
     Vector2 me = s.wildernessPlayerPos, f = s.playerFacing;
     float fl = std::max(0.001f, hypotf(f.x, f.y)); f = { f.x / fl, f.y / fl };
@@ -28694,6 +28704,7 @@ static void GuildRecruitsFollow(GameState& s, float dt) {
 // Their share of the fight this frame: damage to the engaged foe (returned),
 // and the healer mends you when you're hurt.
 static float GuildRecruitsFight(GameState& s, const GameState::ActiveMonster& am, float dt) {
+    if(kHomesteadFocus)return 0;
     if (!GuildFounded(s)) return 0.0f;
     float total = 0.0f;
     bool war = GuildWarFoe(s, am);
@@ -28731,12 +28742,13 @@ static bool g_traided = false; // this chest was raided (it opens lighter)
 static GameState::WorldCorpse& AddWorldCorpse(GameState& s, GameState::WorldCorpse c);
 static void TreasureMaybeDrop(GameState& s, int level, bool boss);
 static void GuildWarCredit(GameState& s, const GameState::ActiveMonster& am, const std::string& name) {
+    if(kHomesteadFocus)return;
     if (!GuildFounded(s)) return;
     for (auto& r : s.guildRecruits) // everyone who was there learns something
         if (r.along) r.level = std::min(60.0f, r.level + 0.05f + 0.5f * (1.0f - r.level / 60.0f));
     int w = -1;
-    if ((am.isRival || am.bladeIdx >= 0) && s.guildWarOn[kGuildWarMurderInc]) w = kGuildWarMurderInc;
-    else if (s.guildWarOn[kGuildWarOrcs] && name.rfind("Orc ", 0) == 0) w = kGuildWarOrcs;
+    if ((am.isRival || am.bladeIdx >= 0) && GuildWarActive(s,kGuildWarMurderInc)) w = kGuildWarMurderInc;
+    else if (GuildWarActive(s,kGuildWarOrcs) && name.rfind("Orc ", 0) == 0) w = kGuildWarOrcs;
     if (w < 0) return;
     s.guildWarKills[w]++;
     const char* foe = w == 0 ? "Murder Inc." : "Grimtusk Hold";
@@ -28800,6 +28812,7 @@ static float SettleBodyR(int kind) { return kind == kSbHall ? 66.0f : 50.0f; }
 // Built (or going up): solid on the ground.
 static bool SettleStands(const GameState& s, int k) { return s.settle[(size_t)k].level > 0 || s.settleUpgrading == k; }
 static void SettleResolve(const GameState& s, Vector2& p, float r) {
+    if(kHomesteadFocus)return;
     if (!SettleOwned(s)) return;
     Vector2 c = SettleCenter(s);
     float d = Dist(p, c), wallR = SettleWallR(SettleCells(s));
@@ -28853,7 +28866,7 @@ static void SettleResolveRaidAway(GameState& s, float strength, int faction) {
                     " goods." + hurt + " More walls and guards would have held.");
 }
 static void SettleStartRaid(GameState& s) {
-    bool wo = s.guildWarOn[kGuildWarOrcs], wm = s.guildWarOn[kGuildWarMurderInc];
+    bool wo = GuildWarActive(s,kGuildWarOrcs), wm = GuildWarActive(s,kGuildWarMurderInc);
     int faction = (wo && !wm) ? 0 : ((wm && !wo) ? 1 : GetRandomValue(0, 1));
     float S = SettleRaidStrength(s) * (0.8f + 0.4f * RandUnit());
     s.settleRaidFaction = faction; s.settleRaidStrength = (int)S;
@@ -29049,6 +29062,7 @@ static void SettleMilitiaTick(GameState& s, float dt) {
 
 // Real-time upkeep of the whole settlement; runs on every screen.
 static void SettleTick(GameState& s, float dt) {
+    if(kHomesteadFocus)return; // no upkeep or raids for a hidden management system
     if (s.settleUpgrading >= 0 && (s.settleUpgradeT -= dt) <= 0.0f) SettleFinishUpgrade(s);
     if (!SettleActive(s)) return;
     SettleProduce(s, dt / 3600.0f);
@@ -29062,7 +29076,7 @@ static void SettleTick(GameState& s, float dt) {
     }
     bool young = s.youngT > 0.0f || s.starterStep >= 0;
     if (!young && !s.settleRaidLive && (s.settleRaidT -= dt) <= 0.0f) {
-        bool war = s.guildWarOn[kGuildWarOrcs] || s.guildWarOn[kGuildWarMurderInc];
+        bool war = GuildWarActive(s,kGuildWarOrcs) || GuildWarActive(s,kGuildWarMurderInc);
         s.settleRaidT = 3600.0f * (1.0f + RandUnit()) * (war ? 0.4f : 1.0f);
         SettleStartRaid(s);
     }
@@ -29072,6 +29086,7 @@ static void SettleTick(GameState& s, float dt) {
 }
 // Time away: production, the build queue, newcomers and at most one raid catch up (24h cap).
 static void SettleCatchUp(GameState& s) {
+    if(kHomesteadFocus)return;
     if (s.settleEpoch <= 0) return;
     float el = (float)std::clamp((long long)std::time(nullptr) - s.settleEpoch, 0LL, 86400LL);
     s.settleEpoch = 0;
@@ -29086,7 +29101,7 @@ static void SettleCatchUp(GameState& s) {
     }
     if (s.youngT <= 0.0f && s.starterStep < 0 && (s.settleRaidT -= el) <= 0.0f) {
         s.settleRaidT = 3600.0f * (1.0f + RandUnit());
-        bool wo = s.guildWarOn[kGuildWarOrcs], wm = s.guildWarOn[kGuildWarMurderInc];
+        bool wo = GuildWarActive(s,kGuildWarOrcs), wm = GuildWarActive(s,kGuildWarMurderInc);
         int faction = (wo && !wm) ? 0 : ((wm && !wo) ? 1 : GetRandomValue(0, 1));
         SettleResolveRaidAway(s, SettleRaidStrength(s) * (0.8f + 0.4f * RandUnit()), faction);
     }
@@ -29372,6 +29387,7 @@ static void SettleDrawBuilding(const GameState& s, int k, bool shadowPass) {
     }
 }
 static void Wild3DDrawSettlement(GameState& s, bool shadowPass, const Town3DCam* cull) {
+    if(kHomesteadFocus)return;
     if (!SettleOwned(s)) return;
     Vector2 c = SettleCenter(s);
     float wallR = SettleWallR(SettleCells(s));
@@ -30268,7 +30284,7 @@ static void TreasureUnearth(GameState& s) {
     s.pickT = -1.0f;
     g_tguards.clear(); g_traiders.clear(); g_traided = false;
     if (m.tier >= 2 && RandUnit() < 0.15f + 0.06f * m.tier) { // raiders got here first (#68)
-        bool wo = s.guildWarOn[kGuildWarOrcs], wm = s.guildWarOn[kGuildWarMurderInc];
+        bool wo = GuildWarActive(s,kGuildWarOrcs), wm = GuildWarActive(s,kGuildWarMurderInc);
         int faction = (wo && !wm) ? 0 : ((wm && !wo) ? 1 : GetRandomValue(0, 1));
         int wantR = m.tier >= 4 ? 3 : 2;
         std::vector<int> band;
@@ -33030,7 +33046,7 @@ static const char* kStarterGoal[kStCount] = {
     "Your pack holds gathered materials and loot. Open it to see what you brought back.",
     "Bring your supplies back to town. Towns have shops, a bank and a safe place to prepare.",
     "Follow the gold marker out of town. The wilderness has resources, enemies and dungeons.",
-    "Gather wood from a tree or ore from a rock. Materials help you craft gear and grow your settlement.",
+    "Gather wood from a tree or ore from a rock. Materials help you craft gear and improve your home.",
     "Approach the marked enemy. Defeat one monster to earn loot and train your combat skills.",
     "Take something from a monster's body. Winning the fight does not automatically collect its loot.",
     "Explore, gather, fight, loot, then return to prepare. Your skills improve as you use them."
@@ -33053,7 +33069,7 @@ static void StarterBegin(GameState& s, int step) {
 static void StarterComplete(GameState& s) {
     if (!s.starterRewarded) { s.gold += 50; s.bandages += 5; s.starterRewarded = true; }
     StarterBegin(s, kStDone);
-    s.logLine = "First expedition complete! Explore for better gear, or open Home to develop your settlement.";
+    s.logLine = "First expedition complete! Explore for better gear, or open Home to plan your homestead.";
 }
 static void UpdateStarterProgress(GameState& s) {
     if (!s.starterAccepted || s.starterStep < 0 || s.starterStep >= kStCount || s.playerIsGhost || s.playerDeathAnimT > 0) { s.starterHasPrev = false; return; }
@@ -33224,7 +33240,7 @@ static void UpdateDrawStarter(GameState& s, int screenW, int screenH) {
     card.rect = largeCard ? Rectangle{176,140,540,226} : Rectangle{16,140,344,236};
     if(!largeCard) card.vitals=TextFormat("Health %d / %d   Mana %d / %d",(int)s.hp,(int)s.maxHp,(int)s.mana,(int)MaxMana(s));
     card.title = s.starterAccepted ? kStarterTitle[s.starterStep] : "Welcome to Town Forge";
-    card.goal = s.starterAccepted ? kStarterGoal[s.starterStep] : "Explore the wilderness, bring back materials and loot, and build a stronger character and settlement.";
+    card.goal = s.starterAccepted ? kStarterGoal[s.starterStep] : "Explore the wilderness, bring back materials and loot, and improve your skills and make a home of your own.";
     card.hint = s.starterAccepted ? kStarterHint[s.starterStep] : "Start with one short expedition. Each objective teaches a control when you need it. Your progress is saved.";
     Vector2 target;
     if (s.starterAccepted && StarterTarget(s, &target)) {
@@ -33240,7 +33256,7 @@ static void UpdateDrawStarter(GameState& s, int screenW, int screenH) {
     }
     if (s.starterStep == kStDone && s.starterRewarded) card.hint = "First-completion reward collected: 50 gold + 5 bandages. Choose your next goal below.";
     if (s.wildEngaged.has_value()) card.hint = "Stay close for automatic melee attacks. Watch your health; move away and use a bandage if needed.";
-    card.actions = !s.starterAccepted ? std::vector<std::string>{"Begin expedition", "Explore freely"} : s.starterStep == kStDone ? std::vector<std::string>{"Keep exploring", "Build settlement"} : s.starterStep == kStPack ? std::vector<std::string>{"Open backpack", "Skip guide"} : std::vector<std::string>{"Skip guide"};
+    card.actions = !s.starterAccepted ? std::vector<std::string>{"Begin expedition", "Explore freely"} : s.starterStep == kStDone ? std::vector<std::string>{"Keep exploring", "Plan my home"} : s.starterStep == kStPack ? std::vector<std::string>{"Open backpack", "Skip guide"} : std::vector<std::string>{"Skip guide"};
     // Test native input against the card that was actually presented last frame.
     // Legacy world controls are disabled for this pointer region.
     if (g_landscapePointerRegion != tflayout::Region::NativePage || !g_presentedOpening || g_uiClickTaken || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
@@ -33251,7 +33267,7 @@ static void UpdateDrawStarter(GameState& s, int screenW, int screenH) {
         else if (s.starterStep == kStPack && i == 0) {
             g_playScreen = s.screen; s.exploreMenuOpen = false; g_characterPack = true; MenuGoScreen(s, Screen::Character);
         } else if (s.starterStep == kStDone && i == 1) {
-            s.starterStep = -1; g_playScreen = s.screen; MenuGoScreen(s, Screen::House); g_settleOpen = true;
+            s.starterStep = -1; g_playScreen = s.screen; MenuGoScreen(s, Screen::House);
         } else { s.starterStep = -1; s.logLine = "Explore at your pace. MENU > Help can restart the guided expedition."; }
         card.visible = false;
         SaveGame(s);
@@ -33785,11 +33801,11 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 raidWarnT -= dt;
                 if (raidWarnT <= 0.0f) { raidWarnT = -1.0f; if (quiet) OrcRaidStrike(s); }
             } else if (quiet && !PlayerYoung(s) && raidCooldown <= 0.0f && df > kOrcFortRadius + 140.0f &&
-                       df < (s.guildWarOn[kGuildWarOrcs] ? 2400.0f : 1300.0f)) { // at war: they range much further
+                       df < (GuildWarActive(s,kGuildWarOrcs) ? 2400.0f : 1300.0f)) { // at war: they range much further
                 raidCheckT -= dt;
                 if (raidCheckT <= 0.0f) {
                     raidCheckT = 45.0f;
-                    if (RandUnit() < (s.guildWarOn[kGuildWarOrcs] ? 0.55f : 0.3f)) {
+                    if (RandUnit() < (GuildWarActive(s,kGuildWarOrcs) ? 0.55f : 0.3f)) {
                         raidWarnT = 8.0f;
                         raidCooldown = 240.0f + RandUnit() * 180.0f;
                         std::string dir;
@@ -33901,7 +33917,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // for any of these buildings, so without this gate a 2D player could land an
     // "[E] Manage the Lumber Camp" prompt for a building they can't see or tap -
     // they can still reach the Settlement gump normally, from the House menu.
-    if (s.wild3DView && SettleOwned(s)) for (int k = 0; k < kSbCount; k++) {
+    if (!kHomesteadFocus && s.wild3DView && SettleOwned(s)) for (int k = 0; k < kSbCount; k++) {
         if (s.settle[(size_t)k].level <= 0 && s.settleUpgrading != k) continue; // nothing standing there yet
         float d = Dist(s.wildernessPlayerPos, SettleSlotPos(s, k));
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Settlement; nearestIdx = k; }
@@ -35660,11 +35676,11 @@ static void DrawLandscapeMainMenu(GameState& s,bool& open,bool inDungeon) {
     DrawLine(28,103,932,103,Color{104,86,59,255});
     DrawUIText("CHARACTER",28,123,14,Color{210,169,94,255});
     DrawUIText("ACTIVITIES",340,123,14,Color{210,169,94,255});
-    DrawUIText("TOWN & SYSTEM",652,123,14,Color{210,169,94,255});
+    DrawUIText("HOME & SETTINGS",652,123,14,Color{210,169,94,255});
     bool enabled=!DenFighting() && !s.combat && !s.playerIsGhost && s.playerDeathAnimT<=0;
     auto card=[&](int slot,const std::string& label,const std::string& detail,bool en=true) {
-        static const int column[]={0,0,0,0,1,1,2,2,1,1,2,2};
-        static const int row[]={0,1,2,3,0,1,0,1,2,3,2,3};
+        static const int column[]={0,0,0,0,1,1,2,2,1,2,1};
+        static const int row[]={0,1,2,3,0,1,0,1,2,2,3};
         return LandscapeMenuCard({28.f+column[slot]*312.f,150.f+row[slot]*72.f,288,62},label,detail,en);
     };
     auto page=[&](Screen sc){MenuGoScreen(s,sc);open=false;};
@@ -35674,12 +35690,11 @@ static void DrawLandscapeMainMenu(GameState& s,bool& open,bool inDungeon) {
     if(card(3,"Spellbook","Spells & combat slots",enabled))page(Screen::Magic);
     if(card(4,"Crafting","Workshops & recipes",enabled))page(Screen::Craft);
     if(card(5,"Pets","Taming & companions",enabled))page(Screen::Pets);
-    if(card(6,"Bank","Stored items & gold",enabled))page(Screen::Bank);
-    if(card(7,"Home","House & settlement",enabled))page(Screen::House);
-    if(card(8,"Guild",GuildAttentionLabel(),enabled)){page(Screen::House);OpenWarWeek(s);g_guildTab=1;}
-    if(card(9,"Journal",JournalAttentionLabel(s),enabled)){page(Screen::House);g_questOpen=true;g_questTab=0;}
-    if(card(10,"Settings","Options & cloud saves",!DenFighting())){page(Screen::House);g_optOpen=true;}
-    if(card(11,"Help","Controls & how to play",enabled)){page(Screen::Guide);s.guidePage=0;}
+    if(card(6,"Home","Your plot & workshops",enabled))page(Screen::House);
+    if(card(7,"Bank","Stored items & gold",enabled))page(Screen::Bank);
+    if(card(8,"Journal",JournalAttentionLabel(s),enabled)){page(Screen::House);g_questOpen=true;g_questTab=0;}
+    if(card(9,"Settings","Options & cloud saves",!DenFighting())){page(Screen::House);g_optOpen=true;}
+    if(card(10,"Help","Controls & how to play",enabled)){page(Screen::Guide);s.guidePage=0;}
     DrawLine(28,447,932,447,Color{104,86,59,255});
     bool ferry=enabled && (InOutdoorTown(s) || s.screen==Screen::Blackwake);
     if(inDungeon) {
@@ -35741,7 +35756,7 @@ static void DrawLandscapePageHeader(GameState& s,bool& open) {
                        : s.screen==Screen::House && g_warOpen ? "Choose a guild section from the list."
                        : s.screen==Screen::House && g_optOpen ? "Your preferences are saved automatically."
                        : s.screen==Screen::House && g_questOpen ? "Quests, rewards, treasure maps and your adventure history."
-                       : s.screen==Screen::House ? "Your home and settlement."
+                       : s.screen==Screen::House ? "Your homestead, storage and workshop stations."
                        : "Use Menu to choose another page.";
         DrawUIText(hint,160,82,14,Color{176,190,198,255});
     }
@@ -35794,8 +35809,8 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         if(Button({x0,y,w,h},"Character",tabsEnabled)) { g_characterPack=false; g_pdSel=-1; MenuGoScreen(s,Screen::Character); open=false; }
         if(Button({x1,y,w,h},"Crafting",tabsEnabled)) { MenuGoScreen(s,Screen::Craft); open=false; }
         if(!wide)y+=62;
-        std::string guild=GuildAttentionLabel(), journal=JournalAttentionLabel(s);
-        if(Button({wide ? 360.0f:x0,y,w,h},guild,tabsEnabled)) { MenuGoScreen(s,Screen::House); OpenWarWeek(s); g_guildTab=1; open=false; }
+        std::string journal=JournalAttentionLabel(s);
+        if(Button({wide ? 360.0f:x0,y,w,h},"Home",tabsEnabled)) { MenuGoScreen(s,Screen::House); open=false; }
         if(Button({wide ? x0:x1,wide ? 218.0f:y,w,h},journal,tabsEnabled)) {
             MenuGoScreen(s,Screen::House); g_questOpen=true; g_questTab=0; open=false;
         }
@@ -38722,10 +38737,11 @@ static void GuildCityAct(GameState& s,const char* action,const std::string& targ
     SaveGame(s); JS_GuildCityAction(action,target.c_str());
 }
 static void GuildCityBossVictory(GameState& s) {
+    if(kHomesteadFocus)return;
     if(!g_gnet.ready || g_gnet.busy || g_gnet.cityPending) return;
     for(const auto& r:g_gnet.cityRuns) if(r.kind=="boss" && r.joined && !r.finished) { GuildCityAct(s,"boss_hit",r.id); break; }
 }
-static void GuildSendGift(int kind) { if (g_gnet.ready && !g_gnet.myId.empty()) JS_GuildNetSendGift(kind); }
+static void GuildSendGift(int kind) { if (!kHomesteadFocus && g_gnet.ready && !g_gnet.myId.empty()) JS_GuildNetSendGift(kind); }
 static std::string GuildGiftOpen(GameState& s, int kind) {
     switch (kind) {
         case 0: { int g = 80 + GetRandomValue(0, 80); s.gold += g; s.bandages += 2; return TextFormat("%d gold, 2 bandages", g); }
@@ -38813,6 +38829,7 @@ static void GuildHallTick(GameState& s) {
 }
 // Every frame: Muster minutes, then (online) keep the guild table fresh and report today's points.
 static void WarNetTick(GameState& s, float dt) {
+    if(kHomesteadFocus)return;
     WarCheckWeek(s);
     int today = WarDayNow();
     if (today == 0 && s.warPlayMin < 60 && (s.warPlayAcc += dt) >= 60.0f) {
@@ -38849,6 +38866,7 @@ static std::string GuildAttentionLabel() {
     return rewards ? TextFormat("Guild / %d rewards",rewards) : helps ? TextFormat("Guild / %d help requests",helps) : "Guild";
 }
 static void OpenWarWeek(GameState& s) {
+    if(kHomesteadFocus)return;
     g_warOpen = true; g_tmapOpen = false; g_optOpen = false; g_questOpen = false; g_guildTab = 1; g_warScroll = 0.0f; g_leaveArmT = 0.0f;
     WarCheckWeek(s);
     JS_GuildNetRefresh(WarWeekKey(s).c_str());
@@ -40031,6 +40049,7 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     content=y+26-start;UIEndScissorMode();
 }
 static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
+    if(kHomesteadFocus){g_warOpen=false;g_settleOpen=false;}
     if (g_questOpen) { DrawQuestBoard(s, screenW, screenH); return; }
     if (g_optOpen) { DrawOptions(s, screenW, screenH); return; }
     if (g_tmapOpen) { DrawTreasureMaps(s, screenW, screenH); return; }
@@ -40041,10 +40060,6 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
 
     int y = 116;
     DrawUIText("Your Home", 20, y, 18, kColorHeading); (void)tier;
-    if (Button({ (float)screenW - 150, (float)y - 4, 130, g_landscapePage ? 44.f:28.f }, s.guildName.empty() ? "Warband" : ("Warband [" + s.guildTag + "]").c_str(), true))
-        { OpenWarWeek(s); g_guildTab = 6; } // the Guild screen's Members tab - same Warband roster section Activities (hidden for now) showed
-    if (Button({ (float)screenW - 290, (float)y - 4, 130, g_landscapePage ? 44.f:28.f }, SettleHall(s) > 0 ? TextFormat("Settlement %d", SettleHall(s)) : "Settlement", true))
-        { g_settleOpen = true; g_settleScroll = 0.0f; } // (2026-09-27)
     y += g_landscapePage ? 58:24;
 
     // Name entry - same always-live pattern as the Character screen's name field.
@@ -40061,7 +40076,7 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     }
     y += g_landscapePage ? 56:32;
 
-    DrawUIText(TextFormat("Backpack capacity: %d (base %d, more from your settlement's Storehouse)",
+    DrawUIText(TextFormat("Backpack capacity: %d (base %d, earned bonuses retained)",
                             BackpackCap(s), GameState::kBackpackCap), 20, y, 12, kColorText);
     y += 22;
 
@@ -40104,23 +40119,27 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
         y += 32;
     }
 
-    // (2026-09-27) The old house tiers, colors and workshop-wing shop are retired: your
-    // Settlement's Storehouse adds pack space, and its Forge, Lumber Camp, Tannery and
-    // Herb Garden open the matching workshop stations in your house.
+    // Personal workshops are upgraded here. Existing settlement-derived levels
+    // still count, without requiring the archived management screen.
     if(g_landscapePage)y=260;
     int workshopX=g_landscapePage ? 500:20;
     DrawUIText("Home workshop stations", workshopX, y, 13, kColorAccent);
     y += 20;
     for (int m = 0; m < 4; m++) {
-        int lv = HomeWingLevel(s, m);
-        std::string line = lv > 0 ? TextFormat("%s - level %d (works up to skill %d)", kHomeModuleDefs[(size_t)m].label.c_str(), lv, kHomeModuleLevels[(size_t)lv - 1].cap)
-                                  : kHomeModuleDefs[(size_t)m].label + " - raise a " + kSettleDefs[kWingSettleKind[m]].name + " in your settlement";
-        if(g_landscapePage){auto lines=WrapJournalText(line,420);for(auto& text:lines){DrawUIText(text.c_str(),workshopX,y,12,lv>0 ? kColorText:Fade(kColorText,.6f));y+=18;}y+=14;continue;}
-        DrawUIText(line.c_str(), 20, y, 12, lv > 0 ? kColorText : Fade(kColorText, 0.6f));
-        y += 18;
+        int lv = HomeWingLevel(s,m);
+        DrawUIText(kHomeModuleDefs[m].label.c_str(),workshopX,y,13,kColorText);
+        std::string detail=lv>0 ? TextFormat("Level %d - skill cap %d",lv,kHomeModuleLevels[lv-1].cap):"Build your own crafting station";
+        DrawUIText(detail.c_str(),workshopX,y+20,11,Fade(kColorText,.75f));
+        int cost=lv<5 ? kHomeModuleLevels[lv].cost:0;
+        std::string action=lv>=5 ? "Fully upgraded":TextFormat("%s %dg",lv ? "Upgrade":"Build",cost);
+        bool enabled=s.housePlotIdx>=0 && lv<5 && CanAfford(s,cost);
+        if(Button({(float)screenW-168,(float)y+4,148,44},action,enabled)) {
+            if(lv==0)BuildHouseModule(s,m);else UpgradeHouseModule(s,m);
+        }
+        y+=58;
     }
     y += 6;
-    DrawUIText("Use them at their benches inside your house.", workshopX, y, 12, Fade(kColorText, 0.75f));
+    DrawUIText(s.housePlotIdx<0 ? "Buy a house plot to build workshop stations.":"Place and use benches inside your house.", workshopX, y, 12, Fade(kColorText, 0.75f));
     (void)screenH;
 }
 
@@ -40690,7 +40709,7 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
             DrawUIText("Materials make gear and buildings; gold buys equipment and services.",20,148,12,Fade(kColorText,.8f));
         } else {
             if(Button({20,120,244,44},"Bank storage",true)) MenuGoScreen(s,Screen::Bank);
-            if(Button({g_landscapePage ? 280.f:276.f,120,244,44},"Home & settlement",true)) MenuGoScreen(s,Screen::House);
+            if(Button({g_landscapePage ? 280.f:276.f,120,244,44},"Home & workshops",true)) MenuGoScreen(s,Screen::House);
         }
     }
     // ---- the backpack (UO bag gump) ----

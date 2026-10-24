@@ -126,11 +126,11 @@ std::string JournalAttentionLabel(GameState&){return "Journal";}
 Vector2 TS(float x,float y){return {x,y};}void WalkTargetClear(){}void TryStartLeaveDungeon(GameState& s){s.leaveDungT=1;}
 '''+section('static bool LandscapeMenuCard(', 'static const char* LandscapePageTitle(')
 native+='''int main(){
-Screen pages[]={Screen::Character,Screen::Character,Screen::Skills,Screen::Magic,Screen::Craft,Screen::Pets,Screen::Bank,Screen::House,Screen::House,Screen::House,Screen::House,Screen::Guide};
-for(int slot=0;slot<12;slot++){
- GameState s;bool open=true;int col[]={0,0,0,0,1,1,2,2,1,1,2,2},row[]={0,1,2,3,0,1,0,1,2,3,2,3};mouse={28.f+col[slot]*312.f+100,150.f+row[slot]*72.f+30};pressed=down=true;UIFrameReset();g_uiShieldBypass=true;
+Screen pages[]={Screen::Character,Screen::Character,Screen::Skills,Screen::Magic,Screen::Craft,Screen::Pets,Screen::House,Screen::Bank,Screen::House,Screen::House,Screen::Guide};
+for(int slot=0;slot<11;slot++){
+ GameState s;bool open=true;int col[]={0,0,0,0,1,1,2,2,1,2,1},row[]={0,1,2,3,0,1,0,1,2,2,3};mouse={28.f+col[slot]*312.f+100,150.f+row[slot]*72.f+30};pressed=down=true;UIFrameReset();g_uiShieldBypass=true;
  DrawLandscapeMainMenu(s,open,false);assert(!open && s.screen==pages[slot]);
- if(slot==1)assert(g_characterPack);if(slot==9)assert(g_questOpen);if(slot==10)assert(g_optOpen);
+ if(slot==1)assert(g_characterPack);if(slot==8)assert(g_questOpen);if(slot==9)assert(g_optOpen);
  for(auto r:g_uiRects)assert(r.x>=0 && r.y>=0 && r.x+r.width<=960 && r.y+r.height<=540 && r.height>=48);
  pressed=down=false;UIFrameReset();
 }
@@ -142,5 +142,5 @@ with tempfile.TemporaryDirectory() as tmp:
     cpp=Path(tmp)/'native-menu.cpp';exe=Path(tmp)/'native-menu';cpp.write_text(native)
     subprocess.run(['g++','-std=c++17',str(cpp),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
-print('PASS native landscape menu: all twelve destinations, Return to game, disabled actions and visible touch targets')
+print('PASS native landscape menu: all eleven homestead destinations, Return to game, disabled actions and visible touch targets')
 
