@@ -17,7 +17,7 @@ void EndScissorMode(){}
 void DrawTexturePro(Texture t,Rectangle s,Rectangle d,Vector2,float,Color){assert(t.id==7 && s.height==-540 && d.width==960);drawn++;}
 void ClearBackground(Color){cleared++;}void DrawText(const char*,int,int,int,Color){}
 '''+extract(layout,'static void LandscapeDrawLastFrame()', 'static std::set<unsigned>')
-code+='''enum class Screen{Town,Wilderness};struct GameState{Screen screen=Screen::Town;};
+code+='''enum class Screen{Town,Wilderness};struct GameState{Screen screen=Screen::Town;bool optClassic2D=false;};
 bool dialog=false,down=false,g_walkOn=false;double now=0;
 enum{MOUSE_BUTTON_LEFT,KEY_W,KEY_A,KEY_S,KEY_D,KEY_UP,KEY_DOWN,KEY_LEFT,KEY_RIGHT};
 bool LandscapeDialogOpen(const GameState&){return dialog;}bool IsMouseButtonDown(int){return down;}
@@ -28,7 +28,9 @@ void Wild3DBuildScatter(){loads[2]++;}void WildMapEnsureTexture(){loads[3]++;}
 code+='''int main(){
 LandscapeHoldFrame();assert(!g_landscapeActive && ended==1 && begun==1 && drawn==1 && cleared==0 && g_landscapeTargets.empty());
 g_landscapeFrameReady=false;LandscapeDrawLastFrame();assert(cleared==1); // first-launch fallback is explicit
-GameState s;now=1;WarmWildernessCache(s);assert(loads[0]==0);
+GameState s;s.optClassic2D=true;
+for(int i=0;i<8;i++){now=i*2;WarmWildernessCache(s);}for(int n:loads)assert(n==0);
+s.optClassic2D=false;now=1;WarmWildernessCache(s);assert(loads[0]==0);
 now=2;WarmWildernessCache(s);assert(loads[0]==1 && loads[1]==0);
 down=true;now=3;WarmWildernessCache(s);assert(loads[1]==0);
 down=false;now=4;WarmWildernessCache(s);assert(loads[1]==0);

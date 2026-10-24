@@ -41303,6 +41303,9 @@ static int LandscapeDialogOpen(const GameState& s) {
     return 0;
 }
 static void WarmWildernessCache(const GameState& s) {
+    // Classic 2D never uses the 3D terrain/models. In particular, baking its
+    // four 2048px noise images can exhaust a phone's tab memory after launch.
+    if(s.optClassic2D)return;
     // Spread independent cache preparation over quiet town frames. The complete
     // town image remains displayed while each one-time task finishes.
     static int step=0;static double quietSince=0;
