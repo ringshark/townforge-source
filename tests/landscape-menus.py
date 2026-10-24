@@ -185,6 +185,37 @@ assert(restored.settleUpgrading==retired.settleUpgrading && restored.settleUpgra
 std::cout<<"PASS homestead: archived management stays paused, no hidden wars or follower costs, direct workshops preserve inherited levels and enforce prices"<<std::endl;
 }
 
+
+{
+GameState life;life.housePlotIdx=0;life.houseLayout=HouseStarterLayout(7);life.gold=3000;life.wood=300;life.ore=100;life.leather=100;
+life.buildingSkill[0]=49.99f;assert(!TryBuildHomeAddition(life,0) && life.gold==3000);
+life.buildingSkill[0]=50;int before=(int)std::count_if(life.houseLayout.begin(),life.houseLayout.end(),[](char c){return c!='.';});
+assert(TryBuildHomeAddition(life,0) && life.gold==2850 && life.wood==270 && life.ore==85);
+assert(life.life.additions==1 && HomeWingLevel(life,0)==3 && HouseHasDoor(life.houseLayout,7));
+assert(std::count_if(life.houseLayout.begin(),life.houseLayout.end(),[](char c){return c!='.';})>before);
+assert(!TryBuildHomeAddition(life,0) && life.gold==2850);
+assert(TryBuyFarm(life) && life.life.farm && life.life.seeds[0]==6);
+assert(!TryBuyFarm(life));life.screen=Screen::House;g_farmOpen=true;g_playScreen=Screen::Wilderness;life.wildernessPlayerPos={life.life.x,life.life.y};
+assert(TryFarmBed(life,0,0) && life.life.seeds[0]==5);assert(TryFarmBed(life,0,0));
+tflife::Grow(life.life,180);assert(TryFarmBed(life,0,0) && life.life.produce[0]==3);
+int gold=life.gold;assert(TryUseProduce(life,0,true) && life.gold==gold+24 && life.life.produce[0]==0);
+assert(!TryUseProduce(life,0,true));
+reset();g_farmOpen=true;DrawHouseScreen(life,960,540);check("farm beds");
+life.wildernessPlayerPos={0,0};assert(!TryFarmBed(life,1,0));
+life.wildernessPlayerPos=kHousePlots[0].pos;life.life.condition=50;int wood=life.wood;assert(TryMaintainHome(life) && life.life.condition==75 && life.wood==wood-5);
+SaveGame(life);GameState restored;assert(LoadGame(restored));assert(restored.life.farm && restored.life.additions==1 && restored.life.seeds[0]==5 && restored.life.condition==75);
+if(const char* path=std::getenv("TF_HOMESTEAD_FIXTURE")) {
+    auto fixture=life;fixture.optOnline=false;fixture.autoReagents=false;fixture.gold=1000;fixture.life.seeds={6,3,3};fixture.life.produce={8,4,3};fixture.life.cooldown=360;fixture.youngT=1200;fixture.starterStep=-1;fixture.starterAccepted=fixture.starterRewarded=true;
+    fixture.life.beds[0]={0,180,true};SaveGame(fixture);std::ifstream from(kSaveFilePath);std::ofstream to(path);to<<from.rdbuf();
+}
+g_farmOpen=false;GameState target;target.screen=Screen::Wilderness;target.youngT=0;target.starterStep=-1;target.wildernessPlayerPos=WP(450,1300);
+assert(SpawnRovingPack(target));assert(target.wildEngaged && target.wildExtraAttackers.size()>=2 && target.wildExtraAttackers.size()<=7);
+assert(!SpawnRovingPack(target)); // never stack a pack onto an existing duel/fight
+for(const auto& am:target.wildExtraAttackers)assert(am.hp>0 && am.spotIdx>=0 && am.spotIdx<12 && !WildBlocked(am.pos));
+GameState safe;safe.screen=Screen::Town;assert(!SpawnRovingPack(safe));safe.screen=Screen::Wilderness;safe.playerIsGhost=true;assert(!SpawnRovingPack(safe));
+std::cout<<"PASS homestead loop: skill-50 physical addition, materials, farm ownership/work/progression, produce, upkeep, real save round trip, bounded real-monster pack and duel safety"<<std::endl;
+}
+
 }
 '''
 (run_dir/'menu.cpp').write_text(test)
