@@ -18,6 +18,8 @@ function changed(a,b){a=PNG.sync.read(a);b=PNG.sync.read(b);let n=0;for(let i=0;
    await page.goto(origin,{waitUntil:'domcontentloaded',timeout:120000});
    await page.waitForFunction(()=>{let e=document.querySelector('#loading');return e&&getComputedStyle(e).display==='none'},null,{timeout:120000});
    await page.waitForTimeout(6000);
+   if(models.length)console.error('UNEXPECTED MODELS',JSON.stringify(models));
+   await page.screenshot({path:`browser-checks/${name}-startup.png`});
    assert.deepEqual(models,[],'2D idle startup must not preload 3D models');
    assert.equal(art.size,18,'all eighteen building and scenery assets load');
    const canvas=page.locator('#canvas');await canvas.focus();

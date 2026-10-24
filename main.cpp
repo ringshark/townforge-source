@@ -2405,10 +2405,11 @@ static void DrawVirtualJoystick() {
     if (!g_joystickActive) {
         if(g_landscapeWorld && !g_landscapeDialog) {
             // A quiet resting stick makes the movement zone discoverable on touch.
-            DrawCircleV({85,815},54,Color{12,22,29,90});
-            DrawCircleLines(85,815,54,Color{159,174,175,105});
-            DrawCircleV({85,815},22,Color{184,196,191,70});
-            for(Vector2 p:std::vector<Vector2>{{85,774},{126,815},{85,856},{44,815}})DrawCircleV(p,2,Color{210,200,165,130});
+            float y=g_landscapePage?kViewport.y+kViewport.height-85:815;
+            DrawCircleV({85,y},54,Color{12,22,29,90});
+            DrawCircleLines(85,(int)y,54,Color{159,174,175,105});
+            DrawCircleV({85,y},22,Color{184,196,191,70});
+            for(Vector2 p:std::vector<Vector2>{{85,y-41},{126,y},{85,y+41},{44,y}})DrawCircleV(p,2,Color{210,200,165,130});
         }
         return;
     }
@@ -9849,6 +9850,9 @@ static float RollWildRespawn();
 static const GameState::ActiveMonster* FindWildExtra(const GameState& s, int spotIdx);
 static bool g_openWorld2D = false;
 static int OpenTownAt(Vector2 p);
+static bool InOutdoorTown(const GameState& s) {
+    return s.screen==Screen::Town || (s.screen==Screen::Wilderness && !s.wild3DView && OpenTownAt(s.wildernessPlayerPos)>=0);
+}
 static bool WildBlocked(Vector2 p);
 static void WildTerrainResolve(Vector2& pos, Vector2 prev);
 
@@ -11280,7 +11284,7 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
     // and a cold blue cast when you can't afford it. Tap/keys behave as before.
     int tapped = -1;
     const bool compact=inCombat && g_landscapeWorld && !g_landscapeDialog;
-    if(compact){x=300;y=770;}
+    if(compact){x=g_landscapePage?520.f:300.f;y=g_landscapePage?410.f:770.f;}
     Vector2 mouse = GetMousePosition();
     const int n = (int)s.combatHotbar.size();
     const float slotW = compact?48.0f:72.0f;
@@ -11691,7 +11695,7 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     // Belt pouch (2026-09-26): bandages and heal potions as framed slots in the
     // spell bar's style, stack counts in the corner. Out of combat (oocZone >= 0,
     // 2026-09-27) it also carries your heal spell, and only shows while you're hurt.
-    float y = kViewport.y + kViewport.height - (oocZone<0 ? 294.0f:146.0f);
+    float y = g_landscapePage ? 450.f:kViewport.y + kViewport.height - (oocZone<0 ? 294.0f:146.0f);
     std::vector<int> potions;
     if (s.poisonT > 0.0f) // (2026-09-29) poisoned: your best cure comes first
         for (size_t i = 0; i < s.potions.size() && potions.empty(); i++)
@@ -18077,8 +18081,17 @@ static void WildMapEnsureTexture() {
             px[y * N + x] = WildMapGroundColor((x + 0.5f) / k, (y + 0.5f) / k);
     WildMapPaintExtras(&img, k);
     // Forest and rock dressing as darker blobs, so woods read on the map.
-    Wild3DBuildDressing();
-    WildMapPaintDressing(&img, k);
+    if(!g_openWorld2D) {
+        Wild3DBuildDressing();
+        WildMapPaintDressing(&img,k);
+    } else {
+        // The 2D map never needs the 3D prop models or their texture atlas.
+        for(int y=0;y<68;y++)for(int x=0;x<68;x++) {
+            Vector2 p={(x+.5f)*86,(y+.5f)*86};
+            if(tf2dart::Noise(x*13+4,y*7+3)<.22f && OpenTownAt(p)<0 && !WildBlocked(p))
+                ImageDrawCircleV(&img,{p.x*k,p.y*k},2,Color{62,91,57,255});
+        }
+    }
     // Roads (same segments the 3D ground bakes).
     Color road = { 214, 190, 136, 255 };
     auto seg = [&](Vector2 a, Vector2 b) {
@@ -18334,16 +18347,9 @@ static bool IsMenuScreen(Screen sc) {
            sc == Screen::MinersGuild || sc == Screen::Refuge || sc == Screen::Guide;
 }
 static bool ExploreHeaderCollapsed(const GameState& s) {
-    // (2026-10-18) Town now collapses in 2D too, not just 3D - see the
-    // Screen::Town 2D-wide block in DrawTownScreen and the g_landscapePage
-    // wiring in UpdateDrawFrame for the matching render-target change this
-    // depends on. Wilderness/Interior are NOT done yet - deliberately still
-    // gated on their own 3DView flag (unchanged, original behavior) so they
-    // aren't regressed by this change; they need the same treatment as a
-    // separate follow-up before they'd be safe to flip too.
-    return (s.screen == Screen::Town) ||
-           (s.screen == Screen::Wilderness && s.wild3DView) ||
-           (s.screen == Screen::Interior && s.interior3DView) || s.screen == Screen::Blackwake || IsMenuScreen(s.screen);
+    // Both outdoor views use the compact navigation. 2D shares a native landscape page.
+    return s.screen==Screen::Town || s.screen==Screen::Wilderness ||
+        (s.screen==Screen::Interior && s.interior3DView) || s.screen==Screen::Blackwake || IsMenuScreen(s.screen);
 }
 static const Rectangle kCompactMenuBtn = { 20, 56, 104, 48 };
 static Rectangle CompactMenuPanelRect(bool inDungeon) {
@@ -33024,7 +33030,7 @@ static void UpdateStarterProgress(GameState& s) {
     s.starterPrevPos = me; s.starterPrevScreen = s.screen; s.starterHasPrev = world;
     switch (s.starterStep) {
         case kStWalk: if (s.starterWalked >= 220.0f) StarterBegin(s, kStGate); break;
-        case kStGate: if (s.screen == Screen::Wilderness) StarterBegin(s, kStGather); break;
+        case kStGate: if (s.screen == Screen::Wilderness && !InOutdoorTown(s)) StarterBegin(s, kStGather); break;
         case kStGather: if (s.wood + s.ore > s.starterBase) { s.starterLooted = 0; StarterBegin(s, kStFight); } break;
         case kStFight: if (s.starterKills > s.starterBase) {
             // Corpse auto-open can let a quick player loot before this update.
@@ -33032,7 +33038,7 @@ static void UpdateStarterProgress(GameState& s) {
         } break;
         case kStLoot: if (s.starterLooted > s.starterBase) StarterBegin(s, kStPack); break;
         case kStPack: if (s.screen == Screen::Character && g_characterPack) StarterBegin(s, kStReturn); break;
-        case kStReturn: if (s.screen == Screen::Town) StarterComplete(s); break;
+        case kStReturn: if (InOutdoorTown(s)) StarterComplete(s); break;
         default: break;
     }
 }
@@ -33040,9 +33046,9 @@ static void UpdateStarterProgress(GameState& s) {
 static bool StarterTarget(GameState& s, Vector2* out) {
     auto nearest = [&](Vector2 me, auto&& each) { float bd = 1e9f; bool ok = false; each([&](Vector2 p, float bias) {
         float d = Dist(me, p) + bias; if (d < bd) { bd = d; *out = p; ok = true; } }); return ok; };
-    if (s.screen == Screen::Town) {
+    if (InOutdoorTown(s)) {
         Vector2 me = s.townPlayerPos;
-        if (s.starterStep == kStGate || s.starterStep == kStGather || s.starterStep == kStFight || s.starterStep == kStLoot) { *out = kWildernessGatePos; return true; }
+        if (s.starterStep == kStGate || s.starterStep == kStGather || s.starterStep == kStFight || s.starterStep == kStLoot) { *out = s.screen==Screen::Wilderness?kTownGates[s.selectedTown].wildernessPos:kWildernessGatePos; return true; }
         return false;
     }
     if (s.screen == Screen::Wilderness) {
@@ -33191,7 +33197,7 @@ static void UpdateDrawStarter(GameState& s, int screenW, int screenH) {
         Vector2 me = s.screen == Screen::Wilderness ? s.wildernessPlayerPos : s.townPlayerPos;
         card.direction = TextFormat("Gold marker: %d paces %s", (int)(Dist(me, target)/10), CompassWord(me, target).c_str());
     }
-    if (s.starterAccepted && s.screen == Screen::Town && (s.starterStep == kStGather || s.starterStep == kStFight || s.starterStep == kStLoot)) {
+    if (s.starterAccepted && InOutdoorTown(s) && (s.starterStep == kStGather || s.starterStep == kStFight || s.starterStep == kStLoot)) {
         card.goal = "Your expedition continues outside town. Follow the gold marker back to the gate.";
         card.hint = "Walk close, tap WILDERNESS or press E. Your saved objective continues outside.";
     } else if (s.starterAccepted && s.screen == Screen::Interior) {
@@ -33661,6 +33667,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         s.wildEngaged.reset();s.wildExtraAttackers.clear();s.flagTarget.reset();
         s.rivalAutoEngage=false;
         for(auto& blade:s.blades)blade.autoEngage=false;
+        if(!s.playerIsGhost) {
+            s.hp=s.maxHp;s.mana=MaxMana(s);s.poisonT=0;s.poisonLvl=0;
+            for(auto& pet:s.pets)if(pet.hp>0){pet.hp=pet.maxHp;pet.mana=pet.maxMana;}
+            if(s.autoReagents && s.reagents<30) {
+                int buy=std::min(30-s.reagents,s.gold);s.gold-=buy;s.reagents+=buy;
+            }
+        }
         ZoneArrive(ActiveTownName(outdoorTown));
     }
     previousOutdoorTown=outdoorTown;
@@ -35203,6 +35216,16 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     DrawRectangleRec(kViewport,Fade(Color{10,18,36,255},night*.30f));
     EndScissorMode();
     } // end else: 2D world view (3D renders via DrawWilderness3DWorld above)
+    if(g_openWorld2D && !s.exploreMenuOpen) {
+        Rectangle hud={20,76,160,48};
+        DrawRectangleRounded(hud,.15f,4,Fade(Color{19,27,29,255},.85f));
+        DrawUIText(TextFormat("HP %d / %d",s.hp,s.maxHp),28,82,12,Color{232,225,197,255});
+        DrawRectangle(28,99,144,5,Color{55,48,42,255});
+        DrawRectangle(28,99,(int)(144.f*s.hp/std::max(1,s.maxHp)),5,Color{103,151,91,255});
+        DrawRectangle(28,110,144,5,Color{32,44,58,255});
+        DrawRectangle(28,110,(int)(144.f*s.mana/std::max(1.f,MaxMana(s))),5,Color{95,151,185,255});
+        UIRegister(hud);
+    }
     DrawVirtualJoystick();
     DrawTargetFrame(s, 0); // shared by the 2D and 3D views (tap it to cycle targets)
     DrawWyrmFrame(s, screenW); // the world boss's three heads (2026-09-27)
@@ -35621,7 +35644,7 @@ static void DrawLandscapeMainMenu(GameState& s,bool& open,bool inDungeon) {
     if(card(10,"Settings","Options & cloud saves",!DenFighting())){page(Screen::House);g_optOpen=true;}
     if(card(11,"Help","Controls & how to play",enabled)){page(Screen::Guide);s.guidePage=0;}
     DrawLine(28,447,932,447,Color{104,86,59,255});
-    bool ferry=enabled && (s.screen==Screen::Town || s.screen==Screen::Blackwake);
+    bool ferry=enabled && (InOutdoorTown(s) || s.screen==Screen::Blackwake);
     if(inDungeon) {
         if(LandscapeMenuCard({652,461,280,54},"Leave dungeon","Magery recall",!s.playerIsGhost && s.playerDeathAnimT<=0 && s.leaveDungT<0)) {TryStartLeaveDungeon(s);open=false;}
     } else if(ferry) {
@@ -35689,7 +35712,7 @@ static void DrawLandscapePageHeader(GameState& s,bool& open) {
 static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
     g_uiShieldBypass = true; // this panel's own buttons sit inside the shield
     if(g_landscapeActive && open){DrawLandscapeMainMenu(s,open,inDungeon);g_uiShieldBypass=false;return;}
-    if(g_landscapePage && s.screen==Screen::Town) {
+    if(g_landscapePage && IsPlayScreen(s.screen)) {
         if(Button({20,20,112,48},"MENU",true))open=true;
         g_uiShieldBypass=false;return;
     }
@@ -35744,7 +35767,7 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         if(Button({wide ? 360.0f:x1,y,w,h},"Return to World",true)) { s.screen=g_playScreen; open=false; }
         DrawUIText("Gear, pack and skills are in Character. Help and saves are in Settings.",24,wide ? 346:352,12,kColorText);
         DrawUIText("Your equipped gear stays visible on your character in the world.",24,373,12,kColorText);
-        if(Button({24,wide ? 282.0f:410.0f,wide && inDungeon ? 236.0f:492.0f,wide ? 48.0f:52.0f},s.screen==Screen::Blackwake ? "Ferry back to Saltmere":"Visit Blackwake Den",tabsEnabled && (s.screen==Screen::Town || s.screen==Screen::Blackwake))) {
+        if(Button({24,wide ? 282.0f:410.0f,wide && inDungeon ? 236.0f:492.0f,wide ? 48.0f:52.0f},s.screen==Screen::Blackwake ? "Ferry back to Saltmere":"Visit Blackwake Den",tabsEnabled && (InOutdoorTown(s) || s.screen==Screen::Blackwake))) {
             if(s.screen==Screen::Blackwake) {s.screen=Screen::Town;s.selectedTown=1;s.townPlayerPos=TS(450,830);}
             else {s.screen=Screen::Blackwake;s.townPlayerPos={750,1250};}
             g_denPanel=0;open=false;WalkTargetClear();
@@ -41365,7 +41388,7 @@ static int LandscapeDialogOpen(const GameState& s) {
     // Only panels rendered by this screen may switch the world into a scroll page.
     // A remembered journal, town greeting or home workshop is invisible elsewhere.
     if (IsMenuScreen(s.screen)) return 1;
-    const bool town = s.screen == Screen::Town;
+    const bool town = InOutdoorTown(s);
     const bool wild = s.screen == Screen::Wilderness;
     const bool hunt = s.screen == Screen::Hunt;
     const bool interior = s.screen == Screen::Interior;
@@ -41596,8 +41619,8 @@ static void UpdateDrawFrame() {
         // panel (ESC); movement (WASD/arrows) and interaction (E) are handled inside
         // DrawTownScreen itself, since they need the frame's nearest-node lookup. ---
             if (kVariantView == 0 && IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D; // (2026-09-28) unadvertised: Options holds the switch
-        if (!encounterPending && state.screen == Screen::Town) {
-            if (IsKeyPressed(KEY_ESCAPE)) state.selectedTile.reset();
+        if (!encounterPending && InOutdoorTown(state)) {
+            if (IsKeyPressed(KEY_ESCAPE)) {state.selectedTile.reset();state.greetedNPC.reset();}
         }
         if (!encounterPending && state.screen == Screen::Wilderness) {
             if (IsKeyPressed(KEY_M)) { // minimap toggle
@@ -41651,7 +41674,7 @@ static void UpdateDrawFrame() {
         // clip. kViewport resets here every frame; only Screen::Town's 2D
         // branch (DrawTownScreen) widens it, for that frame only.
         kViewport = kViewportDefault;
-        g_landscapePage=IsMenuScreen(state.screen) || (state.screen==Screen::Town && !state.town3DView);
+        g_landscapePage=IsMenuScreen(state.screen) || (state.screen==Screen::Town && !state.town3DView) || (state.screen==Screen::Wilderness && !state.wild3DView);
         screenW=g_landscapePage ? 960:kScreenW;screenH=g_landscapePage ? 540:kScreenH;
         if (state.screen != Screen::Character) g_pdTryOn.reset();
         if (state.screen == Screen::Character) PaperdollRenderPass(state); // the 3D body for the paperdoll
