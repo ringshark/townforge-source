@@ -2405,10 +2405,11 @@ static void DrawVirtualJoystick() {
     if (!g_joystickActive) {
         if(g_landscapeWorld && !g_landscapeDialog) {
             // A quiet resting stick makes the movement zone discoverable on touch.
-            DrawCircleV({85,815},54,Color{12,22,29,90});
-            DrawCircleLines(85,815,54,Color{159,174,175,105});
-            DrawCircleV({85,815},22,Color{184,196,191,70});
-            for(Vector2 p:std::vector<Vector2>{{85,774},{126,815},{85,856},{44,815}})DrawCircleV(p,2,Color{210,200,165,130});
+            float y=g_landscapePage?kViewport.y+kViewport.height-85:815;
+            DrawCircleV({85,y},54,Color{12,22,29,90});
+            DrawCircleLines(85,(int)y,54,Color{159,174,175,105});
+            DrawCircleV({85,y},22,Color{184,196,191,70});
+            for(Vector2 p:std::vector<Vector2>{{85,y-41},{126,y},{85,y+41},{44,y}})DrawCircleV(p,2,Color{210,200,165,130});
         }
         return;
     }
@@ -9847,6 +9848,11 @@ static const std::array<WildernessDungeonEntrance, 6> kWildernessDungeonEntrance
 static Vector2 WildernessMonsterLivePos(int idx, float worldTime);
 static float RollWildRespawn();
 static const GameState::ActiveMonster* FindWildExtra(const GameState& s, int spotIdx);
+static bool g_openWorld2D = false;
+static int OpenTownAt(Vector2 p);
+static bool InOutdoorTown(const GameState& s) {
+    return s.screen==Screen::Town || (s.screen==Screen::Wilderness && !s.wild3DView && OpenTownAt(s.wildernessPlayerPos)>=0);
+}
 static bool WildBlocked(Vector2 p);
 static void WildTerrainResolve(Vector2& pos, Vector2 prev);
 
@@ -11278,7 +11284,7 @@ static int DrawCombatHotbarRow(const GameState& s, bool inCombat, const float* s
     // and a cold blue cast when you can't afford it. Tap/keys behave as before.
     int tapped = -1;
     const bool compact=inCombat && g_landscapeWorld && !g_landscapeDialog;
-    if(compact){x=300;y=770;}
+    if(compact){x=g_landscapePage?520.f:300.f;y=g_landscapePage?410.f:770.f;}
     Vector2 mouse = GetMousePosition();
     const int n = (int)s.combatHotbar.size();
     const float slotW = compact?48.0f:72.0f;
@@ -11689,7 +11695,7 @@ static void DrawLiveCombatQuickItems(GameState& s, int oocZone = -1) {
     // Belt pouch (2026-09-26): bandages and heal potions as framed slots in the
     // spell bar's style, stack counts in the corner. Out of combat (oocZone >= 0,
     // 2026-09-27) it also carries your heal spell, and only shows while you're hurt.
-    float y = kViewport.y + kViewport.height - (oocZone<0 ? 294.0f:146.0f);
+    float y = g_landscapePage ? 450.f:kViewport.y + kViewport.height - (oocZone<0 ? 294.0f:146.0f);
     std::vector<int> potions;
     if (s.poisonT > 0.0f) // (2026-09-29) poisoned: your best cure comes first
         for (size_t i = 0; i < s.potions.size() && potions.empty(); i++)
@@ -17898,6 +17904,7 @@ static bool WildBlockedPt(Vector2 p) { return (WildTerrainAt(p.x, p.y) & (kWTWat
 // you stop on the bank instead of visibly standing in the water.
 static const float kWildFootR = 14.0f;
 static bool WildBlocked(Vector2 p) {
+    if (g_openWorld2D && OpenTownAt(p) >= 0) return false;
     return WildBlockedPt(p) || WildBlockedPt({ p.x + kWildFootR, p.y }) || WildBlockedPt({ p.x - kWildFootR, p.y }) ||
            WildBlockedPt({ p.x, p.y + kWildFootR }) || WildBlockedPt({ p.x, p.y - kWildFootR });
 }
@@ -18074,8 +18081,17 @@ static void WildMapEnsureTexture() {
             px[y * N + x] = WildMapGroundColor((x + 0.5f) / k, (y + 0.5f) / k);
     WildMapPaintExtras(&img, k);
     // Forest and rock dressing as darker blobs, so woods read on the map.
-    Wild3DBuildDressing();
-    WildMapPaintDressing(&img, k);
+    if(!g_openWorld2D) {
+        Wild3DBuildDressing();
+        WildMapPaintDressing(&img,k);
+    } else {
+        // The 2D map never needs the 3D prop models or their texture atlas.
+        for(int y=0;y<68;y++)for(int x=0;x<68;x++) {
+            Vector2 p={(x+.5f)*86,(y+.5f)*86};
+            if(tf2dart::Noise(x*13+4,y*7+3)<.22f && OpenTownAt(p)<0 && !WildBlocked(p))
+                ImageDrawCircleV(&img,{p.x*k,p.y*k},2,Color{62,91,57,255});
+        }
+    }
     // Roads (same segments the 3D ground bakes).
     Color road = { 214, 190, 136, 255 };
     auto seg = [&](Vector2 a, Vector2 b) {
@@ -18331,16 +18347,9 @@ static bool IsMenuScreen(Screen sc) {
            sc == Screen::MinersGuild || sc == Screen::Refuge || sc == Screen::Guide;
 }
 static bool ExploreHeaderCollapsed(const GameState& s) {
-    // (2026-10-18) Town now collapses in 2D too, not just 3D - see the
-    // Screen::Town 2D-wide block in DrawTownScreen and the g_landscapePage
-    // wiring in UpdateDrawFrame for the matching render-target change this
-    // depends on. Wilderness/Interior are NOT done yet - deliberately still
-    // gated on their own 3DView flag (unchanged, original behavior) so they
-    // aren't regressed by this change; they need the same treatment as a
-    // separate follow-up before they'd be safe to flip too.
-    return (s.screen == Screen::Town) ||
-           (s.screen == Screen::Wilderness && s.wild3DView) ||
-           (s.screen == Screen::Interior && s.interior3DView) || s.screen == Screen::Blackwake || IsMenuScreen(s.screen);
+    // Both outdoor views use the compact navigation. 2D shares a native landscape page.
+    return s.screen==Screen::Town || s.screen==Screen::Wilderness ||
+        (s.screen==Screen::Interior && s.interior3DView) || s.screen==Screen::Blackwake || IsMenuScreen(s.screen);
 }
 static const Rectangle kCompactMenuBtn = { 20, 56, 104, 48 };
 static Rectangle CompactMenuPanelRect(bool inDungeon) {
@@ -21691,6 +21700,36 @@ static Vector2 GateLocal(Vector2 p, Vector2 gate, Vector2 f) {
 static Vector2 GateWorld(Vector2 l, Vector2 gate, Vector2 f) {
     return { gate.x + l.x * f.y + l.y * f.x, gate.y - l.x * f.x + l.y * f.y };
 }
+static constexpr float kOpenTownScale = .36f;
+static constexpr float kOpenTownDepth = 550.0f;
+static constexpr float kOpenTownApron = 60.0f;
+static constexpr float kOpenCoastalTownScale = .30f;
+static constexpr float kOpenTownHalfW = 286.f;
+static float OpenTownScale(int ti) {return ti==1?kOpenCoastalTownScale:kOpenTownScale;}
+static float OpenTownDepth(int ti) {
+    Vector2 g=kTownGates[ti].wildernessPos,f=TownGateFacing(ti);
+    float d=kOpenTownDepth;
+    if(fabsf(f.x)>.001f) d=std::min(d,((f.x>0?g.x:kWildernessWorldSize-g.x)-kPlayerEdgeMargin-kOpenTownHalfW*fabsf(f.y))/fabsf(f.x));
+    if(fabsf(f.y)>.001f) d=std::min(d,((f.y>0?g.y:kWildernessWorldSize-g.y)-kPlayerEdgeMargin-kOpenTownHalfW*fabsf(f.x))/fabsf(f.y));
+    return d;
+}
+static Vector2 OpenTownWorld(int ti, Vector2 p) {
+    Vector2 l = {(p.x - kWildernessGatePos.x) * OpenTownScale(ti),
+                 (p.y - kWildernessGatePos.y) * OpenTownScale(ti) - kOpenTownApron};
+    return GateWorld(l, kTownGates[ti].wildernessPos, TownGateFacing(ti));
+}
+static Vector2 OpenTownLocal(int ti, Vector2 p) {
+    Vector2 l = GateLocal(p, kTownGates[ti].wildernessPos, TownGateFacing(ti));
+    return {l.x / OpenTownScale(ti) + kWildernessGatePos.x,
+            (l.y + kOpenTownApron) / OpenTownScale(ti) + kWildernessGatePos.y};
+}
+static int OpenTownAt(Vector2 p) {
+    for (int ti=0;ti<4;ti++) {
+        Vector2 l=GateLocal(p,kTownGates[ti].wildernessPos,TownGateFacing(ti));
+        if(fabsf(l.x)<280 && l.y<35 && l.y>-OpenTownDepth(ti)) return ti;
+    }
+    return -1;
+}
 static void GateCollide(Vector2& p, Vector2 gate, Vector2 f) {
     Vector2 l = GateLocal(p, gate, f);
     const float r = 17.0f; // kPlayerRadius
@@ -21714,6 +21753,7 @@ static Vector2 TownGateFacing(int townIdx);
 static const float kCompoundHalfW = 286.0f;
 static float TownCompoundBaseDepth(int ti) { static const float d[4] = { 340.0f, 360.0f, 250.0f, 320.0f }; return d[std::clamp(ti, 0, 3)]; }
 static float TownCompoundDepth(const GameState& s, int ti) {
+    if (g_openWorld2D) return OpenTownDepth(ti);
     float D = TownCompoundBaseDepth(ti);
     if (s.housePlotIdx >= 0 && s.housePlotIdx < (int)kHousePlots.size()) {
         const HousePlot& hp = kHousePlots[(size_t)s.housePlotIdx];
@@ -27711,7 +27751,18 @@ static void DrawPolishedTownBuilding(Vector2 pos, const Texture2D& tex,
     if(near && !sub.empty())DrawWorldLabel(sub,{pos.x,foot+38},11,Color{238,205,135,255});
 }
 
+static void DrawWildernessScreen(GameState& s, int screenW, int screenH);
 static void DrawTownScreen(GameState& s, int screenW, int screenH) {
+    if (!s.town3DView) {
+        g_openWorld2D=true;
+        s.wildernessPlayerPos=OpenTownWorld(std::clamp(s.selectedTown,0,3),s.townPlayerPos);
+        for(const auto& node:ActiveTownNodes(s.selectedTown))
+            ResolveCircleCollision(s.wildernessPlayerPos,kPlayerRadius,OpenTownWorld(s.selectedTown,node.pos),35.f);
+        s.wild3DView=false; s.screen=Screen::Wilderness;
+        DrawWildernessScreen(s,screenW,screenH);
+        return;
+    }
+    g_openWorld2D=false;
     // 2D-wide mode (2026-10-18): fill the whole 960x540 page target instead
     // of the old fixed 540x790 portrait box - screenW/screenH are already
     // 960x540 here (see the g_landscapePage wiring in UpdateDrawFrame). This
@@ -32979,7 +33030,7 @@ static void UpdateStarterProgress(GameState& s) {
     s.starterPrevPos = me; s.starterPrevScreen = s.screen; s.starterHasPrev = world;
     switch (s.starterStep) {
         case kStWalk: if (s.starterWalked >= 220.0f) StarterBegin(s, kStGate); break;
-        case kStGate: if (s.screen == Screen::Wilderness) StarterBegin(s, kStGather); break;
+        case kStGate: if (s.screen == Screen::Wilderness && !InOutdoorTown(s)) StarterBegin(s, kStGather); break;
         case kStGather: if (s.wood + s.ore > s.starterBase) { s.starterLooted = 0; StarterBegin(s, kStFight); } break;
         case kStFight: if (s.starterKills > s.starterBase) {
             // Corpse auto-open can let a quick player loot before this update.
@@ -32987,7 +33038,7 @@ static void UpdateStarterProgress(GameState& s) {
         } break;
         case kStLoot: if (s.starterLooted > s.starterBase) StarterBegin(s, kStPack); break;
         case kStPack: if (s.screen == Screen::Character && g_characterPack) StarterBegin(s, kStReturn); break;
-        case kStReturn: if (s.screen == Screen::Town) StarterComplete(s); break;
+        case kStReturn: if (InOutdoorTown(s)) StarterComplete(s); break;
         default: break;
     }
 }
@@ -32995,9 +33046,9 @@ static void UpdateStarterProgress(GameState& s) {
 static bool StarterTarget(GameState& s, Vector2* out) {
     auto nearest = [&](Vector2 me, auto&& each) { float bd = 1e9f; bool ok = false; each([&](Vector2 p, float bias) {
         float d = Dist(me, p) + bias; if (d < bd) { bd = d; *out = p; ok = true; } }); return ok; };
-    if (s.screen == Screen::Town) {
+    if (InOutdoorTown(s)) {
         Vector2 me = s.townPlayerPos;
-        if (s.starterStep == kStGate || s.starterStep == kStGather || s.starterStep == kStFight || s.starterStep == kStLoot) { *out = kWildernessGatePos; return true; }
+        if (s.starterStep == kStGate || s.starterStep == kStGather || s.starterStep == kStFight || s.starterStep == kStLoot) { *out = s.screen==Screen::Wilderness?kTownGates[s.selectedTown].wildernessPos:kWildernessGatePos; return true; }
         return false;
     }
     if (s.screen == Screen::Wilderness) {
@@ -33146,7 +33197,7 @@ static void UpdateDrawStarter(GameState& s, int screenW, int screenH) {
         Vector2 me = s.screen == Screen::Wilderness ? s.wildernessPlayerPos : s.townPlayerPos;
         card.direction = TextFormat("Gold marker: %d paces %s", (int)(Dist(me, target)/10), CompassWord(me, target).c_str());
     }
-    if (s.starterAccepted && s.screen == Screen::Town && (s.starterStep == kStGather || s.starterStep == kStFight || s.starterStep == kStLoot)) {
+    if (s.starterAccepted && InOutdoorTown(s) && (s.starterStep == kStGather || s.starterStep == kStFight || s.starterStep == kStLoot)) {
         card.goal = "Your expedition continues outside town. Follow the gold marker back to the gate.";
         card.hint = "Walk close, tap WILDERNESS or press E. Your saved objective continues outside.";
     } else if (s.starterAccepted && s.screen == Screen::Interior) {
@@ -33606,7 +33657,33 @@ static void EnforceDuelInvariants(GameState& s) {
     }
 }
 
+#include "open_world_2d.h"
 static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
+    g_openWorld2D=!s.wild3DView;
+    if(g_openWorld2D) kViewport={0,0,(float)screenW,(float)screenH};
+    const int outdoorTown=g_openWorld2D?OpenTownAt(s.wildernessPlayerPos):-1;
+    static int previousOutdoorTown=-1;
+    if(outdoorTown>=0 && previousOutdoorTown<0) {
+        s.wildEngaged.reset();s.wildExtraAttackers.clear();s.flagTarget.reset();
+        s.rivalAutoEngage=false;
+        for(auto& blade:s.blades)blade.autoEngage=false;
+        if(!s.playerIsGhost) {
+            s.hp=s.maxHp;s.mana=MaxMana(s);s.poisonT=0;s.poisonLvl=0;
+            for(auto& pet:s.pets)if(pet.hp>0){pet.hp=pet.maxHp;pet.mana=pet.maxMana;}
+            if(s.autoReagents && s.reagents<30) {
+                int buy=std::min(30-s.reagents,s.gold);s.gold-=buy;s.reagents+=buy;
+            }
+        }
+        ZoneArrive(ActiveTownName(outdoorTown));
+    }
+    previousOutdoorTown=outdoorTown;
+    if(outdoorTown>=0) {
+        if(s.selectedTown!=outdoorTown)s.greetedNPC.reset();
+        s.selectedTown=outdoorTown;
+        s.townPlayerPos=OpenTownLocal(outdoorTown,s.wildernessPlayerPos);
+        MarkTownVisited(s,outdoorTown);
+    }
+
     // House designer overlay takes over the whole screen while open.
     if (s.houseDesignerOpen) { DrawHouseDesigner(s, screenW, screenH); return; }
     if (GetTouchPointCount() > 0) g_touchSeen = true; // latch: TARGET button appears on touch devices
@@ -33614,7 +33691,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // Phase 0: HUD region label - always visible, flips live as the player crosses
     // a boundary. Top-center pill, clear of the target frame (left) and HUD buttons.
     {
-        const char* regionName = RegionName(RegionAt(s.wildernessPlayerPos));
+        const char* regionName = outdoorTown>=0?ActiveTownName(outdoorTown):RegionName(RegionAt(s.wildernessPlayerPos));
         int w = MeasureUIText(regionName, 16);
         int sx = (int)(kViewport.x + (kViewport.width - w) / 2);
         DrawRectangle(sx - 10, 106, w + 20, 26, Fade(BLACK, 0.45f));
@@ -33712,7 +33789,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // --- Nearest interactable: gather nodes, creature spots, monster spots, and the
     // return gate all compete in one search, same pattern as the Wilderness Gate vs.
     // buildings in Town.
-    enum class WildNodeKind { Gather, Creature, Monster, Rival, Blade, Innocent, ReturnGate, DungeonEntrance, Town2Gate, Town3Gate, Town4Gate, HousePlot, Shrine, Refuge, Settlement }; // Phase 6: Shrine + Refuge
+    enum class WildNodeKind { TownBuilding, TownNPC, Gather, Creature, Monster, Rival, Blade, Innocent, ReturnGate, DungeonEntrance, Town2Gate, Town3Gate, Town4Gate, HousePlot, Shrine, Refuge, Settlement }; // Phase 6: Shrine + Refuge
     WildNodeKind nearestKind = WildNodeKind::ReturnGate;
     int nearestIdx = -1;
     float nearestDist = 1e9f;
@@ -33757,22 +33834,22 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         float d = Dist(s.wildernessPlayerPos, kWildernessDungeonEntrances[i].pos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::DungeonEntrance; nearestIdx = (int)i; }
     }
-    {
+    if(s.wild3DView) {
         float d = Dist(s.wildernessPlayerPos, kWildernessReturnGatePos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::ReturnGate; nearestIdx = -1; }
     }
-    {
+    if(s.wild3DView) {
         // Gate to Town 2 (2026-09-22, "second town" plan) - a genuine walk out from
         // the Town 1 area, same pattern as kWildernessDungeonEntrances.
         float d = Dist(s.wildernessPlayerPos, kWildernessTown2GatePos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Town2Gate; nearestIdx = -1; }
     }
-    {
+    if(s.wild3DView) {
         // Gate to Town 3 / Frostmere (Phase 3) - same pattern as the Town 2 gate.
         float d = Dist(s.wildernessPlayerPos, kWildernessTown3GatePos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Town3Gate; nearestIdx = -1; }
     }
-    {
+    if(s.wild3DView) {
         // Gate to Town 4 / Cragmoor (Phase 4) - same pattern as the Town 3 gate.
         float d = Dist(s.wildernessPlayerPos, kWildernessTown4GatePos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Town4Gate; nearestIdx = -1; }
@@ -33805,6 +33882,19 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         float d = Dist(s.wildernessPlayerPos, kOutlawRefuge);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Refuge; nearestIdx = -1; }
     }
+    if(outdoorTown>=0) {
+        nearestDist=1e9f;
+        auto nodes=ActiveTownNodes(outdoorTown);
+        for(int i=0;i<(int)nodes.n;i++) {
+            float d=Dist(s.wildernessPlayerPos,OpenTownWorld(outdoorTown,nodes.begin()[i].pos));
+            if(d<nearestDist){nearestDist=d;nearestIdx=i;nearestKind=WildNodeKind::TownBuilding;}
+        }
+        const auto& npcs=ActiveTownNPCs(outdoorTown);
+        for(int i=0;i<(int)npcs.size();i++) {
+            float d=Dist(s.wildernessPlayerPos,OpenTownWorld(outdoorTown,TownNPCLivePos(i,s.worldTime,outdoorTown)));
+            if(d<nearestDist){nearestDist=d;nearestIdx=i;nearestKind=WildNodeKind::TownNPC;}
+        }
+    }
     bool inRange = nearestDist < kNodeRadius + kInteractRange;
 
     // Engaging a monster now starts a *live* fight (GameState::ActiveMonster) instead
@@ -33812,6 +33902,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // above kWildernessMonsterSpots. Same monsterMaxHP() formula StartCombat uses
     // (level*3) for starting HP.
     auto tryEngageWildMonster = [&](int idx) {
+        if(outdoorTown>=0)return;
         if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
         SpringFromHiding(s); // (2026-09-28) only you can start a fight while hidden
         if (s.wildSpotRespawn[idx] > 0.0f) return; // empty - waiting to respawn
@@ -33826,6 +33917,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         s.logLine = "You engage the " + spot.name + "!";
     };
     auto tryEngageRival = [&]() {
+        if(outdoorTown>=0)return;
         if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
         GameState::ActiveMonster am;
         am.spotIdx = -1;
@@ -33839,6 +33931,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         s.logLine = RivalEpithetName(s) + " turns to face you!";
     };
     auto tryEngageBlade = [&](int bi) {
+        if(outdoorTown>=0)return;
         if (s.playerIsGhost || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
         GameState::ActiveMonster am;
         am.spotIdx = -1;
@@ -34448,7 +34541,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         s.vigorT = 0.0f;
         ZoneArrive(kDungeons[(size_t)idx].name);
     };
-    auto enterTown = [&](int t) { // through a gate into a town (2026-09-27: shared + arrival fade)
+    auto enterTown = [&](int t) { // 2D gates are a real passage in the current world.
+        if(g_openWorld2D) {s.logLine=std::string("Walk through the arch into ")+ActiveTownName(t)+".";return;}
         CancelEscort(s, "parts ways at the gate - the escort is broken.");
         s.selectedTown = t;
         WalkTargetClear();
@@ -34463,7 +34557,11 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         // may pray for resurrection. Everything else stays hands-off for ghosts.
         bool shrineForGhost = s.playerIsGhost && nearestKind == WildNodeKind::Shrine;
         if ((s.playerIsGhost && !shrineForGhost) || s.playerDeathAnimT > 0.0f) { s.logLine = kGhostNoTouch; return; }
-        if (nearestKind == WildNodeKind::Gather) TryStartGather(s, kWildernessGatherNodes[nearestIdx].resource, 3.0f); // (2026-09-27) was 5s
+        if(nearestKind==WildNodeKind::TownBuilding) {
+            EnterInterior(s,ActiveTownNodes(outdoorTown).begin()[nearestIdx].key);
+        } else if(nearestKind==WildNodeKind::TownNPC) {
+            s.greetedNPC=s.greetedNPC?std::nullopt:std::make_optional(nearestIdx);
+        } else if (nearestKind == WildNodeKind::Gather) TryStartGather(s, kWildernessGatherNodes[nearestIdx].resource, 3.0f); // (2026-09-27) was 5s
         else if (nearestKind == WildNodeKind::Creature) TryStartTameAttempt(s, kWildernessCreatureSpots[nearestIdx].creatureIdx);
         else if (nearestKind == WildNodeKind::Monster) tryEngageWildMonster(nearestIdx);
         else if (nearestKind == WildNodeKind::Rival) tryEngageRival();
@@ -34535,7 +34633,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                                : s.wildEngaged->bladeIdx >= 0 ? BladeName(s.wildEngaged->bladeIdx)
                                : kWildernessMonsterSpots[s.wildEngaged->spotIdx].name);
     } else if (inRange) {
-        if (nearestKind == WildNodeKind::Gather) {
+        if(nearestKind==WildNodeKind::TownBuilding) prompt="[E] Enter "+TileNameFor(ActiveTownNodes(outdoorTown).begin()[nearestIdx].key);
+        else if(nearestKind==WildNodeKind::TownNPC) prompt="[E] Greet "+ActiveTownNPCs(outdoorTown)[nearestIdx].name;
+        else if (nearestKind == WildNodeKind::Gather) {
             const std::string& res = kWildernessGatherNodes[nearestIdx].resource;
             prompt = (res == "fish") ? "[E] Catch fish" : (res == "richore" ? "[E] Mine rich ore" : "[E] Gather " + res);
         }
@@ -34571,7 +34671,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 
     // No movement during the death animation - the body isn't going anywhere.
     const Vector2 wildPrevPos = s.wildernessPlayerPos; // for the terrain check below (2026-09-26)
-    if (s.playerDeathAnimT <= 0.0f) {
+    if (s.playerDeathAnimT <= 0.0f && !s.selectedTile && !s.greetedNPC) {
         bool moved = UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GameDt() * SettleTravelMult(s), kWildernessWorldSize, s.wild3DView ? -g_t3dYawSm : 0.0f); // Stable (2026-09-27)
         StealthTick(s, GameDt(), moved); // Hiding & Stealth (2026-09-28)
         TreasureTick(s, GameDt(), moved); // digging and lock picking (2026-09-28)
@@ -34598,9 +34698,11 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     }
     UpdateLiveSpellFX(s, GameDt()); // combat anim timers, projectiles, debuffs, fiend
     for (auto& node : kWildernessGatherNodes)
-        ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, node.pos, kNodeRadius * 0.7f);
+        if(!g_openWorld2D || OpenTownAt(node.pos)<0)
+            ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, node.pos, kNodeRadius * 0.7f);
     for (auto& spot : kWildernessCreatureSpots)
-        ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, spot.pos, kNodeRadius * 0.8f);
+        if(!g_openWorld2D || OpenTownAt(spot.pos)<0)
+            ResolveCircleCollision(s.wildernessPlayerPos, kPlayerRadius, spot.pos, kNodeRadius * 0.8f);
     g_foesNear = false;
     for (size_t i = 0; i < kWildernessMonsterSpots.size(); i++) {
         // The engaged one collides against its live position (below); the others
@@ -34613,6 +34715,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         if (s.wildEngaged.has_value() && s.wildEngaged->spotIdx == (int)i) continue;
         if (FindWildExtra(s, (int)i)) continue; // pack member: it's already on you (tap it to fight it)
         Vector2 livePos = WildernessMonsterLivePos((int)i, s.worldTime);
+        if(g_openWorld2D && (outdoorTown>=0 || OpenTownAt(livePos)>=0))continue;
         if (Dist(s.wildernessPlayerPos, livePos) < 220.0f && ThreatOf(s, kWildernessMonsterSpots[i].level) != kThreatTrivial) g_foesNear = true;
         if (!s.hidden && // hidden (2026-09-28): it doesn't see you, even up close
             !s.wildEngaged.has_value() && s.wildExtraAttackers.empty() && // with a pack on you, you choose (tap-to-target)
@@ -34664,7 +34767,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         for (int ti = 0; ti < (int)kTownGates.size() && s.screen == Screen::Wilderness; ti++) {
             Vector2 g = kTownGates[(size_t)ti].wildernessPos, f = TownGateFacing(ti);
             Vector2 now = GateLocal(s.wildernessPlayerPos, g, f), prev = GateLocal(wildPrevPos, g, f);
-            if (fabsf(now.x) < 34.0f && prev.y >= -4.0f && now.y < -4.0f) enterTown(ti); // crossed the gate line, town side
+            if (s.wild3DView && fabsf(now.x) < 34.0f && prev.y >= -4.0f && now.y < -4.0f) enterTown(ti); // crossed the gate line, town side
         }
     }
     // Custom house blocks movement (2026-09-25; Housing 2.0: roofed, so every cell is solid -
@@ -34685,9 +34788,10 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     OrcFortResolve(s.wildernessPlayerPos, kPlayerRadius);     // Grimtusk Hold's walls
     SettleResolve(s, s.wildernessPlayerPos, kPlayerRadius);    // your settlement's buildings and palisade (2026-09-27)
     WyrmLairResolve(s.wildernessPlayerPos, kPlayerRadius);     // the Cinder Caldera's crags
-    if(!s.wild3DView) { // 3D uses the open passage in GateCollide, not a solid portal disc
-        for(const auto& gate:kTownGates)
-            ResolveCircleCollision(s.wildernessPlayerPos,kPlayerRadius,gate.wildernessPos,kNodeRadius);
+    // Both views use the walkable arch in GateCollide; no solid portal disc.
+    if(outdoorTown>=0) {
+        for(const auto& node:ActiveTownNodes(outdoorTown))
+            ResolveCircleCollision(s.wildernessPlayerPos,kPlayerRadius,OpenTownWorld(outdoorTown,node.pos),35.f);
     }
     s.wildernessPlayerPos = ClampToWorld(s.wildernessPlayerPos, kPlayerEdgeMargin, kWildernessWorldSize);
     // Trees, rocks, mountains and camp props (3D view; ghosts pass through).
@@ -34742,30 +34846,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     if (s.wild3DView) { DrawWilderness3DWorld(s, screenW, screenH, prompt); } else {
     BeginScissorMode((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height);
     Vector2 camera = CameraTopLeft(s.wildernessPlayerPos, kWildernessWorldSize);
-    DrawTiledGround(g_assets.groundGrassOk ? &g_assets.groundGrass : nullptr, kViewport, camera, 48.0f,
-                      Color{ 170, 188, 148, 255 }); // a shade greener/wilder than Town's tended-grass tint
-
-    // Phase 0 region visuals (2D): light ground washes per region + thin boundary
-    // lines, so crossing a region reads on the map. Full biomes arrive in Phases 2-4.
-    {
-        auto washRect = [&](float x, float y, float w, float h, Color c) {
-            Vector2 tl = WorldToScreen({ x, y }, camera);
-            DrawRectangle((int)tl.x, (int)tl.y, (int)w, (int)h, c);
-        };
-        const float WS = kWildernessWorldSize;
-        const float F = 700.0f * kWS, C = 1950.0f * kWS, P = 500.0f * kWS; // region lines (1.5x map)
-        washRect(0, 0, WS, F, Color{ 228, 238, 248, 120 });         // Frostwastes: snow (Phase 3)
-        washRect(C, F, WS - C, WS - F, Color{ 216, 196, 150, 36 }); // Salt Coast: sandy wash
-        washRect(0, F, P, WS - F, Color{ 138, 136, 130, 80 });  // Stonepeaks: granite (Phase 4)
-        Color boundCol = Color{ 90, 70, 50, 110 };
-        Vector2 b1a = WorldToScreen({ 0, F }, camera), b1b = WorldToScreen({ WS, F }, camera);
-        Vector2 b2a = WorldToScreen({ C, F }, camera), b2b = WorldToScreen({ C, WS }, camera);
-        Vector2 b3a = WorldToScreen({ P, F }, camera), b3b = WorldToScreen({ P, WS }, camera);
-        DrawLineEx(b1a, b1b, 3.0f, boundCol);
-        DrawLineEx(b2a, b2b, 3.0f, boundCol);
-        DrawLineEx(b3a, b3b, 3.0f, boundCol);
-    }
-
+    OpenWildGround(camera);
     // The King's Road (Phase 0): drawn as a proper waypoint polyline in both views.
     // 2026-09-26: the whole road network (King's Road + curving branch roads,
     // which replaced the straight gate-to-entrance spokes), then the terrain
@@ -34788,9 +34869,13 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         WildDraw2DTerrainOverlay(camera);
     }
 
+    OpenWildWater(camera,s.worldTime);
+    OpenTownDraw(s,camera,false);
+    OpenWildScenery(s,camera,false);
     // Decorative bush/fern scatter - drawn first (no collision) so nodes layer on top of
     // any incidental overlap. CraftPix "Rocks & Bushes", same license as the tame-spot art.
     for (const WildernessFoliage& f : kWildernessFoliage) {
+        if(OpenTownAt(f.pos)>=0)continue;
         const Texture2D* icon = WildFoliageIcon(f.variant);
         if (!icon) continue;
         Vector2 screenPos = WorldToScreen(f.pos, camera);
@@ -35072,29 +35157,18 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         Vector2 screenPos = WorldToScreen(kOutlawRefuge, camera);
         DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 60, 50, 70, 255 }, "Outlaw Refuge", near, "No questions asked");
     }
-    {
-        bool near = nearestKind == WildNodeKind::ReturnGate && inRange;
-        Vector2 screenPos = WorldToScreen(kWildernessReturnGatePos, camera);
-        DrawWorldNode(screenPos, kNodeRadius * 0.8f, kColorPanelBg, "Emberhold Gate", near);
-    }
-    {
-        // Gate to Town 2 (2026-09-22) - same treatment as the Town 1 gate just above,
-        // out in the newly added Wilderness space (kWildernessTown2GatePos).
-        bool near = nearestKind == WildNodeKind::Town2Gate && inRange;
-        Vector2 screenPos = WorldToScreen(kWildernessTown2GatePos, camera);
-        DrawWorldNode(screenPos, kNodeRadius * 0.9f, Color{ 140, 148, 156, 255 }, kTown2Name, near, "Coastal trade port");
-    }
-    {
-        // Gate to Town 3 / Frostmere (Phase 3) - same treatment as the Town 2 gate.
-        bool near = nearestKind == WildNodeKind::Town3Gate && inRange;
-        Vector2 screenPos = WorldToScreen(kWildernessTown3GatePos, camera);
-        DrawWorldNode(screenPos, kNodeRadius * 0.9f, Color{ 200, 218, 232, 255 }, kTown3Name, near, "Frozen northern town");
-    }
-    {
-        // Gate to Town 4 / Cragmoor (Phase 4) - same treatment as the Town 3 gate.
-        bool near = nearestKind == WildNodeKind::Town4Gate && inRange;
-        Vector2 screenPos = WorldToScreen(kWildernessTown4GatePos, camera);
-        DrawWorldNode(screenPos, kNodeRadius * 0.9f, Color{ 150, 142, 128, 255 }, kTown4Name, near, "Mountain mining town");
+    for(int ti=0;ti<4;ti++) {
+        Vector2 gate=kTownGates[ti].wildernessPos,f=TownGateFacing(ti);
+        for(int side:{-1,1}) {
+            Vector2 p=WorldToScreen(GateWorld({side*56.f,-8},gate,f),camera);
+            tf2dart::Shadow(p,24,8,.2f);
+            DrawRectangleRounded({p.x-21,p.y-58,42,64},.08f,3,Color{100,104,91,255});
+            DrawRectangleRounded({p.x-18,p.y-58,32,58},.08f,3,Color{166,164,140,255});
+            for(int row=0;row<4;row++)DrawLineEx({p.x-18,p.y-45+row*14.f},{p.x+14,p.y-45+row*14.f},1,Color{121,124,107,255});
+            DrawRectangle((int)p.x-25,(int)p.y-64,50,9,Color{188,181,151,255});
+        }
+        if(Dist(gate,s.wildernessPlayerPos)<200)
+            DrawWorldLabel(ActiveTownName(ti),WorldToScreen(GateWorld({0,-20},gate,f),camera),14,Color{244,224,170,255});
     }
     // AI companion (2026-09-23): now renders as a real animated creature instead of a
     // colored circle, via WildCreatureSheetForRole - see that function's comment for
@@ -35136,8 +35210,22 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     Wild2DClickFlag(s, camera, screenW, screenH); // tap a monster to flag it
     DrawFlagMarker2D(s, camera, 0);
     DrawSpellFX2D(s, camera, 0);
+    OpenTownDraw(s,camera,true);
+    OpenWildScenery(s,camera,true);
+    float night=std::clamp((.62f-T3DLightAt(T3DLocalTimeOfDay()).sunI)/.34f,0.f,1.f);
+    DrawRectangleRec(kViewport,Fade(Color{10,18,36,255},night*.30f));
     EndScissorMode();
     } // end else: 2D world view (3D renders via DrawWilderness3DWorld above)
+    if(g_openWorld2D && !s.exploreMenuOpen) {
+        Rectangle hud={20,76,160,48};
+        DrawRectangleRounded(hud,.15f,4,Fade(Color{19,27,29,255},.85f));
+        DrawUIText(TextFormat("HP %d / %d",s.hp,s.maxHp),28,82,12,Color{232,225,197,255});
+        DrawRectangle(28,99,144,5,Color{55,48,42,255});
+        DrawRectangle(28,99,(int)(144.f*s.hp/std::max(1,s.maxHp)),5,Color{103,151,91,255});
+        DrawRectangle(28,110,144,5,Color{32,44,58,255});
+        DrawRectangle(28,110,(int)(144.f*s.mana/std::max(1.f,MaxMana(s))),5,Color{95,151,185,255});
+        UIRegister(hud);
+    }
     DrawVirtualJoystick();
     DrawTargetFrame(s, 0); // shared by the 2D and 3D views (tap it to cycle targets)
     DrawWyrmFrame(s, screenW); // the world boss's three heads (2026-09-27)
@@ -35236,6 +35324,17 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             }
         }
     }
+    if(outdoorTown>=0) {
+        DrawBuildingDetailPanel(s,screenW);
+        if(s.greetedNPC && *s.greetedNPC<(int)ActiveTownNPCs(outdoorTown).size()) {
+            const auto& npc=ActiveTownNPCs(outdoorTown)[*s.greetedNPC];
+            Rectangle r={20,170,(float)screenW-40,100};
+            DrawRectangleRounded(r,.06f,8,Fade(kColorPageBg,.97f));
+            DrawUIText(npc.name.c_str(),36,184,16,kColorHeading);
+            DrawUIText(npc.greeting.c_str(),36,212,13,kColorText);
+            if(Button({r.x+r.width-64,r.y+62,44,26},"X",true))s.greetedNPC.reset();
+        }
+    } else s.greetedNPC.reset();
     DrawHotbarPicker(s, screenW, screenH, false);
 
     // Event journal (2026-09-25): LOG button + L key, collapsible panel.
@@ -35545,7 +35644,7 @@ static void DrawLandscapeMainMenu(GameState& s,bool& open,bool inDungeon) {
     if(card(10,"Settings","Options & cloud saves",!DenFighting())){page(Screen::House);g_optOpen=true;}
     if(card(11,"Help","Controls & how to play",enabled)){page(Screen::Guide);s.guidePage=0;}
     DrawLine(28,447,932,447,Color{104,86,59,255});
-    bool ferry=enabled && (s.screen==Screen::Town || s.screen==Screen::Blackwake);
+    bool ferry=enabled && (InOutdoorTown(s) || s.screen==Screen::Blackwake);
     if(inDungeon) {
         if(LandscapeMenuCard({652,461,280,54},"Leave dungeon","Magery recall",!s.playerIsGhost && s.playerDeathAnimT<=0 && s.leaveDungT<0)) {TryStartLeaveDungeon(s);open=false;}
     } else if(ferry) {
@@ -35613,7 +35712,7 @@ static void DrawLandscapePageHeader(GameState& s,bool& open) {
 static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
     g_uiShieldBypass = true; // this panel's own buttons sit inside the shield
     if(g_landscapeActive && open){DrawLandscapeMainMenu(s,open,inDungeon);g_uiShieldBypass=false;return;}
-    if(g_landscapePage && s.screen==Screen::Town) {
+    if(g_landscapePage && IsPlayScreen(s.screen)) {
         if(Button({20,20,112,48},"MENU",true))open=true;
         g_uiShieldBypass=false;return;
     }
@@ -35668,7 +35767,7 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
         if(Button({wide ? 360.0f:x1,y,w,h},"Return to World",true)) { s.screen=g_playScreen; open=false; }
         DrawUIText("Gear, pack and skills are in Character. Help and saves are in Settings.",24,wide ? 346:352,12,kColorText);
         DrawUIText("Your equipped gear stays visible on your character in the world.",24,373,12,kColorText);
-        if(Button({24,wide ? 282.0f:410.0f,wide && inDungeon ? 236.0f:492.0f,wide ? 48.0f:52.0f},s.screen==Screen::Blackwake ? "Ferry back to Saltmere":"Visit Blackwake Den",tabsEnabled && (s.screen==Screen::Town || s.screen==Screen::Blackwake))) {
+        if(Button({24,wide ? 282.0f:410.0f,wide && inDungeon ? 236.0f:492.0f,wide ? 48.0f:52.0f},s.screen==Screen::Blackwake ? "Ferry back to Saltmere":"Visit Blackwake Den",tabsEnabled && (InOutdoorTown(s) || s.screen==Screen::Blackwake))) {
             if(s.screen==Screen::Blackwake) {s.screen=Screen::Town;s.selectedTown=1;s.townPlayerPos=TS(450,830);}
             else {s.screen=Screen::Blackwake;s.townPlayerPos={750,1250};}
             g_denPanel=0;open=false;WalkTargetClear();
@@ -41245,6 +41344,16 @@ static void UpdateDrawToasts(GameState& s, int screenW, int screenH, bool play) 
 // see main()) can reach them; there's exactly one of each for the process's lifetime
 // either way, so file-scope statics cost nothing bar naming a global.
 static GameState g_state;
+#ifdef __EMSCRIPTEN__
+extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_OutdoorState() {
+    const auto& s=g_state;
+    Vector2 g=kTownGates[std::clamp(s.selectedTown,0,3)].wildernessPos;
+    Vector2 f=TownGateFacing(s.selectedTown);
+    return TextFormat("{\"screen\":%d,\"outdoor\":%s,\"town\":%d,\"x\":%.3f,\"y\":%.3f,\"gx\":%.3f,\"gy\":%.3f,\"fx\":%.4f,\"fy\":%.4f}",
+        (int)s.screen,s.screen==Screen::Wilderness?"true":"false",OpenTownAt(s.wildernessPlayerPos),s.wildernessPlayerPos.x,s.wildernessPlayerPos.y,g.x,g.y,f.x,f.y);
+}
+#endif
+
 static const int kScreenW = 540;
 static const int kScreenH = 900;
 static float g_autosaveTimer = 0.0f;
@@ -41279,7 +41388,7 @@ static int LandscapeDialogOpen(const GameState& s) {
     // Only panels rendered by this screen may switch the world into a scroll page.
     // A remembered journal, town greeting or home workshop is invisible elsewhere.
     if (IsMenuScreen(s.screen)) return 1;
-    const bool town = s.screen == Screen::Town;
+    const bool town = InOutdoorTown(s);
     const bool wild = s.screen == Screen::Wilderness;
     const bool hunt = s.screen == Screen::Hunt;
     const bool interior = s.screen == Screen::Interior;
@@ -41510,8 +41619,8 @@ static void UpdateDrawFrame() {
         // panel (ESC); movement (WASD/arrows) and interaction (E) are handled inside
         // DrawTownScreen itself, since they need the frame's nearest-node lookup. ---
             if (kVariantView == 0 && IsKeyPressed(KEY_V)) state.optClassic2D = !state.optClassic2D; // (2026-09-28) unadvertised: Options holds the switch
-        if (!encounterPending && state.screen == Screen::Town) {
-            if (IsKeyPressed(KEY_ESCAPE)) state.selectedTile.reset();
+        if (!encounterPending && InOutdoorTown(state)) {
+            if (IsKeyPressed(KEY_ESCAPE)) {state.selectedTile.reset();state.greetedNPC.reset();}
         }
         if (!encounterPending && state.screen == Screen::Wilderness) {
             if (IsKeyPressed(KEY_M)) { // minimap toggle
@@ -41565,7 +41674,7 @@ static void UpdateDrawFrame() {
         // clip. kViewport resets here every frame; only Screen::Town's 2D
         // branch (DrawTownScreen) widens it, for that frame only.
         kViewport = kViewportDefault;
-        g_landscapePage=IsMenuScreen(state.screen) || (state.screen==Screen::Town && !state.town3DView);
+        g_landscapePage=IsMenuScreen(state.screen) || (state.screen==Screen::Town && !state.town3DView) || (state.screen==Screen::Wilderness && !state.wild3DView);
         screenW=g_landscapePage ? 960:kScreenW;screenH=g_landscapePage ? 540:kScreenH;
         if (state.screen != Screen::Character) g_pdTryOn.reset();
         if (state.screen == Screen::Character) PaperdollRenderPass(state); // the 3D body for the paperdoll
@@ -41811,6 +41920,8 @@ static void UpdateDrawFrame() {
 }
 
 static void CleanupAndClose() {
+    if(g_openWildGround.id)UnloadTexture(g_openWildGround);
+
     GameState& state = g_state;
     tf2dart::Unload();
     SaveGame(state); // final save on quit

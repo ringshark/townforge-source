@@ -130,7 +130,7 @@ GameState o;int gold=o.gold,bandages=o.bandages;
 UpdateStarterProgress(o);o.townPlayerPos.x+=300;UpdateStarterProgress(o);assert(o.starterStep==kStWalk);
 o.starterAccepted=true;UpdateStarterProgress(o);
 for(int i=0;i<6;i++){o.townPlayerPos.x+=40;UpdateStarterProgress(o);}assert(o.starterStep==kStGate);
-o.screen=Screen::Wilderness;UpdateStarterProgress(o);assert(o.starterStep==kStGather);
+o.screen=Screen::Wilderness;o.wildernessPlayerPos=TownWildernessSpawn(0);UpdateStarterProgress(o);assert(o.starterStep==kStGather);
 UpdateStarterProgress(o);assert(o.starterStep==kStGather);o.wood++;UpdateStarterProgress(o);assert(o.starterStep==kStFight);
 GameState::WorldCorpse corpse{};corpse.zone=1;corpse.spotIdx=0;corpse.name="Test bat";
 AddWorldCorpse(o,corpse);UpdateStarterProgress(o);assert(o.starterStep==kStFight);o.worldCorpses.clear();
