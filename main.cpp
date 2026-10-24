@@ -1511,7 +1511,9 @@ struct CommissionDeed { int building = 0; int recipe = 0; int amount = 10; int f
 static const int kCommissionMax = 6;
 static const float kCommissionCooldown = 600.0f; // a new order per workshop every ten minutes of play
 
+#include "homestead_life.h"
 struct GameState {
+    tflife::State life;
     int gold = 100;
     int wood = 10;
     int ore = 0;
@@ -4993,9 +4995,9 @@ static GameState* g_skillOwner = nullptr; // the player's state (set in main)
 // mastery; the last point to 100 fills out level 99's bar. XP follows RuneScape's own
 // table (83 XP for level 2 ... 13,034,431 for 99), so early levels fly by and the
 // numbers climb the way RS players expect. No total cap: every skill can reach 99.
-static const int kSkillKeyCount = 37; // 0-28 kCappedSkills, 29-32 gathering, 33-36 crafting
-static const char* kExtraSkillLabels[8] = { "Lumberjacking", "Mining", "Fishing", "Skinning",
-                                            "Blacksmithing", "Carpentry", "Tailoring", "Alchemy" };
+static const int kSkillKeyCount = 38; // 0-28 kCappedSkills, 29-32 gathering, 33-36 crafting
+static const char* kExtraSkillLabels[9] = { "Lumberjacking", "Mining", "Fishing", "Skinning",
+                                            "Blacksmithing", "Carpentry", "Tailoring", "Alchemy", "Farming" };
 static const char* SkillKeyLabel(int key) {
     if (key >= 0 && key < (int)kCappedSkills.size()) return kCappedSkills[(size_t)key].label;
     if (key >= 29 && key < kSkillKeyCount) return kExtraSkillLabels[key - 29];
@@ -5006,6 +5008,7 @@ static float* SkillKeyPtr(GameState& s, int key) {
     switch (key) {
         case 29: return &s.lumberjacking; case 30: return &s.mining; case 31: return &s.fishing; case 32: return &s.skinning;
         case 33: case 34: case 35: case 36: return &s.buildingSkill[(size_t)(key - 33)];
+        case 37: return &s.life.farming;
     }
     return nullptr;
 }
@@ -7932,6 +7935,7 @@ static void SaveGame(const GameState& s) {
     out << "hearthBound=" << (s.hearthBound ? 1 : 0) << "\n";
     out << "wildHouseMigrated=" << (s.wildHouseMigrated ? 1 : 0) << "\n";
     out << "houseStyle=" << s.houseWallStyle << "," << s.houseFloorStyle << "," << s.houseRoofStyle << "\n";
+    out << "homesteadLife=" << tflife::Save(s.life,(long long)std::time(nullptr)) << "\n";
     out << "houseFurnished=" << (s.houseFurnished ? 1 : 0) << "\n";
     out << "houseDecor.count=" << s.houseDecor.size() << "\n";
     for (size_t i = 0; i < s.houseDecor.size(); i++) { // by name, so the catalog can grow and reorder
@@ -8186,6 +8190,7 @@ static bool LoadGame(GameState& s) {
                 s.houseRoofStyle = std::clamp(r, 0, kHouseRoofStyleCount - 1);
             }
         }
+        else if (key == "homesteadLife") tflife::Load(s.life,val,(long long)std::time(nullptr));
         else if (key == "houseFurnished") s.houseFurnished = val == "1";
         else if (key == "houseDecor.count") s.houseDecor.clear();
         else if (key.rfind("houseDecor.", 0) == 0) {
@@ -8502,6 +8507,7 @@ static bool LoadGame(GameState& s) {
         s.housePlotIdx = -1;
         s.houseLayout.clear();
     }
+    if(s.life.farm && (s.housePlotIdx<0 || s.life.x<80 || s.life.y<80 || s.life.x>kWildernessWorldSize-80 || s.life.y>kWildernessWorldSize-80))s.life.farm=false;
     if (s.housePlotIdx >= 0 && !HouseLayoutValid(s.houseLayout, kHousePlots[s.housePlotIdx].cells))
         s.houseLayout = HouseEmptyLayout(kHousePlots[s.housePlotIdx].cells);
     // (storage is no longer trimmed on load - chests add capacity; an over-full house just can't take more)
@@ -33018,6 +33024,8 @@ static void DrawJournalUI(GameState& s, Rectangle buttonRect, bool visible) {
 // One concept per page, short plain lines; the overlay and the tab share
 // the same pages so the tab reopens exactly what the walkthrough showed.
 // ---------------------------------------------------------------------
+#include "homestead_life_game.h"
+
 static const int kGuidePageCount = 5;
 static const char* kGuideTitles[5] = {
     "1. Move around",
@@ -33164,7 +33172,7 @@ static void DrawWildernessHousePlots2D(const GameState& s, Vector2 camera, bool 
                 Rectangle r = { cp.x - cs / 2, cp.y - cs / 2, cs, cs };
                 // Housing 2.0: seen from above it's the roof, walls along the outline,
                 // glass on window cells and the door on its outward side.
-                DrawTexturePro(SurfTex(kHouseRoofSurfs[s.houseRoofStyle]), { cc.x * 2.0f, cc.y * 2.0f, cs * 2.0f, cs * 2.0f }, r, { 0, 0 }, 0, WHITE);
+                DrawTexturePro(SurfTex(kHouseRoofSurfs[s.houseRoofStyle]), { cc.x * 2.0f, cc.y * 2.0f, cs * 2.0f, cs * 2.0f }, r, { 0, 0 }, 0, s.life.condition<30 ? Color{183,176,151,255}:WHITE);
                 const int dx4[4] = { 0, 0, -1, 1 }, dy4[4] = { -1, 1, 0, 0 };
                 for (int k = 0; k < 4; k++) {
                     if (HouseCellAt(s.houseLayout, cells, cx + dx4[k], cy + dy4[k]) != '.') continue;
@@ -33839,7 +33847,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // --- Nearest interactable: gather nodes, creature spots, monster spots, and the
     // return gate all compete in one search, same pattern as the Wilderness Gate vs.
     // buildings in Town.
-    enum class WildNodeKind { TownBuilding, TownNPC, Gather, Creature, Monster, Rival, Blade, Innocent, ReturnGate, DungeonEntrance, Town2Gate, Town3Gate, Town4Gate, HousePlot, Shrine, Refuge, Settlement }; // Phase 6: Shrine + Refuge
+    enum class WildNodeKind { TownBuilding, TownNPC, Gather, Creature, Monster, Rival, Blade, Innocent, ReturnGate, DungeonEntrance, Town2Gate, Town3Gate, Town4Gate, HousePlot, Shrine, Refuge, Settlement, Farm }; // Phase 6: Shrine + Refuge
     WildNodeKind nearestKind = WildNodeKind::ReturnGate;
     int nearestIdx = -1;
     float nearestDist = 1e9f;
@@ -33910,6 +33918,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         float d = Dist(s.wildernessPlayerPos, HousePlotInteractPos(s, (int)pi));
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::HousePlot; nearestIdx = (int)pi; }
     }
+    if(s.life.farm){float d=Dist(s.wildernessPlayerPos,{s.life.x,s.life.y});if(d<nearestDist){nearestDist=d;nearestKind=WildNodeKind::Farm;nearestIdx=0;}}
     // Settlement buildings (2026-10-05): walk up to one you've actually built (or
     // that's mid-construction) and manage/collect it directly, same as every other
     // world object here - no more opening the Settlement gump just to collect wood.
@@ -34628,6 +34637,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
                 else { s.houseDesignerOpen = true; s.houseDemolishArmed = false; PlaySfx(SfxId::Click); }
             } else TryBuyHousePlot(s, pi);
         }
+        else if (nearestKind == WildNodeKind::Farm) {
+            g_playScreen=Screen::Wilderness;MenuGoScreen(s,Screen::House);g_farmOpen=true;
+        }
         else if (nearestKind == WildNodeKind::Settlement) {
             // Collecting is the one-tap case; anything else (upgrade/repair/assign
             // settlers) still needs the full gump, just opened straight to it.
@@ -34700,6 +34712,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         else if (nearestKind == WildNodeKind::Town2Gate) prompt = "[E] Enter " + std::string(kTown2Name);
         else if (nearestKind == WildNodeKind::Town3Gate) prompt = "[E] Enter " + std::string(kTown3Name);
         else if (nearestKind == WildNodeKind::Town4Gate) prompt = "[E] Enter " + std::string(kTown4Name); // Phase 4
+        else if (nearestKind == WildNodeKind::Farm) prompt="[E] Tend home farm";
         else if (nearestKind == WildNodeKind::HousePlot)
             prompt = "[E] " + HousePlotPrompt(s.housePlotIdx, s.houseLayout, nearestIdx);
         else if (nearestKind == WildNodeKind::Shrine) // Phase 6
@@ -34937,6 +34950,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 
     // Housing plots (2026-09-25) - for-sale signs on unowned plots, custom houses
     // on owned ones. Drawn after foliage so houses layer on top of it.
+    DrawFarmWorld(s,camera);
     DrawWildernessHousePlots2D(s, camera,
         inRange && nearestKind == WildNodeKind::HousePlot, nearestIdx);
 
@@ -35562,7 +35576,7 @@ static void MenuGoScreen(GameState& s, Screen t) {
     g_pdTryOn.reset();
     if (t == Screen::Craft) GuardZoneConfiscateIfMurderer(s, t);
     s.screen = t;
-    if (t == Screen::House) { g_settleOpen = false; g_warOpen = false; g_tmapOpen = false; g_optOpen = false; g_questOpen = false; }
+    if (t == Screen::House) { g_farmOpen=false; g_settleOpen = false; g_warOpen = false; g_tmapOpen = false; g_optOpen = false; g_questOpen = false; }
     int g = MenuGroupOf(t);
     if (g >= 0 && g < 3 && MenuGroupOf(s.screen) == g) g_menuGroupLast[g] = s.screen;
 }
@@ -35718,7 +35732,7 @@ static const char* LandscapePageTitle(const GameState& s) {
         case Screen::Bank:return "Bank";case Screen::Guide:return "Help";
         case Screen::Provisioner:return "Provisioner";case Screen::FurTrader:return "Fur trader";
         case Screen::MinersGuild:return "Miners' Guild";case Screen::Refuge:return "Outlaw refuge";
-        case Screen::House:return g_optOpen ? "Settings":g_questOpen ? "Journal":g_warOpen ? "Guild":g_tmapOpen ? "Treasure maps":g_settleOpen ? "Settlement":"Home";
+        case Screen::House:return g_farmOpen ? "Home farm":g_optOpen ? "Settings":g_questOpen ? "Journal":g_warOpen ? "Guild":g_tmapOpen ? "Treasure maps":g_settleOpen ? "Settlement":"Home";
         default:return "Town Forge";
     }
 }
@@ -35753,6 +35767,7 @@ static void DrawLandscapePageHeader(GameState& s,bool& open) {
                        : s.screen==Screen::Bank ? "Move items between your backpack and vault."
                        : s.screen==Screen::Skills ? "Progress comes from using your skills."
                        : s.screen==Screen::Pets ? "Browse creatures on the left. Manage companions on the right."
+                       : s.screen==Screen::House && g_farmOpen ? "Plant, water and harvest at your farm. Ship produce or prepare supplies."
                        : s.screen==Screen::House && g_warOpen ? "Choose a guild section from the list."
                        : s.screen==Screen::House && g_optOpen ? "Your preferences are saved automatically."
                        : s.screen==Screen::House && g_questOpen ? "Quests, rewards, treasure maps and your adventure history."
@@ -40049,6 +40064,7 @@ static void DrawOptions(GameState& s, int screenW, int screenH) {
     content=y+26-start;UIEndScissorMode();
 }
 static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
+    if(g_farmOpen){DrawFarmScreen(s,screenW,screenH);return;}
     if(kHomesteadFocus){g_warOpen=false;g_settleOpen=false;}
     if (g_questOpen) { DrawQuestBoard(s, screenW, screenH); return; }
     if (g_optOpen) { DrawOptions(s, screenW, screenH); return; }
@@ -40060,6 +40076,9 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
 
     int y = 116;
     DrawUIText("Your Home", 20, y, 18, kColorHeading); (void)tier;
+    if(Button({(float)screenW-168,112,148,44},"Farm",HomeLifeQuiet(s)))g_farmOpen=true;
+    if(Button({(float)screenW-336,112,148,44},"Care / 5 wood",s.housePlotIdx>=0 && s.wood>=5 && s.life.condition<100))if(!TryMaintainHome(s))s.logLine="Visit your homestead to maintain it.";
+
     y += g_landscapePage ? 58:24;
 
     // Name entry - same always-live pattern as the Character screen's name field.
@@ -40076,8 +40095,8 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     }
     y += g_landscapePage ? 56:32;
 
-    DrawUIText(TextFormat("Backpack capacity: %d (base %d, earned bonuses retained)",
-                            BackpackCap(s), GameState::kBackpackCap), 20, y, 12, kColorText);
+    DrawUIText(TextFormat("Home condition %.0f%% / Farming %.0f / Backpack %d",
+                            s.life.condition,s.life.farming,BackpackCap(s)), 20, y, 12, kColorText);
     y += 22;
 
     // --- Homestead (2026-09-25): your wilderness plot and house.
@@ -40128,13 +40147,15 @@ static void DrawHouseScreen(GameState& s, int screenW, int screenH) {
     for (int m = 0; m < 4; m++) {
         int lv = HomeWingLevel(s,m);
         DrawUIText(kHomeModuleDefs[m].label.c_str(),workshopX,y,13,kColorText);
-        std::string detail=lv>0 ? TextFormat("Level %d - skill cap %d",lv,kHomeModuleLevels[lv-1].cap):"Build your own crafting station";
+        std::string detail=(s.life.additions&(1<<m)) ? TextFormat("Level %d - skill cap %d",lv,kHomeModuleLevels[lv-1].cap):TextFormat("50 skill / 150g / %dw %do %dl",kHomeWingWood[m],kHomeWingOre[m],kHomeWingLeather[m]);
         DrawUIText(detail.c_str(),workshopX,y+20,11,Fade(kColorText,.75f));
+        bool built=(s.life.additions&(1<<m))!=0;
         int cost=lv<5 ? kHomeModuleLevels[lv].cost:0;
-        std::string action=lv>=5 ? "Fully upgraded":TextFormat("%s %dg",lv ? "Upgrade":"Build",cost);
-        bool enabled=s.housePlotIdx>=0 && lv<5 && CanAfford(s,cost);
+        std::string action=!built ? (s.buildingSkill[m]<50 ? TextFormat("Needs skill 50 (%.0f)",s.buildingSkill[m]):"Add wing / 150g") : lv>=5?"Fully upgraded":TextFormat("Upgrade %dg",cost);
+        bool enabled=s.housePlotIdx>=0 && HomeLifeQuiet(s) && (!built ? CanBuildHomeAddition(s,m) : lv<5) && CanAfford(s,!built?150:cost);
         if(Button({(float)screenW-168,(float)y+4,148,44},action,enabled)) {
-            if(lv==0)BuildHouseModule(s,m);else UpgradeHouseModule(s,m);
+            if(!built){if(!TryBuildHomeAddition(s,m))s.logLine="Wing needs 150 gold plus materials: smith 30w/15ore, carpenter 50w, tailor 20w/10leather, alchemist 25w/10ore.";}
+            else UpgradeHouseModule(s,m);
         }
         y+=58;
     }
@@ -40237,7 +40258,7 @@ static void DrawSkillsScreen(GameState& s, int screenW, int screenH) {
         { "Scouting & thievery", { 19, 21, 22, 15, 16, 17 } },
         { "Treasure hunting", { 24, 25 } },
         { "Bard", { 26, 27, 28 } },
-        { "Gathering", { 29, 30, 31, 32 } },
+        { "Gathering & farming", { 29, 30, 31, 32, 37 } },
         { "Crafting", { 33, 34, 35, 36 } },
     };
     const Color ink = kColorText, soft = Fade(kColorText, 0.72f), good = { 46, 120, 60, 255 };
@@ -41401,6 +41422,10 @@ static void UpdateDrawToasts(GameState& s, int screenW, int screenH, bool play) 
 // either way, so file-scope statics cost nothing bar naming a global.
 static GameState g_state;
 #ifdef __EMSCRIPTEN__
+extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_HomesteadState() {
+    const auto& s=g_state;const auto& b=s.life.beds[0];
+    return TextFormat("{\"farm\":%s,\"open\":%s,\"seeds\":%d,\"produce\":%d,\"crop\":%d,\"watered\":%s,\"growth\":%.2f,\"additions\":%d,\"farming\":%.2f,\"gold\":%d}",s.life.farm?"true":"false",g_farmOpen?"true":"false",s.life.seeds[0],s.life.produce[0],b.crop,b.watered?"true":"false",b.growth,s.life.additions,s.life.farming,s.gold);
+}
 extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_OutdoorState() {
     const auto& s=g_state;
     Vector2 g=kTownGates[std::clamp(s.selectedTown,0,3)].wildernessPos;
@@ -41537,6 +41562,7 @@ static void UpdateDrawFrame() {
 
         // --- Update ---
         UpdateGathering(state, dt);
+        TickHomesteadLife(state,dt);
         UpdateUpgrade(state, dt);
         RegenMana(state, dt);
         MountTick(state); // (2026-09-28, #74)

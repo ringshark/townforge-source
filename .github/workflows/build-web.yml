@@ -54,6 +54,8 @@ jobs:
           /tmp/tf-art-test
           g++ -std=c++17 -I /tmp/raylib/src tests/world-visuals.cpp -o /tmp/tf-world-visuals
           /tmp/tf-world-visuals
+          g++ -std=c++17 tests/homestead-life.cpp -o /tmp/tf-homestead-life
+          /tmp/tf-homestead-life
           RAYLIB_DIR=/tmp/raylib python tests/avatar-motion.py
           RAYLIB_DIR=/tmp/raylib python tests/landscape-menus.py
       - name: Build game

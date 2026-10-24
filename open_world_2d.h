@@ -51,7 +51,8 @@ static void OpenWildScenery(const GameState& s,Vector2 camera,bool foreground) {
         Vector2 w={(x+.15f+tf2dart::Noise(x,y)*.7f)*kOpenSceneryCell,
                    (y+.15f+tf2dart::Noise(y,x)*.7f)*kOpenSceneryCell};
         if(w.x>=kWildernessWorldSize || w.y>=kWildernessWorldSize ||
-           OpenTownAt(w)>=0 || WildBlocked(w) || OpenNearRoad(w))continue;
+           OpenTownAt(w)>=0 || WildBlocked(w) || OpenNearRoad(w) ||
+           (s.life.farm && Dist(w,{s.life.x,s.life.y})<150))continue;
         // Keep harvest nodes, creatures, dungeon doors and homes legible and clear.
         bool clear=true;
         for(const auto& node:kWildernessGatherNodes)if(Dist(w,node.pos)<80){clear=false;break;}
