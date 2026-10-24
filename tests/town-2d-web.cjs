@@ -30,6 +30,13 @@ function changed(a,b){a=PNG.sync.read(a);b=PNG.sync.read(b);let n=0;for(let i=0;
    // The render target stays 960x540 inside the physical canvas; map its letterbox.
    const rect=await canvas.boundingBox();
    const scale=Math.min(rect.width/960,rect.height/540);
+   const map=PNG.sync.read(await page.screenshot({clip:{
+       x:rect.x+(rect.width-960*scale)/2+830*scale,
+       y:rect.y+(rect.height-540*scale)/2+174*scale,
+       width:104*scale,height:104*scale}}));
+   let mapHigh=0,mapLow=255;
+   for(let i=0;i<map.data.length;i+=4){const v=Math.max(map.data[i],map.data[i+1],map.data[i+2]);mapHigh=Math.max(mapHigh,v);mapLow=Math.min(mapLow,v);}
+   assert(mapHigh>90 && mapHigh-mapLow>35,'native landscape minimap contains terrain instead of a blank panel');
    const x=rect.x+(rect.width-960*scale)/2+75*scale;
    const y=rect.y+(rect.height-540*scale)/2+43*scale;
    if(spec.hasTouch && engine==='chromium'){const client=await context.newCDPSession(page);await client.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y,id:1}]});await page.waitForTimeout(150);await client.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});}

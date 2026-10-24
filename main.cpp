@@ -33834,22 +33834,22 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         float d = Dist(s.wildernessPlayerPos, kWildernessDungeonEntrances[i].pos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::DungeonEntrance; nearestIdx = (int)i; }
     }
-    {
+    if(s.wild3DView) {
         float d = Dist(s.wildernessPlayerPos, kWildernessReturnGatePos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::ReturnGate; nearestIdx = -1; }
     }
-    {
+    if(s.wild3DView) {
         // Gate to Town 2 (2026-09-22, "second town" plan) - a genuine walk out from
         // the Town 1 area, same pattern as kWildernessDungeonEntrances.
         float d = Dist(s.wildernessPlayerPos, kWildernessTown2GatePos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Town2Gate; nearestIdx = -1; }
     }
-    {
+    if(s.wild3DView) {
         // Gate to Town 3 / Frostmere (Phase 3) - same pattern as the Town 2 gate.
         float d = Dist(s.wildernessPlayerPos, kWildernessTown3GatePos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Town3Gate; nearestIdx = -1; }
     }
-    {
+    if(s.wild3DView) {
         // Gate to Town 4 / Cragmoor (Phase 4) - same pattern as the Town 3 gate.
         float d = Dist(s.wildernessPlayerPos, kWildernessTown4GatePos);
         if (d < nearestDist) { nearestDist = d; nearestKind = WildNodeKind::Town4Gate; nearestIdx = -1; }

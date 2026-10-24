@@ -165,7 +165,7 @@ void ClearBackground(int){cleared=bound;}void SetTextureFilter(Texture,int){}
 RenderTexture2D LoadRenderTexture(int w,int h){return {2,{2,w,h}};}
 void rlMatrixMode(int){}void rlLoadIdentity(){}void rlOrtho(float,float,float,float,int,int){}
 enum{BLANK, TEXTURE_FILTER_BILINEAR, RL_PROJECTION, RL_MODELVIEW};
-bool g_landscapeActive=true,g_landscapeWorld=true,g_landscapeDialog=false,g_landscapeMap=false;
+bool g_landscapeActive=true,g_landscapeWorld=true,g_landscapeDialog=false,g_landscapeMap=false,g_landscapePage=false;
 Rectangle g_landscapeMapSource{},g_landscapeMapDest{};RenderTexture2D g_landscapeMapTarget{},g_landscapeNativeMenuTarget{};
 bool g_landscapeNativeMenu=false,g_landscapeNativeMenuDrawing=false;
 std::vector<RenderTexture2D> g_landscapeTargets;std::map<unsigned,Vector2> g_landscapeSceneSizes;
@@ -177,6 +177,9 @@ assert(bound==1 && g_landscapeTargets.size()==1 && g_landscapeMap);
 assert(g_landscapeMapDest.x==796 && g_landscapeMapDest.width==148 && g_landscapeMapDest.height==148);
 g_landscapeDialog=true;{LandscapeMapWidget map({388,152,148,148});assert(!map.active && bound==1);}
 assert(bound==1 && cleared==2);
+g_landscapeDialog=false;g_landscapePage=true;
+{LandscapeMapWidget map({814,158,136,136});assert(!map.active && bound==1);}
+g_landscapePage=false;
 {LandscapeRoomOverlay editor;assert(bound==2 && g_landscapeNativeMenu && g_landscapeNativeMenuDrawing);}
 assert(bound==1 && g_landscapeTargets.size()==1 && !g_landscapeNativeMenuDrawing);
 }

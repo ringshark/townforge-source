@@ -163,7 +163,7 @@ struct LandscapeRoomOverlay {
 // across the portrait HUD bands; its picking uses the same source/destination.
 struct LandscapeMapWidget {
     bool active;
-    LandscapeMapWidget(Rectangle source):active(g_landscapeActive && g_landscapeWorld && !g_landscapeDialog) {
+    LandscapeMapWidget(Rectangle source):active(g_landscapeActive && g_landscapeWorld && !g_landscapeDialog && !g_landscapePage) {
         if(!active)return;
         if(!g_landscapeMapTarget.id) {
             g_landscapeMapTarget=::LoadRenderTexture(540,900);
