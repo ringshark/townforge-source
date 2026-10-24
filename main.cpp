@@ -2747,6 +2747,8 @@ struct DirSpriteSheet {
 };
 
 #include "town_2d_art.h"
+#include "world_visuals_2d.h"
+static bool g_openWorld2D = false;
 
 struct GameAssets {
     Texture2D player{};
@@ -2963,7 +2965,17 @@ static void DrawWorldLabel(const std::string& text,Vector2 point,int size,Color 
 }
 
 static Texture2D TryLoadTexture(const std::string& path, bool& okOut) {
-    Texture2D t = LoadTexture(path.c_str());
+    Texture2D t{};
+    if(kVariantView!=3 && (path.find("assets/frostmere_buildings/")==0 ||
+                          path.find("assets/cragmoor_buildings/")==0)) {
+        // These exports use 70/109-alpha mattes instead of transparent margins.
+        // Clear those low-alpha pixels so rectangular plates don't tint the ground.
+        Image image=LoadImage(path.c_str());
+        if(image.data) {
+            ImageAlphaClear(&image,BLANK,.44f);
+            t=LoadTextureFromImage(image);UnloadImage(image);
+        }
+    } else t=LoadTexture(path.c_str());
     okOut = (t.id != 0);
     if (okOut) SetTextureFilter(t, TEXTURE_FILTER_POINT); // crisp pixel art, no blurring when scaled up
     return t;
@@ -3055,6 +3067,7 @@ static DirSpriteSheet LoadCarlActorSheet(const std::string& path, int cols, int 
         // a horizontally-mirrored read of Left's row, since no sheet has real Right art.
         sheet.rowMap = {0, 2, 2, 1};
         sheet.rowFlip = {false, false, true, false};
+        if(kVariantView!=3)tfworldart::Register(sheet.tex,path,sheet.frameW,sheet.frameH,srcRows,walkCols);
     }
     return sheet;
 }
@@ -4616,10 +4629,9 @@ static Rectangle ActorSrcRect(const DirSpriteSheet& sheet, Vector2 facing, Actor
     float fw = (float)sheet.frameW, fh = (float)sheet.frameH;
     int texRow = sheet.rowMap[row];
     bool flip = sheet.rowFlip[row];
-    // A negative source width tells raylib to sample the frame mirrored horizontally -
-    // start at the frame's right edge and read backwards - used for rows synthesized
-    // from another direction's art rather than physically flipped pixels on disk.
-    return { frame * fw + (flip ? fw : 0.0f), texRow * fh, flip ? -fw : fw, fh };
+    // Raylib flips the UVs inside this cell when width is negative; its x
+    // remains the LEFT edge. Advancing x sampled the next animation cell.
+    return { frame * fw, texRow * fh, flip ? -fw : fw, fh };
 }
 // Draws one DirSpriteSheet-backed actor frame centered on `center` at `size`, rotated
 // by `rotationDeg` around its own middle if given (dest.x/y is the rotation pivot in
@@ -4632,6 +4644,9 @@ static void DrawActorSprite(const DirSpriteSheet& sheet, Vector2 facing, ActorAn
                               Color tint = WHITE) {
     if (!sheet.ok) return;
     Rectangle src = ActorSrcRect(sheet, facing, anim, worldTime, fps);
+    if(g_openWorld2D && tfworldart::Find(sheet.tex.id)) {
+        tfworldart::Draw(sheet.tex,src,center,tint,1,rotationDeg);return;
+    }
     Rectangle dest = { center.x, center.y, size, size };
     Vector2 origin = { size / 2.0f, size / 2.0f };
     DrawTexturePro(sheet.tex, src, dest, origin, rotationDeg, tint);
@@ -4661,7 +4676,7 @@ static void DrawPlayer(const GameState& s, Vector2 screenPos, Vector2 facing, co
         const bool moving=AnyMoveKeyDown() || VirtualJoystickIsMoving() || g_walkOn;
         const int frame=moving && combatAnim==ActorAnim::Idle ? (int)(s.worldTime*kHeroWalkFps)%4:1;
         const float cw=g_assets.heroSheet.tex.width/4.f,ch=g_assets.heroSheet.tex.height/4.f;
-        const float size=kPlayerRadius*1.85f;
+        const float size=tfworldart::kHeroSize*visualScale;
         float bob=moving ? sinf(s.worldTime*12.f)*.5f*visualScale:0;
         float attack=combatAnim==ActorAnim::Attack ? sinf(s.worldTime*15.f)*22.f:0;
         Rectangle src=g_compactHeroFrames[row*4+frame];
@@ -9848,7 +9863,6 @@ static const std::array<WildernessDungeonEntrance, 6> kWildernessDungeonEntrance
 static Vector2 WildernessMonsterLivePos(int idx, float worldTime);
 static float RollWildRespawn();
 static const GameState::ActiveMonster* FindWildExtra(const GameState& s, int spotIdx);
-static bool g_openWorld2D = false;
 static int OpenTownAt(Vector2 p);
 static bool InOutdoorTown(const GameState& s) {
     return s.screen==Screen::Town || (s.screen==Screen::Wilderness && !s.wild3DView && OpenTownAt(s.wildernessPlayerPos)>=0);
@@ -10476,7 +10490,9 @@ static void DrawDyingWorldNode(Vector2 screenPos, float radius, const Texture2D*
     bool onScreen = screenPos.x > kViewport.x - radius * 2 && screenPos.x < kViewport.x + kViewport.width + radius * 2 &&
                      screenPos.y > kViewport.y - radius * 2 && screenPos.y < kViewport.y + kViewport.height + radius * 2;
     if (!onScreen || !icon) return;
-    if (iconSrcRect) DrawIconCenteredRect(*icon, *iconSrcRect, screenPos, radius * 1.5f * iconScaleMul, iconTint);
+    if(g_openWorld2D && iconSrcRect && tfworldart::Find(icon->id))
+        tfworldart::Draw(*icon,*iconSrcRect,screenPos,iconTint,iconScaleMul);
+    else if (iconSrcRect) DrawIconCenteredRect(*icon, *iconSrcRect, screenPos, radius * 1.5f * iconScaleMul, iconTint);
     else DrawIconCentered(*icon, screenPos, radius * 1.5f * iconScaleMul, iconTint);
 }
 
@@ -10769,6 +10785,19 @@ static void DrawWorldNode(Vector2 screenPos, float radius, Color color, const st
     bool onScreen = screenPos.x > kViewport.x - radius && screenPos.x < kViewport.x + kViewport.width + radius &&
                      screenPos.y > kViewport.y - radius && screenPos.y < kViewport.y + kViewport.height + radius;
     if (!onScreen) return;
+    if(g_openWorld2D && icon && iconSrcRect && tfworldart::Find(icon->id)) {
+        // Actor art has its own scale; the radius continues to serve interaction
+        // and combat only. Contextual labels keep the landscape readable.
+        Vector2 foot={screenPos.x,screenPos.y+12};
+        tf2dart::Shadow(foot,11,3,.18f);
+        if(nearPlayer)DrawEllipseLines((int)foot.x,(int)foot.y,18,6,Color{231,200,128,230});
+        tfworldart::Draw(*icon,*iconSrcRect,screenPos,iconTint);
+        if(nearPlayer) {
+            DrawWorldLabel(label,{screenPos.x,screenPos.y+32},11,Color{244,231,201,255});
+            if(!sublabel.empty())DrawWorldLabel(sublabel,{screenPos.x,screenPos.y+47},10,Color{207,207,188,255});
+        }
+        return;
+    }
     if (icon) {
         // Real art loaded (every dungeon monster) - show it directly with no colored
         // circle backdrop (a flat color disc behind the art was both visual clutter and
@@ -28286,7 +28315,8 @@ static void DrawWorldCorpses2D(const GameState& s, int zone, Vector2 camera) {
             const DirSpriteSheet& sheet = WildMonsterSheetFor(c.iconIdx);
             Rectangle src = ActorSrcRect(sheet, { 0, 1 }, ActorAnim::Idle, s.worldTime);
             Color tint = Fade(Color{ 90, 85, 80, 255 }, 0.75f * fade); // dark, drained, fading
-            DrawIconCenteredRect(sheet.tex, src, sp, kNodeRadius * 1.1f, tint);
+            if(g_openWorld2D)tfworldart::Draw(sheet.tex,src,sp,tint);
+            else DrawIconCenteredRect(sheet.tex, src, sp, kNodeRadius * 1.1f, tint);
         } else {
             DrawCircleV(sp, kNodeRadius * 0.5f, Fade(Color{ 70, 62, 58, 255 }, 0.8f * fade));
             DrawCircleLines((int)sp.x, (int)sp.y, kNodeRadius * 0.5f, Fade(Color{ 40, 36, 32, 255 }, 0.8f * fade));
@@ -31596,6 +31626,10 @@ static void DrawFlagMarker2D(const GameState& s, Vector2 camera, int zone) {
     Vector2 sp = WorldToScreen(tgt, camera);
     float pulse = 0.55f + 0.45f * sinf(s.worldTime * 6.0f);
     Color rc = Fade(Color{ 255, 60, 60, 255 }, pulse);
+    if(g_openWorld2D) {
+        DrawTriangle({sp.x,sp.y-40},{sp.x-5,sp.y-31},{sp.x+5,sp.y-31},rc);
+        DrawEllipseLines((int)sp.x,(int)sp.y+12,20,7,rc);return;
+    }
     DrawTriangle({ sp.x, sp.y - 66 }, { sp.x - 9, sp.y - 50 }, { sp.x + 9, sp.y - 50 }, rc);
     DrawCircleLines((int)sp.x, (int)sp.y, (int)(kNodeRadius * 0.85f + 8.0f + 3.0f * sinf(s.worldTime * 6.0f)), rc);
 }
@@ -34872,6 +34906,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     OpenWildWater(camera,s.worldTime);
     OpenTownDraw(s,camera,false);
     OpenWildScenery(s,camera,false);
+    OpenResourceTrees(s,camera,false);
     // Decorative bush/fern scatter - drawn first (no collision) so nodes layer on top of
     // any incidental overlap. CraftPix "Rocks & Bushes", same license as the tame-spot art.
     for (const WildernessFoliage& f : kWildernessFoliage) {
@@ -34893,6 +34928,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     for (size_t i = 0; i < kWildernessGatherNodes.size(); i++) {
         const WildernessGatherNode& node = kWildernessGatherNodes[i];
         bool isWood = node.resource == "wood";
+        if(isWood && tf2dart::scenery[0].id)continue; // foot-anchored and depth-layered by OpenResourceTrees
         bool isFish = node.resource == "fish"; // Phase 2: Salt Coast fishery
         bool isIce = node.resource == "ice";  // Phase 3: Frostwastes ice crystals
         bool isRichOre = node.resource == "richore"; // Phase 4: Stonepeaks rich ore vein
@@ -35027,7 +35063,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, inMelee, "");
         }
         float hpPct = std::clamp(s.wildEngaged->hp / s.wildEngaged->maxHp, 0.0f, 1.0f);
-        Rectangle hpBg = { screenPos.x - 30, screenPos.y - kNodeRadius * 0.7f - 26, 60, 8 };
+        Rectangle hpBg = { screenPos.x - 20, screenPos.y - 32, 40, 5 };
         DrawRectangleRec(hpBg, Fade(BLACK, 0.4f));
         DrawRectangleRec({ hpBg.x, hpBg.y, hpBg.width * hpPct, hpBg.height }, Color{ 122, 46, 46, 255 });
         DrawRectangleLinesEx(hpBg, 1.0f, Fade(RAYWHITE, 0.8f));
@@ -35212,6 +35248,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     DrawSpellFX2D(s, camera, 0);
     OpenTownDraw(s,camera,true);
     OpenWildScenery(s,camera,true);
+    OpenResourceTrees(s,camera,true);
     float night=std::clamp((.62f-T3DLightAt(T3DLocalTimeOfDay()).sunI)/.34f,0.f,1.f);
     DrawRectangleRec(kViewport,Fade(Color{10,18,36,255},night*.30f));
     EndScissorMode();
@@ -41921,6 +41958,7 @@ static void UpdateDrawFrame() {
 
 static void CleanupAndClose() {
     if(g_openWildGround.id)UnloadTexture(g_openWildGround);
+    for(auto& texture:g_openTownGround)if(texture.id)UnloadTexture(texture);
 
     GameState& state = g_state;
     tf2dart::Unload();
