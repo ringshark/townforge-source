@@ -111,12 +111,13 @@ void ClearBackground(Color){}void DrawRectangleGradientV(int,int,int,int,Color,C
 void DrawUIText(const char*,int,int,int,Color){}void LandscapePlate(Rectangle,Color){}
 const char* TextFormat(const char*,...){return "resources";}
 enum class SfxId{Click};void PlaySfx(SfxId){}
-enum class Screen{Town,Blackwake,Character,Skills,Magic,Craft,Pets,Bank,House,Guide};
+enum class Screen{Town,Blackwake,Character,Skills,Magic,Craft,Pets,Bank,House,Guide,Wilderness};
 struct GameState{
  Screen screen=Screen::Town;std::optional<int> combat;bool playerIsGhost=false;
  float playerDeathAnimT=0,leaveDungT=-1;int gold=100,wood=0,ore=0,leather=0,backpackScroll=0,selectedTown=0,guidePage=0;Vector2 townPlayerPos{};
 };
 bool g_characterPack=false,g_questOpen=false,g_optOpen=false,g_settleOpen=false;int g_pdSel=-1,g_questTab=0,g_guildTab=0,g_denPanel=0;
+bool InOutdoorTown(const GameState& s){return s.screen==Screen::Town;}
 Screen g_playScreen=Screen::Town;
 bool DenFighting(){return false;}
 void MenuGoScreen(GameState& s,Screen sc){s.screen=sc;g_questOpen=g_optOpen=false;}

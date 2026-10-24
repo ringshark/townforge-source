@@ -133,6 +133,7 @@ struct GameState {
  std::optional<int> selectedTile,greetedNPC,hotbarPickerSlot;
  int houseCraftModule=-1,openCorpseId=-1;
 };
+bool InOutdoorTown(const GameState& s){return s.screen==Screen::Town;}
 '''+selector+'''int main(){
 GameState s;assert(!LandscapeDialogOpen(s));
 '''
