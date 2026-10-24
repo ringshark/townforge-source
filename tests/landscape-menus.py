@@ -41,13 +41,13 @@ s.housePlotIdx=0;s.settle[kSbHall].level=3;
 reset();bool open=false;
 // Every native menu destination must preserve its action and fit the canvas.
 auto menuReset=[&](){reset();g_landscapePage=g_presentedPage=false;g_presentedNativeMenu=true;g_uiShieldBypass=true;open=true;s.screen=Screen::Town;};
-const Vector2 targets[]={{60,178},{60,250},{60,322},{60,394},{370,178},{370,250},{680,178},{680,250},{370,322},{370,394},{680,322},{680,394}};
-const Screen screens[]={Screen::Character,Screen::Character,Screen::Skills,Screen::Magic,Screen::Craft,Screen::Pets,Screen::Bank,Screen::House,Screen::House,Screen::House,Screen::House,Screen::Guide};
-for(int i=0;i<12;i++){
+const Vector2 targets[]={{60,178},{60,250},{60,322},{60,394},{370,178},{370,250},{680,178},{680,250},{370,322},{680,322},{370,394}};
+const Screen screens[]={Screen::Character,Screen::Character,Screen::Skills,Screen::Magic,Screen::Craft,Screen::Pets,Screen::House,Screen::Bank,Screen::House,Screen::House,Screen::Guide};
+for(int i=0;i<11;i++){
  menuReset();testPressed=true;testMouse=targets[i];DrawLandscapeMainMenu(s,open,false);
  assert(!open && s.screen==screens[i]);check("main menu destination");
  if(i==0)assert(!g_characterPack);if(i==1)assert(g_characterPack);
- if(i==8)assert(g_warOpen);if(i==9)assert(g_questOpen);if(i==10)assert(g_optOpen);
+ if(i==8)assert(g_questOpen);if(i==9)assert(g_optOpen);
 }
 menuReset();testPressed=true;testMouse={800,52};DrawLandscapeMainMenu(s,open,false);assert(!open && s.screen==Screen::Town);
 menuReset();s.playerIsGhost=true;testPressed=true;testMouse=targets[0];DrawLandscapeMainMenu(s,open,false);assert(open && s.screen==Screen::Town);s.playerIsGhost=false;
@@ -160,6 +160,30 @@ g_landscapeWorld=true;g_landscapeDialog=false;g_landscapePage=false;g_presentedP
 g_landscapeMapDest={796,92,148,148};g_landscapeMapSource={388,152,148,148};
 UpdateDrawStarter(field,540,900);LandscapePresent(UiFont(),g_uiRects);assert(g_presentedMap && g_presentedOpening); // minimap must not hide the objective
 std::cout<<"PASS opening: explicit start, movement, gathering, real kills/loot, missing-corpse recovery, backpack, return, saved progress, one-time reward and native input ownership"<<std::endl;
+
+
+// Retirement preserves saved progress and never charges upkeep for hidden systems.
+{
+GameState retired;retired.housePlotIdx=0;retired.gold=5000;retired.settleUpgrading=0;retired.settleUpgradeT=20;retired.settleRaidT=10;retired.settleEpoch=100;
+retired.guildName="Existing guild";retired.guildRecruits.push_back({"Miran",0,10,true});retired.guildWarOn[0]=true;
+SettleTick(retired,100);SettleCatchUp(retired);WarNetTick(retired,100);
+assert(retired.settleUpgradeT==20 && retired.settleRaidT==10 && retired.settleEpoch==100 && retired.gold==5000);
+assert(retired.guildRecruits[0].along && retired.guildWarOn[0] && !GuildWarActive(retired,0));
+assert(FollowersUsed(retired)==0); // archived recruits never occupy pet slots
+reset();g_warOpen=g_settleOpen=true;DrawHouseScreen(retired,960,540);assert(!g_warOpen && !g_settleOpen);check("homestead home");
+for(int i=0;i<4;i++){int gold=retired.gold;BuildHouseModule(retired,i);assert(retired.houseModuleLevel[i]==1 && retired.gold==gold-150);}
+int gold=retired.gold;BuildHouseModule(retired,0);assert(retired.gold==gold);
+retired.settle[kSbForge].level=6;assert(HomeWingLevel(retired,0)==3);
+UpgradeHouseModule(retired,0);assert(retired.houseModuleLevel[0]==4 && retired.gold==gold-600);
+GameState noPlot;noPlot.gold=10000;BuildHouseModule(noPlot,0);assert(noPlot.houseModuleLevel[0]==0 && noPlot.gold==10000);
+GameState poor;poor.housePlotIdx=0;poor.gold=1;BuildHouseModule(poor,0);assert(poor.houseModuleLevel[0]==0 && poor.gold==1);
+GameState complete;complete.housePlotIdx=0;complete.gold=10000;complete.houseModuleLevel[0]=5;UpgradeHouseModule(complete,0);assert(complete.gold==10000 && complete.houseModuleLevel[0]==5);
+SaveGame(retired);GameState restored;assert(LoadGame(restored));
+assert(restored.guildName==retired.guildName && restored.guildWarOn[0] && restored.guildRecruits.size()==1 && restored.guildRecruits[0].along);
+assert(restored.settle[kSbForge].level==6 && restored.houseModuleLevel[0]==4 && restored.gold==retired.gold);
+assert(restored.settleUpgrading==retired.settleUpgrading && restored.settleUpgradeT==retired.settleUpgradeT);
+std::cout<<"PASS homestead: archived management stays paused, no hidden wars or follower costs, direct workshops preserve inherited levels and enforce prices"<<std::endl;
+}
 
 }
 '''
