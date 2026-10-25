@@ -20,6 +20,7 @@ const engine=process.env.TF_BROWSER||'chromium';
    await page.screenshot({path:prefix+'-overview.png'});
    async function mapColor(wx,wy){const p=pos(153+wx*412/5760-3,76+wy*412/5760-3);const im=PNG.sync.read(await page.screenshot({clip:{x:p.x,y:p.y,width:6*scale,height:6*scale}}));const rgb=[0,0,0];for(let i=0;i<im.data.length;i+=4)for(let c=0;c<3;c++)rgb[c]+=im.data[i+c];return rgb.map(v=>v/(im.data.length/4));}
    const snow=await mapColor(800,500),lake=await mapColor(2610,4572);
+   console.log("ATLAS RASTER",await page.evaluate(()=>UTF8ToString(_TF_AtlasRasterState())),"screen",snow,lake);
    assert(snow[0]>165 && snow[1]>175,'northern snow renders as snow without corrupted horizontal bands');
    assert(lake[2]>lake[0]+20 && lake[1]>lake[0]+20,'Mirrormere renders as lake water');
    const before=await hero();await page.keyboard.down('w');await page.waitForTimeout(250);await page.keyboard.up('w');const after=await hero();

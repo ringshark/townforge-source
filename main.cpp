@@ -18095,6 +18095,8 @@ static Rectangle WorldMapPanelRect() { return { 12.0f, 118.0f, 516.0f, 600.0f };
 static bool g_worldMapJustOpened = false; // the opening tap must not also close it
 static Texture2D g_wildMapTex{};
 static bool g_wildMapTexBuilt = false;
+static Color g_mapSnowProbe{},g_mapLakeProbe{};
+static int g_mapFormatProbe=0;
 static void Wild3DBuildDressing();
 static void WildMapPaintDressing(Image* img, float pxPerUnit); // defined with the dressing
 static Color WildMapGroundColor(float x, float z) {
@@ -18154,6 +18156,9 @@ static void WildMapEnsureTexture() {
     WildTerrainEnsure();
     for (const auto& road : g_wtRoads)
         for (size_t i = 0; i + 1 < road.size(); i++) seg(road[i], road[i + 1]);
+    g_mapSnowProbe=((Color*)img.data)[(int)(500*k)*N+(int)(800*k)];
+    g_mapLakeProbe=((Color*)img.data)[(int)(4572*k)*N+(int)(2610*k)];
+    g_mapFormatProbe=img.format;
     g_wildMapTex = LoadTextureFromImage(img);
     UnloadImage(img);
     SetTextureFilter(g_wildMapTex, TEXTURE_FILTER_BILINEAR);
@@ -41456,6 +41461,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_OutdoorState() {
 extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_AtlasState() {
     return TextFormat("{\"open\":%s,\"zoom\":%.3f,\"cx\":%.2f,\"cy\":%.2f,\"filter\":%d,\"selected\":%d,\"waypoint\":%d}",g_state.worldMapOpen?"true":"false",tfatlas::view.zoom,tfatlas::view.center.x,tfatlas::view.center.y,tfatlas::filter,tfatlas::selected?tfatlas::selected->id:-1,tfatlas::waypoint?tfatlas::waypoint->id:-1);
 }
+extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_AtlasRasterState() {
+    auto logical=g_landscapeSceneSizes.find(g_wildMapTex.id);
+    return TextFormat("{\"snow\":[%d,%d,%d],\"lake\":[%d,%d,%d],\"format\":%d,\"tex\":[%d,%d,%d],\"logical\":[%.0f,%.0f],\"northFlags\":%d}",g_mapSnowProbe.r,g_mapSnowProbe.g,g_mapSnowProbe.b,g_mapLakeProbe.r,g_mapLakeProbe.g,g_mapLakeProbe.b,g_mapFormatProbe,g_wildMapTex.id,g_wildMapTex.width,g_wildMapTex.height,logical==g_landscapeSceneSizes.end()?0:logical->second.x,logical==g_landscapeSceneSizes.end()?0:logical->second.y,(int)WildTerrainAt(800,500));
+}
+
 #endif
 
 static const int kScreenW = 540;
