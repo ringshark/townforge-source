@@ -18095,11 +18095,13 @@ static Rectangle WorldMapPanelRect() { return { 12.0f, 118.0f, 516.0f, 600.0f };
 static bool g_worldMapJustOpened = false; // the opening tap must not also close it
 static Texture2D g_wildMapTex{};
 static bool g_wildMapTexBuilt = false;
+static Color g_mapSnowProbe{},g_mapLakeProbe{};
+static int g_mapFormatProbe=0;
 static void Wild3DBuildDressing();
 static void WildMapPaintDressing(Image* img, float pxPerUnit); // defined with the dressing
 static Color WildMapGroundColor(float x, float z) {
-    const Color whisper = { 118, 156, 92, 255 }, stone = { 150, 146, 132, 255 };
-    const Color frost = { 226, 234, 242, 255 }, coast = { 206, 190, 140, 255 };
+    const Color whisper = { 103, 133, 88, 255 }, stone = { 143, 148, 137, 255 };
+    const Color frost = { 213, 226, 230, 255 }, coast = { 196, 180, 133, 255 };
     auto base = [&](float px, float pz) -> Color {
         RegionId r = RegionAt({ px, pz });
         return r == RegionId::Frostwastes ? frost : r == RegionId::Stonepeaks ? stone
@@ -18113,16 +18115,22 @@ static Color WildMapGroundColor(float x, float z) {
     return { (unsigned char)(R / 5), (unsigned char)(G / 5), (unsigned char)(B / 5), 255 };
 }
 static void WildMapPaintExtras(Image* img, float pxPerUnit); // water etc. (terrain pass)
+#include "atlas_raster.h"
 static void WildMapEnsureTexture() {
     if (g_wildMapTexBuilt) return;
     g_wildMapTexBuilt = true;
-    const int N = 512;
+    const int N = 1024;
     const float k = (float)N / kWildernessWorldSize; // px per world unit
     Image img = GenImageColor(N, N, BLANK);
+    ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
     Color* px = (Color*)img.data;
     for (int y = 0; y < N; y++)
         for (int x = 0; x < N; x++)
-            px[y * N + x] = WildMapGroundColor((x + 0.5f) / k, (y + 0.5f) / k);
+            {
+                Color c=WildMapGroundColor((x+.5f)/k,(y+.5f)/k);
+                float grain=(tf2dart::Noise(x,y)-.5f)*7+sinf(x*.041f)*sinf(y*.033f)*3;
+                px[y*N+x]={(unsigned char)(c.r+grain),(unsigned char)(c.g+grain),(unsigned char)(c.b+grain),255};
+            }
     WildMapPaintExtras(&img, k);
     // Forest and rock dressing as darker blobs, so woods read on the map.
     if(!g_openWorld2D) {
@@ -18133,18 +18141,26 @@ static void WildMapEnsureTexture() {
         for(int y=0;y<68;y++)for(int x=0;x<68;x++) {
             Vector2 p={(x+.5f)*86,(y+.5f)*86};
             if(tf2dart::Noise(x*13+4,y*7+3)<.22f && OpenTownAt(p)<0 && !WildBlocked(p))
-                ImageDrawCircleV(&img,{p.x*k,p.y*k},2,Color{62,91,57,255});
+                {
+                    tfraster::Dot(img,{p.x*k,p.y*k},2,Color{66,99,61,180});
+                    tfraster::Dot(img,{p.x*k-1,p.y*k-1},1,Color{84,119,74,210});
+                }
         }
     }
     // Roads (same segments the 3D ground bakes).
     Color road = { 214, 190, 136, 255 };
     auto seg = [&](Vector2 a, Vector2 b) {
-        ImageDrawLineEx(&img, { a.x * k, a.y * k }, { b.x * k, b.y * k }, 3, road);
+        tfraster::Line(img,{a.x*k,a.y*k},{b.x*k,b.y*k},4,Color{110,108,81,255});
+        tfraster::Line(img,{a.x*k,a.y*k},{b.x*k,b.y*k},2,road);
     };
     WildTerrainEnsure();
     for (const auto& road : g_wtRoads)
         for (size_t i = 0; i + 1 < road.size(); i++) seg(road[i], road[i + 1]);
+    g_mapSnowProbe=((Color*)img.data)[(int)(500*k)*N+(int)(800*k)];
+    g_mapLakeProbe=((Color*)img.data)[(int)(4572*k)*N+(int)(2610*k)];
+    g_mapFormatProbe=img.format;
     g_wildMapTex = LoadTextureFromImage(img);
+    g_landscapeSceneSizes.erase(g_wildMapTex.id); // an image never uses a scene render target's logical UVs
     UnloadImage(img);
     SetTextureFilter(g_wildMapTex, TEXTURE_FILTER_BILINEAR);
 }
@@ -18172,9 +18188,12 @@ static void MapIconPlayer(Vector2 p, Vector2 facing, float r) {
     DrawCircleV(p, r * 0.45f, Color{ 70, 150, 230, 255 });
 }
 
+#include "world_atlas_2d.h"
+
 // Full map: the whole wilderness with names and a readable legend.
 static void DrawWorldMap(GameState& s) {
     WildMapEnsureTexture();
+    if(g_landscapePage){tfatlas::Draw(s);return;}
     Rectangle panel = WorldMapPanelRect(), mm = WorldMapRect();
     if (g_worldMapJustOpened) g_worldMapJustOpened = false;
     else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !g_uiClickTaken) { g_uiClickTaken = g_uiGestureOwned = true; s.worldMapOpen = false; return; } // any tap closes
@@ -18345,6 +18364,11 @@ static void DrawMinimap(GameState& s) {
             float a = atan2f(f.y - ctr.y, f.x - ctr.x), r = mm.width / 2 - 12;
             DrawDirArrow({ ctr.x + cosf(a) * r, ctr.y + sinf(a) * r }, a, 9.0f, c);
         }
+    }
+    if(tfatlas::waypoint) {
+        Vector2 p=toMap(tfatlas::waypoint->pos);Color gold={255,220,120,255};
+        if(inside(p,8)){DrawCircleLinesV(p,6,gold);DrawCircleV(p,2,gold);}
+        else {Vector2 ctr={mm.x+mm.width/2,mm.y+mm.height/2};float a=atan2f(p.y-ctr.y,p.x-ctr.x);DrawDirArrow({ctr.x+cosf(a)*(mm.width/2-12),ctr.y+sinf(a)*(mm.height/2-12)},a,7,gold);}
     }
     MapIconPlayer(toMap(s.wildernessPlayerPos), s.playerFacing, 5.0f);
     if (s.wyrmRespawnT <= 180.0f) { // (2026-09-27) the Caldera: pointer on the edge when it's off this map
@@ -20452,27 +20476,24 @@ static void WildMapPaintDressing(Image* img, float pxPerUnit) {
         float r = trees ? (it.id <= kWPTreesBLarge ? 26.0f : 14.0f) * it.scale / kWPScaleTrees : 10.0f;
         Color c = trees ? Color{ 62, 104, 58, 255 } : Color{ 128, 124, 116, 255 };
         if (it.z < 700.0f * kWS && trees) c = Color{ 150, 172, 160, 255 }; // frosted woods
-        ImageDrawCircleV(img, { it.x * pxPerUnit, it.z * pxPerUnit }, (int)fmaxf(1.0f, r * pxPerUnit), c);
+        tfraster::Dot(*img,{it.x*pxPerUnit,it.z*pxPerUnit},fmaxf(1.f,r*pxPerUnit),c);
     }
 }
 static void WildMapPaintExtras(Image* img, float pxPerUnit) {
-    // Water (with a pale shore), ridges and bridge decks, from the terrain grid.
-    WildField wf = WildTerrainField(kWTWater | kWTRiver, 1);
-    WildField rf = WildTerrainField(kWTRidge, 1);
-    Color* px = (Color*)img->data;
-    const int N = img->width;
-    for (int y = 0; y < N; y++)
-        for (int x = 0; x < N; x++) {
-            float wx = (x + 0.5f) / pxPerUnit, wz = (y + 0.5f) / pxPerUnit;
-            float w = WildFieldAt(wf, wx, wz), r = WildFieldAt(rf, wx, wz);
-            Color& c = px[y * N + x];
-            if (r > 0.35f) c = Color{ 112, 102, 92, 255 };
-            if (w > 0.2f && w <= 0.45f) c = Color{ 214, 204, 160, 255 };
-            if (w > 0.45f) c = Color{ 62, 118, 150, 255 };
-        }
-    for (const WildBridge& b : g_wtBridges)
-        ImageDrawLineEx(img, { b.a.x * pxPerUnit, b.a.y * pxPerUnit }, { b.b.x * pxPerUnit, b.b.y * pxPerUnit }, 4,
-                        Color{ 150, 105, 62, 255 });
+    // The navigation map samples the actual collision grid. Bridges and fords
+    // stay readable, without a second blurred terrain field or extra buffers.
+    WildTerrainEnsure();
+    auto* px=(Color*)img->data;
+    for(int y=0;y<img->height;y++)for(int x=0;x<img->width;x++) {
+        unsigned char flags=WildTerrainAt((x+.5f)/pxPerUnit,(y+.5f)/pxPerUnit);
+        Color& c=px[y*img->width+x];
+        if(flags&kWTRidge)c={112,108,96,255};
+        if(flags&kWTShore)c={207,197,151,255};
+        if(flags&kWTWater)c={62,118,150,255};
+        if(flags&kWTFord)c={126,172,181,255};
+    }
+    for(const WildBridge& b:g_wtBridges)
+        tfraster::Line(*img,{b.a.x*pxPerUnit,b.a.y*pxPerUnit},{b.b.x*pxPerUnit,b.b.y*pxPerUnit},4,Color{150,105,62,255});
 }
 
 static void Wild3DDrawDressing(const Town3DCam* cull) {
@@ -34744,7 +34765,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 
     // No movement during the death animation - the body isn't going anywhere.
     const Vector2 wildPrevPos = s.wildernessPlayerPos; // for the terrain check below (2026-09-26)
-    if (s.playerDeathAnimT <= 0.0f && !s.selectedTile && !s.greetedNPC) {
+    if (s.playerDeathAnimT <= 0.0f && !s.selectedTile && !s.greetedNPC && !s.worldMapOpen) {
         bool moved = UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GameDt() * SettleTravelMult(s), kWildernessWorldSize, s.wild3DView ? -g_t3dYawSm : 0.0f); // Stable (2026-09-27)
         StealthTick(s, GameDt(), moved); // Hiding & Stealth (2026-09-28)
         TreasureTick(s, GameDt(), moved); // digging and lock picking (2026-09-28)
@@ -35342,7 +35363,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     }
     DrawGhostStatus(s); // death animation / ghost walk banner
     DrawCorpseUI(s, 0); // UO corpse window / Loot button (2026-09-26)
-    DrawMinimap(s); // wilderness minimap (shared by the 2D and 3D views)
+    DrawMinimap(s); tfatlas::WaypointHud(s); // wilderness minimap (shared by the 2D and 3D views)
     // Phase 3 - snowfall while in the Frostwastes (both 2D and 3D views).
     if (RegionAt(s.wildernessPlayerPos) == RegionId::Frostwastes) DrawSnowfall(screenW, screenH, s.worldTime);
 
@@ -41424,18 +41445,29 @@ static void UpdateDrawToasts(GameState& s, int screenW, int screenH, bool play) 
 // see main()) can reach them; there's exactly one of each for the process's lifetime
 // either way, so file-scope statics cost nothing bar naming a global.
 static GameState g_state;
+static bool g_runtimeReady=false;
 #ifdef __EMSCRIPTEN__
 extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_HomesteadState() {
     const auto& s=g_state;const auto& b=s.life.beds[0];
     return TextFormat("{\"farm\":%s,\"open\":%s,\"seeds\":%d,\"produce\":%d,\"crop\":%d,\"watered\":%s,\"growth\":%.2f,\"additions\":%d,\"farming\":%.2f,\"gold\":%d}",s.life.farm?"true":"false",g_farmOpen?"true":"false",s.life.seeds[0],s.life.produce[0],b.crop,b.watered?"true":"false",b.growth,s.life.additions,s.life.farming,s.gold);
 }
 extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_OutdoorState() {
+    if(!g_runtimeReady)return "{\"outdoor\":false}";
     const auto& s=g_state;
     Vector2 g=kTownGates[std::clamp(s.selectedTown,0,3)].wildernessPos;
     Vector2 f=TownGateFacing(s.selectedTown);
     return TextFormat("{\"screen\":%d,\"outdoor\":%s,\"town\":%d,\"x\":%.3f,\"y\":%.3f,\"gx\":%.3f,\"gy\":%.3f,\"fx\":%.4f,\"fy\":%.4f}",
         (int)s.screen,s.screen==Screen::Wilderness?"true":"false",OpenTownAt(s.wildernessPlayerPos),s.wildernessPlayerPos.x,s.wildernessPlayerPos.y,g.x,g.y,f.x,f.y);
 }
+extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_AtlasState() {
+    return TextFormat("{\"open\":%s,\"zoom\":%.3f,\"cx\":%.2f,\"cy\":%.2f,\"filter\":%d,\"selected\":%d,\"waypoint\":%d}",g_state.worldMapOpen?"true":"false",tfatlas::view.zoom,tfatlas::view.center.x,tfatlas::view.center.y,tfatlas::filter,tfatlas::selected?tfatlas::selected->id:-1,tfatlas::waypoint?tfatlas::waypoint->id:-1);
+}
+extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_AtlasRasterState() {
+    if(!g_runtimeReady)return "{}";
+    auto logical=g_landscapeSceneSizes.find(g_wildMapTex.id);
+    return TextFormat("{\"snow\":[%d,%d,%d],\"lake\":[%d,%d,%d],\"format\":%d,\"tex\":[%d,%d,%d],\"logical\":[%.0f,%.0f],\"northFlags\":%d}",g_mapSnowProbe.r,g_mapSnowProbe.g,g_mapSnowProbe.b,g_mapLakeProbe.r,g_mapLakeProbe.g,g_mapLakeProbe.b,g_mapFormatProbe,g_wildMapTex.id,g_wildMapTex.width,g_wildMapTex.height,logical==g_landscapeSceneSizes.end()?0:logical->second.x,logical==g_landscapeSceneSizes.end()?0:logical->second.y,(int)WildTerrainAt(800,500));
+}
+
 #endif
 
 static const int kScreenW = 540;
@@ -41713,6 +41745,7 @@ static void UpdateDrawFrame() {
             if (IsKeyPressed(KEY_ESCAPE)) {state.selectedTile.reset();state.greetedNPC.reset();}
         }
         if (!encounterPending && state.screen == Screen::Wilderness) {
+            if(state.worldMapOpen && IsKeyPressed(KEY_ESCAPE))state.worldMapOpen=false;
             if (IsKeyPressed(KEY_M)) { // minimap toggle
                 state.worldMapOpen = false;
                 state.minimapOpen = !state.minimapOpen;
@@ -42115,6 +42148,7 @@ int main() {
     rlSetClipPlanes(10.0, 5000.0);
     InitSfx(); // audio device + synthesized SFX bank (missing files stay silent)
     LoadGameAssets(); // must come after InitWindow - texture loading needs a graphics context
+    g_runtimeReady=true;
 
 #ifdef __EMSCRIPTEN__
     // Kick off the async IndexedDB mount+load now; LoadGame itself is deferred to
