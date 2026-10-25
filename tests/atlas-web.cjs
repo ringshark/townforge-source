@@ -1,4 +1,5 @@
 const engines=require('playwright'),assert=require('assert'),fs=require('fs');
+const {PNG}=require('pngjs');
 const engine=process.env.TF_BROWSER||'chromium';
 (async()=>{
  const browser=await engines[engine].launch({headless:true,args:engine==='chromium'?['--no-sandbox','--disable-dev-shm-usage','--enable-unsafe-swiftshader','--use-gl=angle','--use-angle=swiftshader']:[]});
@@ -17,6 +18,10 @@ const engine=process.env.TF_BROWSER||'chromium';
    await click(882,226);await page.waitForFunction(()=>JSON.parse(UTF8ToString(_TF_AtlasState())).open);
    fs.mkdirSync('browser-checks',{recursive:true});const prefix=`browser-checks/atlas-${engine}-${mobile?'phone':'desktop'}`;
    await page.screenshot({path:prefix+'-overview.png'});
+   async function mapColor(wx,wy){const p=pos(153+wx*412/5760-3,76+wy*412/5760-3);const im=PNG.sync.read(await page.screenshot({clip:{x:p.x,y:p.y,width:6*scale,height:6*scale}}));const rgb=[0,0,0];for(let i=0;i<im.data.length;i+=4)for(let c=0;c<3;c++)rgb[c]+=im.data[i+c];return rgb.map(v=>v/(im.data.length/4));}
+   const snow=await mapColor(800,500),lake=await mapColor(2610,4572);
+   assert(snow[0]>165 && snow[1]>175,'northern snow renders as snow without corrupted horizontal bands');
+   assert(lake[2]>lake[0]+20 && lake[1]>lake[0]+20,'Mirrormere renders as lake water');
    const before=await hero();await page.keyboard.down('w');await page.waitForTimeout(250);await page.keyboard.up('w');const after=await hero();
    assert(Math.hypot(after.x-before.x,after.y-before.y)<1,'map input never moves the hero');
    await click(718,38);await click(718,38);assert((await state()).zoom>1.7,'zoom buttons work');
@@ -33,7 +38,7 @@ const engine=process.env.TF_BROWSER||'chromium';
    await page.screenshot({path:prefix+'-waypoint.png'});
    await click(882,226);await page.waitForFunction(()=>JSON.parse(UTF8ToString(_TF_AtlasState())).open);
    await click(824,498);assert.equal((await state()).waypoint,-1,'clear waypoint');
-   await page.keyboard.press('Escape');await page.waitForTimeout(150);assert(!(await state()).open,'Escape closes atlas');
+   await page.keyboard.press('Escape',{delay:150});await page.waitForTimeout(150);assert(!(await state()).open,'Escape closes atlas');
    assert.deepEqual(errors,[],'no map runtime errors');
    console.log(`PASS ${engine} ${mobile?'phone':'desktop'} atlas: overview, zoom, drag, filters, destination, waypoint, clear and close`);
    await context.close();

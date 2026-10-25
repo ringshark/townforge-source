@@ -18113,12 +18113,14 @@ static Color WildMapGroundColor(float x, float z) {
     return { (unsigned char)(R / 5), (unsigned char)(G / 5), (unsigned char)(B / 5), 255 };
 }
 static void WildMapPaintExtras(Image* img, float pxPerUnit); // water etc. (terrain pass)
+#include "atlas_raster.h"
 static void WildMapEnsureTexture() {
     if (g_wildMapTexBuilt) return;
     g_wildMapTexBuilt = true;
     const int N = 1024;
     const float k = (float)N / kWildernessWorldSize; // px per world unit
     Image img = GenImageColor(N, N, BLANK);
+    ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
     Color* px = (Color*)img.data;
     for (int y = 0; y < N; y++)
         for (int x = 0; x < N; x++)
@@ -18138,16 +18140,16 @@ static void WildMapEnsureTexture() {
             Vector2 p={(x+.5f)*86,(y+.5f)*86};
             if(tf2dart::Noise(x*13+4,y*7+3)<.22f && OpenTownAt(p)<0 && !WildBlocked(p))
                 {
-                    ImageDrawCircleV(&img,{p.x*k,p.y*k},2,Color{66,99,61,180});
-                    ImageDrawCircleV(&img,{p.x*k-1,p.y*k-1},1,Color{84,119,74,210});
+                    tfraster::Dot(img,{p.x*k,p.y*k},2,Color{66,99,61,180});
+                    tfraster::Dot(img,{p.x*k-1,p.y*k-1},1,Color{84,119,74,210});
                 }
         }
     }
     // Roads (same segments the 3D ground bakes).
     Color road = { 214, 190, 136, 255 };
     auto seg = [&](Vector2 a, Vector2 b) {
-        ImageDrawLineEx(&img,{a.x*k,a.y*k},{b.x*k,b.y*k},4,Color{110,108,81,255});
-        ImageDrawLineEx(&img,{a.x*k,a.y*k},{b.x*k,b.y*k},2,road);
+        tfraster::Line(img,{a.x*k,a.y*k},{b.x*k,b.y*k},4,Color{110,108,81,255});
+        tfraster::Line(img,{a.x*k,a.y*k},{b.x*k,b.y*k},2,road);
     };
     WildTerrainEnsure();
     for (const auto& road : g_wtRoads)
@@ -20468,7 +20470,7 @@ static void WildMapPaintDressing(Image* img, float pxPerUnit) {
         float r = trees ? (it.id <= kWPTreesBLarge ? 26.0f : 14.0f) * it.scale / kWPScaleTrees : 10.0f;
         Color c = trees ? Color{ 62, 104, 58, 255 } : Color{ 128, 124, 116, 255 };
         if (it.z < 700.0f * kWS && trees) c = Color{ 150, 172, 160, 255 }; // frosted woods
-        ImageDrawCircleV(img, { it.x * pxPerUnit, it.z * pxPerUnit }, (int)fmaxf(1.0f, r * pxPerUnit), c);
+        tfraster::Dot(*img,{it.x*pxPerUnit,it.z*pxPerUnit},fmaxf(1.f,r*pxPerUnit),c);
     }
 }
 static void WildMapPaintExtras(Image* img, float pxPerUnit) {
@@ -20487,8 +20489,7 @@ static void WildMapPaintExtras(Image* img, float pxPerUnit) {
             if (w > 0.45f) c = Color{ 62, 118, 150, 255 };
         }
     for (const WildBridge& b : g_wtBridges)
-        ImageDrawLineEx(img, { b.a.x * pxPerUnit, b.a.y * pxPerUnit }, { b.b.x * pxPerUnit, b.b.y * pxPerUnit }, 4,
-                        Color{ 150, 105, 62, 255 });
+        tfraster::Line(*img,{b.a.x*pxPerUnit,b.a.y*pxPerUnit},{b.b.x*pxPerUnit,b.b.y*pxPerUnit},4,Color{150,105,62,255});
 }
 
 static void Wild3DDrawDressing(const Town3DCam* cull) {
@@ -41732,6 +41733,7 @@ static void UpdateDrawFrame() {
             if (IsKeyPressed(KEY_ESCAPE)) {state.selectedTile.reset();state.greetedNPC.reset();}
         }
         if (!encounterPending && state.screen == Screen::Wilderness) {
+            if(state.worldMapOpen && IsKeyPressed(KEY_ESCAPE))state.worldMapOpen=false;
             if (IsKeyPressed(KEY_M)) { // minimap toggle
                 state.worldMapOpen = false;
                 state.minimapOpen = !state.minimapOpen;
