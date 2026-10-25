@@ -18098,8 +18098,8 @@ static bool g_wildMapTexBuilt = false;
 static void Wild3DBuildDressing();
 static void WildMapPaintDressing(Image* img, float pxPerUnit); // defined with the dressing
 static Color WildMapGroundColor(float x, float z) {
-    const Color whisper = { 118, 156, 92, 255 }, stone = { 150, 146, 132, 255 };
-    const Color frost = { 226, 234, 242, 255 }, coast = { 206, 190, 140, 255 };
+    const Color whisper = { 103, 133, 88, 255 }, stone = { 143, 148, 137, 255 };
+    const Color frost = { 213, 226, 230, 255 }, coast = { 196, 180, 133, 255 };
     auto base = [&](float px, float pz) -> Color {
         RegionId r = RegionAt({ px, pz });
         return r == RegionId::Frostwastes ? frost : r == RegionId::Stonepeaks ? stone
@@ -18116,13 +18116,17 @@ static void WildMapPaintExtras(Image* img, float pxPerUnit); // water etc. (terr
 static void WildMapEnsureTexture() {
     if (g_wildMapTexBuilt) return;
     g_wildMapTexBuilt = true;
-    const int N = 512;
+    const int N = 1024;
     const float k = (float)N / kWildernessWorldSize; // px per world unit
     Image img = GenImageColor(N, N, BLANK);
     Color* px = (Color*)img.data;
     for (int y = 0; y < N; y++)
         for (int x = 0; x < N; x++)
-            px[y * N + x] = WildMapGroundColor((x + 0.5f) / k, (y + 0.5f) / k);
+            {
+                Color c=WildMapGroundColor((x+.5f)/k,(y+.5f)/k);
+                float grain=(tf2dart::Noise(x,y)-.5f)*7+sinf(x*.041f)*sinf(y*.033f)*3;
+                px[y*N+x]={(unsigned char)(c.r+grain),(unsigned char)(c.g+grain),(unsigned char)(c.b+grain),255};
+            }
     WildMapPaintExtras(&img, k);
     // Forest and rock dressing as darker blobs, so woods read on the map.
     if(!g_openWorld2D) {
@@ -18133,13 +18137,17 @@ static void WildMapEnsureTexture() {
         for(int y=0;y<68;y++)for(int x=0;x<68;x++) {
             Vector2 p={(x+.5f)*86,(y+.5f)*86};
             if(tf2dart::Noise(x*13+4,y*7+3)<.22f && OpenTownAt(p)<0 && !WildBlocked(p))
-                ImageDrawCircleV(&img,{p.x*k,p.y*k},2,Color{62,91,57,255});
+                {
+                    ImageDrawCircleV(&img,{p.x*k,p.y*k},2,Color{66,99,61,180});
+                    ImageDrawCircleV(&img,{p.x*k-1,p.y*k-1},1,Color{84,119,74,210});
+                }
         }
     }
     // Roads (same segments the 3D ground bakes).
     Color road = { 214, 190, 136, 255 };
     auto seg = [&](Vector2 a, Vector2 b) {
-        ImageDrawLineEx(&img, { a.x * k, a.y * k }, { b.x * k, b.y * k }, 3, road);
+        ImageDrawLineEx(&img,{a.x*k,a.y*k},{b.x*k,b.y*k},4,Color{110,108,81,255});
+        ImageDrawLineEx(&img,{a.x*k,a.y*k},{b.x*k,b.y*k},2,road);
     };
     WildTerrainEnsure();
     for (const auto& road : g_wtRoads)
@@ -18172,9 +18180,12 @@ static void MapIconPlayer(Vector2 p, Vector2 facing, float r) {
     DrawCircleV(p, r * 0.45f, Color{ 70, 150, 230, 255 });
 }
 
+#include "world_atlas_2d.h"
+
 // Full map: the whole wilderness with names and a readable legend.
 static void DrawWorldMap(GameState& s) {
     WildMapEnsureTexture();
+    if(g_landscapePage){tfatlas::Draw(s);return;}
     Rectangle panel = WorldMapPanelRect(), mm = WorldMapRect();
     if (g_worldMapJustOpened) g_worldMapJustOpened = false;
     else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !g_uiClickTaken) { g_uiClickTaken = g_uiGestureOwned = true; s.worldMapOpen = false; return; } // any tap closes
@@ -18345,6 +18356,11 @@ static void DrawMinimap(GameState& s) {
             float a = atan2f(f.y - ctr.y, f.x - ctr.x), r = mm.width / 2 - 12;
             DrawDirArrow({ ctr.x + cosf(a) * r, ctr.y + sinf(a) * r }, a, 9.0f, c);
         }
+    }
+    if(tfatlas::waypoint) {
+        Vector2 p=toMap(tfatlas::waypoint->pos);Color gold={255,220,120,255};
+        if(inside(p,8)){DrawCircleLinesV(p,6,gold);DrawCircleV(p,2,gold);}
+        else {Vector2 ctr={mm.x+mm.width/2,mm.y+mm.height/2};float a=atan2f(p.y-ctr.y,p.x-ctr.x);DrawDirArrow({ctr.x+cosf(a)*(mm.width/2-12),ctr.y+sinf(a)*(mm.height/2-12)},a,7,gold);}
     }
     MapIconPlayer(toMap(s.wildernessPlayerPos), s.playerFacing, 5.0f);
     if (s.wyrmRespawnT <= 180.0f) { // (2026-09-27) the Caldera: pointer on the edge when it's off this map
@@ -34744,7 +34760,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
 
     // No movement during the death animation - the body isn't going anywhere.
     const Vector2 wildPrevPos = s.wildernessPlayerPos; // for the terrain check below (2026-09-26)
-    if (s.playerDeathAnimT <= 0.0f && !s.selectedTile && !s.greetedNPC) {
+    if (s.playerDeathAnimT <= 0.0f && !s.selectedTile && !s.greetedNPC && !s.worldMapOpen) {
         bool moved = UpdatePlayerMovement(s.wildernessPlayerPos, s.playerFacing, GameDt() * SettleTravelMult(s), kWildernessWorldSize, s.wild3DView ? -g_t3dYawSm : 0.0f); // Stable (2026-09-27)
         StealthTick(s, GameDt(), moved); // Hiding & Stealth (2026-09-28)
         TreasureTick(s, GameDt(), moved); // digging and lock picking (2026-09-28)
@@ -35342,7 +35358,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     }
     DrawGhostStatus(s); // death animation / ghost walk banner
     DrawCorpseUI(s, 0); // UO corpse window / Loot button (2026-09-26)
-    DrawMinimap(s); // wilderness minimap (shared by the 2D and 3D views)
+    DrawMinimap(s); tfatlas::WaypointHud(s); // wilderness minimap (shared by the 2D and 3D views)
     // Phase 3 - snowfall while in the Frostwastes (both 2D and 3D views).
     if (RegionAt(s.wildernessPlayerPos) == RegionId::Frostwastes) DrawSnowfall(screenW, screenH, s.worldTime);
 
@@ -41435,6 +41451,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_OutdoorState() {
     Vector2 f=TownGateFacing(s.selectedTown);
     return TextFormat("{\"screen\":%d,\"outdoor\":%s,\"town\":%d,\"x\":%.3f,\"y\":%.3f,\"gx\":%.3f,\"gy\":%.3f,\"fx\":%.4f,\"fy\":%.4f}",
         (int)s.screen,s.screen==Screen::Wilderness?"true":"false",OpenTownAt(s.wildernessPlayerPos),s.wildernessPlayerPos.x,s.wildernessPlayerPos.y,g.x,g.y,f.x,f.y);
+}
+extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_AtlasState() {
+    return TextFormat("{\"open\":%s,\"zoom\":%.3f,\"cx\":%.2f,\"cy\":%.2f,\"filter\":%d,\"selected\":%d,\"waypoint\":%d}",g_state.worldMapOpen?"true":"false",tfatlas::view.zoom,tfatlas::view.center.x,tfatlas::view.center.y,tfatlas::filter,tfatlas::selected?tfatlas::selected->id:-1,tfatlas::waypoint?tfatlas::waypoint->id:-1);
 }
 #endif
 
