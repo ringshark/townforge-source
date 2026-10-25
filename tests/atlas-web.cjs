@@ -11,7 +11,7 @@ const engine=process.env.TF_BROWSER||'chromium';
    await page.waitForFunction(()=>typeof runtimeInitialized!=='undefined' && runtimeInitialized && typeof _TF_AtlasState==='function' && typeof _TF_OutdoorState==='function' && JSON.parse(UTF8ToString(_TF_OutdoorState())).outdoor,null,{timeout:120000});
    await page.waitForTimeout(1500);await page.locator('#canvas').focus();
    const box=await page.locator('#canvas').boundingBox(),scale=Math.min(box.width/960,box.height/540);
-   const pos=(x,y)=>({x:box.x+(box.width-960*scale)/2+x*scale,y:box.y+(box.height-540*scale)/2+y*scale});
+   const pos=(x,y)=>({x:box.x+x*box.width/960,y:box.y+y*box.height/540});
    const click=async(x,y)=>{const p=pos(x,y);await page.mouse.click(p.x,p.y,{delay:140});await page.waitForTimeout(150)};
    const state=()=>page.evaluate(()=>JSON.parse(UTF8ToString(_TF_AtlasState())));
    const hero=()=>page.evaluate(()=>JSON.parse(UTF8ToString(_TF_OutdoorState())));
