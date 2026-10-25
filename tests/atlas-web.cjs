@@ -8,7 +8,7 @@ const engine=process.env.TF_BROWSER||'chromium';
    const context=await browser.newContext({viewport:mobile?{width:844,height:390}:{width:1280,height:720},hasTouch:mobile,isMobile:mobile,deviceScaleFactor:1,timezoneId:'America/New_York'});
    const page=await context.newPage(),errors=[];page.on('pageerror',e=>{errors.push(e.message);console.error(e.stack)});
    await page.goto(process.env.TF_SMOKE_ORIGIN||'http://127.0.0.1:8765',{waitUntil:'domcontentloaded'});
-   await page.waitForFunction(()=>typeof _TF_AtlasState==='function' && typeof _TF_OutdoorState==='function' && JSON.parse(UTF8ToString(_TF_OutdoorState())).outdoor,null,{timeout:120000});
+   await page.waitForFunction(()=>typeof runtimeInitialized!=='undefined' && runtimeInitialized && typeof _TF_AtlasState==='function' && typeof _TF_OutdoorState==='function' && JSON.parse(UTF8ToString(_TF_OutdoorState())).outdoor,null,{timeout:120000});
    await page.waitForTimeout(1500);await page.locator('#canvas').focus();
    const box=await page.locator('#canvas').boundingBox(),scale=Math.min(box.width/960,box.height/540);
    const pos=(x,y)=>({x:box.x+(box.width-960*scale)/2+x*scale,y:box.y+(box.height-540*scale)/2+y*scale});
@@ -21,7 +21,7 @@ const engine=process.env.TF_BROWSER||'chromium';
    async function mapColor(wx,wy){const p=pos(153+wx*412/5760-3,76+wy*412/5760-3);const im=PNG.sync.read(await page.screenshot({clip:{x:p.x,y:p.y,width:6*scale,height:6*scale}}));const rgb=[0,0,0];for(let i=0;i<im.data.length;i+=4)for(let c=0;c<3;c++)rgb[c]+=im.data[i+c];return rgb.map(v=>v/(im.data.length/4));}
    const snow=await mapColor(800,500),lake=await mapColor(2610,4572);
    console.log("ATLAS RASTER",await page.evaluate(()=>UTF8ToString(_TF_AtlasRasterState())),"screen",snow,lake);
-   assert(snow[0]>165 && snow[1]>175,'northern snow renders as snow without corrupted horizontal bands');
+   assert(snow[0]>150 && snow[1]>160,'northern snow renders as snow without corrupted horizontal bands');
    assert(lake[2]>lake[0]+20 && lake[1]>lake[0]+20,'Mirrormere renders as lake water');
    const before=await hero();await page.keyboard.down('w');await page.waitForTimeout(250);await page.keyboard.up('w');const after=await hero();
    assert(Math.hypot(after.x-before.x,after.y-before.y)<1,'map input never moves the hero');

@@ -41445,12 +41445,14 @@ static void UpdateDrawToasts(GameState& s, int screenW, int screenH, bool play) 
 // see main()) can reach them; there's exactly one of each for the process's lifetime
 // either way, so file-scope statics cost nothing bar naming a global.
 static GameState g_state;
+static bool g_runtimeReady=false;
 #ifdef __EMSCRIPTEN__
 extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_HomesteadState() {
     const auto& s=g_state;const auto& b=s.life.beds[0];
     return TextFormat("{\"farm\":%s,\"open\":%s,\"seeds\":%d,\"produce\":%d,\"crop\":%d,\"watered\":%s,\"growth\":%.2f,\"additions\":%d,\"farming\":%.2f,\"gold\":%d}",s.life.farm?"true":"false",g_farmOpen?"true":"false",s.life.seeds[0],s.life.produce[0],b.crop,b.watered?"true":"false",b.growth,s.life.additions,s.life.farming,s.gold);
 }
 extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_OutdoorState() {
+    if(!g_runtimeReady)return "{\"outdoor\":false}";
     const auto& s=g_state;
     Vector2 g=kTownGates[std::clamp(s.selectedTown,0,3)].wildernessPos;
     Vector2 f=TownGateFacing(s.selectedTown);
@@ -41461,6 +41463,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_AtlasState() {
     return TextFormat("{\"open\":%s,\"zoom\":%.3f,\"cx\":%.2f,\"cy\":%.2f,\"filter\":%d,\"selected\":%d,\"waypoint\":%d}",g_state.worldMapOpen?"true":"false",tfatlas::view.zoom,tfatlas::view.center.x,tfatlas::view.center.y,tfatlas::filter,tfatlas::selected?tfatlas::selected->id:-1,tfatlas::waypoint?tfatlas::waypoint->id:-1);
 }
 extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_AtlasRasterState() {
+    if(!g_runtimeReady)return "{}";
     auto logical=g_landscapeSceneSizes.find(g_wildMapTex.id);
     return TextFormat("{\"snow\":[%d,%d,%d],\"lake\":[%d,%d,%d],\"format\":%d,\"tex\":[%d,%d,%d],\"logical\":[%.0f,%.0f],\"northFlags\":%d}",g_mapSnowProbe.r,g_mapSnowProbe.g,g_mapSnowProbe.b,g_mapLakeProbe.r,g_mapLakeProbe.g,g_mapLakeProbe.b,g_mapFormatProbe,g_wildMapTex.id,g_wildMapTex.width,g_wildMapTex.height,logical==g_landscapeSceneSizes.end()?0:logical->second.x,logical==g_landscapeSceneSizes.end()?0:logical->second.y,(int)WildTerrainAt(800,500));
 }
@@ -42145,6 +42148,7 @@ int main() {
     rlSetClipPlanes(10.0, 5000.0);
     InitSfx(); // audio device + synthesized SFX bank (missing files stay silent)
     LoadGameAssets(); // must come after InitWindow - texture loading needs a graphics context
+    g_runtimeReady=true;
 
 #ifdef __EMSCRIPTEN__
     // Kick off the async IndexedDB mount+load now; LoadGame itself is deferred to
