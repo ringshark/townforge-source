@@ -18160,6 +18160,7 @@ static void WildMapEnsureTexture() {
     g_mapLakeProbe=((Color*)img.data)[(int)(4572*k)*N+(int)(2610*k)];
     g_mapFormatProbe=img.format;
     g_wildMapTex = LoadTextureFromImage(img);
+    g_landscapeSceneSizes.erase(g_wildMapTex.id); // an image never uses a scene render target's logical UVs
     UnloadImage(img);
     SetTextureFilter(g_wildMapTex, TEXTURE_FILTER_BILINEAR);
 }
@@ -20479,21 +20480,19 @@ static void WildMapPaintDressing(Image* img, float pxPerUnit) {
     }
 }
 static void WildMapPaintExtras(Image* img, float pxPerUnit) {
-    // Water (with a pale shore), ridges and bridge decks, from the terrain grid.
-    WildField wf = WildTerrainField(kWTWater | kWTRiver, 1);
-    WildField rf = WildTerrainField(kWTRidge, 1);
-    Color* px = (Color*)img->data;
-    const int N = img->width;
-    for (int y = 0; y < N; y++)
-        for (int x = 0; x < N; x++) {
-            float wx = (x + 0.5f) / pxPerUnit, wz = (y + 0.5f) / pxPerUnit;
-            float w = WildFieldAt(wf, wx, wz), r = WildFieldAt(rf, wx, wz);
-            Color& c = px[y * N + x];
-            if (r > 0.35f) c = Color{ 112, 102, 92, 255 };
-            if (w > 0.2f && w <= 0.45f) c = Color{ 214, 204, 160, 255 };
-            if (w > 0.45f) c = Color{ 62, 118, 150, 255 };
-        }
-    for (const WildBridge& b : g_wtBridges)
+    // The navigation map samples the actual collision grid. Bridges and fords
+    // stay readable, without a second blurred terrain field or extra buffers.
+    WildTerrainEnsure();
+    auto* px=(Color*)img->data;
+    for(int y=0;y<img->height;y++)for(int x=0;x<img->width;x++) {
+        unsigned char flags=WildTerrainAt((x+.5f)/pxPerUnit,(y+.5f)/pxPerUnit);
+        Color& c=px[y*img->width+x];
+        if(flags&kWTRidge)c={112,108,96,255};
+        if(flags&kWTShore)c={207,197,151,255};
+        if(flags&kWTWater)c={62,118,150,255};
+        if(flags&kWTFord)c={126,172,181,255};
+    }
+    for(const WildBridge& b:g_wtBridges)
         tfraster::Line(*img,{b.a.x*pxPerUnit,b.a.y*pxPerUnit},{b.b.x*pxPerUnit,b.b.y*pxPerUnit},4,Color{150,105,62,255});
 }
 

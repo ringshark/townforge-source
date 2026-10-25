@@ -2,7 +2,7 @@ const engines=require('playwright'),assert=require('assert'),fs=require('fs');
 const {PNG}=require('pngjs');
 const engine=process.env.TF_BROWSER||'chromium';
 (async()=>{
- const browser=await engines[engine].launch({headless:true,args:engine==='chromium'?['--no-sandbox','--disable-dev-shm-usage','--enable-unsafe-swiftshader','--use-gl=angle','--use-angle=swiftshader']:[]});
+ const browser=await engines[engine].launch({headless:true,...(process.env.TF_CHROME?{executablePath:process.env.TF_CHROME}:{}),args:engine==='chromium'?['--no-sandbox','--disable-dev-shm-usage','--enable-unsafe-swiftshader','--use-gl=angle','--use-angle=swiftshader']:[]});
  try {
   for(const mobile of [false,true]){
    const context=await browser.newContext({viewport:mobile?{width:844,height:390}:{width:1280,height:720},hasTouch:mobile,isMobile:mobile,deviceScaleFactor:1,timezoneId:'America/New_York'});
