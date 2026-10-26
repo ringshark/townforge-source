@@ -34,6 +34,36 @@ int main() {
             assert((GateLocal(p,gate,f).y>0)==(dir==1));
         }
     }
+    // Every town is a square compound that faces north, east, south or west, with open ground behind its walls.
+    for(int ti=0;ti<4;ti++) {
+        Vector2 f=TownGateFacing(ti),gate=kTownGates[ti].wildernessPos;
+        assert((fabsf(f.x)==1.f && f.y==0.f) || (fabsf(f.y)==1.f && f.x==0.f));
+        int blocked=0,total=0;
+        for(float lz=-40;lz>-OpenTownDepth(ti);lz-=40)for(float lx=-280;lx<=280;lx+=40) {
+            Vector2 w=GateWorld({lx,lz},gate,f);total++;
+            if(WildTerrainAt(w.x,w.y)&(kWTWater|kWTRidge))blocked++;
+        }
+        assert(OpenTownDepth(ti)>=250.f);
+        assert(blocked*5<total*2); // under 40% of the yard is water or rock (Saltmere stands on a harbour deck)
+    }
+    // No road runs through a town's yard: the stretches inside were led round the walls to the gate.
+    for(const auto& road:OpenRoadNetwork())
+        for(const Vector2& p:road)
+            for(int ti=0;ti<4;ti++) {
+                Vector2 l=GateLocal(p,kTownGates[ti].wildernessPos,TownGateFacing(ti));
+                bool yard=fabsf(l.x)<kCompoundHalfW-20.f && l.y<-30.f && l.y>-OpenTownDepth(ti)+20.f;
+                assert(!yard);
+            }
+    // The archway is wide enough for the hero (radius 17) and both towers are solid.
+    for(int ti=0;ti<4;ti++) {
+        Vector2 f=TownGateFacing(ti),gate=kTownGates[ti].wildernessPos;
+        for(float x:{-30.f,0.f,30.f}) {
+            Vector2 p=GateWorld({x,60.f},gate,f);
+            for(int k=0;k<130;k++){Vector2 prev=p;p=GateWorld({x,60.f-k},gate,f);GateCollide(p,gate,f);assert(Dist(p,GateWorld({x,60.f-k},gate,f))<.5f);(void)prev;}
+        }
+        Vector2 tower=GateWorld({76.f,-4.f},gate,f),p=GateWorld({80.f,0.f},gate,f);GateCollide(p,gate,f);assert(Dist(p,tower)>=42.f);
+        Vector2 wall=GateWorld({160.f,-6.f},gate,f),q=wall;GateCollide(q,gate,f);assert(Dist(q,wall)>10.f);
+    }
     // 3D terrain behavior remains active outside the continuous 2D view.
     g_openWorld2D=false;
     assert(TownCompoundDepth(s,0)==TownCompoundBaseDepth(0));

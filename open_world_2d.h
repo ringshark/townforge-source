@@ -35,10 +35,25 @@ static void OpenWildGround(Vector2 camera) {
     DrawTexturePro(g_openWildGround,{0,0,kOpenGroundSize,kOpenGroundSize},
         {p.x,p.y,kWildernessWorldSize,kWildernessWorldSize},{0,0},0,WHITE);
 }
+// Scenery keeps clear of the roads as drawn (OpenRoadNetwork), through a coarse map of where they run.
 static bool OpenNearRoad(Vector2 p) {
-    for(float dx:{-40.f,0.f,40.f})for(float dy:{-40.f,0.f,40.f})
-        if(WildTerrainAt(p.x+dx,p.y+dy)&kWTRoad)return true;
-    return false;
+    static std::vector<unsigned char> roadNear; static const int cell=40,n=(int)(kWildernessWorldSize/cell)+1;
+    if(roadNear.empty()) {
+        roadNear.assign((size_t)n*n,0);
+        for(const auto& road:OpenRoadNetwork())
+            for(size_t i=0;i+1<road.size();i++) {
+                float len=Dist(road[i],road[i+1]);int steps=std::max(1,(int)(len/15));
+                for(int k=0;k<=steps;k++) {
+                    float t=(float)k/steps,x=road[i].x+(road[i+1].x-road[i].x)*t,y=road[i].y+(road[i+1].y-road[i].y)*t;
+                    for(int dy=-1;dy<=1;dy++)for(int dx=-1;dx<=1;dx++) {
+                        int cx=(int)(x/cell)+dx,cy=(int)(y/cell)+dy;
+                        if(cx>=0&&cy>=0&&cx<n&&cy<n)roadNear[(size_t)cy*n+cx]=1;
+                    }
+                }
+            }
+    }
+    int cx=(int)(p.x/cell),cy=(int)(p.y/cell);
+    return cx>=0&&cy>=0&&cx<n&&cy<n&&roadNear[(size_t)cy*n+cx];
 }
 static void OpenWildScenery(const GameState& s,Vector2 camera,bool foreground) {
     int x0=std::max(0,(int)((camera.x-180)/kOpenSceneryCell));
@@ -141,6 +156,88 @@ static void OpenTownGround(int ti,Vector2 camera) {
         DrawTexturePro(texture,{0,0,w,h},{p.x,p.y,w,h},{0,0},rotation,WHITE);
     }
 }
+// ---- Town walls and gatehouse ----------------------------------------------------------------------------
+// Four walls and a gate. Each piece is a stone block seen from the south: a lit top and a masonry front face,
+// sorted against the hero so he walks behind a wall that is south of him and in front of one that is north.
+// The footprints match the collision in TownCompoundCollide and GateCollide (gate frame: +y out to the wilds).
+static void OpenWallBlock(Rectangle foot,float h,Vector2 camera,Color stone,bool merlons,float faceHeight=-1) {
+    Vector2 s=WorldToScreen({foot.x,foot.y},camera);
+    float fh=faceHeight>0?faceHeight:h;
+    Rectangle top={s.x,s.y-h,foot.width,foot.height},face={s.x,s.y+foot.height-h,foot.width,fh};
+    if(faceHeight<=0)DrawRectangleRec({s.x+3,s.y+foot.height-2,foot.width+9,10},Fade(BLACK,.20f));   // cast shadow
+    tfroad::DrawTextured(tfroad::flag,face,tfroad::Mul(stone,Color{150,148,140,255}));
+    for(float y=face.y+11;y<face.y+face.height-1;y+=11) {                                       // courses and staggered joints
+        DrawLineEx({face.x,y},{face.x+face.width,y},1,Fade(Color{40,38,34,255},.38f));
+        int row=(int)((y-face.y)/11);
+        for(float x=face.x+((row&1)?9.f:2.f);x<face.x+face.width-2;x+=18)DrawLineEx({x,y},{x,y+11},1,Fade(Color{40,38,34,255},.30f));
+    }
+    DrawRectangleRec({face.x,face.y+face.height-4,face.width,4},Fade(BLACK,.22f));              // dark footing
+    tfroad::DrawTextured(tfroad::flag,top,tfroad::Mul(stone,Color{232,228,214,255}));
+    DrawRectangleLinesEx(top,1,Fade(Color{36,34,30,255},.6f));
+    if(h>=56 && faceHeight<=0) {   // a tower: a slate roof inset in the parapet, an arrow slit, light stone at the corners
+        Rectangle roof={top.x+5,top.y+5,top.width-10,top.height-10};
+        DrawRectangleRec(roof,Color{86,78,74,255});
+        DrawRectangleRec({roof.x+2,roof.y+2,roof.width-4,roof.height-4},Color{112,102,96,255});
+        DrawRectangleLinesEx(top,2,Fade(Color{232,226,208,255},.55f));
+        DrawRectangle((int)(face.x+face.width*.5f)-2,(int)(face.y+face.height*.38f),4,16,Color{22,20,18,255});
+        DrawRectangle((int)face.x,(int)face.y,4,(int)face.height,Fade(Color{232,226,208,255},.28f));
+        DrawRectangle((int)(face.x+face.width)-4,(int)face.y,4,(int)face.height,Fade(BLACK,.18f));
+    }
+    if(merlons && foot.width>foot.height)
+        for(float x=top.x+2;x<top.x+top.width-9;x+=18) {
+            Color lit=tfroad::Mul(stone,Color{222,218,204,255});
+            DrawRectangle((int)x,(int)top.y-6,10,8,lit);DrawRectangle((int)x,(int)top.y+2,10,2,Fade(BLACK,.25f));
+        }
+}
+static void OpenTownWalls(int ti,const GameState& s,Vector2 camera,bool foreground) {
+    const float D=OpenTownDepth(ti);if(D<150)return;
+    Vector2 gate=kTownGates[ti].wildernessPos,f=TownGateFacing(ti);
+    static const Color stones[4]={{190,186,174,255},{214,190,150,255},{206,222,232,255},{148,146,142,255}};
+    const Color stone=stones[std::clamp(ti,0,3)];
+    Vector2 hero=s.wildernessPlayerPos;
+    auto rect=[&](float x0,float y0,float x1,float y1){
+        Vector2 a=GateWorld({x0,y0},gate,f),b=GateWorld({x1,y1},gate,f);
+        return Rectangle{std::min(a.x,b.x),std::min(a.y,b.y),fabsf(b.x-a.x),fabsf(b.y-a.y)};
+    };
+    auto piece=[&](Rectangle foot,float h,bool merlons,float face=-1.f) {
+        float sortY=foot.y+foot.height;
+        if((sortY>hero.y)!=foreground)return;
+        Vector2 p=WorldToScreen({foot.x,foot.y},camera);
+        if(!OpenVisible({p.x+foot.width*.5f,p.y},std::max(foot.width,foot.height)+120))return;
+        OpenWallBlock(foot,h,camera,stone,merlons,face);
+    };
+    const float H=40,T=288;
+    // side walls and the back wall, cut into short pieces so the hero sorts correctly along them
+    for(int side=-1;side<=1;side+=2)
+        for(float y=0;y>-D;y-=48) {
+            float y1=std::max(y-48,-D);
+            piece(rect(side*286.f-10,y,side*286.f+10,y1),H,false);
+        }
+    for(float x=-T;x<T;x+=48)piece(rect(x,-D-10,std::min(x+48,T),-D+10),H,true);
+    // the front wall either side of the gate
+    for(int side=-1;side<=1;side+=2)
+        for(float x=96;x<T+10;x+=48) piece(rect(side*x,-16,side*std::min(x+48,T+10),4),H,true);
+    // towers: the two corners and the middle of each side, and the gate towers
+    auto tower=[&](float cx,float cy,float size,float h) {
+        piece(rect(cx-size*.5f,cy-size*.5f,cx+size*.5f,cy+size*.5f),h,true);
+    };
+    for(int side=-1;side<=1;side+=2) {
+        tower(side*286.f,-D,46,64);tower(side*286.f,-D*.5f,38,58);tower(side*286.f,-6,46,64);
+        tower(side*76.f,-6,50,70);
+    }
+    // the lintel across the archway: a block high above the road, open underneath. Only a north or south gate shows
+    // it side-on; seen from the south, an east or west arch would be a bar standing on end over the road.
+    if(fabsf(f.y)>.5f)piece(rect(-50,-14,50,2),70,true,18);
+    // pennants on the gate towers, in the town's colours
+    if(foreground==false) {
+        for(int side=-1;side<=1;side+=2) {
+            Vector2 p=WorldToScreen(GateWorld({side*76.f,-6},gate,f),camera);
+            DrawLineEx({p.x,p.y-92},{p.x,p.y-72},2,Color{70,56,40,255});
+            DrawTriangle({p.x,p.y-92},{p.x,p.y-80},{p.x+14,p.y-86},TownBannerColor(ti));
+        }
+    }
+}
+
 static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
     for(int ti=0;ti<4;ti++) {
         Vector2 center=OpenTownWorld(ti,TS(500,480)),sp=WorldToScreen(center,camera);
@@ -154,18 +251,29 @@ static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
             DrawTriangle(corners[0],corners[2],corners[1],ground);
             DrawTriangle(corners[0],corners[3],corners[2],ground);
             OpenTownGround(ti,camera);
-            // Two streets run BETWEEN building columns. Cross streets run between
-            // rows, rather than cutting every route through the Town Hall's roof.
-            Color paving=ti==2?Color{181,191,190,255}:ti==1?Color{155,143,119,255}:Color{156,151,128,255};
-            auto street=[&](Vector2 a,Vector2 b,float width=26.f){OpenStreet(screen(a),screen(b),width,paving);};
+            // Two streets run BETWEEN building columns. Cross streets run between rows, rather than cutting
+            // every route through the Town Hall's roof. Towns face N/E/S/W, so every street is a plain
+            // rectangle on the screen; they are drawn together as one kerbed cobble network.
+            std::vector<Rectangle> lanes;
+            auto street=[&](Vector2 a,Vector2 b,float width=34.f){
+                Vector2 pa=world(a),pb=world(b);
+                lanes.push_back({std::min(pa.x,pb.x)-width*.5f,std::min(pa.y,pb.y)-width*.5f,fabsf(pb.x-pa.x)+width,fabsf(pb.y-pa.y)+width});
+            };
             for(float x:{350.f,650.f})street(TS(x,125),TS(x,870));
             for(float y:{350.f,650.f,870.f})street(TS(350,y),TS(650,y));
-            OpenStreet(WorldToScreen(kTownGates[ti].wildernessPos,camera),screen(TS(500,870)),30,paving);
+            {   // the gate road and the apron outside the gate
+                Vector2 pa=kTownGates[ti].wildernessPos,pb=world(TS(500,870));
+                float w=46.f;
+                lanes.push_back({std::min(pa.x,pb.x)-w*.5f,std::min(pa.y,pb.y)-w*.5f,fabsf(pb.x-pa.x)+w,fabsf(pb.y-pa.y)+w});
+                Vector2 a0=GateWorld({-58,-6},pa,TownGateFacing(ti)),a1=GateWorld({58,92},pa,TownGateFacing(ti));
+                lanes.push_back({std::min(a0.x,a1.x),std::min(a0.y,a1.y),fabsf(a1.x-a0.x),fabsf(a1.y-a0.y)});
+            }
             for(const auto& node:ActiveTownNodes(ti)) {
                 float lane=node.pos.x<TS(500,0).x?350.f:650.f;
-                Vector2 door=screen(node.pos);door.y+=18;
-                OpenStreet(door,screen({TS(lane,0).x,node.pos.y}),18,paving);
+                Vector2 door=node.pos;door.y+=18;
+                street(door,{TS(lane,0).x,node.pos.y},24.f);
             }
+            tfroad::DrawStreets(lanes,ti==2?Color{222,236,244,255}:ti==3?Color{196,190,184,255}:WHITE,ti==1,camera);
             // Low planting and lamps occupy the edge of each street junction.
             // They never become new collision objects or interfere with doors.
             float night=std::clamp((.62f-T3DLightAt(T3DLocalTimeOfDay()).sunI)/.34f,0.f,1.f);
@@ -179,16 +287,8 @@ static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
                     if(night>.05f)for(int r=3;r>0;r--)DrawCircleV({p.x,p.y-h+5},r*5,Fade(Color{255,205,120,255},night*.035f));
                 }
             }
-            // Stone perimeter and an open gateway on the same terrain/camera.
-            for(int side=-1;side<=1;side+=2) {
-                Vector2 a=WorldToScreen(GateWorld({side*286.f,0},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
-                Vector2 b=WorldToScreen(GateWorld({side*286.f,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
-                DrawLineEx(a,b,14,Color{91,94,82,255});DrawLineEx({a.x-2,a.y-3},{b.x-2,b.y-3},6,Color{164,162,140,255});
-            }
-            Vector2 a=WorldToScreen(GateWorld({-286,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
-            Vector2 b=WorldToScreen(GateWorld({286,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
-            DrawLineEx(a,b,14,Color{125,127,108,255});
         }
+        OpenTownWalls(ti,s,camera,foreground);
         for(const auto& node:ActiveTownNodes(ti)) {
             Vector2 w=world(node.pos),p=WorldToScreen(w,camera);
             if((w.y>s.wildernessPlayerPos.y)!=foreground || !OpenVisible(p))continue;
@@ -216,7 +316,7 @@ static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
             if((w.y>s.wildernessPlayerPos.y)!=foreground)continue;
             Vector2 p=WorldToScreen(w,camera);if(!OpenVisible(p) || !sheets[i].ok)continue;
             tf2dart::Shadow(p,10,3,.18f);
-            DrawActorSprite(sheets[i],WanderFacing(i,s.worldTime),ActorAnim::Walk,s.worldTime,p,tfworldart::kHeroSize);
+            DrawActorSprite(sheets[i],WanderFacing(i,s.worldTime),ActorAnim::Walk,s.worldTime,p,tfworldart::HeroSize());
         }
     }
 }

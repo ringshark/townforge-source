@@ -4,6 +4,10 @@
 // independent of combat radii and the compressed coordinates of outdoor towns.
 namespace tfworldart {
 static constexpr float kHeroSize=34.f;
+// Outdoors the actors are drawn larger than their art budget (the world itself is zoomed; see DrawWildernessScreen),
+// so a hero, a villager or a wolf reads clearly on a phone. 1 everywhere else.
+inline float g_actorBoost=1.f;
+inline float HeroSize() {return kHeroSize*g_actorBoost;}
 static constexpr float kBuildingHeight=94.f, kBuildingWidth=96.f;
 static constexpr float kTreeMin=74.f, kTreeVariation=22.f;
 struct Actor {unsigned id; Rectangle crop; float size;};
@@ -61,7 +65,7 @@ inline Rectangle Source(Rectangle frame,Rectangle crop) {
 inline void Draw(const Texture2D& tex,Rectangle frame,Vector2 center,Color tint,float multiplier=1,float rotation=0) {
     const Actor* a=Find(tex.id);
     Rectangle src=a?Source(frame,a->crop):frame;
-    float size=(a?a->size:34.f)*multiplier;
+    float size=(a?a->size:34.f)*multiplier*g_actorBoost;
     float scale=size/std::max(fabsf(src.width),src.height);
     float w=fabsf(src.width)*scale,h=src.height*scale;
     // Same ground baseline as the compact hero, whose logical position is its centre.

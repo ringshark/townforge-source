@@ -2754,6 +2754,8 @@ struct DirSpriteSheet {
 #include "town_2d_art.h"
 #include "world_visuals_2d.h"
 static bool g_openWorld2D = false;
+static float g_outdoorZoom = 1.5f;              // the connected 2D world is drawn at 1.5x ...
+static constexpr float kOutdoorActorBoost = 1.34f; // ... and its people and creatures a third larger again: about 2x on screen
 
 struct GameAssets {
     Texture2D player{};
@@ -2969,6 +2971,41 @@ static void DrawWorldLabel(const std::string& text,Vector2 point,int size,Color 
     DrawUIText(text.c_str(),x,y,size,color);
 }
 
+// Some art exports sit on a solid backdrop instead of a transparent one (Cragmoor's buildings on pale blue). Clears
+// whatever backdrop touches the picture's edge: flood-fills from the border across pixels close to the corner colour,
+// then trims one more pixel of its anti-aliased fringe.
+static void KeyBorderBackdrop(Image& img) {
+    ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    Color* px = (Color*)img.data;
+    const int w = img.width, h = img.height;
+    if (w < 4 || h < 4) return;
+    // The backdrop colour: the average of the pale pixels along the border (the corners alone can be half transparent).
+    int r = 0, g = 0, bl = 0, n = 0;
+    auto sample = [&](int x, int y) { const Color& c = px[y * w + x]; if (c.a >= 100 && std::min({ (int)c.r, (int)c.g, (int)c.b }) > 190) { r += c.r; g += c.g; bl += c.b; n++; } };
+    for (int x = 0; x < w; x++) { sample(x, 0); sample(x, h - 1); }
+    for (int y = 0; y < h; y++) { sample(0, y); sample(w - 1, y); }
+    if (n < 8) return; // no pale backdrop
+    const Color ref = { (unsigned char)(r / n), (unsigned char)(g / n), (unsigned char)(bl / n), 255 };
+    auto dist = [&](const Color& c) { return abs((int)c.r - ref.r) + abs((int)c.g - ref.g) + abs((int)c.b - ref.b); };
+    std::vector<int> stack; std::vector<unsigned char> gone((size_t)w * h, 0);
+    auto push = [&](int x, int y) { int i = y * w + x; if (!gone[i] && (px[i].a == 0 || dist(px[i]) <= 60)) { gone[i] = 1; stack.push_back(i); } };
+    for (int x = 0; x < w; x++) { push(x, 0); push(x, h - 1); }
+    for (int y = 0; y < h; y++) { push(0, y); push(w - 1, y); }
+    while (!stack.empty()) {
+        int i = stack.back(); stack.pop_back(); int x = i % w, y = i / w;
+        if (x > 0) push(x - 1, y);
+        if (x < w - 1) push(x + 1, y);
+        if (y > 0) push(x, y - 1);
+        if (y < h - 1) push(x, y + 1);
+    }
+    std::vector<unsigned char> fringe = gone;
+    for (int y = 1; y < h - 1; y++) for (int x = 1; x < w - 1; x++) {
+        int i = y * w + x; if (gone[i]) continue;
+        if ((gone[i - 1] || gone[i + 1] || gone[i - w] || gone[i + w]) && dist(px[i]) <= 110) fringe[i] = 1;
+    }
+    for (int i = 0; i < w * h; i++) if (fringe[i]) px[i].a = 0;
+}
+
 static Texture2D TryLoadTexture(const std::string& path, bool& okOut) {
     Texture2D t{};
     if(kVariantView!=3 && (path.find("assets/frostmere_buildings/")==0 ||
@@ -2978,6 +3015,7 @@ static Texture2D TryLoadTexture(const std::string& path, bool& okOut) {
         Image image=LoadImage(path.c_str());
         if(image.data) {
             ImageAlphaClear(&image,BLANK,.44f);
+            if(path.find("assets/cragmoor_buildings/")==0)KeyBorderBackdrop(image);
             t=LoadTextureFromImage(image);UnloadImage(image);
         }
     } else t=LoadTexture(path.c_str());
@@ -4681,7 +4719,7 @@ static void DrawPlayer(const GameState& s, Vector2 screenPos, Vector2 facing, co
         const bool moving=AnyMoveKeyDown() || VirtualJoystickIsMoving() || g_walkOn;
         const int frame=moving && combatAnim==ActorAnim::Idle ? (int)(s.worldTime*kHeroWalkFps)%4:1;
         const float cw=g_assets.heroSheet.tex.width/4.f,ch=g_assets.heroSheet.tex.height/4.f;
-        const float size=tfworldart::kHeroSize*visualScale;
+        const float size=tfworldart::HeroSize()*visualScale;
         float bob=moving ? sinf(s.worldTime*12.f)*.5f*visualScale:0;
         float attack=combatAnim==ActorAnim::Attack ? sinf(s.worldTime*15.f)*22.f:0;
         Rectangle src=g_compactHeroFrames[row*4+frame];
@@ -15943,6 +15981,9 @@ EM_JS(int, JS_MpState, (char* out, int len), {
     return lengthBytesUTF8(s);
 });
 #else
+#ifdef TF_SHOTS
+static void JS_CloudOpen() {}
+#endif
 static int JS_MpConfigured() { return 0; }
 static void JS_MpZone(const char*, const char*, const char*) {}
 static void JS_MpPos(float, float, float, int) {}
@@ -17784,6 +17825,7 @@ enum : unsigned char {
 static std::vector<unsigned char> g_wt;
 static bool g_wtBuilt = false;
 static std::vector<std::vector<Vector2>> g_wtRoads;           // smoothed: [0] King's Road, then branches
+static const std::vector<std::vector<Vector2>>& OpenRoadNetwork(); // g_wtRoads with the stretches inside towns routed round the walls to the gates
 struct WildBridge { Vector2 a, b; float halfW; };
 static std::vector<WildBridge> g_wtBridges;
 
@@ -18016,7 +18058,7 @@ static float WildFieldAt(const WildField& F, float x, float z) {
 static void WildDraw2DTerrainOverlay(Vector2 camera) {
     if (!g_wild2DOverlayBuilt) {
         g_wild2DOverlayBuilt = true;
-        const int N = 1024;
+        const int N = g_openWorld2D ? 2048 : 1024; // the 2D world is drawn zoomed in, so the shores need the finer texture
         const float k = N / kWildernessWorldSize;
         WildField wf = WildTerrainField(kWTWater | kWTRiver, 2), rf = WildTerrainField(kWTRidge, 2);
         Image img = GenImageColor(N, N, BLANK);
@@ -18035,7 +18077,7 @@ static void WildDraw2DTerrainOverlay(Vector2 camera) {
                 }
                 px[y * N + x] = c;
             }
-        for (const WildBridge& b : g_wtBridges) // plank decks
+        if (!g_openWorld2D) for (const WildBridge& b : g_wtBridges) // plank decks (3D-minimap view; the 2D world draws them as shapes below)
             ImageDrawLineEx(&img, { b.a.x * k, b.a.y * k }, { b.b.x * k, b.b.y * k }, 13, Color{ 140, 100, 62, 255 });
         g_wild2DOverlay = LoadTextureFromImage(img);
         UnloadImage(img);
@@ -18044,6 +18086,28 @@ static void WildDraw2DTerrainOverlay(Vector2 camera) {
     Vector2 tl = WorldToScreen({ 0, 0 }, camera);
     DrawTexturePro(g_wild2DOverlay, { 0, 0, (float)g_wild2DOverlay.width, (float)g_wild2DOverlay.height },
                    { tl.x, tl.y, kWildernessWorldSize, kWildernessWorldSize }, { 0, 0 }, 0.0f, WHITE);
+    if (g_openWorld2D) // plank bridges: a deck with a cross-board pattern, side rails and posts
+        for (const WildBridge& br : g_wtBridges) {
+            Vector2 a = WorldToScreen(br.a, camera), b = WorldToScreen(br.b, camera);
+            if (fmaxf(a.x, b.x) < kViewport.x - 60 || fminf(a.x, b.x) > kViewport.x + kViewport.width + 60 ||
+                fmaxf(a.y, b.y) < kViewport.y - 60 || fminf(a.y, b.y) > kViewport.y + kViewport.height + 60) continue;
+            float len = Dist(a, b); if (len < 1) continue;
+            Vector2 d = { (b.x - a.x) / len, (b.y - a.y) / len }, n = { -d.y, d.x };
+            const float hw = 15.0f;
+            DrawLineEx({ a.x + n.x * 4, a.y + n.y * 4 + 5 }, { b.x + n.x * 4, b.y + n.y * 4 + 5 }, hw * 2 + 6, Fade(BLACK, .22f)); // shadow on the water
+            DrawLineEx(a, b, hw * 2, Color{ 142, 104, 66, 255 });
+            for (float t = 4; t < len - 2; t += 7) { // boards
+                Vector2 p = { a.x + d.x * t, a.y + d.y * t };
+                DrawLineEx({ p.x - n.x * hw, p.y - n.y * hw }, { p.x + n.x * hw, p.y + n.y * hw }, 1.2f, Color{ 98, 68, 40, 255 });
+                if (((int)(t / 7)) % 3 == 0) DrawLineEx({ p.x - n.x * hw, p.y - n.y * hw + 2 }, { p.x + n.x * hw, p.y + n.y * hw + 2 }, 1.0f, Color{ 176, 134, 88, 140 });
+            }
+            for (int side = -1; side <= 1; side += 2) { // rails
+                Vector2 ra = { a.x + n.x * hw * side, a.y + n.y * hw * side }, rb = { b.x + n.x * hw * side, b.y + n.y * hw * side };
+                DrawLineEx(ra, rb, 3.0f, Color{ 86, 60, 36, 255 });
+                DrawLineEx({ ra.x, ra.y - 1 }, { rb.x, rb.y - 1 }, 1.2f, Color{ 190, 150, 100, 255 });
+                for (float t = 0; t <= len; t += 22) { Vector2 p = { ra.x + d.x * t, ra.y + d.y * t }; DrawRectangle((int)p.x - 2, (int)p.y - 6, 4, 8, Color{ 70, 48, 28, 255 }); }
+            }
+        }
 }
 
 // --- Wilderness minimap (2026-09-25): display-only v1, top-right of the viewport
@@ -18154,7 +18218,7 @@ static void WildMapEnsureTexture() {
         tfraster::Line(img,{a.x*k,a.y*k},{b.x*k,b.y*k},2,road);
     };
     WildTerrainEnsure();
-    for (const auto& road : g_wtRoads)
+    for (const auto& road : OpenRoadNetwork())
         for (size_t i = 0; i + 1 < road.size(); i++) seg(road[i], road[i + 1]);
     g_mapSnowProbe=((Color*)img.data)[(int)(500*k)*N+(int)(800*k)];
     g_mapLakeProbe=((Color*)img.data)[(int)(4572*k)*N+(int)(2610*k)];
@@ -21798,14 +21862,17 @@ static int OpenTownAt(Vector2 p) {
 static void GateCollide(Vector2& p, Vector2 gate, Vector2 f) {
     Vector2 l = GateLocal(p, gate, f);
     const float r = 17.0f; // kPlayerRadius
-    if (fabsf(l.x) > 34.0f && fabsf(l.x) < 300.0f && fabsf(l.y + 6.0f) < 9.0f + r) { // curtain wall band
+    // The 2D gatehouse (OpenTownWalls) has its towers further apart than the 3D one, so the archway is wide enough
+    // for the larger hero; the front wall starts at the towers.
+    const float openGap = g_openWorld2D ? 96.0f : 34.0f, towerX = g_openWorld2D ? 76.0f : 50.0f, towerR = g_openWorld2D ? 26.0f : 24.0f;
+    if (fabsf(l.x) > openGap && fabsf(l.x) < 300.0f && fabsf(l.y + 6.0f) < 9.0f + r) { // curtain wall band
         l.y = (l.y + 6.0f >= 0 ? 1.0f : -1.0f) * (9.0f + r) - 6.0f;
         p = GateWorld(l, gate, f);
     }
     for (int sx = -1; sx <= 1; sx += 2) {
-        Vector2 t = GateWorld({ sx * 50.0f, -4.0f }, gate, f);
+        Vector2 t = GateWorld({ sx * towerX, -4.0f }, gate, f);
         float d = Dist(p, t);
-        if (d < 24.0f + r && d > 0.01f) { p.x = t.x + (p.x - t.x) / d * (24.0f + r); p.y = t.y + (p.y - t.y) / d * (24.0f + r); }
+        if (d < towerR + r && d > 0.01f) { p.x = t.x + (p.x - t.x) / d * (towerR + r); p.y = t.y + (p.y - t.y) / d * (towerR + r); }
     }
 }
 static Vector2 TownGateFacing(int townIdx);
@@ -21949,9 +22016,88 @@ static Vector2 TownGateFacing(int townIdx) {
             if (d >= 80.0f && d <= 200.0f) { sum.x += (p.x - c.x) / d; sum.y += (p.y - c.y) / d; }
         }
     float L = hypotf(sum.x, sum.y);
-    cache[townIdx] = L > 0.01f ? Vector2{ sum.x / L, sum.y / L } : Vector2{ 0, 1 };
+    Vector2 dir = L > 0.01f ? Vector2{ sum.x / L, sum.y / L } : Vector2{ 0, 1 };
+    // Towns are square compounds that face one of the four compass directions (2026-10-26): a town at an angle made a
+    // tilted yard, tilted streets and walls that did not meet. Of the four directions, take the one nearest the road
+    // that leaves the gate, unless the ground behind it is water or ridge, or runs out of world.
+    {
+        const Vector2 cands[4] = { { 0, 1 }, { 1, 0 }, { 0, -1 }, { -1, 0 } };
+        float bestScore = -1e9f; Vector2 best = cands[0];
+        for (const Vector2& cf : cands) {
+            float depth = 550.0f;
+            if (fabsf(cf.x) > .001f) depth = std::min(depth, (cf.x > 0 ? c.x : kWildernessWorldSize - c.x) - kPlayerEdgeMargin);
+            if (fabsf(cf.y) > .001f) depth = std::min(depth, (cf.y > 0 ? c.y : kWildernessWorldSize - c.y) - kPlayerEdgeMargin);
+            int blocked = 0, total = 0;
+            for (float lz = -40; lz > -std::max(depth, 80.0f); lz -= 40)
+                for (float lx = -280; lx <= 280; lx += 40) {
+                    Vector2 w = { c.x + lx * cf.y + lz * cf.x, c.y - lx * cf.x + lz * cf.y };
+                    total++;
+                    if (w.x < 30 || w.y < 30 || w.x > kWildernessWorldSize - 30 || w.y > kWildernessWorldSize - 30 || (WildTerrainAt(w.x, w.y) & (kWTWater | kWTRidge))) blocked++;
+                }
+            float score = (dir.x * cf.x + dir.y * cf.y) + std::min(depth, 550.0f) / 550.0f - 2.0f * (total ? (float)blocked / total : 1.0f);
+            if (depth < 300.0f) score -= (300.0f - depth) / 100.0f;
+            if (score > bestScore) { bestScore = score; best = cf; }
+        }
+        dir = best;
+    }
+    cache[townIdx] = dir;
     done[townIdx] = true;
     return cache[townIdx];
+}
+
+// The road network as the 2D world draws it (2026-10-26). The King's Road and its branches were laid out through the
+// gate points, which suited a town you walked into through a doorway; a walled town that faces one compass direction
+// would have roads running straight through its yard. So every stretch inside a town's walls (and its gate apron) is cut
+// out, and the road that reached it is led round the outside of the wall to the front of the gate and in.
+static const std::vector<std::vector<Vector2>>& OpenRoadNetwork() {
+    static std::vector<std::vector<Vector2>> net; static bool built = false;
+    if (built) return net;
+    built = true;
+    WildTerrainEnsure();
+    auto zone = [&](Vector2 p) -> int {
+        for (int ti = 0; ti < 4; ti++) {
+            Vector2 l = GateLocal(p, kTownGates[(size_t)ti].wildernessPos, TownGateFacing(ti));
+            if (fabsf(l.x) < kCompoundHalfW + 60.0f && l.y < 110.0f && l.y > -OpenTownDepth(ti) - 50.0f) return ti;
+        }
+        return -1;
+    };
+    // The way from a point outside a town to its gate (point first), round the outside of the wall.
+    auto link = [&](int ti, Vector2 P) {
+        Vector2 g = kTownGates[(size_t)ti].wildernessPos, f = TownGateFacing(ti);
+        Vector2 L = GateLocal(P, g, f);
+        const float lane = kCompoundHalfW + 80.0f;
+        std::vector<Vector2> local = { L };
+        if (L.y >= 110.0f) {                       // in front of the gate: come straight in (never doubling back)
+            if (L.y > 150.0f) local.push_back({ 0.0f, 140.0f });
+        } else {                                   // beside or behind the walls: out to the lane, along it, then in
+            float sx = L.x >= 0 ? 1.0f : -1.0f, ox = sx * std::max(fabsf(L.x), lane);
+            if (ox != L.x) local.push_back({ ox, L.y });
+            local.push_back({ ox, 150.0f });
+            local.push_back({ 0.0f, 150.0f });
+        }
+        local.push_back({ 0.0f, 0.0f });
+        std::vector<Vector2> w;
+        for (const Vector2& q : local) w.push_back(GateWorld(q, g, f));
+        return WildCatmull(w.data(), (int)w.size(), 20.0f);
+    };
+    for (const auto& road : g_wtRoads) {
+        std::vector<int> z(road.size());
+        bool any = false;
+        for (size_t i = 0; i < road.size(); i++) { z[i] = zone(road[i]); any |= z[i] >= 0; }
+        if (!any) { net.push_back(road); continue; }
+        size_t i = 0;
+        while (i < road.size()) {
+            if (z[i] >= 0) { i++; continue; }
+            size_t j = i; while (j < road.size() && z[j] < 0) j++;          // road[i..j) is outside every town
+            std::vector<Vector2> piece;
+            if (i > 0) { auto l = link(z[i - 1], road[i]); piece.assign(l.rbegin(), l.rend()); }   // from the gate out to the road
+            piece.insert(piece.end(), road.begin() + i, road.begin() + j);
+            if (j < road.size()) { auto l = link(z[j], road[j - 1]); piece.insert(piece.end(), l.begin(), l.end()); } // and in to the next gate
+            if (piece.size() >= 2) net.push_back(std::move(piece));
+            i = j;
+        }
+    }
+    return net;
 }
 
 // (Phase 3 removed the old primitive stand-ins - Wild3DDrawAnimal,
@@ -33737,6 +33883,7 @@ static void EnforceDuelInvariants(GameState& s) {
     }
 }
 
+#include "world_roads_2d.h"
 #include "open_world_2d.h"
 static void DrawNativeWorldVitals(const GameState& s) {
     Rectangle hud={20,76,160,48};
@@ -34939,7 +35086,15 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // 2D world block below is skipped and DrawWilderness3DWorld renders the 3D
     // scene instead. Movement, interaction, combat, and the HUD are shared.
     if (s.wild3DView) { DrawWilderness3DWorld(s, screenW, screenH, prompt); } else {
-    BeginScissorMode((int)kViewport.x, (int)kViewport.y, (int)kViewport.width, (int)kViewport.height);
+    // Outdoors the world is drawn zoomed (g_outdoorZoom) with the actors a little larger still, so the hero is about
+    // twice his old size on screen and a phone can read him. The world is laid out in its own units; only the camera
+    // changes: kViewport is the (smaller) part of the world that fits, a Camera2D scales it up, and the mouse is
+    // scaled back so tapping a monster still finds it. The HUD below is drawn at the normal scale.
+    BeginScissorMode(0, 0, screenW, screenH);
+    kViewport = { 0, 0, screenW / g_outdoorZoom, screenH / g_outdoorZoom };
+    BeginMode2D(Camera2D{ { 0, 0 }, { 0, 0 }, 0.0f, g_outdoorZoom });
+    SetMouseScale(1.0f / g_outdoorZoom, 1.0f / g_outdoorZoom);
+    tfworldart::g_actorBoost = kOutdoorActorBoost;
     Vector2 camera = CameraTopLeft(s.wildernessPlayerPos, kWildernessWorldSize);
     OpenWildGround(camera);
     // The King's Road (Phase 0): drawn as a proper waypoint polyline in both views.
@@ -34949,16 +35104,8 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // same blocking terrain as 3D.
     {
         WildTerrainEnsure();
-        Color roadOuter = { 178, 148, 98, 255 }, roadInner = { 208, 182, 126, 255 };
-        for (int pass = 0; pass < 2; pass++)
-            for (const auto& road : g_wtRoads)
-                for (size_t i = 0; i + 1 < road.size(); i++) {
-                    Vector2 a = WorldToScreen(road[i], camera), b = WorldToScreen(road[i + 1], camera);
-                    if (fmaxf(a.x, b.x) < kViewport.x - 20 || fminf(a.x, b.x) > kViewport.x + kViewport.width + 20 ||
-                        fmaxf(a.y, b.y) < kViewport.y - 20 || fminf(a.y, b.y) > kViewport.y + kViewport.height + 20) continue;
-                    DrawLineEx(a, b, pass == 0 ? 30.0f : 16.0f, pass == 0 ? roadOuter : roadInner);
-                    DrawCircleV(a, pass == 0 ? 15.0f : 8.0f, pass == 0 ? roadOuter : roadInner);
-                }
+        // Soft dirt roads (world_roads_2d.h): drawn in world space, so the ribbons are given the camera's world rectangle.
+        tfroad::DrawWildRoads(OpenRoadNetwork(), { camera.x, camera.y, kViewport.width, kViewport.height }, s.worldTime);
         Vector2 lbl = WorldToScreen(WP(1900, 1630), camera);
         DrawUIText("King's Road", (int)lbl.x - 38, (int)lbl.y, 12, Color{ 96, 74, 50, 255 });
         WildDraw2DTerrainOverlay(camera);
@@ -35257,14 +35404,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     }
     for(int ti=0;ti<4;ti++) {
         Vector2 gate=kTownGates[ti].wildernessPos,f=TownGateFacing(ti);
-        for(int side:{-1,1}) {
-            Vector2 p=WorldToScreen(GateWorld({side*56.f,-8},gate,f),camera);
-            tf2dart::Shadow(p,24,8,.2f);
-            DrawRectangleRounded({p.x-21,p.y-58,42,64},.08f,3,Color{100,104,91,255});
-            DrawRectangleRounded({p.x-18,p.y-58,32,58},.08f,3,Color{166,164,140,255});
-            for(int row=0;row<4;row++)DrawLineEx({p.x-18,p.y-45+row*14.f},{p.x+14,p.y-45+row*14.f},1,Color{121,124,107,255});
-            DrawRectangle((int)p.x-25,(int)p.y-64,50,9,Color{188,181,151,255});
-        }
+        // (The gatehouse itself - towers, arch and walls - is drawn with the town in OpenTownWalls.)
         if(Dist(gate,s.wildernessPlayerPos)<200)
             DrawWorldLabel(ActiveTownName(ti),WorldToScreen(GateWorld({0,-20},gate,f),camera),14,Color{244,224,170,255});
     }
@@ -35313,7 +35453,11 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     OpenResourceTrees(s,camera,true);
     float night=std::clamp((.62f-T3DLightAt(T3DLocalTimeOfDay()).sunI)/.34f,0.f,1.f);
     DrawRectangleRec(kViewport,Fade(Color{10,18,36,255},night*.30f));
+    tfworldart::g_actorBoost = 1.0f;
+    SetMouseScale(1.0f, 1.0f);
+    EndMode2D();
     EndScissorMode();
+    kViewport = { 0, 0, (float)screenW, (float)screenH };
     } // end else: 2D world view (3D renders via DrawWilderness3DWorld above)
     if(g_openWorld2D && !s.exploreMenuOpen) DrawNativeWorldVitals(s);
     DrawVirtualJoystick();
@@ -42171,6 +42315,29 @@ int main() {
     if (hadSave && !g_state.logLine.empty() && g_state.logLine == "Welcome to Town Forge.")
         g_state.logLine = "Welcome back.";
     if (hadSave) SettleCatchUp(g_state);
+#ifdef TF_SHOTS
+    // Developer-only (compile with -DTF_SHOTS): TF_SHOTS="name:x:y;name:x:y" teleports the hero over the connected
+    // wilderness, lets a few frames settle and saves name.png, then quits. Never part of a release build.
+    if (const char* spec = std::getenv("TF_SHOTS")) {
+        std::string list = spec; size_t at = 0;
+        g_state.wild3DView = false;
+        if (const char* z = std::getenv("TF_ZOOM")) g_outdoorZoom = (float)std::atof(z);
+        while (at < list.size()) {
+            size_t end = list.find(';', at); if (end == std::string::npos) end = list.size();
+            std::string item = list.substr(at, end - at); at = end + 1;
+            size_t c1 = item.find(':'), c2 = item.find(':', c1 + 1); if (c1 == std::string::npos || c2 == std::string::npos) continue;
+            g_state.screen = Screen::Wilderness; g_state.wild3DView = false;
+            if (const char* room = std::getenv("TF_INTERIOR")) { g_state.selectedTown = 0; EnterInterior(g_state, room); g_state.interior3DView = false; }
+            size_t c3 = item.find(':', c2 + 1);
+            g_state.wildernessPlayerPos = { (float)std::atof(item.substr(c1 + 1, c2 - c1 - 1).c_str()), (float)std::atof(item.substr(c2 + 1, c3 == std::string::npos ? std::string::npos : c3 - c2 - 1).c_str()) };
+            g_state.worldMapOpen = c3 != std::string::npos;
+            for (int i = 0; i < 40; i++) UpdateDrawFrame();
+            TakeScreenshot((item.substr(0, c1) + ".png").c_str());
+        }
+        CleanupAndClose();
+        return 0;
+    }
+#endif
     while (!WindowShouldClose()) UpdateDrawFrame();
     CleanupAndClose();
 #endif

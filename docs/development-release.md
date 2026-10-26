@@ -76,3 +76,15 @@ copy by hand). Restoring checks the format, the checksum and the `version=` head
 confirm, keeps the replaced save as `townforge_save.prev.txt`, blocks the autosave, writes the
 save, syncs IndexedDB and reloads. It carries a character between phones, browsers, an installed
 app and Safari, and between the 2D and 3D sites, and survives Safari clearing a site's data.
+
+## Roads, walled towns and a larger hero in the connected 2D world (2026-10-26)
+
+Mark: "the roads look horrible, in town and in the wilderness; the towns should have 4 walls with a gate; the sprite should be larger, maybe 2x".
+
+- **Camera.** Outdoors the world is drawn at `g_outdoorZoom` (1.5) and people and creatures at `kOutdoorActorBoost` (1.34) on top, so the hero is about twice his old size on screen (34 px became ~68). `DrawWildernessScreen` sets `kViewport` to the part of the world that fits, wraps the world pass in a `Camera2D`, and scales the mouse back (`SetMouseScale`) so tapping a monster still finds it; the HUD is drawn afterwards at the normal scale. Interiors and the 3D view are untouched.
+- **Towns face a compass direction.** `TownGateFacing` snaps the road direction to N/E/S/W (scored against water, ridge and the world edge behind the gate), so each town is a plain square compound with four walls. `OpenTownWalls` (open_world_2d.h) draws them: wall pieces sorted against the hero, crenellated, corner and mid-side towers, gate towers either side of the archway, a lintel on north/south gates and pennants. The 2D archway is wider than the 3D one (`GateCollide` uses the 2D numbers when `g_openWorld2D`): towers at 76 and radius 26 leave a 66-unit passage for the hero.
+- **Roads** (`world_roads_2d.h`, namespace `tfroad`). Wilderness roads are soft-edged dirt ribbons (verge that melts into the grass, worn centre, wheel ruts, pebbles and tufts, an edge that wanders) drawn from `OpenRoadNetwork()`: `g_wtRoads` with every stretch that lay inside a town's yard cut out and led round the walls to the front of the gate. Town streets are kerbed cobble rectangles drawn as one network (kerbs first, then the cobble) with a gate apron. Scenery keeps clear of the roads as drawn. The atlas map uses the same network.
+- **Art fixes.** Cragmoor's buildings sat on a pale blue backdrop (white boxes in the game): `KeyBorderBackdrop` clears it at load. The shore/water overlay is 2048 px in 2D (it was blurry zoomed in) and bridges are drawn as planked decks with rails.
+- **Dev tool.** Compile with `-DTF_SHOTS` (and `-DTF_HOUR=13` to pin the daylight) and run with `TF_SHOTS="name:x:y;name:x:y"` to teleport over the wilderness and save `name.png` for each (`TF_ZOOM=0.17` shows the whole world, `TF_INTERIOR=smith` an interior). It does nothing in a normal build.
+- **Tests.** `tests/open-world.cpp` now also checks that every town faces a compass direction with open ground behind it, that no road runs through a yard, and that the archway passes the hero while the towers and walls block him.
+- **Not done.** Building interiors still draw the hero at his old size in a portrait-shaped room; the in-town buildings are the existing art, only re-laid onto the new streets.
