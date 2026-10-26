@@ -70,6 +70,25 @@ for(int di=0;di<(int)kDungeons.size();++di) {
  dungeon.hunt3DView=true;assert(!NativeLandscapePage(dungeon));
 }
 std::cout<<"PASS all six dungeon layouts: full landscape viewport, hero camera follow, identity input without panel scrolling, visible HUD and menu controls"<<std::endl;
+std::fill(std::begin(g_isReady),std::end(g_isReady),true); // GPU surfaces are stubbed in this layout test
+// Every 2D building uses the native world, with camera tracking rather than page scrolling.
+for(const auto& room:kInteriorRooms) {
+ GameState inside;inside.screen=Screen::Interior;inside.interiorKey=room.key;inside.interior3DView=false;
+ assert(NativeLandscapePage(inside) && ExploreHeaderCollapsed(inside));
+ for(Vector2 position:std::vector<Vector2>{{260,520},{260,100},{120,310},{400,310}}) {
+  reset();g_landscapeWorld=g_presentedWorld=true;g_landscapeScroll=180;
+  inside.interiorPlayerPos=position;DrawInteriorScreen(inside,960,540);
+  assert(kViewport.x==0 && kViewport.y==0 && kViewport.width==960 && kViewport.height==540);
+  auto pp=WorldToScreen(inside.interiorPlayerPos,InteriorCameraTopLeft(inside.interiorPlayerPos));
+  assert(pp.x>0 && pp.x<960 && pp.y>0 && pp.y<540);
+  auto input=LandscapePointerMap({pp.x,pp.y},tflayout::Region::NativePage);
+  assert(input.x==pp.x && input.y==pp.y);check(room.key);
+ }
+ reset();g_landscapeWorld=true;inside.selectedTile=room.key;DrawInteriorScreen(inside,960,540);check("interior building actions");
+ reset();inside.selectedTile.reset();inside.interiorGreeted=true;DrawInteriorScreen(inside,960,540);check("interior greeting");
+ inside.interior3DView=true;assert(!NativeLandscapePage(inside));
+}
+std::cout<<"PASS all 13 interiors: native landscape, visible hero, identity input and building panels"<<std::endl;
 reset();bool open=false;
 // Every native menu destination must preserve its action and fit the canvas.
 auto menuReset=[&](){reset();g_landscapePage=g_presentedPage=false;g_presentedNativeMenu=true;g_uiShieldBypass=true;open=true;s.screen=Screen::Town;};
@@ -239,6 +258,12 @@ SaveGame(life);GameState restored;assert(LoadGame(restored));assert(restored.lif
 if(const char* path=std::getenv("TF_HOMESTEAD_FIXTURE")) {
     auto fixture=life;fixture.optOnline=false;fixture.autoReagents=false;fixture.gold=1000;fixture.life.seeds={6,3,3};fixture.life.produce={8,4,3};fixture.life.cooldown=360;fixture.youngT=1200;fixture.starterStep=-1;fixture.starterAccepted=fixture.starterRewarded=true;
     fixture.life.beds[0]={0,180,true};SaveGame(fixture);std::ifstream from(kSaveFilePath);std::ofstream to(path);to<<from.rdbuf();
+}
+if(const char* path=std::getenv("TF_INTERIOR_FIXTURE")) {
+    GameState fixture;fixture.optClassic2D=true;fixture.optOnline=false;fixture.youngT=1200;fixture.starterStep=-1;fixture.starterAccepted=fixture.starterRewarded=true;
+    fixture.screen=Screen::Wilderness;fixture.selectedTown=0;
+    for(const auto& n:ActiveTownNodes(0))if(std::string(n.key)=="smith")fixture.wildernessPlayerPos=OpenTownWorld(0,{n.pos.x,n.pos.y+150});
+    SaveGame(fixture);std::ifstream from(kSaveFilePath);std::ofstream to(path);to<<from.rdbuf();
 }
 g_farmOpen=false;GameState target;target.screen=Screen::Wilderness;target.youngT=0;target.starterStep=-1;target.wildernessPlayerPos=WP(450,1300);
 assert(SpawnRovingPack(target));assert(target.wildEngaged && target.wildExtraAttackers.size()>=2 && target.wildExtraAttackers.size()<=7);

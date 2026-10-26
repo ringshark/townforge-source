@@ -18417,7 +18417,7 @@ static bool IsMenuScreen(Screen sc) {
 static bool ExploreHeaderCollapsed(const GameState& s) {
     // Both outdoor views use the compact navigation. 2D shares a native landscape page.
     return s.screen==Screen::Town || s.screen==Screen::Wilderness ||
-        (s.screen==Screen::Interior && s.interior3DView) || s.screen==Screen::Blackwake || IsMenuScreen(s.screen);
+        s.screen==Screen::Interior || s.screen==Screen::Blackwake || IsMenuScreen(s.screen);
 }
 static const Rectangle kCompactMenuBtn = { 20, 56, 104, 48 };
 static Rectangle CompactMenuPanelRect(bool inDungeon) {
@@ -27565,7 +27565,7 @@ static float g_hcScroll = 0.0f;
 static void DrawHouseCraftGump(GameState& s) {
     int mIdx = s.houseCraftModule;
     if (mIdx < 0 || mIdx > 3) { s.houseCraftModule = -1; return; }
-    Rectangle G = { 20, 190, 500, 520 };
+    Rectangle G = g_landscapePage ? Rectangle{230,70,500,450}:Rectangle{20,190,500,520};
     UODrawGump(G, kUoParchment);
     const HomeModuleDef& def = kHomeModuleDefs[mIdx];
     UODrawTitle(G, def.label, 14);
@@ -27693,6 +27693,7 @@ static void DrawInterior2D(GameState& s, int screenW, int screenH,
 }
 
 static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
+    if (!s.interior3DView) kViewport={0,0,(float)screenW,(float)screenH};
     const InteriorRoomDef* room = InteriorRoomFor(s.interiorKey);
     if (!room) { // safety net
         s.interiorKey.clear();
@@ -27758,7 +27759,7 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
     }
 
     // Title + view/camera buttons (same placement language as the town HUD).
-    DrawInfoLine(TileNameFor(s.interiorKey).c_str(), 20, 118, 14);
+    DrawInfoLine(TileNameFor(s.interiorKey).c_str(), g_landscapePage?156:20, g_landscapePage?24:118, 14);
     if (s.interior3DView && Button({ 452, 120, 78, 30 }, g_t3dFollowMode ? "Follow" : "Float", true))
         g_t3dFollowMode = !g_t3dFollowMode;
 
@@ -41459,6 +41460,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_OutdoorState() {
     return TextFormat("{\"screen\":%d,\"outdoor\":%s,\"town\":%d,\"x\":%.3f,\"y\":%.3f,\"gx\":%.3f,\"gy\":%.3f,\"fx\":%.4f,\"fy\":%.4f}",
         (int)s.screen,s.screen==Screen::Wilderness?"true":"false",OpenTownAt(s.wildernessPlayerPos),s.wildernessPlayerPos.x,s.wildernessPlayerPos.y,g.x,g.y,f.x,f.y);
 }
+extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_InteriorState() {
+    if(!g_runtimeReady)return "{}";
+    const auto& s=g_state;auto p=WorldToScreen(s.interiorPlayerPos,InteriorCameraTopLeft(s.interiorPlayerPos));
+    return TextFormat("{\"room\":\"%s\",\"inside\":%s,\"wide\":%s,\"x\":%.2f,\"y\":%.2f,\"heroX\":%.2f,\"heroY\":%.2f,\"vw\":%.0f,\"vh\":%.0f,\"scroll\":%.1f,\"menu\":%s}",s.interiorKey.c_str(),s.screen==Screen::Interior?"true":"false",g_landscapePage?"true":"false",s.interiorPlayerPos.x,s.interiorPlayerPos.y,p.x,p.y,kViewport.width,kViewport.height,g_landscapeScroll,s.exploreMenuOpen?"true":"false");
+}
 extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_AtlasState() {
     return TextFormat("{\"open\":%s,\"zoom\":%.3f,\"cx\":%.2f,\"cy\":%.2f,\"filter\":%d,\"selected\":%d,\"waypoint\":%d}",g_state.worldMapOpen?"true":"false",tfatlas::view.zoom,tfatlas::view.center.x,tfatlas::view.center.y,tfatlas::filter,tfatlas::selected?tfatlas::selected->id:-1,tfatlas::waypoint?tfatlas::waypoint->id:-1);
 }
@@ -41503,6 +41509,7 @@ static const float kZoom = 1.125f;
 static bool NativeLandscapePage(const GameState& s) {
     return IsMenuScreen(s.screen) || (s.screen==Screen::Town && !s.town3DView) ||
         (s.screen==Screen::Wilderness && !s.wild3DView) ||
+        (s.screen==Screen::Interior && !s.interior3DView) ||
         (s.screen==Screen::Hunt && s.selectedDungeon.has_value() && !s.hunt3DView && !s.combat && s.huntSubView==0);
 }
 static int LandscapeDialogOpen(const GameState& s) {
