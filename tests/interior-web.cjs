@@ -12,7 +12,7 @@ const fixture=fs.readFileSync(process.env.TF_INTERIOR_FIXTURE||'/tmp/tf-interior
    await page.reload({waitUntil:'domcontentloaded'});await ready();await page.waitForTimeout(700);await page.locator('#canvas').focus();
    await page.waitForFunction(()=>JSON.parse(UTF8ToString(_TF_OutdoorState())).outdoor);
    const outside=await page.evaluate(()=>JSON.parse(UTF8ToString(_TF_OutdoorState())));
-   const target={x:outside.gx-51*outside.fy-114*outside.fx,y:outside.gy+51*outside.fx-114*outside.fy};
+   const target={x:outside.bankX,y:outside.bankY+58};
    let held=new Set();const start=Date.now();
    try{while(Date.now()-start<12000){const p=await page.evaluate(()=>JSON.parse(UTF8ToString(_TF_OutdoorState()))),dx=target.x-p.x,dy=target.y-p.y;if(Math.hypot(dx,dy)<2.5)break;const next=new Set();if(Math.abs(dx)>1.5)next.add(dx>0?'d':'a');if(Math.abs(dy)>1.5)next.add(dy>0?'s':'w');for(const k of held)if(!next.has(k))await page.keyboard.up(k);for(const k of next)if(!held.has(k))await page.keyboard.down(k);held=next;await page.waitForTimeout(50);}}finally{for(const k of held)await page.keyboard.up(k);}
    await page.keyboard.press('e',{delay:160});await page.waitForFunction(()=>JSON.parse(UTF8ToString(_TF_InteriorState())).inside,null,{timeout:10000});await page.waitForTimeout(300);

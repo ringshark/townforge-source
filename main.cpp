@@ -534,8 +534,9 @@ static const char* RegionName(RegionId r) {
 // King's Road - the trade road between the towns, defined as waypoints so
 // later phases can extend it (Phase 3: north to Frostmere; Phase 4: west to
 // Cragmoor). Both the 2D and 3D views draw it from this one table.
-static const std::array<Vector2, 14> kKingsRoadWaypoints = {{
+static const std::array<Vector2, 15> kKingsRoadWaypoints = {{
     WP(900, 1750),   // Town return gate
+    WP(900, 1850),   // South-facing forecourt: turn outside the town walls
     WP(1400, 1710),  // bend south of the Whisper Crypt approach
     WP(1900, 1680),  // Whisperwood edge
     WP(2300, 1720),  // Saltmere corridor
@@ -9070,23 +9071,23 @@ struct TownNodePos { std::string key; Vector2 pos; };
 // (2026-09-25: the town house building was retired in favor of custom wilderness
 // housing - the node is gone, but this comment stays to explain the grid history.)
 static const std::array<TownNodePos, 9> kTownNodePositions = {{
-    {"smith", TS(200, 200)}, {"carpenter", TS(500, 200)}, {"tailor", TS(800, 200)},
-    {"alchemy", TS(200, 500)}, {"townhall", TS(500, 500)}, {"stable", TS(800, 500)},
-    {"healer", TS(200, 800)}, {"bank", TS(500, 800)}, {"provisioner", TS(800, 800)},
+    {"smith", TS(180, 300)}, {"carpenter", TS(180, 600)}, {"tailor", TS(820, 300)},
+    {"alchemy", TS(180, 860)}, {"townhall", TS(500, 110)}, {"stable", TS(820, 600)},
+    {"healer", TS(500, 820)}, {"bank", TS(500, 340)}, {"provisioner", TS(820, 860)},
 }};
 // Phase 3 - Frostmere's own building set: 5 nodes on the same town grid (plaza at
 // 420,420 and the Wilderness Gate at 500,900 are shared). Roads, collision, and
 // hit-testing all iterate ActiveTownNodes(), so the smaller set just works.
 static const std::array<TownNodePos, 5> kTown3NodePositions = {{
-    {"bank", TS(350, 280)}, {"healer", TS(650, 280)},
-    {"provisioner", TS(500, 600)},
-    {"furtrader", TS(180, 620)}, {"smith", TS(820, 620)},
+    {"bank", TS(300, 280)}, {"healer", TS(700, 280)},
+    {"provisioner", TS(500, 180)},
+    {"furtrader", TS(180, 700)}, {"smith", TS(820, 700)},
 }};
 // Phase 4 - Cragmoor's own building set: 5 nodes, same grid conventions.
 static const std::array<TownNodePos, 5> kTown4NodePositions = {{
-    {"bank", TS(350, 280)}, {"healer", TS(650, 280)},
-    {"provisioner", TS(500, 600)},
-    {"smith", TS(180, 620)}, {"minersguild", TS(820, 620)},
+    {"bank", TS(300, 280)}, {"healer", TS(700, 280)},
+    {"provisioner", TS(500, 180)},
+    {"smith", TS(180, 700)}, {"minersguild", TS(820, 700)},
 }};
 // Range over the active town's building nodes - the two tables have different
 // sizes, so this (not a reference) is what the town loops iterate.
@@ -21407,6 +21408,7 @@ static void T3DDrawNightGlows(const Town3DCam& c, int town) {
 // stair, a lava-lit cave, a frozen barrow, a timbered mine - with a dark
 // doorway you walk into. It faces the road that leads to it.
 static Vector2 EntranceFacing(int i) {
+    if(g_openWorld2D)return {0,1}; // the 2D landmark atlas has south-facing thresholds
     static Vector2 cache[8]; static bool done[8] = {};
     if (i < 0 || i >= 8) return { 0, 1 };
     if (done[i]) return cache[i];
@@ -21765,12 +21767,12 @@ static Vector2 GateLocal(Vector2 p, Vector2 gate, Vector2 f) {
 static Vector2 GateWorld(Vector2 l, Vector2 gate, Vector2 f) {
     return { gate.x + l.x * f.y + l.y * f.x, gate.y - l.x * f.x + l.y * f.y };
 }
-static constexpr float kOpenTownScale = .36f;
-static constexpr float kOpenTownDepth = 550.0f;
+static constexpr float kOpenTownScale = .42f;
+static constexpr float kOpenTownDepth = 660.0f;
 static constexpr float kOpenTownApron = 60.0f;
-static constexpr float kOpenCoastalTownScale = .30f;
-static constexpr float kOpenTownHalfW = 286.f;
-static float OpenTownScale(int ti) {return ti==1?kOpenCoastalTownScale:kOpenTownScale;}
+static constexpr float kOpenCoastalTownScale = .19f;
+static constexpr float kOpenTownHalfW = 310.f;
+static float OpenTownScale(int ti) {return (ti==1 || ti==3)?kOpenCoastalTownScale:kOpenTownScale;}
 static float OpenTownDepth(int ti) {
     Vector2 g=kTownGates[ti].wildernessPos,f=TownGateFacing(ti);
     float d=kOpenTownDepth;
@@ -21778,12 +21780,22 @@ static float OpenTownDepth(int ti) {
     if(fabsf(f.y)>.001f) d=std::min(d,((f.y>0?g.y:kWildernessWorldSize-g.y)-kPlayerEdgeMargin-kOpenTownHalfW*fabsf(f.x))/fabsf(f.y));
     return d;
 }
+// Saltmere is a shallow coastal compound. Use two broad terraces rather than
+// squeezing the inland town's three rows past the edge of the connected world.
+static Vector2 OpenCompactAnchor(int ti,const std::string& key) {
+    if(ti==3){if(key=="bank")return {-150,-260};if(key=="healer")return {150,-260};if(key=="provisioner")return {0,-300};if(key=="smith")return {-180,-100};return {180,-100};}
+    const char* keys[]={"smith","carpenter","townhall","tailor","alchemy","healer","bank","stable","provisioner"};
+    const Vector2 points[]={{-240,-250},{-120,-250},{0,-250},{120,-250},{240,-250},{-240,-110},{-120,-110},{120,-110},{240,-110}};
+    for(int i=0;i<9;i++)if(key==keys[i])return points[i];return {0,-110};
+}
 static Vector2 OpenTownWorld(int ti, Vector2 p) {
     Vector2 l = {(p.x - kWildernessGatePos.x) * OpenTownScale(ti),
                  (p.y - kWildernessGatePos.y) * OpenTownScale(ti) - kOpenTownApron};
+    if(ti==1 || ti==3)for(const auto& n:ActiveTownNodes(ti))if(Dist(n.pos,p)<.01f){l=OpenCompactAnchor(ti,n.key);break;}
     return GateWorld(l, kTownGates[ti].wildernessPos, TownGateFacing(ti));
 }
 static Vector2 OpenTownLocal(int ti, Vector2 p) {
+    if(ti==1 || ti==3)for(const auto& n:ActiveTownNodes(ti))if(Dist(OpenTownWorld(ti,n.pos),p)<.01f)return n.pos;
     Vector2 l = GateLocal(p, kTownGates[ti].wildernessPos, TownGateFacing(ti));
     return {l.x / OpenTownScale(ti) + kWildernessGatePos.x,
             (l.y + kOpenTownApron) / OpenTownScale(ti) + kWildernessGatePos.y};
@@ -21791,14 +21803,14 @@ static Vector2 OpenTownLocal(int ti, Vector2 p) {
 static int OpenTownAt(Vector2 p) {
     for (int ti=0;ti<4;ti++) {
         Vector2 l=GateLocal(p,kTownGates[ti].wildernessPos,TownGateFacing(ti));
-        if(fabsf(l.x)<280 && l.y<35 && l.y>-OpenTownDepth(ti)) return ti;
+        if(fabsf(l.x)<kOpenTownHalfW-6 && l.y<35 && l.y>-OpenTownDepth(ti)) return ti;
     }
     return -1;
 }
 static void GateCollide(Vector2& p, Vector2 gate, Vector2 f) {
     Vector2 l = GateLocal(p, gate, f);
     const float r = 17.0f; // kPlayerRadius
-    if (fabsf(l.x) > 34.0f && fabsf(l.x) < 300.0f && fabsf(l.y + 6.0f) < 9.0f + r) { // curtain wall band
+    if (fabsf(l.x) > 34.0f && fabsf(l.x) < (g_openWorld2D?kOpenTownHalfW:300.0f) && fabsf(l.y + 6.0f) < 9.0f + r) { // curtain wall band
         l.y = (l.y + 6.0f >= 0 ? 1.0f : -1.0f) * (9.0f + r) - 6.0f;
         p = GateWorld(l, gate, f);
     }
@@ -21844,10 +21856,10 @@ static void TownCompoundCollide(Vector2& p, int ti, float D) {
     const float r = 17.0f, t = 10.0f;
     bool moved = false;
     for (int sx = -1; sx <= 1; sx += 2) { // side walls
-        float wx = sx * kCompoundHalfW;
+        float wx = sx * (g_openWorld2D?kOpenTownHalfW:kCompoundHalfW);
         if (l.y < 0.0f && l.y > -D - t && fabsf(l.x - wx) < t + r) { l.x = wx + ((l.x - wx) >= 0 ? 1.0f : -1.0f) * (t + r); moved = true; }
     }
-    if (fabsf(l.x) < kCompoundHalfW + t && fabsf(l.y + D) < t + r) { l.y = -D + ((l.y + D) >= 0 ? 1.0f : -1.0f) * (t + r); moved = true; } // back wall
+    if (fabsf(l.x) < (g_openWorld2D?kOpenTownHalfW:kCompoundHalfW) + t && fabsf(l.y + D) < t + r) { l.y = -D + ((l.y + D) >= 0 ? 1.0f : -1.0f) * (t + r); moved = true; } // back wall
     if (moved) p = GateWorld(l, g, f);
 }
 static void Wild3DDrawTownCompound(const GameState& s, int ti, Color wall, Color dark) {
@@ -21938,6 +21950,7 @@ static void Wild3DDrawTownCompound(const GameState& s, int ti, Color wall, Color
 // Which way a town's gatehouse faces: along the road that leaves it (unit vector,
 // pointing out into the wilds). The town lies behind it.
 static Vector2 TownGateFacing(int townIdx) {
+    if(townIdx==0)return {0,1}; // Emberhold faces its new south forecourt, clear of Southfen homes
     static Vector2 cache[4]; static bool done[4] = {};
     townIdx = std::clamp(townIdx, 0, 3);
     if (done[townIdx]) return cache[townIdx];
@@ -34948,19 +34961,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // overlay - water, shores, ridges, bridge decks - over it, so 2D shows the
     // same blocking terrain as 3D.
     {
-        WildTerrainEnsure();
-        Color roadOuter = { 178, 148, 98, 255 }, roadInner = { 208, 182, 126, 255 };
-        for (int pass = 0; pass < 2; pass++)
-            for (const auto& road : g_wtRoads)
-                for (size_t i = 0; i + 1 < road.size(); i++) {
-                    Vector2 a = WorldToScreen(road[i], camera), b = WorldToScreen(road[i + 1], camera);
-                    if (fmaxf(a.x, b.x) < kViewport.x - 20 || fminf(a.x, b.x) > kViewport.x + kViewport.width + 20 ||
-                        fmaxf(a.y, b.y) < kViewport.y - 20 || fminf(a.y, b.y) > kViewport.y + kViewport.height + 20) continue;
-                    DrawLineEx(a, b, pass == 0 ? 30.0f : 16.0f, pass == 0 ? roadOuter : roadInner);
-                    DrawCircleV(a, pass == 0 ? 15.0f : 8.0f, pass == 0 ? roadOuter : roadInner);
-                }
-        Vector2 lbl = WorldToScreen(WP(1900, 1630), camera);
-        DrawUIText("King's Road", (int)lbl.x - 38, (int)lbl.y, 12, Color{ 96, 74, 50, 255 });
+        tfdesign::DrawRoads(camera);
         WildDraw2DTerrainOverlay(camera);
     }
 
@@ -35224,8 +35225,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         bool near = nearestKind == WildNodeKind::DungeonEntrance && nearestIdx == (int)i && inRange;
         const DungeonDef& dungeon = kDungeons[entrance.dungeonIdx];
         Vector2 screenPos = WorldToScreen(entrance.pos, camera);
-        const Texture2D* icon = g_assets.wildEntranceTexOk[entrance.dungeonIdx] ? &g_assets.wildEntranceTex[entrance.dungeonIdx] : nullptr;
-        DrawWorldNode(screenPos, kNodeRadius * 0.9f, entrance.color, dungeon.name, near, dungeon.theme, icon);
+        tfdesign::DrawDungeon((int)i,s,camera,near);
     }
     // Phase 6 - connective tissue landmarks, 2D.
     for (size_t si = 0; si < kShrines.size(); si++) { // virtue shrines: gold-ringed white stones
@@ -41457,8 +41457,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_OutdoorState() {
     const auto& s=g_state;
     Vector2 g=kTownGates[std::clamp(s.selectedTown,0,3)].wildernessPos;
     Vector2 f=TownGateFacing(s.selectedTown);
-    return TextFormat("{\"screen\":%d,\"outdoor\":%s,\"town\":%d,\"x\":%.3f,\"y\":%.3f,\"gx\":%.3f,\"gy\":%.3f,\"fx\":%.4f,\"fy\":%.4f}",
-        (int)s.screen,s.screen==Screen::Wilderness?"true":"false",OpenTownAt(s.wildernessPlayerPos),s.wildernessPlayerPos.x,s.wildernessPlayerPos.y,g.x,g.y,f.x,f.y);
+    Vector2 bank{};for(const auto& n:ActiveTownNodes(s.selectedTown))if(n.key=="bank")bank=OpenTownWorld(s.selectedTown,n.pos);
+    return TextFormat("{\"screen\":%d,\"outdoor\":%s,\"town\":%d,\"x\":%.3f,\"y\":%.3f,\"gx\":%.3f,\"gy\":%.3f,\"fx\":%.4f,\"fy\":%.4f,\"bankX\":%.3f,\"bankY\":%.3f}",
+        (int)s.screen,s.screen==Screen::Wilderness?"true":"false",OpenTownAt(s.wildernessPlayerPos),s.wildernessPlayerPos.x,s.wildernessPlayerPos.y,g.x,g.y,f.x,f.y,bank.x,bank.y);
 }
 extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_InteriorState() {
     if(!g_runtimeReady)return "{}";

@@ -9,6 +9,7 @@ static bool OpenVisible(Vector2 p,float pad=180) {
     return p.x>kViewport.x-pad && p.x<kViewport.x+kViewport.width+pad &&
            p.y>kViewport.y-pad && p.y<kViewport.y+kViewport.height+pad;
 }
+#include "world_design_2d.h"
 static void OpenWildGround(Vector2 camera) {
     if(!g_openWildGround.id) {
         Image img=GenImageColor(kOpenGroundSize,kOpenGroundSize,BLANK);
@@ -135,9 +136,9 @@ static void OpenTownGround(int ti,Vector2 camera) {
     float depth=OpenTownDepth(ti),rotation=atan2f(-facing.x,facing.y)*RAD2DEG;
     // Clip the last tile to the wall. Rotation follows the actual gate basis,
     // while buildings retain their top-down art orientation.
-    for(float y=0;y<depth;y+=tile)for(float x=0;x<572;x+=tile) {
-        float w=std::min((float)tile,572-x),h=std::min((float)tile,depth-y);
-        Vector2 p=WorldToScreen(GateWorld({x-286,y-depth},gate,facing),camera);
+    for(float y=0;y<depth;y+=tile)for(float x=0;x<kOpenTownHalfW*2;x+=tile) {
+        float w=std::min((float)tile,kOpenTownHalfW*2-x),h=std::min((float)tile,depth-y);
+        Vector2 p=WorldToScreen(GateWorld({x-kOpenTownHalfW,y-depth},gate,facing),camera);
         DrawTexturePro(texture,{0,0,w,h},{p.x,p.y,w,h},{0,0},rotation,WHITE);
     }
 }
@@ -149,22 +150,20 @@ static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
         auto screen=[&](Vector2 p){return WorldToScreen(world(p),camera);};
         if(!foreground) {
             auto corner=[&](float x,float y){return WorldToScreen(GateWorld({x,y},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);};
-            Vector2 corners[4]={corner(-286,-OpenTownDepth(ti)),corner(286,-OpenTownDepth(ti)),corner(286,0),corner(-286,0)};
+            Vector2 corners[4]={corner(-kOpenTownHalfW,-OpenTownDepth(ti)),corner(kOpenTownHalfW,-OpenTownDepth(ti)),corner(kOpenTownHalfW,0),corner(-kOpenTownHalfW,0)};
             Color ground=ti==2?Color{205,220,220,255}:ti==3?Color{121,122,109,255}:Color{79,92,57,255};
             DrawTriangle(corners[0],corners[2],corners[1],ground);
             DrawTriangle(corners[0],corners[3],corners[2],ground);
             OpenTownGround(ti,camera);
-            // Two streets run BETWEEN building columns. Cross streets run between
-            // rows, rather than cutting every route through the Town Hall's roof.
-            Color paving=ti==2?Color{181,191,190,255}:ti==1?Color{155,143,119,255}:Color{156,151,128,255};
-            auto street=[&](Vector2 a,Vector2 b,float width=26.f){OpenStreet(screen(a),screen(b),width,paving);};
-            for(float x:{350.f,650.f})street(TS(x,125),TS(x,870));
-            for(float y:{350.f,650.f,870.f})street(TS(350,y),TS(650,y));
-            OpenStreet(WorldToScreen(kTownGates[ti].wildernessPos,camera),screen(TS(500,870)),30,paving);
-            for(const auto& node:ActiveTownNodes(ti)) {
-                float lane=node.pos.x<TS(500,0).x?350.f:650.f;
-                Vector2 door=screen(node.pos);door.y+=18;
-                OpenStreet(door,screen({TS(lane,0).x,node.pos.y}),18,paving);
+            tfdesign::DrawTownStreets(ti,camera);
+            // Orchard-like planting at the edge of each district; never in a
+            // street or the approach to a shop door. Existing trees are reused.
+            for(Vector2 site:std::array<Vector2,4>{{TS(95,440),TS(905,440),TS(95,720),TS(905,720)}}){
+                Vector2 w=world(site);bool clear=OpenTownAt(w)==ti;
+                for(const auto& n:ActiveTownNodes(ti))if(Dist(w,world(n.pos))<85)clear=false;
+                for(const auto& lane:tfdesign::TownLanes(ti))if(Dist(w,tfdesign::NearestOn(w,lane.a,lane.b))<48)clear=false;
+                const auto& tree=tf2dart::scenery[ti==2?2:0];
+                if(clear && tree.id){Vector2 p=WorldToScreen(w,camera);float h=72,width=h*tree.width/tree.height;tf2dart::Shadow(p,16,5,.16f);DrawTexturePro(tree,{0,0,(float)tree.width,(float)tree.height},{p.x-width/2,p.y-h,width,h},{0,0},0,WHITE);}
             }
             // Low planting and lamps occupy the edge of each street junction.
             // They never become new collision objects or interfere with doors.
@@ -181,12 +180,12 @@ static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
             }
             // Stone perimeter and an open gateway on the same terrain/camera.
             for(int side=-1;side<=1;side+=2) {
-                Vector2 a=WorldToScreen(GateWorld({side*286.f,0},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
-                Vector2 b=WorldToScreen(GateWorld({side*286.f,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
+                Vector2 a=WorldToScreen(GateWorld({side*kOpenTownHalfW,0},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
+                Vector2 b=WorldToScreen(GateWorld({side*kOpenTownHalfW,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
                 DrawLineEx(a,b,14,Color{91,94,82,255});DrawLineEx({a.x-2,a.y-3},{b.x-2,b.y-3},6,Color{164,162,140,255});
             }
-            Vector2 a=WorldToScreen(GateWorld({-286,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
-            Vector2 b=WorldToScreen(GateWorld({286,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
+            Vector2 a=WorldToScreen(GateWorld({-kOpenTownHalfW,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
+            Vector2 b=WorldToScreen(GateWorld({kOpenTownHalfW,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
             DrawLineEx(a,b,14,Color{125,127,108,255});
         }
         for(const auto& node:ActiveTownNodes(ti)) {

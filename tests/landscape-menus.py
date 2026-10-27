@@ -89,6 +89,29 @@ for(const auto& room:kInteriorRooms) {
  inside.interior3DView=true;assert(!NativeLandscapePage(inside));
 }
 std::cout<<"PASS all 13 interiors: native landscape, visible hero, identity input and building panels"<<std::endl;
+// Physical planning uses existing building keys, doors and walkable terrain.
+g_openWorld2D=true;
+for(int town=0;town<4;++town){
+ std::cout<<"town "<<town<<" depth="<<OpenTownDepth(town)<<" facing="<<TownGateFacing(town).x<<","<<TownGateFacing(town).y<<std::endl;
+ // Flood the actual movement footprint from the gate, not just a drawn road.
+ constexpr int N=140;const float step=8;auto center=GateWorld({0,-OpenTownDepth(town)*.5f},kTownGates[town].wildernessPos,TownGateFacing(town));Vector2 origin={center.x-560,center.y-560};
+ auto point=[&](int i){return Vector2{origin.x+(i%N+.5f)*step,origin.y+(i/N+.5f)*step};};
+ auto index=[&](Vector2 p){return std::clamp((int)((p.y-origin.y)/step),0,N-1)*N+std::clamp((int)((p.x-origin.x)/step),0,N-1);};
+ auto walk=[&](Vector2 p){auto l=GateLocal(p,kTownGates[town].wildernessPos,TownGateFacing(town));if(OpenTownAt(p)!=town || fabsf(l.x)>kOpenTownHalfW-28 || l.y<-OpenTownDepth(town)+28)return false;for(const auto& n:ActiveTownNodes(town))if(Dist(p,OpenTownWorld(town,n.pos))<53)return false;return true;};
+ std::vector<char> seen(N*N);std::vector<int> queue;int start=index(GateWorld({0,-35},kTownGates[town].wildernessPos,TownGateFacing(town)));queue.push_back(start);seen[start]=1;
+ for(size_t head=0;head<queue.size();head++){int i=queue[head];for(int d:std::array<int,4>{{1,-1,N,-N}}){int j=i+d;if(j<0 || j>=N*N || std::abs(j%N-i%N)>1 || seen[j] || !walk(point(j)))continue;seen[j]=1;queue.push_back(j);}}
+ for(const auto& node:ActiveTownNodes(town)){
+  auto w=OpenTownWorld(town,node.pos);assert(OpenTownAt(w)==town);
+  Vector2 approach={w.x,w.y+58};float access=1e9;for(int i:queue)access=std::min(access,Dist(point(i),approach));assert(access<24);
+  auto local=OpenTownLocal(town,w);assert(Dist(local,node.pos)<.01f);
+  for(const auto& other:ActiveTownNodes(town))if(node.key!=other.key)assert(Dist(w,OpenTownWorld(town,other.pos))>100);
+ }
+}
+for(const auto& plot:kHousePlots)for(int dx:{-1,0,1})for(int dy:{-1,0,1})assert(OpenTownAt({plot.pos.x+dx*plot.cells*kHouseCellSize*.5f,plot.pos.y+dy*plot.cells*kHouseCellSize*.5f})<0);
+for(int i=0;i<6;i++){auto door=EntranceDoorPoint(i),body=EntranceBodyCenter(i);assert(Dist({door.x,door.y+20},body)>=79);assert(Dist(EntranceStepOut(i),door)>60);}
+tfdesign::BuildTrails();assert(!tfdesign::trails.empty());
+for(const auto& path:tfdesign::trails)for(size_t i=1;i<path.size();++i)assert(tfdesign::ClearLine(path[i-1],path[i]));
+std::cout<<"PASS redesigned towns: all original shops inside their compound, spaced apart, coordinate round trips; "<<tfdesign::trails.size()<<" wilderness trails avoid water, ridges and owned plot footprints"<<std::endl;
 reset();bool open=false;
 // Every native menu destination must preserve its action and fit the canvas.
 auto menuReset=[&](){reset();g_landscapePage=g_presentedPage=false;g_presentedNativeMenu=true;g_uiShieldBypass=true;open=true;s.screen=Screen::Town;};
