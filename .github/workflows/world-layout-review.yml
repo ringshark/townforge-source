@@ -1,7 +1,7 @@
 name: Verify Town Forge graphics and world
 on:
   push:
-    branches: [codex/world-layout-redesign, codex/full-graphics-pass]
+    branches: [codex/world-layout-redesign, codex/full-graphics-pass, codex/layered-equipment]
   workflow_dispatch:
 permissions:
   contents: read
@@ -31,6 +31,7 @@ jobs:
           make -C /tmp/raylib/src PLATFORM=PLATFORM_WEB -j2
           python -m pip install --quiet Pillow
           python tests/graphics-assets.py
+          TF_EQUIPMENT_FIXTURE=/tmp/tf-equipment-fixture RAYLIB_DIR=/tmp/raylib python tests/equipment-sprites.py
           TF_GRAPHICS_FIXTURE=/tmp/tf-graphics-fixture.txt TF_INTERIOR_FIXTURE=/tmp/tf-interior-fixture.txt TF_HOMESTEAD_FIXTURE=/tmp/tf-homestead-fixture.txt RAYLIB_DIR=/tmp/raylib python tests/landscape-menus.py
           node tests/build-variants.cjs
           python tests/player-movement.py
@@ -59,6 +60,7 @@ jobs:
           python3 -m http.server 8765 --directory site > /tmp/tf-http.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid"' EXIT
+          NODE_PATH=/tmp/tf-browser/node_modules node tests/equipment-sprites-web.cjs
           NODE_PATH=/tmp/tf-browser/node_modules node tests/full-graphics-web.cjs
           NODE_PATH=/tmp/tf-browser/node_modules node tests/town-2d-web.cjs
           TF_BROWSER=webkit NODE_PATH=/tmp/tf-browser/node_modules node tests/town-2d-web.cjs

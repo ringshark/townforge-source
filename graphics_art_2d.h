@@ -4,13 +4,13 @@ namespace tfgfx {
 struct Atlas {Texture2D texture{};std::vector<Rectangle> frames;};
 static Atlas hero,north,props,details;
 static int lastHeroFrame=-1;static bool lastHeroNorth=false;
-static void LoadAtlas(Atlas& atlas,const char* path,int columns,const std::vector<float>& rows) {
+static void LoadAtlas(Atlas& atlas,const char* path,int columns,const std::vector<float>& rows,const std::vector<float>& xEdges={}) {
     Image image=LoadImage(path);if(!image.data)return;
     ImageAlphaClear(&image,BLANK,.12f);
     atlas.texture=LoadTextureFromImage(image);SetTextureFilter(atlas.texture,TEXTURE_FILTER_BILINEAR);
     Color* pixels=LoadImageColors(image);
     for(size_t row=0;row+1<rows.size();++row)for(int col=0;col<columns;++col){
-        int x0=(int)(col*image.width/(float)columns),x1=(int)((col+1)*image.width/(float)columns);
+        int x0=(int)((xEdges.empty()?col/(float)columns:xEdges[col])*image.width),x1=(int)((xEdges.empty()?(col+1)/(float)columns:xEdges[col+1])*image.width);
         int y0=(int)(rows[row]*image.height),y1=(int)(rows[row+1]*image.height);
         int left=x1,right=x0,top=y1,bottom=y0;
         if(pixels)for(int y=y0;y<y1;y++)for(int x=x0;x<x1;x++)if(pixels[y*image.width+x].a>48){left=std::min(left,x);right=std::max(right,x+1);top=std::min(top,y);bottom=std::max(bottom,y+1);}

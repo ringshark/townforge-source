@@ -2756,6 +2756,7 @@ struct DirSpriteSheet {
 #include "town_2d_art.h"
 #include "world_visuals_2d.h"
 #include "graphics_art_2d.h"
+#include "equipment_sprites_2d.h"
 static bool g_openWorld2D = false;
 static bool g_dungeonMapOpen=false;
 
@@ -3085,7 +3086,7 @@ static DirSpriteSheet LoadCarlActorSheet(const std::string& path, int cols, int 
 }
 
 static void LoadGameAssets() {
-    if(kVariantView!=3){tf2dart::Load();tfgfx::Load();}
+    if(kVariantView!=3){tf2dart::Load();tfgfx::Load();tfequip2d::Load();}
     // Loaded at 48px (0/nullptr = default codepoints, just standard ASCII - every string
     // in the game is plain English) so it covers the largest UI text (title, 22px)
     // without much upscale blur while not needing an extreme downscale for the smallest
@@ -4709,7 +4710,10 @@ static void DrawPlayer(const GameState& s, Vector2 screenPos, Vector2 facing, co
     if(s.hidden)tint=Fade(tint,.65f);
     float kPlayerRadius = ::kPlayerRadius * visualScale; // shadows the global on purpose - see
                                                            // DrawBuildingNode's identical trick.
-    if(g_compactHeroAtlas && g_assets.heroSheet.ok && tfgfx::HeroAction(s,screenPos,DirRowForFacing(facing),combatAnim,tfworldart::kHeroSize*visualScale,tint)) {
+    bool layered=g_compactHeroAtlas && tfequip2d::Draw(s,screenPos,DirRowForFacing(facing),combatAnim,(AnyMoveKeyDown() || VirtualJoystickIsMoving() || g_walkOn) && g_mountPetId<0,tfworldart::kHeroSize*visualScale,tint);
+    if(layered) {
+        // Equipment and gathering tools are part of the shared animated rig.
+    } else if(g_compactHeroAtlas && g_assets.heroSheet.ok && tfgfx::HeroAction(s,screenPos,DirRowForFacing(facing),combatAnim,tfworldart::kHeroSize*visualScale,tint)) {
         // Non-sword weapons retain their equipped art over the action body.
         if(combatAnim==ActorAnim::Attack && s.playerHurtT<0 && s.playerDeathAnimT<=0){
             const Item* weapon=s.equipped.rightHand?&*s.equipped.rightHand:(s.equipped.leftHand?&*s.equipped.leftHand:nullptr);
@@ -4757,7 +4761,7 @@ static void DrawPlayer(const GameState& s, Vector2 screenPos, Vector2 facing, co
         Vector2 nose = { screenPos.x + facing.x * (kPlayerRadius + 6), screenPos.y + facing.y * (kPlayerRadius + 6) };
         DrawCircleV(nose, 4, Color{ 220, 200, 140, 255 });
     }
-    if(s.gatheringResource && *s.gatheringResource=="fish"){
+    if(!layered && s.gatheringResource && *s.gatheringResource=="fish"){
         Vector2 hand={screenPos.x+facing.x*8,screenPos.y+6},tip={hand.x+facing.x*28,hand.y+facing.y*18-18};
         Vector2 bobber={tip.x+facing.x*10,tip.y+22+sinf(s.worldTime*3)*1.5f};
         DrawLineEx(hand,tip,2,Color{120,88,52,255});DrawLineEx(tip,bobber,.7f,Color{211,219,208,230});DrawCircleV(bobber,2,Color{210,82,62,255});
@@ -40566,6 +40570,7 @@ static void PaperdollText(std::string text, Rectangle box, int size, Color color
 }
 
 static void PaperdollRenderPass(const GameState& s) {
+    if(s.optClassic2D && tfequip2d::soft.texture.id)return;
     if (!g_dollRTReady) {
         g_dollRT = LoadRenderTexture((int)kDollView.width * 2, (int)kDollView.height * 2);
         SetTextureFilter(g_dollRT.texture, TEXTURE_FILTER_BILINEAR);
@@ -40685,13 +40690,24 @@ static void DrawCharacterScreen(GameState& s, int screenW, int screenH) {
         DrawCircleGradient(c, 175.0f, Fade(Color{ 255, 226, 160, 255 }, 0.55f), Fade(Color{ 255, 226, 160, 255 }, 0.0f));
         UIEndScissorMode();
     }
-    if (g_dollRTReady)
+    if(s.optClassic2D && tfequip2d::soft.texture.id){
+        static GameState preview;preview.equipped=EquipmentPreview(s.equipped,PaperdollTryOnItem(s));preview.worldTime=(float)GetTime();
+        preview.screen=Screen::Wilderness;preview.wildEngaged.emplace();preview.playerHurtT=-1;preview.playerDeathAnimT=0;
+        float phase=fmodf(preview.worldTime*.65f,1.f);preview.wildEngaged->swingEffectTimer=.32f*(1-phase);preview.wildEngaged->castEffectTimer=.35f*(1-phase);
+        int mode=tfequip2d::previewMode;preview.gatheringResource.reset();
+        if(mode>=4){preview.gatheringResource=mode==4?"wood":mode==5?"ore":"fish";preview.gatherDuration=4;preview.gatherSecondsRemaining=4*(1-phase);}
+        int dirs[]={0,1,3,2};int turn=((int)floorf(g_dollYaw/(PI*.5f)+.5f)%4+4)%4;
+        float height=std::min(kDollView.height*.44f,kDollView.width*.98f);
+        tfequip2d::Draw(preview,{kDollView.x+kDollView.width*.5f,kDollView.y+kDollView.height*.48f},dirs[turn],mode==2?ActorAnim::Attack:mode==3?ActorAnim::Cast:ActorAnim::Idle,mode==1,height,WHITE);
+        const char* poses[]={"Idle","Walk","Attack","Cast","Chop","Mine","Fish"};
+        if(Button({kDollView.x+8,kDollView.y+kDollView.height-46,kDollView.width-16,40},std::string("Pose: ")+poses[mode],true))tfequip2d::previewMode=(mode+1)%7;
+    }else if (g_dollRTReady)
         DrawTexturePro(g_dollRT.texture, { 0, 0, (float)g_dollRT.texture.width, -(float)g_dollRT.texture.height },
                        kDollView, { 0, 0 }, 0.0f, WHITE);
     // drag the body to turn it
     UIRegister(kDollView);
     if (!g_uiClickTaken && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && UIContains(mouse, kDollView) &&
-        mouse.y >= kDollView.y + 52 && !(g_uiShieldOn && CheckCollisionPointRec(mouse, g_uiShield))) {
+        mouse.y >= kDollView.y + 52 && (!s.optClassic2D || mouse.y<kDollView.y+kDollView.height-54) && !(g_uiShieldOn && CheckCollisionPointRec(mouse, g_uiShield))) {
         g_uiClickTaken = g_uiGestureOwned = true; g_dollDragging = true; g_dollLastX = mouse.x;
     }
     if (g_dollDragging && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) { g_dollYaw += (mouse.x - g_dollLastX) * 0.012f; g_dollLastX = mouse.x; }
@@ -41530,6 +41546,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_GraphicsState(){
     auto camera=CameraTopLeft(s.dungeonPlayerPos,kDungeonWorldSize),hero=WorldToScreen(s.dungeonPlayerPos,camera);
     return TextFormat("{\"heroFrames\":%d,\"northFrames\":%d,\"furnitureFrames\":%d,\"species\":%d,\"dungeon\":%s,\"map\":%s,\"size\":%.0f,\"spawns\":%d,\"x\":%.2f,\"y\":%.2f,\"heroX\":%.2f,\"heroY\":%.2f}",(int)tfgfx::hero.frames.size(),(int)tfgfx::north.frames.size(),(int)(tfgfx::props.frames.size()+tfgfx::details.frames.size()),s.pets.empty()?-1:PetSpecies(s.pets[0]),s.screen==Screen::Hunt?"true":"false",g_dungeonMapOpen?"true":"false",kDungeonWorldSize,kDungeonRegularSlots,s.dungeonPlayerPos.x,s.dungeonPlayerPos.y,hero.x,hero.y);
 }
+extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_EquipmentState(){
+    if(!g_runtimeReady)return "{}";const auto& p=tfequip2d::lastPose;
+    return TextFormat("{\"parts\":%d,\"draws\":%d,\"direction\":%d,\"action\":\"%s\",\"phase\":%.3f,\"weapon\":%d,\"materials\":[%d,%d,%d,%d,%d,%d],\"character\":%s,\"preview\":%d,\"buttonX\":%.1f,\"buttonY\":%.1f}",
+        (int)(tfequip2d::soft.frames.size()+tfequip2d::metal.frames.size()+tfequip2d::weapons.frames.size()),tfequip2d::drawCount,p.direction,tfequip2d::ActionName(p.action),p.phase,(int)p.weapon,
+        tfequip2d::lastMaterials[0],tfequip2d::lastMaterials[1],tfequip2d::lastMaterials[2],tfequip2d::lastMaterials[3],tfequip2d::lastMaterials[4],tfequip2d::lastMaterials[5],g_state.screen==Screen::Character?"true":"false",tfequip2d::previewMode,kDollView.x+kDollView.width*.5f,kDollView.y+kDollView.height-26);
+}
 extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_InteriorState() {
     if(!g_runtimeReady)return "{}";
     const auto& s=g_state;auto p=WorldToScreen(s.interiorPlayerPos,InteriorCameraTopLeft(s.interiorPlayerPos));
@@ -42122,7 +42144,7 @@ static void CleanupAndClose() {
     for(auto& texture:g_openTownGround)if(texture.id)UnloadTexture(texture);
 
     GameState& state = g_state;
-    tf2dart::Unload();tfgfx::Unload();
+    tf2dart::Unload();tfgfx::Unload();tfequip2d::Unload();
     SaveGame(state); // final save on quit
     if (g_assets.uiFontOk) UnloadFont(g_assets.uiFont);
     if (g_assets.playerOk) UnloadTexture(g_assets.player);
