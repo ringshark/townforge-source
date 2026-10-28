@@ -142,6 +142,16 @@ static void OpenTownGround(int ti,Vector2 camera) {
         DrawTexturePro(texture,{0,0,w,h},{p.x,p.y,w,h},{0,0},rotation,WHITE);
     }
 }
+// Five spans close all four sides while leaving the gatehouse passage open.
+// The front curtain shares GateCollide's y=-6 line; towers cover its inner ends.
+struct OpenTownWallSpan { Vector2 a,b; };
+static std::array<OpenTownWallSpan,5> OpenTownWallSpans(int ti) {
+    auto point=[&](float x,float y){return GateWorld({x,y},kTownGates[ti].wildernessPos,TownGateFacing(ti));};
+    float w=kOpenTownHalfW,d=OpenTownDepth(ti);
+    return {{{point(-w,0),point(-w,-d)},{point(w,0),point(w,-d)},
+             {point(-w,-d),point(w,-d)},
+             {point(-w,-6),point(-56,-6)},{point(56,-6),point(w,-6)}}};
+}
 static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
     for(int ti=0;ti<4;ti++) {
         Vector2 center=OpenTownWorld(ti,TS(500,480)),sp=WorldToScreen(center,camera);
@@ -178,15 +188,12 @@ static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
                     if(night>.05f)for(int r=3;r>0;r--)DrawCircleV({p.x,p.y-h+5},r*5,Fade(Color{255,205,120,255},night*.035f));
                 }
             }
-            // Stone perimeter and an open gateway on the same terrain/camera.
-            for(int side=-1;side<=1;side+=2) {
-                Vector2 a=WorldToScreen(GateWorld({side*kOpenTownHalfW,0},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
-                Vector2 b=WorldToScreen(GateWorld({side*kOpenTownHalfW,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
-                DrawLineEx(a,b,14,Color{91,94,82,255});DrawLineEx({a.x-2,a.y-3},{b.x-2,b.y-3},6,Color{164,162,140,255});
+            // A continuous stone perimeter, split only at the usable gate.
+            for(const auto& span:OpenTownWallSpans(ti)) {
+                Vector2 a=WorldToScreen(span.a,camera),b=WorldToScreen(span.b,camera);
+                DrawLineEx(a,b,14,Color{91,94,82,255});
+                DrawLineEx({a.x-2,a.y-3},{b.x-2,b.y-3},6,Color{164,162,140,255});
             }
-            Vector2 a=WorldToScreen(GateWorld({-kOpenTownHalfW,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
-            Vector2 b=WorldToScreen(GateWorld({kOpenTownHalfW,-OpenTownDepth(ti)},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);
-            DrawLineEx(a,b,14,Color{125,127,108,255});
         }
         for(const auto& node:ActiveTownNodes(ti)) {
             Vector2 w=world(node.pos),p=WorldToScreen(w,camera);

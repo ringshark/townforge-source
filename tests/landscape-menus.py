@@ -93,6 +93,21 @@ std::cout<<"PASS all 13 interiors: native landscape, visible hero, identity inpu
 g_openWorld2D=true;
 for(int town=0;town<4;++town){
  std::cout<<"town "<<town<<" depth="<<OpenTownDepth(town)<<" facing="<<TownGateFacing(town).x<<","<<TownGateFacing(town).y<<std::endl;
+ // Visible front curtains must match the existing solid wall and spare the gate.
+ auto walls=OpenTownWallSpans(town);assert(walls.size()==5);
+ Vector2 gate=kTownGates[town].wildernessPos,facing=TownGateFacing(town);
+ for(int side:{-1,1}){
+  const auto& span=walls[side<0?3:4];
+  auto a=GateLocal(span.a,gate,facing),b=GateLocal(span.b,gate,facing);
+  assert(std::abs(a.y+6)<.01f && std::abs(b.y+6)<.01f);
+  assert(std::abs(std::abs(side<0?a.x:b.x)-kOpenTownHalfW)<.01f);
+  assert(std::abs(std::abs(side<0?b.x:a.x)-56)<.01f);
+  Vector2 probe=GateWorld({side*(kOpenTownHalfW+56)*.5f,-6},gate,facing),moved=probe;
+  assert(Dist(probe,tfdesign::NearestOn(probe,span.a,span.b))<.01f);
+  GateCollide(moved,gate,facing);assert(Dist(probe,moved)>17);
+ }
+ Vector2 passage=GateWorld({0,-6},gate,facing),entered=passage;
+ GateCollide(entered,gate,facing);assert(Dist(passage,entered)<.01f);
  // Flood the actual movement footprint from the gate, not just a drawn road.
  constexpr int N=140;const float step=8;auto center=GateWorld({0,-OpenTownDepth(town)*.5f},kTownGates[town].wildernessPos,TownGateFacing(town));Vector2 origin={center.x-560,center.y-560};
  auto point=[&](int i){return Vector2{origin.x+(i%N+.5f)*step,origin.y+(i/N+.5f)*step};};
@@ -111,7 +126,7 @@ for(const auto& plot:kHousePlots)for(int dx:{-1,0,1})for(int dy:{-1,0,1})assert(
 for(int i=0;i<6;i++){auto door=EntranceDoorPoint(i),body=EntranceBodyCenter(i);assert(Dist({door.x,door.y+20},body)>=79);assert(Dist(EntranceStepOut(i),door)>60);}
 tfdesign::BuildTrails();assert(!tfdesign::trails.empty());
 for(const auto& path:tfdesign::trails)for(size_t i=1;i<path.size();++i)assert(tfdesign::ClearLine(path[i-1],path[i]));
-std::cout<<"PASS redesigned towns: all original shops inside their compound, spaced apart, coordinate round trips; "<<tfdesign::trails.size()<<" wilderness trails avoid water, ridges and owned plot footprints"<<std::endl;
+std::cout<<"PASS all four towns: four visible wall sides, solid front curtains and open gate passage; all original shops inside their compound, spaced apart, coordinate round trips; "<<tfdesign::trails.size()<<" wilderness trails avoid water, ridges and owned plot footprints"<<std::endl;
 reset();bool open=false;
 // Every native menu destination must preserve its action and fit the canvas.
 auto menuReset=[&](){reset();g_landscapePage=g_presentedPage=false;g_presentedNativeMenu=true;g_uiShieldBypass=true;open=true;s.screen=Screen::Town;};
