@@ -59,12 +59,12 @@ jobs:
           python3 -m http.server 8765 --directory site > /tmp/tf-http.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid"' EXIT
+          NODE_PATH=/tmp/tf-browser/node_modules node tests/full-graphics-web.cjs
           NODE_PATH=/tmp/tf-browser/node_modules node tests/town-2d-web.cjs
           TF_BROWSER=webkit NODE_PATH=/tmp/tf-browser/node_modules node tests/town-2d-web.cjs
           NODE_PATH=/tmp/tf-browser/node_modules node tests/homestead-web.cjs
           NODE_PATH=/tmp/tf-browser/node_modules node tests/interior-web.cjs
           NODE_PATH=/tmp/tf-browser/node_modules node tests/atlas-web.cjs
-          NODE_PATH=/tmp/tf-browser/node_modules node tests/full-graphics-web.cjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

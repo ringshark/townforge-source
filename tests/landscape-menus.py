@@ -337,7 +337,7 @@ if(const char* path=std::getenv("TF_INTERIOR_FIXTURE")) {
     SaveGame(fixture);std::ifstream from(kSaveFilePath);std::ofstream to(path);to<<from.rdbuf();
 }
 if(const char* path=std::getenv("TF_GRAPHICS_FIXTURE")){
- GameState fixture;fixture.optClassic2D=true;fixture.optOnline=false;fixture.youngT=1200;fixture.starterStep=-1;fixture.starterAccepted=fixture.starterRewarded=true;fixture.gold=1000;fixture.autoReagents=false;
+ GameState fixture;fixture.optClassic2D=true;fixture.optOnline=false;fixture.youngT=1200;fixture.starterStep=-1;fixture.starterAccepted=fixture.starterRewarded=true;fixture.gold=1000;fixture.autoReagents=false;fixture.wildernessPlayerPos=GateWorld({0,-35},kTownGates[0].wildernessPos,TownGateFacing(0));
  Pet pet{};pet.id=1;pet.name="My renamed wolf";pet.species=1;pet.role=PetRole::Melee;pet.hp=pet.maxHp=100;pet.active=true;fixture.pets.push_back(pet);fixture.nextPetId=2;
  Item sword{};sword.id=100;sword.name="Iron Sword";sword.type=ItemType::Weapon;sword.category="Swordsmanship";sword.power=15;fixture.equipped.rightHand=sword;
  SaveGame(fixture);std::ifstream from(kSaveFilePath);std::ofstream to(path);to<<from.rdbuf();
