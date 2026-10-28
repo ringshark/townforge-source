@@ -2755,6 +2755,7 @@ struct DirSpriteSheet {
 
 #include "town_2d_art.h"
 #include "world_visuals_2d.h"
+#include "scene_style_2d.h"
 #include "graphics_art_2d.h"
 #include "equipment_sprites_2d.h"
 static bool g_openWorld2D = false;
@@ -2983,9 +2984,12 @@ static Texture2D TryLoadTexture(const std::string& path, bool& okOut) {
         Image image=LoadImage(path.c_str());
         if(image.data) {
             ImageAlphaClear(&image,BLANK,.44f);
+            tfworldart::CleanMatte(image,image.width,image.height);
             t=LoadTextureFromImage(image);UnloadImage(image);
         }
-    } else if(kVariantView!=3 && path.find("assets/monsters_boss_v2/")==0){
+    } else if(kVariantView!=3 && (path.find("assets/monsters_boss_v2/")==0 ||
+              path.find("assets/town_buildings/")==0 || path.find("assets/saltmere_buildings/")==0 ||
+              path.find("assets/buildings/")==0)){
         Image image=LoadImage(path.c_str());if(image.data){tfworldart::CleanMatte(image,image.width,image.height);t=LoadTextureFromImage(image);UnloadImage(image);}
     } else t=LoadTexture(path.c_str());
     okOut = (t.id != 0);
@@ -27722,10 +27726,13 @@ static void DrawInterior2D(GameState& s, int screenW, int screenH,
     for (const Rectangle& f : g_intFloors)
         DrawTexturePro(SurfTex(g_intFloorSurf), { f.x * 2.3f, f.y * 2.3f, f.width * 2.3f, f.height * 2.3f },
                        { ro.x + f.x, ro.y + f.y, f.width, f.height }, { 0, 0 }, 0, Color{ 235, 225, 210, 255 });
+    for(const Rectangle& f:g_intFloors)tfscene::Grain(f,cam,kViewport);
     for (const IntSeg& sg : g_intSegs) {
         float x0 = std::min(sg.ax, sg.bx), x1 = std::max(sg.ax, sg.bx), z0 = std::min(sg.az, sg.bz), z1 = std::max(sg.az, sg.bz);
         Rectangle wr = (x1 - x0 >= z1 - z0) ? Rectangle{ ro.x + x0, ro.y + z0 - kIntWallT * 0.5f, x1 - x0, kIntWallT }
                                             : Rectangle{ ro.x + x0 - kIntWallT * 0.5f, ro.y + z0, kIntWallT, z1 - z0 };
+        for(int depth=7;depth>0;--depth)
+            DrawRectangleRec({wr.x+depth*.6f,wr.y+depth,wr.width,wr.height},Fade(Color{17,24,29,255},.035f));
         DrawRectangleRec({ wr.x + 2, wr.y + 3, wr.width, wr.height }, Fade(BLACK, 0.35f));
         DrawTexturePro(SurfTex(sg.surf), { wr.x, wr.y, wr.width, wr.height }, wr, { 0, 0 }, 0, Color{ 170, 160, 150, 255 });
         DrawRectangleLinesEx(wr, 1.0f, Fade(BLACK, 0.5f));
@@ -27736,11 +27743,20 @@ static void DrawInterior2D(GameState& s, int screenW, int screenH,
         DrawRectangleRec(gr, Color{ 150, 200, 230, 255 });
         DrawRectangleLinesEx(gr, 1.5f, Color{ 60, 40, 26, 255 });
     }
+    // Light comes from actual windows and fixtures, before furniture and labels.
+    for(const auto& w:g_intWins)tfscene::Light(WorldToScreen({w.x,w.z},cam),95,.065f,Color{181,211,224,255});
+    for(const auto& p:props) {
+        std::string label=p.label;
+        if(label.find("Torch")!=std::string::npos || label.find("Lantern")!=std::string::npos ||
+           label.find("Forge")!=std::string::npos || label.find("Hearth")!=std::string::npos)
+            tfscene::Light(WorldToScreen({p.x,p.y},cam),90,.13f);
+    }
     // Props.
     for (auto& p : props) {
         Vector2 sp = WorldToScreen({ p.x, p.y }, cam);
         bool hl = (nearest && nearest == &p);
         Rectangle rc = { sp.x - p.sw / 2, sp.y - p.sh / 2, p.sw, p.sh };
+        tfscene::Contact({sp.x,sp.y+p.sh*.32f},p.sw*.34f,std::max(2.f,p.sh*.075f));
         bool drewSprite=tfgfx::Prop(tfgfx::PropIndex(p.label,p.model?p.model:""),sp,p.sw,p.sh,hl);
         Color hlCol = Color{ 255, 200, 90, 255 }; // warm gold: reads on every floor color
         if (!drewSprite) {
@@ -36738,25 +36754,17 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     BeginScissorMode((int)arenaViewport.x, (int)arenaViewport.y, (int)arenaViewport.width, (int)arenaViewport.height);
     Vector2 camera = CameraTopLeft(s.dungeonPlayerPos, kDungeonWorldSize);
 
-    const Texture2D* wallTex = ThemedDungeonWall(*s.selectedDungeon);
-    // Real rooms, not an open arena - see kDungeonRoomLayouts. Wall texture fills the
-    // whole viewport as solid rock, then each room/corridor rectangle punches a
-    // floor-textured hole in it, in one pass with no depth-buffer or masking trickery
-    // (floor is simply drawn on top). Each dungeon keeps its own themed floor/wall art
-    // (lava/volcanic for Emberveil, web-choked for the Nest (Phase 5), tomb for the Crypt, rock for
-    // Wyrmscar), falling back to a generic dungeon look if a themed texture is missing.
-    // Emberveil's wall and floor art are both mottled red/black lava-rock crops that read
-    // as nearly identical - Mark could tell monsters apart fine after the plate fix, but
-    // not walls from floor. Rather than source new art, darken just the wall tile via a
-    // multiply tint so it reads as cooled obsidian rock against the floor's bright lava,
-    // without touching the other 3 dungeons' walls.
-    Color wallTint = (*s.selectedDungeon == 3) ? Color{ 95, 70, 65, 255 } : // Ember Depths: cooled obsidian walls
-                     (*s.selectedDungeon == 4) ? Color{ 190, 215, 240, 255 } : WHITE; // Phase 3: icy tomb
-    DrawTiledGround(wallTex, arenaViewport, camera, 48.0f, Color{ 40, 40, 44, 255 }, wallTint);
-    const Texture2D* floorTex = ThemedDungeonFloor(*s.selectedDungeon);
-    Color floorTint = (*s.selectedDungeon == 4) ? Color{ 200, 222, 245, 255 } : WHITE; // Phase 3: icy tomb
+    const Texture2D* wallTex = tfscene::DungeonSurface(*s.selectedDungeon,true);
+    if(!wallTex)wallTex=ThemedDungeonWall(*s.selectedDungeon);
+    // Shared masonry materials retain six theme palettes. Walls are darker than
+    // walkable stone; furnishings, water and room geometry preserve each identity.
+    DrawTiledGround(wallTex,arenaViewport,camera,128.f,Color{40,40,44,255},WHITE);
+    const Texture2D* floorTex = tfscene::DungeonSurface(*s.selectedDungeon,false);
+    if(!floorTex)floorTex=ThemedDungeonFloor(*s.selectedDungeon);
     for (const Rectangle& r : kDungeonRoomLayouts[*s.selectedDungeon])
-        DrawTiledRect(floorTex, r, camera, 48.0f, Color{ 60, 50, 46, 255 }, floorTint);
+        DrawTiledRect(floorTex,r,camera,128.f,Color{60,50,46,255},WHITE);
+    for(const auto& r:kDungeonRoomLayouts[*s.selectedDungeon])tfscene::Grain(r,camera,arenaViewport);
+    tfscene::RoomEdges(kDungeonRoomLayouts[*s.selectedDungeon],camera,arenaViewport);
     // Furnished room edges create landmarks without blocking the established paths.
     for(size_t roomIndex=0;roomIndex<kDungeonRoomLayouts[*s.selectedDungeon].size();roomIndex++){
         auto r=kDungeonRoomLayouts[*s.selectedDungeon][roomIndex];if(r.width<450 || r.height<450)continue;
@@ -36764,7 +36772,11 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         for(int corner=0;corner<3;corner++){
             Vector2 p={r.x+(corner==1?r.width-65:65),r.y+(corner==2?r.height-65:65)};
             if(Dist(p,{1800,2600})<200)continue;
-            tfgfx::Prop(themes[*s.selectedDungeon][corner],WorldToScreen(p,camera),corner==2?22:48,corner==2?35:42,false);
+            Vector2 sp=WorldToScreen(p,camera);
+            if(sp.x<arenaViewport.x-100 || sp.y<arenaViewport.y-100 || sp.x>arenaViewport.x+arenaViewport.width+100 || sp.y>arenaViewport.y+arenaViewport.height+100)continue;
+            tfscene::Contact({sp.x,sp.y+12},corner==2?7:16,4);
+            if(corner==2)tfscene::Light(sp,95,.12f);
+            tfgfx::Prop(themes[*s.selectedDungeon][corner],sp,corner==2?22:48,corner==2?35:42,false);
         }
     }
     // The Sunken Crypt gets a water pool in its boss room - it's the one dungeon that's
@@ -36781,8 +36793,10 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         // Spots sit inside the Depths' forge halls, clear of monster home spots
         // (kCenters) and the shared dungeon spawn/exit point (kDungeonExitPos).
         static const std::array<Vector2, 2> kBrazierSpots = {{ {1680,1800}, {1920,2300} }};
-        for (const Vector2& pos : kBrazierSpots)
-            DrawIconCentered(g_assets.emberveilBrazier, WorldToScreen(pos, camera), 40.0f, WHITE);
+        for (const Vector2& pos : kBrazierSpots) {
+            tfscene::Light(WorldToScreen(pos,camera),100,.15f);
+            DrawIconCentered(g_assets.emberveilBrazier, WorldToScreen(pos,camera), 40.0f, WHITE);
+        }
     }
     // The Hollow Warrens gets its boss room floored with the fancy medallion-pattern
     // rug from the same "Dungeon Tileset" sheet the walls/floor came from (CC0, Buch on
@@ -36794,8 +36808,10 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     }
     if (*s.selectedDungeon == 5 && g_assets.hollowWarrensTorchOk) { // The Hollow's shaft torches
         static const std::array<Vector2, 2> kWarrenTorchSpots = {{ {1140,2060}, {2460,2060} }};
-        for (const Vector2& pos : kWarrenTorchSpots)
-            DrawIconCentered(g_assets.hollowWarrensTorch, WorldToScreen(pos, camera), 34.0f, WHITE);
+        for (const Vector2& pos : kWarrenTorchSpots) {
+            tfscene::Light(WorldToScreen(pos,camera),100,.15f);
+            DrawIconCentered(g_assets.hollowWarrensTorch, WorldToScreen(pos,camera), 34.0f, WHITE);
+        }
     }
 
     // Dungeon monsters DO wander in place (DungeonMonsterLivePos already applies
@@ -42215,6 +42231,7 @@ static void CleanupAndClose() {
 #ifndef __EMSCRIPTEN__
     UnloadRenderTexture(g_zoomTarget);
 #endif
+    tfscene::Unload();
     UnloadSfx();
     CloseWindow();
 }

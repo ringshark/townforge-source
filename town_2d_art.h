@@ -21,7 +21,16 @@ inline void Load() {
     entranceAtlas=LoadTexture("assets/world_design/dungeon-atlas.png");
     if(entranceAtlas.id)SetTextureFilter(entranceAtlas,TEXTURE_FILTER_BILINEAR);
     for (int i=0;i<10;i++) {
-        buildings[i] = LoadTexture((std::string("assets/town_polish/")+kKeys[i]+".png").c_str());
+        Image image=LoadImage((std::string("assets/town_polish/")+kKeys[i]+".png").c_str());
+        if(image.data) {
+            // Only edge-connected white is a matte; pale interior masonry is retained.
+            ImageFormat(&image,PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+            auto* px=(Color*)image.data;std::vector<int> queue;
+            auto add=[&](int x,int y){if(x<0 || y<0 || x>=image.width || y>=image.height)return;auto& c=px[y*image.width+x];if(c.a && c.r>=248 && c.g>=248 && c.b>=248){c.a=0;queue.push_back(y*image.width+x);}};
+            for(int x=0;x<image.width;x++){add(x,0);add(x,image.height-1);}for(int y=0;y<image.height;y++){add(0,y);add(image.width-1,y);}
+            for(size_t j=0;j<queue.size();j++){int x=queue[j]%image.width,y=queue[j]/image.width;add(x-1,y);add(x+1,y);add(x,y-1);add(x,y+1);}
+            buildings[i]=LoadTextureFromImage(image);UnloadImage(image);
+        }
         if (buildings[i].id) {
             SetTextureFilter(buildings[i], TEXTURE_FILTER_BILINEAR);
         }

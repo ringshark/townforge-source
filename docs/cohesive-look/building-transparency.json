@@ -1,0 +1,350 @@
+[
+  {
+    "asset": "assets/buildings/alchemy.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 124
+  },
+  {
+    "asset": "assets/buildings/bank.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 124
+  },
+  {
+    "asset": "assets/buildings/carpenter.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 124
+  },
+  {
+    "asset": "assets/buildings/door.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 0
+  },
+  {
+    "asset": "assets/buildings/healer.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 124
+  },
+  {
+    "asset": "assets/buildings/provisioner.png",
+    "border_connected_white_pixels": 4,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 113
+  },
+  {
+    "asset": "assets/buildings/smith.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 124
+  },
+  {
+    "asset": "assets/buildings/stable.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 94
+  },
+  {
+    "asset": "assets/buildings/tailor.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 124
+  },
+  {
+    "asset": "assets/buildings/townhall.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 124
+  },
+  {
+    "asset": "assets/town_buildings/alchemy.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1895
+  },
+  {
+    "asset": "assets/town_buildings/bank.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1394
+  },
+  {
+    "asset": "assets/town_buildings/carpenter.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1697
+  },
+  {
+    "asset": "assets/town_buildings/healer.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1634
+  },
+  {
+    "asset": "assets/town_buildings/house.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1543
+  },
+  {
+    "asset": "assets/town_buildings/provisioner.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1696
+  },
+  {
+    "asset": "assets/town_buildings/smith.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1834
+  },
+  {
+    "asset": "assets/town_buildings/stable.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1692
+  },
+  {
+    "asset": "assets/town_buildings/tailor.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1726
+  },
+  {
+    "asset": "assets/town_buildings/townhall.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1390
+  },
+  {
+    "asset": "assets/saltmere_buildings/alchemy.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 2044
+  },
+  {
+    "asset": "assets/saltmere_buildings/bank.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1516
+  },
+  {
+    "asset": "assets/saltmere_buildings/carpenter.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1702
+  },
+  {
+    "asset": "assets/saltmere_buildings/healer.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1817
+  },
+  {
+    "asset": "assets/saltmere_buildings/house.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1761
+  },
+  {
+    "asset": "assets/saltmere_buildings/provisioner.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1729
+  },
+  {
+    "asset": "assets/saltmere_buildings/smith.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1624
+  },
+  {
+    "asset": "assets/saltmere_buildings/stable.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1739
+  },
+  {
+    "asset": "assets/saltmere_buildings/tailor.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1492
+  },
+  {
+    "asset": "assets/saltmere_buildings/townhall.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1971
+  },
+  {
+    "asset": "assets/frostmere_buildings/bank.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 0
+  },
+  {
+    "asset": "assets/frostmere_buildings/furtrader.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 0
+  },
+  {
+    "asset": "assets/frostmere_buildings/healer.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 0
+  },
+  {
+    "asset": "assets/frostmere_buildings/provisioner.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 0
+  },
+  {
+    "asset": "assets/frostmere_buildings/smith.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 0
+  },
+  {
+    "asset": "assets/cragmoor_buildings/bank.png",
+    "border_connected_white_pixels": 1858,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 0
+  },
+  {
+    "asset": "assets/cragmoor_buildings/healer.png",
+    "border_connected_white_pixels": 1894,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 0
+  },
+  {
+    "asset": "assets/cragmoor_buildings/minersguild.png",
+    "border_connected_white_pixels": 1866,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 0
+  },
+  {
+    "asset": "assets/cragmoor_buildings/provisioner.png",
+    "border_connected_white_pixels": 1842,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 0
+  },
+  {
+    "asset": "assets/cragmoor_buildings/smith.png",
+    "border_connected_white_pixels": 1845,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 0
+  },
+  {
+    "asset": "assets/town_polish/alchemy.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1137
+  },
+  {
+    "asset": "assets/town_polish/bank.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1022
+  },
+  {
+    "asset": "assets/town_polish/carpenter.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1028
+  },
+  {
+    "asset": "assets/town_polish/healer.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1015
+  },
+  {
+    "asset": "assets/town_polish/house.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 972
+  },
+  {
+    "asset": "assets/town_polish/prop_barrel.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 56
+  },
+  {
+    "asset": "assets/town_polish/prop_crates.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 144
+  },
+  {
+    "asset": "assets/town_polish/prop_hedge.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 177
+  },
+  {
+    "asset": "assets/town_polish/prop_lamp.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 172
+  },
+  {
+    "asset": "assets/town_polish/provisioner.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1088
+  },
+  {
+    "asset": "assets/town_polish/smith.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1191
+  },
+  {
+    "asset": "assets/town_polish/stable.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1008
+  },
+  {
+    "asset": "assets/town_polish/tailor.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1015
+  },
+  {
+    "asset": "assets/town_polish/town_fountain.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 359
+  },
+  {
+    "asset": "assets/town_polish/townhall.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 1106
+  },
+  {
+    "asset": "assets/town_polish/tree_autumn.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 378
+  },
+  {
+    "asset": "assets/town_polish/tree_leafy.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 398
+  },
+  {
+    "asset": "assets/town_polish/tree_pine.png",
+    "border_connected_white_pixels": 0,
+    "white_background_suspected": false,
+    "transparent_border_pixels": 313
+  }
+]

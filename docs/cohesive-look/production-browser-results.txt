@@ -1,0 +1,6 @@
+HEAP 134217728
+PASS desktop-day: eighteen assets, movement, mouse menu and rendered scenery
+HEAP 134217728
+PASS phone-day: eighteen assets, movement, touch menu and rendered scenery
+HEAP 134217728
+PASS desktop-night: eighteen assets, movement, mouse menu and rendered scenery
