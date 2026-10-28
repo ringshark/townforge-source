@@ -337,7 +337,7 @@ if(const char* path=std::getenv("TF_INTERIOR_FIXTURE")) {
     SaveGame(fixture);std::ifstream from(kSaveFilePath);std::ofstream to(path);to<<from.rdbuf();
 }
 {
- GameState route;route.townPlayerPos=TS(450,830);auto gate=kTownGates[0].wildernessPos;auto start=OpenTownWorld(0,route.townPlayerPos);
+ GameState route;auto gate=kTownGates[0].wildernessPos;auto start=OpenTownWorld(0,route.townPlayerPos);
  for(const auto& node:ActiveTownNodes(0))ResolveCircleCollision(start,kPlayerRadius,OpenTownWorld(0,node.pos),35.f);
  std::array<Vector2,5> points={{start,{gate.x+90,start.y},{gate.x+90,gate.y-45},{gate.x,gate.y-45},{gate.x,gate.y+100}}};
  for(int i=1;i<5;i++)for(int sample=1;sample<=100;sample++){
