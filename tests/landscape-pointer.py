@@ -124,7 +124,7 @@ modal='''#include <optional>
 #include <cassert>
 enum class Screen {Town,Wilderness,Hunt,Interior,Blackwake,Character};
 bool IsMenuScreen(Screen s){return s==Screen::Character;}
-bool g_trackOpen=false;int g_denPanel=0;
+bool g_trackOpen=false,g_dungeonMapOpen=false;int g_denPanel=0;
 struct GameState {
  Screen screen=Screen::Town;
  std::string interiorKey="wildhouse";
@@ -141,7 +141,8 @@ for flag,screen in [('exploreMenuOpen','Town'),('dungeonMenuOpen','Hunt'),('worl
     modal+=f's=GameState{{}};s.{flag}=true;s.screen=Screen::{screen};assert(LandscapeDialogOpen(s));\n'
 for flag,screen in [('selectedTile','Town'),('greetedNPC','Town'),('hotbarPickerSlot','Wilderness'),('houseCraftModule','Interior'),('openCorpseId','Hunt')]:
     modal+=f's=GameState{{}};s.{flag}=0;s.screen=Screen::{screen};assert(LandscapeDialogOpen(s));\n'
-modal+='''s=GameState{};s.screen=Screen::Character;assert(LandscapeDialogOpen(s));
+modal+='''s=GameState{};s.screen=Screen::Hunt;g_dungeonMapOpen=true;assert(LandscapeDialogOpen(s)==17);g_dungeonMapOpen=false;assert(!LandscapeDialogOpen(s));
+s=GameState{};s.screen=Screen::Character;assert(LandscapeDialogOpen(s));
 s=GameState{};s.screen=Screen::Wilderness;g_trackOpen=true;assert(LandscapeDialogOpen(s));s.screen=Screen::Interior;assert(!LandscapeDialogOpen(s));g_trackOpen=false;
 s.screen=Screen::Blackwake;g_denPanel=1;assert(LandscapeDialogOpen(s));
 g_denPanel=0;assert(!LandscapeDialogOpen(s));
