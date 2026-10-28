@@ -9,7 +9,9 @@ inline const Texture2D* DungeonSurface(int theme,bool wall) {
         constexpr int tile=128;
         const Color floors[6]={{78,91,94,255},{83,78,83,255},{100,87,70,255},{82,65,59,255},{112,137,150,255},{82,86,72,255}};
         const Color walls[6]={{43,55,60,255},{48,43,51,255},{58,50,42,255},{43,33,34,255},{58,77,91,255},{43,49,39,255}};
-        Color base=wall?walls[theme]:floors[theme];Image image=GenImageColor(tile,tile,base);auto* pixels=(Color*)image.data;
+        Color base=wall?walls[theme]:floors[theme];Image image=GenImageColor(tile,tile,base);
+        if(!image.data)return nullptr; // Allocation failure falls back to the existing themed surface.
+        auto* pixels=(Color*)image.data;
         int rowHeight=wall?32:16;
         for(int y=0;y<tile;y++)for(int x=0;x<tile;x++) {
             int row=y/rowHeight,xx=(x+(row%2)*16)%32,yy=y%rowHeight;
