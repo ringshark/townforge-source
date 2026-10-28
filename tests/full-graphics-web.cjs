@@ -24,7 +24,7 @@ const fixture=fs.readFileSync(process.env.TF_GRAPHICS_FIXTURE||'/tmp/tf-graphics
     }
     throw Error('walking failed to reach '+JSON.stringify(goal)+' from '+JSON.stringify(await outside()));
    }finally{for(const key of held)await page.keyboard.up(key);}}
-   const gate=await outside();await walk({x:gate.gx,y:gate.gy+100});await walk({x:1620,y:3330});await walk({x:2520,y:3078});await walk({x:2970,y:3060});
+   const gate=await outside();console.log('Dungeon route start',spec.name,gate);await walk({x:gate.gx+90,y:gate.y});await walk({x:gate.gx+90,y:gate.gy-45});await walk({x:gate.gx,y:gate.gy-45});await walk({x:gate.gx,y:gate.gy+100});await walk({x:1620,y:3330});await walk({x:2520,y:3078});await walk({x:2970,y:3060});
    await page.screenshot({path:`browser-checks/full-art-${spec.name}-crypt-approach.png`});await walk({x:2970,y:2995});
    if(!(await state()).dungeon)await page.keyboard.press('e',{delay:200});
    await page.waitForFunction(()=>JSON.parse(UTF8ToString(_TF_GraphicsState())).dungeon,null,{timeout:15000});await page.waitForTimeout(300);

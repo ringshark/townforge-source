@@ -336,8 +336,19 @@ if(const char* path=std::getenv("TF_INTERIOR_FIXTURE")) {
     for(const auto& n:ActiveTownNodes(0))if(std::string(n.key)=="smith")fixture.wildernessPlayerPos=OpenTownWorld(0,{n.pos.x,n.pos.y+150});
     SaveGame(fixture);std::ifstream from(kSaveFilePath);std::ofstream to(path);to<<from.rdbuf();
 }
+{
+ GameState route;route.townPlayerPos=TS(450,830);auto gate=kTownGates[0].wildernessPos;auto start=OpenTownWorld(0,route.townPlayerPos);
+ for(const auto& node:ActiveTownNodes(0))ResolveCircleCollision(start,kPlayerRadius,OpenTownWorld(0,node.pos),35.f);
+ std::array<Vector2,5> points={{start,{gate.x+90,start.y},{gate.x+90,gate.y-45},{gate.x,gate.y-45},{gate.x,gate.y+100}}};
+ for(int i=1;i<5;i++)for(int sample=1;sample<=100;sample++){
+  Vector2 p={points[i-1].x+(points[i].x-points[i-1].x)*sample/100,points[i-1].y+(points[i].y-points[i-1].y)*sample/100};
+  for(const auto& n:ActiveTownNodes(0))assert(Dist(p,OpenTownWorld(0,n.pos))>=35+kPlayerRadius-.1f);
+  auto resolved=p;GateCollide(resolved,gate,TownGateFacing(0));assert(Dist(p,resolved)<.1f);
+ }
+ std::cout<<"PASS town route: real arrival, clear side lane and open gate geometry"<<std::endl;
+}
 if(const char* path=std::getenv("TF_GRAPHICS_FIXTURE")){
- GameState fixture;fixture.optClassic2D=true;fixture.optOnline=false;fixture.youngT=1200;fixture.starterStep=-1;fixture.starterAccepted=fixture.starterRewarded=true;fixture.gold=1000;fixture.autoReagents=false;fixture.wildernessPlayerPos=GateWorld({0,-35},kTownGates[0].wildernessPos,TownGateFacing(0));
+ GameState fixture;fixture.optClassic2D=true;fixture.optOnline=false;fixture.youngT=1200;fixture.starterStep=-1;fixture.starterAccepted=fixture.starterRewarded=true;fixture.gold=1000;fixture.autoReagents=false;
  Pet pet{};pet.id=1;pet.name="My renamed wolf";pet.species=1;pet.role=PetRole::Melee;pet.hp=pet.maxHp=100;pet.active=true;fixture.pets.push_back(pet);fixture.nextPetId=2;
  Item sword{};sword.id=100;sword.name="Iron Sword";sword.type=ItemType::Weapon;sword.category="Swordsmanship";sword.power=15;fixture.equipped.rightHand=sword;
  SaveGame(fixture);std::ifstream from(kSaveFilePath);std::ofstream to(path);to<<from.rdbuf();
