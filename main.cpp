@@ -1250,7 +1250,9 @@ static void PlaySfx(SfxId id) {
 // ---- Music (2026-09-28): one CC0 track per kind of place, cross-faded ----------
 // town: "The Old Tower Inn" (RandomMind), the wilds: "Mirror Lake" (joth),
 // dungeons: "Dark Cavern Ambient" (Paul Wortmann) - see assets/sfx/CREDITS.md.
-// (2026-09-29) plus a calm set (slots 3-5, tools/gen_calm_music.py), the default.
+// (2026-09-29) plus a calm set (slots 3-5), the default. 2026-10-27: Mark found the first calm set (random plucked harp, flute and
+// bell notes) more annoying than calming, so slots 3-5 are now tools/gen_soft_music.mjs: slow pads and one soft stepwise voice,
+// stored as IMA ADPCM WAV (a quarter the size of PCM; dr_wav decodes it).
 struct MusicSlot { Music m{}; bool ok = false; float vol = 0.0f; };
 static MusicSlot g_music[6];
 static bool g_musicLoaded = false;
@@ -1261,10 +1263,10 @@ static void MusicTick(int want, float dt) { // want: 0 town, 1 wilds, 2 dungeon,
     if (!g_musicLoaded) {
         g_musicLoaded = true;
         const char* f[6] = { "assets/music/town.ogg", "assets/music/wild.ogg", "assets/music/dungeon.ogg",
-                             "assets/music/town_calm.ogg", "assets/music/wild_calm.ogg", "assets/music/dungeon_calm.ogg" };
+                             "assets/music/town_soft.wav", "assets/music/wild_soft.wav", "assets/music/dungeon_soft.wav" };
         for (int i = 0; i < 6; i++) if (FileExists(f[i])) { g_music[i].m = LoadMusicStream(f[i]); g_music[i].ok = g_music[i].m.frameCount > 0; }
     }
-    const float peak[6] = { 0.30f, 0.26f, 0.34f, 0.42f, 0.36f, 0.42f };
+    const float peak[6] = { 0.30f, 0.26f, 0.34f, 0.55f, 0.55f, 0.55f }; // the soft set is normalised lower than the old calm one
     if (want >= 0 && g_calmMusic && g_music[want + 3].ok) want += 3;
     for (int i = 0; i < 6; i++) {
         MusicSlot& ms = g_music[i];
