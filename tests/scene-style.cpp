@@ -9,7 +9,8 @@
 #include "../town_2d_art.h"
 #include "../scene_style_2d.h"
 static std::vector<Color> captured;
-Image GenImageColor(int width,int height,Color color){auto* px=(Color*)malloc(width*height*sizeof(Color));std::fill(px,px+width*height,color);return {px,width,height,1,PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};}
+static bool allocationFails=false;
+Image GenImageColor(int width,int height,Color color){if(allocationFails)return {};auto* px=(Color*)malloc(width*height*sizeof(Color));std::fill(px,px+width*height,color);return {px,width,height,1,PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};}
 Texture2D LoadTextureFromImage(Image image){captured.assign((Color*)image.data,(Color*)image.data+image.width*image.height);return {1,image.width,image.height,1,image.format};}
 void UnloadImage(Image image){free(image.data);}
 void SetTextureFilter(Texture2D,int){}
@@ -19,6 +20,7 @@ void DrawRectangle(int x,int y,int width,int height,Color){lines.push_back({(flo
 bool CheckCollisionPointRec(Vector2 p,Rectangle r){return p.x>=r.x && p.x<=r.x+r.width && p.y>=r.y && p.y<=r.y+r.height;}
 static float luminance(){float n=0;for(auto p:captured){assert(p.a==255);n+=(p.r+p.g+p.b)/3.f;}return n/captured.size();}
 int main(){
+ allocationFails=true;assert(tfscene::DungeonSurface(0,false)==nullptr);assert(!tfscene::dungeonFloors[0].id);allocationFails=false;
  for(int theme=0;theme<6;theme++){
   auto floor=tfscene::DungeonSurface(theme,false);assert(floor && floor->width==128 && floor->height==128);
   float floorLight=luminance();auto first=captured;tfscene::dungeonFloors[theme]={};tfscene::DungeonSurface(theme,false);
