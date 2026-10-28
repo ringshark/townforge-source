@@ -39,7 +39,8 @@ inline Point Map(Point p,Region region,float scroll=0) {
 inline Point WorldPoint(Point p) {return {p.x*width/legacyWidth,p.y*height/legacyHeight};}
 // A wide viewport has 60% of the portrait height. Keep actors readable rather
 // than preserving the portrait camera distance and shrinking the whole scene.
-inline float CameraDistance(float distance) {return distance*.65f;}
+// 25% larger world framing; divide distance rather than enlarging the HUD.
+inline float CameraDistance(float distance) {return distance*(.65f/1.25f);}
 constexpr float maxScroll=legacyHeight-110-panelBody;
 inline float Scroll(float value) {return value<0 ? 0:value>maxScroll ? maxScroll:value;}
 inline Point Input(Point p,bool world,bool dialog,float scroll=0) {
@@ -51,3 +52,4 @@ inline Point Input(Point p,bool world,bool dialog,float scroll=0) {
     return {p.x*legacyWidth/width,p.y*legacyHeight/height};
 }
 }
+

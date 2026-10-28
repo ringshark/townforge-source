@@ -22,9 +22,10 @@ int main(){
  // Native nameplates stay centered on the projected building across the frame.
  auto center=WorldPoint({270,450});assert(near(center.x,480)&&near(center.y,270));
  auto corner=WorldPoint({540,900});assert(near(corner.x,960)&&near(corner.y,540));
- // At default zoom, landscape restores >90% of portrait actor height.
+ // The closer camera enlarges the world 25% without changing HUD/input maps.
  float portraitHeight=900/650.f,wideHeight=540/CameraDistance(650);
- assert(wideHeight/portraitHeight>.9f && wideHeight/portraitHeight<1.0f);
+ assert(wideHeight/portraitHeight>1.15f && wideHeight/portraitHeight<1.16f);
+ assert(near(CameraDistance(650),650*.65f/1.25f));
  auto chat=Input({70,28},true,false);assert(near(chat.x,70)&&near(chat.y,28));
  auto drag=Map({195,455},Region::Left);assert(near(drag.x,195)&&near(drag.y,815));
  auto ground=Map({700,420},Region::World);assert(near(ground.x,393.75f)&&near(ground.y,700));
@@ -40,3 +41,4 @@ int main(){
  assert(near(details.x,270)&&near(details.y,850));
  assert(122+452*gearScale<540 && 496+440<960);
 }
+
