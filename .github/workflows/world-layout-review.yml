@@ -1,7 +1,7 @@
-name: Verify connected-world redesign
+name: Verify Town Forge graphics and world
 on:
   push:
-    branches: [codex/world-layout-redesign]
+    branches: [codex/world-layout-redesign, codex/full-graphics-pass]
   workflow_dispatch:
 permissions:
   contents: read
@@ -29,7 +29,9 @@ jobs:
         run: |
           git clone --depth 1 --branch 6.0 https://github.com/raysan5/raylib.git /tmp/raylib
           make -C /tmp/raylib/src PLATFORM=PLATFORM_WEB -j2
-          TF_INTERIOR_FIXTURE=/tmp/tf-interior-fixture.txt TF_HOMESTEAD_FIXTURE=/tmp/tf-homestead-fixture.txt RAYLIB_DIR=/tmp/raylib python tests/landscape-menus.py
+          python -m pip install --quiet Pillow
+          python tests/graphics-assets.py
+          TF_GRAPHICS_FIXTURE=/tmp/tf-graphics-fixture.txt TF_INTERIOR_FIXTURE=/tmp/tf-interior-fixture.txt TF_HOMESTEAD_FIXTURE=/tmp/tf-homestead-fixture.txt RAYLIB_DIR=/tmp/raylib python tests/landscape-menus.py
           node tests/build-variants.cjs
           python tests/player-movement.py
           python tests/ui-input.py
@@ -62,6 +64,7 @@ jobs:
           NODE_PATH=/tmp/tf-browser/node_modules node tests/homestead-web.cjs
           NODE_PATH=/tmp/tf-browser/node_modules node tests/interior-web.cjs
           NODE_PATH=/tmp/tf-browser/node_modules node tests/atlas-web.cjs
+          NODE_PATH=/tmp/tf-browser/node_modules node tests/full-graphics-web.cjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

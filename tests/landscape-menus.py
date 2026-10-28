@@ -44,7 +44,7 @@ for(int di=0;di<(int)kDungeons.size();++di) {
  GameState dungeon;dungeon.screen=Screen::Hunt;dungeon.selectedDungeon=di;dungeon.hunt3DView=false;
  assert(NativeLandscapePage(dungeon));
  for(Vector2 pos:std::vector<Vector2>{{900,1300},{900,1000},{900,700},{700,700},{1100,700}}) {
-  if(!DungeonIsFloor(di,pos))continue;
+  pos={pos.x*2,pos.y*2};if(!DungeonIsFloor(di,pos))continue;
   reset();g_landscapeWorld=true;g_presentedWorld=true;g_landscapeScroll=180;
   dungeon.dungeonPlayerPos=pos;DrawHuntScreen(dungeon,960,540);
   assert(kViewport.x==0 && kViewport.y==0 && kViewport.width==960 && kViewport.height==540);
@@ -57,7 +57,7 @@ for(int di=0;di<(int)kDungeons.size();++di) {
   assert(input.x==480 && input.y==270); // stale panel scroll cannot move the world or its picking
   check("dungeon world");
  }
- reset();dungeon.dungeonPlayerPos={900,1300};dungeon.playerIsGhost=true;testMoveKey=KEY_S;
+ reset();dungeon.dungeonPlayerPos={1800,2600};dungeon.playerIsGhost=true;testMoveKey=KEY_S;
  const auto start=dungeon.dungeonPlayerPos;
  for(int frame=0;frame<20;++frame) {
   DrawHuntScreen(dungeon,960,540);
@@ -127,6 +127,39 @@ for(int i=0;i<6;i++){auto door=EntranceDoorPoint(i),body=EntranceBodyCenter(i);a
 tfdesign::BuildTrails();assert(!tfdesign::trails.empty());
 for(const auto& path:tfdesign::trails)for(size_t i=1;i<path.size();++i)assert(tfdesign::ClearLine(path[i-1],path[i]));
 std::cout<<"PASS all four towns: four visible wall sides, solid front curtains and open gate passage; all original shops inside their compound, spaced apart, coordinate round trips; "<<tfdesign::trails.size()<<" wilderness trails avoid water, ridges and owned plot footprints"<<std::endl;
+// Expanded dungeons are connected, have distinct well-spaced real encounters,
+// and keep a quiet entry/exit plus a fully revealed, nonblocking overview.
+for(int di=0;di<6;di++){
+ constexpr int N=90;std::vector<char> visited(N*N);std::vector<int> queue;
+ auto p=[](int i){return Vector2{(i%N+.5f)*40,(i/N+.5f)*40};};int start=65*N+45;visited[start]=1;queue.push_back(start);
+ for(size_t head=0;head<queue.size();head++){int i=queue[head];for(int d:std::array<int,4>{{1,-1,N,-N}}){int j=i+d;if(j<0 || j>=N*N || std::abs(j%N-i%N)>1 || visited[j] || !DungeonIsFloor(di,p(j)))continue;visited[j]=1;queue.push_back(j);}}
+ for(int slot=0;slot<kDungeonSlotCount;slot++){
+  auto at=DungeonMonsterNodePos(di,slot);assert(DungeonIsFloor(di,at));float access=1e9;
+  for(int i:queue)access=std::min(access,Dist(p(i),at));assert(access<60);
+  if(slot<kDungeonRegularSlots)assert(Dist(at,{1800,2600})>300);
+  for(int other=0;other<slot;other++)assert(Dist(at,DungeonMonsterNodePos(di,other))>170);
+ }
+ GameState dungeon;dungeon.screen=Screen::Hunt;dungeon.selectedDungeon=di;dungeon.dungeonPlayerPos={1800,2600};reset();g_dungeonMapOpen=true;
+ assert(LandscapeDialogOpen(dungeon)==17);DrawHuntScreen(dungeon,960,540);check("fully revealed dungeon map");assert(dungeon.dungeonPlayerPos.x==1800 && dungeon.dungeonPlayerPos.y==2600);g_dungeonMapOpen=false;
+}
+std::cout<<"PASS six expanded dungeons: 3600-unit worlds, 20 spaced encounters and boss, connected floors, quiet entry and fully revealed overview"<<std::endl;
+for(int species=0;species<11;species++){
+ Pet pet{};pet.id=900+species;pet.name=kWildCreatures[species].name;pet.role=kWildCreatures[species].role;pet.species=species;pet.hp=pet.maxHp=50;
+ auto saved=PetFromLine(PetToLine(pet));assert(saved && saved->species==species);saved->name="Renamed companion";assert(PetSpecies(*saved)==species);
+ auto legacy=PetToLine(pet);legacy=legacy.substr(0,legacy.rfind('|'));auto old=PetFromLine(legacy);assert(old && PetSpecies(*old)==species);
+}
+{std::vector<Color> image(25,WHITE);for(int y=1;y<4;y++)for(int x=1;x<4;x++)image[y*5+x]=BLACK;image[12]=WHITE;Image matte{image.data(),5,5,1,7};tfworldart::CleanMatte(matte,5,5);assert(image[0].a==0 && image[12].a==255 && image[6].a==255);}
+{auto before=tfgfx::hero,up=tfgfx::north;tfgfx::hero.texture.id=991;tfgfx::hero.frames.assign(56,{0,0,100,139});tfgfx::north.texture.id=992;tfgfx::north.frames.assign(8,{0,0,200,290});
+ GameState actor;actor.screen=Screen::Wilderness;actor.wildEngaged=GameState::ActiveMonster{};Item sword{};sword.category="Swordsmanship";actor.equipped.rightHand=sword;
+ for(int face=0;face<4;face++){
+  actor.wildEngaged->swingEffectTimer=.32f;assert(tfgfx::HeroAction(actor,{100,100},face,ActorAnim::Attack,34,WHITE));int first=tfgfx::lastHeroFrame;
+  actor.wildEngaged->swingEffectTimer=.04f;assert(tfgfx::HeroAction(actor,{100,100},face,ActorAnim::Attack,34,WHITE));assert(tfgfx::lastHeroFrame!=first);assert(tfgfx::lastHeroNorth==(face==3));
+  actor.wildEngaged->castEffectTimer=.04f;assert(tfgfx::HeroAction(actor,{100,100},face,ActorAnim::Cast,34,WHITE));assert(tfgfx::lastHeroFrame%8>=4 || (face==3 && tfgfx::lastHeroFrame>=4));
+ }
+ actor.playerDeathAnimT=1.2f;tfgfx::HeroAction(actor,{100,100},0,ActorAnim::Idle,34,WHITE);int falling=tfgfx::lastHeroFrame;actor.playerDeathAnimT=.01f;tfgfx::HeroAction(actor,{100,100},0,ActorAnim::Idle,34,WHITE);assert(tfgfx::lastHeroFrame>falling);
+ tfgfx::hero=before;tfgfx::north=up;
+}
+std::cout<<"PASS graphics states: four-direction attack/cast/death phases, all 11 saved and renamed pet species, legacy pet rows and white matte cleanup"<<std::endl;
 reset();bool open=false;
 // Every native menu destination must preserve its action and fit the canvas.
 auto menuReset=[&](){reset();g_landscapePage=g_presentedPage=false;g_presentedNativeMenu=true;g_uiShieldBypass=true;open=true;s.screen=Screen::Town;};
@@ -302,6 +335,12 @@ if(const char* path=std::getenv("TF_INTERIOR_FIXTURE")) {
     fixture.screen=Screen::Wilderness;fixture.selectedTown=0;
     for(const auto& n:ActiveTownNodes(0))if(std::string(n.key)=="smith")fixture.wildernessPlayerPos=OpenTownWorld(0,{n.pos.x,n.pos.y+150});
     SaveGame(fixture);std::ifstream from(kSaveFilePath);std::ofstream to(path);to<<from.rdbuf();
+}
+if(const char* path=std::getenv("TF_GRAPHICS_FIXTURE")){
+ GameState fixture;fixture.optClassic2D=true;fixture.optOnline=false;fixture.youngT=1200;fixture.starterStep=-1;fixture.starterAccepted=fixture.starterRewarded=true;fixture.gold=1000;fixture.autoReagents=false;
+ Pet pet{};pet.id=1;pet.name="My renamed wolf";pet.species=1;pet.role=PetRole::Melee;pet.hp=pet.maxHp=100;pet.active=true;fixture.pets.push_back(pet);fixture.nextPetId=2;
+ Item sword{};sword.id=100;sword.name="Iron Sword";sword.type=ItemType::Weapon;sword.category="Swordsmanship";sword.power=15;fixture.equipped.rightHand=sword;
+ SaveGame(fixture);std::ifstream from(kSaveFilePath);std::ofstream to(path);to<<from.rdbuf();
 }
 g_farmOpen=false;GameState target;target.screen=Screen::Wilderness;target.youngT=0;target.starterStep=-1;target.wildernessPlayerPos=WP(450,1300);
 assert(SpawnRovingPack(target));assert(target.wildEngaged && target.wildExtraAttackers.size()>=2 && target.wildExtraAttackers.size()<=7);

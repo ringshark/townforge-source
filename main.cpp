@@ -1370,6 +1370,7 @@ struct Pet {
     int level = 1;        // (2026-09-28) pets level from kills, bond after kBondKills fights together
     float xp = 0.0f;
     bool bonded = false;
+    int species = -1; // exact tamed creature, additive save field
     int bondKills = 0;
     Vector2 fpos{};       // (2026-09-28) where an extra follower stands (transient; the lead pet uses companionPos)
     bool fposInit = false;
@@ -1454,8 +1455,8 @@ static const int kBladeCount = 3;
 // must match (kWildernessMonsterSpots, kCenters in DungeonMonsterNodePos) are
 // declared much later. static_asserts next to those tables verify the match.
 static const int kWildMonsterSpotCount = 31; // (2026-09-27) +7 Grimtusk Hold orcs, +2 Sorrow Wraiths, +1 the Tri-Wyrm; (2026-09-29) +1 the breakout boss
-static const int kDungeonBossSlot = 8; // boss slot index; regular slots are 0..7
-static const int kDungeonSlotCount = kDungeonBossSlot + 1; // 9 slots per dungeon
+static const int kDungeonBossSlot = 20; // regular slots are 0..19
+static const int kDungeonSlotCount = kDungeonBossSlot + 1; // 20 regular encounters plus boss
 static const char* kGhostNoTouch = "Ghosts cannot touch the world of the living.";
 // ---- Player guild (2026-09-27) ----
 // "Once you own a house, maybe you can start a guild to even the playing
@@ -2054,7 +2055,7 @@ struct GameState {
     // space. Only one is "active" at a time depending on state.screen/selectedDungeon,
     // but both persist independently so leaving and returning keeps your spot. ---
     Vector2 townPlayerPos = {675, 900}; // layout {450,600} x kTS 1.5 - on the main north-south street, clear of Townhall/Bank's collision radius
-    Vector2 dungeonPlayerPos = {900, 900};
+    Vector2 dungeonPlayerPos = {1800, 2600};
     Vector2 bloodstainedPlayerPos = {450, 700};
     Vector2 wildernessPlayerPos = { 900 * kWS, 1750 * kWS - 100 }; // just inside the gate from Town
     Vector2 playerFacing = {0, 1}; // last nonzero movement direction, for a facing indicator
@@ -2287,7 +2288,7 @@ static const float kWorldSize = 900.0f;       // Bloodstained Road world size (T
 static constexpr float kTS = 1.5f;
 static constexpr Vector2 TS(float x, float y) { return { x * kTS, y * kTS }; }
 static const float kTownWorldSize = 1000.0f * kTS;
-static const float kDungeonWorldSize = 1800.0f; // dungeons get their own, much bigger world - real
+static const float kDungeonWorldSize = 3600.0f; // dungeons get their own, much bigger world - real
                                                    // room-and-corridor space to actually walk and explore
 // Wilderness's own world size, separate from kDungeonWorldSize above (2026-09-22,
 // "second town" plan) - Mark wants the walk from Town 1 to the new Town 2 to feel like
@@ -2754,7 +2755,9 @@ struct DirSpriteSheet {
 
 #include "town_2d_art.h"
 #include "world_visuals_2d.h"
+#include "graphics_art_2d.h"
 static bool g_openWorld2D = false;
+static bool g_dungeonMapOpen=false;
 
 struct GameAssets {
     Texture2D player{};
@@ -2981,6 +2984,8 @@ static Texture2D TryLoadTexture(const std::string& path, bool& okOut) {
             ImageAlphaClear(&image,BLANK,.44f);
             t=LoadTextureFromImage(image);UnloadImage(image);
         }
+    } else if(kVariantView!=3 && path.find("assets/monsters_boss_v2/")==0){
+        Image image=LoadImage(path.c_str());if(image.data){tfworldart::CleanMatte(image,image.width,image.height);t=LoadTextureFromImage(image);UnloadImage(image);}
     } else t=LoadTexture(path.c_str());
     okOut = (t.id != 0);
     if (okOut) SetTextureFilter(t, TEXTURE_FILTER_POINT); // crisp pixel art, no blurring when scaled up
@@ -3059,7 +3064,8 @@ static DirSpriteSheet LoadDirSpriteSheet(const std::string& path, int frameW = 6
 // rather than trusting the frame count blindly.
 static DirSpriteSheet LoadCarlActorSheet(const std::string& path, int cols, int srcRows = 4, int walkColsOverride = 0) {
     DirSpriteSheet sheet;
-    sheet.tex = TryLoadTexture(path, sheet.ok);
+    Image image=LoadImage(path.c_str());
+    if(image.data){tfworldart::CleanMatte(image,image.width/cols,image.height/srcRows);sheet.tex=LoadTextureFromImage(image);UnloadImage(image);sheet.ok=sheet.tex.id!=0;if(sheet.ok)SetTextureFilter(sheet.tex,TEXTURE_FILTER_POINT);}
     if (sheet.ok) {
         sheet.frameW = sheet.tex.width / cols;
         sheet.frameH = sheet.tex.height / srcRows;
@@ -3067,7 +3073,7 @@ static DirSpriteSheet LoadCarlActorSheet(const std::string& path, int cols, int 
         sheet.rows = srcRows;
         int walkCols = walkColsOverride > 0 ? walkColsOverride : cols;
         sheet.walkCount.fill(walkCols);
-        sheet.attackCount.fill(walkCols);
+        sheet.attackCount.fill(1); // combat holds a directional pose; movement is not replayed as a bite
         sheet.castCount.fill(walkCols);
         // Down/Left/Right/Up (dest) <- Down/Up/Left/Left (src rows 0,1,2,2) - Right is
         // a horizontally-mirrored read of Left's row, since no sheet has real Right art.
@@ -3079,7 +3085,7 @@ static DirSpriteSheet LoadCarlActorSheet(const std::string& path, int cols, int 
 }
 
 static void LoadGameAssets() {
-    if(kVariantView!=3)tf2dart::Load();
+    if(kVariantView!=3){tf2dart::Load();tfgfx::Load();}
     // Loaded at 48px (0/nullptr = default codepoints, just standard ASCII - every string
     // in the game is plain English) so it covers the largest UI text (title, 22px)
     // without much upscale blur while not needing an extreme downscale for the smallest
@@ -3166,6 +3172,7 @@ static void LoadGameAssets() {
     for (int i = 0; i < 6; i++) {
         g_assets.monsterFamily[i] = LoadCarlActorSheet(kMonsterFiles[i], kMonsterCols[i], kMonsterRows[i], kMonsterWalkOverride[i]);
         g_assets.bossFamily[i] = TryLoadTexture(kBossFiles[i], g_assets.bossFamilyOk[i]);
+        if(kVariantView!=3 && g_assets.bossFamilyOk[i])tfworldart::Register(g_assets.bossFamily[i],kBossFiles[i],g_assets.bossFamily[i].width,g_assets.bossFamily[i].height,1,1);
     }
 
     g_assets.groundGrass = TryLoadTexture("assets/ground/grass.png", g_assets.groundGrassOk);
@@ -3928,6 +3935,14 @@ static const DirSpriteSheet* MonsterFamilySheet(int dungeonIdx) {
     if (dungeonIdx < 0 || dungeonIdx > 5 || !g_assets.monsterFamily[dungeonIdx].ok) return nullptr;
     return &g_assets.monsterFamily[dungeonIdx];
 }
+// Preserve the distinct creature families implied by each encounter's identity.
+static const DirSpriteSheet* DungeonActorSheet(int di,int slot){
+    int type=slot%5;if(slot==kDungeonBossSlot)return MonsterFamilySheet(di);
+    if(di==3){if(type==0)return &g_assets.wildMonsterTex[3];if(type==1)return &g_assets.wildMonsterTex[2];if(type==3)return MonsterFamilySheet(0);}
+    if(di==2){if(type==1)return &g_assets.wildMonsterTex[1];if(type==2)return &g_assets.wildCreatureTex[8];if(type==3)return &g_assets.wildCreatureTex[9];}
+    if(di==5){if(type==1 || type==4)return &g_assets.wildMonsterTex[4];if(type==2)return MonsterFamilySheet(0);if(type==3)return MonsterFamilySheet(3);}
+    return MonsterFamilySheet(di);
+}
 // Phase 3 - the Frostbound Tomb (index 5) reuses the Whisper Crypt's undead sheets
 // with an icy tint, so the glacier tomb reads cold without new art.
 static Color DungeonMonsterTint(int dungeonIdx) {
@@ -4004,6 +4019,15 @@ static void DrawIconCenteredRect(const Texture2D& tex, Rectangle srcRect, Vector
     Rectangle dest = { center.x - w / 2.0f, center.y - h / 2.0f, w, h };
     DrawTexturePro(tex, srcRect, dest, { 0, 0 }, 0.0f, tint);
 }
+
+static int PetSpecies(const Pet& pet){
+    if(pet.species>=0 && pet.species<11)return pet.species;
+    std::string name=pet.name;std::transform(name.begin(),name.end(),name.begin(),[](unsigned char c){return (char)std::tolower(c);});
+    const char* species[]={"dog","wolf","bear","panther","bison","horse","sabertooth","griffin","drake","wyvern","dragon"};
+    for(int i=0;i<11;i++)if(name.find(species[i])!=std::string::npos)return i;
+    return pet.role==PetRole::Tank?2:pet.role==PetRole::Caster?8:1;
+}
+static const DirSpriteSheet& PetSheet(const Pet& pet){return g_assets.wildCreatureTex[PetSpecies(pet)];}
 
 // Tiles `tex` across `screenArea` at `worldTileSize` world-units per tile, scrolling
 // correctly with the camera (tiles wrap seamlessly as the camera moves - no popping or
@@ -4675,12 +4699,31 @@ static bool AnyMoveKeyDown() {
 static void DrawPlayer(const GameState& s, Vector2 screenPos, Vector2 facing, const std::string& interactPrompt,
                          float visualScale = 1.0f, ActorAnim combatAnim = ActorAnim::Idle,
                          Color tint = WHITE) {
+    if(g_mountPetId>=0 && s.screen==Screen::Wilderness){
+        for(const auto& pet:s.pets)if(pet.id==g_mountPetId && pet.hp>0){
+            const auto& mount=PetSheet(pet);bool moving=AnyMoveKeyDown() || VirtualJoystickIsMoving() || g_walkOn;
+            DrawActorSprite(mount,facing,moving?ActorAnim::Walk:ActorAnim::Idle,s.worldTime,{screenPos.x,screenPos.y+9},40,8,0,tint);
+            screenPos.y-=12;break;
+        }
+    }
+    if(s.hidden)tint=Fade(tint,.65f);
     float kPlayerRadius = ::kPlayerRadius * visualScale; // shadows the global on purpose - see
                                                            // DrawBuildingNode's identical trick.
-    if(g_compactHeroAtlas && g_assets.heroSheet.ok) {
+    if(g_compactHeroAtlas && g_assets.heroSheet.ok && tfgfx::HeroAction(s,screenPos,DirRowForFacing(facing),combatAnim,tfworldart::kHeroSize*visualScale,tint)) {
+        // Non-sword weapons retain their equipped art over the action body.
+        if(combatAnim==ActorAnim::Attack && s.playerHurtT<0 && s.playerDeathAnimT<=0){
+            const Item* weapon=s.equipped.rightHand?&*s.equipped.rightHand:(s.equipped.leftHand?&*s.equipped.leftHand:nullptr);
+            if(weapon && weapon->category!="Swordsmanship" && weapon->category!="Fencing")if(const auto* texture=GearIconForItem(*weapon)){
+                float left=s.wildEngaged?s.wildEngaged->swingEffectTimer:s.dungeonEngaged?s.dungeonEngaged->swingEffectTimer:0;
+                float phase=std::clamp(1-left/.32f,0.f,1.f);float size=tfworldart::kHeroSize*visualScale*.54f,angle=weapon->category=="Archery"?0:std::sin(phase*PI)*45;
+                DrawTexturePro(*texture,{0,0,(float)texture->width,(float)texture->height},{screenPos.x+facing.x*10,screenPos.y+facing.y*8,size,size},{size*.5f,size*.5f},angle,tint);
+            }
+        }
+    } else if(g_compactHeroAtlas && g_assets.heroSheet.ok) {
         const int row=DirRowForFacing(facing);
-        const bool moving=AnyMoveKeyDown() || VirtualJoystickIsMoving() || g_walkOn;
-        const int frame=moving && combatAnim==ActorAnim::Idle ? (int)(s.worldTime*kHeroWalkFps)%4:1;
+        const bool moving=(AnyMoveKeyDown() || VirtualJoystickIsMoving() || g_walkOn) && !(g_mountPetId>=0 && s.screen==Screen::Wilderness);
+        float cadence=IsKeyDown(KEY_LEFT_SHIFT)?12.f:kHeroWalkFps;
+        const int frame=moving && combatAnim==ActorAnim::Idle ? (int)(s.worldTime*cadence)%4:1;
         const float cw=g_assets.heroSheet.tex.width/4.f,ch=g_assets.heroSheet.tex.height/4.f;
         const float size=tfworldart::kHeroSize*visualScale;
         float bob=moving ? sinf(s.worldTime*12.f)*.5f*visualScale:0;
@@ -4713,6 +4756,11 @@ static void DrawPlayer(const GameState& s, Vector2 screenPos, Vector2 facing, co
         DrawCircleV(screenPos, kPlayerRadius, Color{ 63, 94, 150, 255 });
         Vector2 nose = { screenPos.x + facing.x * (kPlayerRadius + 6), screenPos.y + facing.y * (kPlayerRadius + 6) };
         DrawCircleV(nose, 4, Color{ 220, 200, 140, 255 });
+    }
+    if(s.gatheringResource && *s.gatheringResource=="fish"){
+        Vector2 hand={screenPos.x+facing.x*8,screenPos.y+6},tip={hand.x+facing.x*28,hand.y+facing.y*18-18};
+        Vector2 bobber={tip.x+facing.x*10,tip.y+22+sinf(s.worldTime*3)*1.5f};
+        DrawLineEx(hand,tip,2,Color{120,88,52,255});DrawLineEx(tip,bobber,.7f,Color{211,219,208,230});DrawCircleV(bobber,2,Color{210,82,62,255});
     }
     if (!interactPrompt.empty()) {
         int tw = MeasureUIText(interactPrompt.c_str(), 12);
@@ -6042,7 +6090,7 @@ static const float kDungeonRespawnMin = 60.0f;    // dungeon regular-slot respaw
 static const float kDungeonRespawnMax = 120.0f;
 static const float kDungeonBossRespawnMin = 240.0f; // boss respawn window (4-6 min)
 static const float kDungeonBossRespawnMax = 360.0f;
-static const int kDungeonRegularSlots = 8; // regular spawn points per dungeon (was 5 - raised so respawn timers don't empty dungeons)
+static const int kDungeonRegularSlots = 20; // regular spawn points per dungeon (was 5 - raised so respawn timers don't empty dungeons)
 
 // Forward declarations - the full definitions live just before DrawWildernessScreen,
 // after the wilderness tables they depend on (kWildernessMonsterSpots, gates, MaxMana).
@@ -7480,6 +7528,7 @@ static void ResolveTameAttempt(GameState& s) {
             Pet pet;
             pet.id = s.nextPetId++;
             pet.name = creature.name;
+            pet.species = s.tamingAttempt->creatureIdx;
             pet.role = creature.role;
             pet.str = str; pet.dex = dex; pet.intStat = intV;
             pet.maxHp = 50.0f + str; pet.hp = pet.maxHp;
@@ -7739,7 +7788,7 @@ static std::string PetToLine(const Pet& p) {
     o << p.id << "|" << p.name << "|" << (int)p.role << "|" << p.str << "|" << p.dex << "|" << p.intStat << "|"
       << p.hp << "|" << p.maxHp << "|" << p.mana << "|" << p.maxMana << "|" << p.wrestling << "|" << p.tactics << "|"
       << p.anatomy << "|" << p.magery << "|" << p.evalInt << "|" << p.meditation << "|" << (p.active ? 1 : 0)
-      << "|" << p.level << "|" << p.xp << "|" << (p.bonded ? 1 : 0) << "|" << p.bondKills;
+      << "|" << p.level << "|" << p.xp << "|" << (p.bonded ? 1 : 0) << "|" << p.bondKills << "|" << p.species;
     return o.str();
 }
 static std::optional<Pet> PetFromLine(const std::string& line) {
@@ -7770,6 +7819,9 @@ static std::optional<Pet> PetFromLine(const std::string& line) {
         p.bonded = std::atoi(parts[19].c_str()) != 0;
         p.bondKills = std::atoi(parts[20].c_str());
     }
+    if(parts.size()>=22)p.species=std::clamp(std::atoi(parts[21].c_str()),-1,10);
+    if(p.species<0)for(int i=0;i<11;i++)if(p.name==kWildCreatures[i].name)p.species=i;
+    if(p.species<0){int unique=-1;for(int i=0;i<11;i++){const auto& c=kWildCreatures[i];if(c.role==p.role && p.str>=c.strRange[0] && p.str<=c.strRange[1] && p.dex>=c.dexRange[0] && p.dex<=c.dexRange[1] && p.intStat>=c.intRange[0] && p.intStat<=c.intRange[1]){if(unique>=0){unique=-2;break;}unique=i;}}if(unique>=0)p.species=unique;}
     return p;
 }
 // Corpse <-> "monsterName|baseLeather|gold"
@@ -10505,8 +10557,8 @@ static void DrawDyingWorldNode(Vector2 screenPos, float radius, const Texture2D*
     bool onScreen = screenPos.x > kViewport.x - radius * 2 && screenPos.x < kViewport.x + kViewport.width + radius * 2 &&
                      screenPos.y > kViewport.y - radius * 2 && screenPos.y < kViewport.y + kViewport.height + radius * 2;
     if (!onScreen || !icon) return;
-    if(g_openWorld2D && iconSrcRect && tfworldart::Find(icon->id))
-        tfworldart::Draw(*icon,*iconSrcRect,screenPos,iconTint,iconScaleMul);
+    if(g_openWorld2D && tfworldart::Find(icon->id))
+        tfworldart::Draw(*icon,iconSrcRect?*iconSrcRect:Rectangle{0,0,(float)icon->width,(float)icon->height},{screenPos.x,screenPos.y+(1-iconTint.a/255.f)*8},iconTint,1-(1-iconTint.a/255.f)*.12f,(1-iconTint.a/255.f)*70);
     else if (iconSrcRect) DrawIconCenteredRect(*icon, *iconSrcRect, screenPos, radius * 1.5f * iconScaleMul, iconTint);
     else DrawIconCentered(*icon, screenPos, radius * 1.5f * iconScaleMul, iconTint);
 }
@@ -10631,7 +10683,7 @@ static void UpdateBladeRoaming(GameState& s, int bi, float dt) {
 // preserves all the touching-boundary adjacency between them exactly (linear scaling
 // can't introduce a gap or overlap that wasn't already there), while giving 4x the
 // floor area and much longer walks between rooms to actually explore.
-static const std::vector<Rectangle> kDungeonRoomLayouts[6] = {
+static const std::vector<Rectangle> kDungeonBaseLayouts[6] = {
     // [0] The Whisper Crypt - hub and spoke (the original pilot layout)
     {
         {760,760,280,280},    // hub
@@ -10707,6 +10759,11 @@ static const std::vector<Rectangle> kDungeonRoomLayouts[6] = {
         {680,240,440,400},   // boss room - overlaps shaft room 3's top edge by 30
     }
 };
+// Larger exploration spaces retain each dungeon's connected room topology.
+static const std::array<std::vector<Rectangle>,6> kDungeonRoomLayouts=[](){
+    std::array<std::vector<Rectangle>,6> result;
+    for(int i=0;i<6;i++)for(auto r:kDungeonBaseLayouts[i])result[i].push_back({r.x*2,r.y*2,r.width*2,r.height*2});return result;
+}();
 static bool DungeonIsFloor(int dungeonIdx, Vector2 p) {
     for (const Rectangle& r : kDungeonRoomLayouts[dungeonIdx])
         if (p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height) return true;
@@ -10720,7 +10777,7 @@ static Vector2 DungeonMonsterNodePos(int dungeonIdx, int idx) {
     // 9 slots per dungeon (kDungeonSlotCount): 0-7 regular, 8 boss. Slots 5-7 are
     // extra spawns (2026-09-24) placed as second monsters in the larger rooms so
     // respawn timers don't empty the dungeon; they reuse monster types 0-2.
-    static const Vector2 kCenters[6][kDungeonSlotCount] = {
+    static const Vector2 kCenters[6][9] = {
         { {900,420}, {900,1380}, {1380,900}, {420,900}, {1460,320}, {900,900}, {1040,420}, {1240,900}, {1430,1430} }, // [0] The Whisper Crypt
         { {900,1350}, {900,450}, {1350,900}, {450,900}, {1400,500}, {750,750}, {1050,1050}, {1050,450}, {1420,1320} }, // [1] The Weavers' Nest
         { {920,1320}, {440,1320}, {920,840}, {920,400}, {1370,840}, {1060,1320}, {1060,840}, {1230,840}, {1400,1300} }, // [2] The Sunken Vault
@@ -10728,8 +10785,25 @@ static Vector2 DungeonMonsterNodePos(int dungeonIdx, int idx) {
         { {900,1360}, {900,1100}, {590,1100}, {1210,1100}, {900,820}, {700,1100}, {1100,1100}, {1000,820}, {900,490} }, // [4] The Frostbound Tomb
         { {900,1300}, {900,1030}, {570,1030}, {1230,1030}, {900,760}, {1020,1300}, {1020,1030}, {450,1030}, {900,440} }, // [5] The Hollow
     };
-    static_assert(kDungeonSlotCount == 9, "kCenters must have kDungeonSlotCount entries per dungeon");
-    return kCenters[dungeonIdx][std::clamp(idx, 0, kDungeonBossSlot)];
+    static const auto positions=[&](){
+        std::array<std::array<Vector2,kDungeonSlotCount>,6> out{};
+        for(int di=0;di<6;di++){
+            Vector2 boss={kCenters[di][8].x*2,kCenters[di][8].y*2},entry={1800,2600};out[di][kDungeonBossSlot]=boss;
+            std::vector<Vector2> candidates,chosen;
+            for(auto r:kDungeonRoomLayouts[di])for(float y=r.y+90;y<r.y+r.height-80;y+=130)for(float x=r.x+90;x<r.x+r.width-80;x+=130){
+                Vector2 p={x,y};bool clear=Dist(p,entry)>330 && Dist(p,boss)>300;
+                for(Vector2 offset:std::array<Vector2,4>{{{60,0},{-60,0},{0,60},{0,-60}}})clear=clear && DungeonIsFloor(di,{p.x+offset.x,p.y+offset.y});
+                if(clear)candidates.push_back(p);
+            }
+            // Farthest-point placement gives chambers and branches breathing room.
+            for(int slot=0;slot<kDungeonBossSlot;slot++){
+                float score=-1;Vector2 best=entry;
+                for(auto p:candidates){float d=std::min(Dist(p,entry),Dist(p,boss));for(auto other:chosen)d=std::min(d,Dist(p,other));if(d>score){score=d;best=p;}}
+                out[di][slot]=best;chosen.push_back(best);
+            }
+        }return out;
+    }();
+    return positions[std::clamp(dungeonIdx,0,5)][std::clamp(idx,0,kDungeonBossSlot)];
 }
 
 // Monsters wander in a small loop around their home spot rather than standing frozen -
@@ -10796,17 +10870,19 @@ static Vector2 BloodstainedPathNodePos(int pathIdx) {
 static void DrawWorldNode(Vector2 screenPos, float radius, Color color, const std::string& label,
                             bool nearPlayer, const std::string& sublabel = "",
                             const Texture2D* icon = nullptr, Color iconTint = WHITE,
-                            const Rectangle* iconSrcRect = nullptr) {
+                            const Rectangle* iconSrcRect = nullptr,float visualScale=1) {
     bool onScreen = screenPos.x > kViewport.x - radius && screenPos.x < kViewport.x + kViewport.width + radius &&
                      screenPos.y > kViewport.y - radius && screenPos.y < kViewport.y + kViewport.height + radius;
     if (!onScreen) return;
-    if(g_openWorld2D && icon && iconSrcRect && tfworldart::Find(icon->id)) {
+    if(g_openWorld2D && icon && tfworldart::Find(icon->id)) {
+        if(!iconSrcRect)screenPos.y+=sinf((float)GetTime()*2.4f+icon->id)*1.2f;
         // Actor art has its own scale; the radius continues to serve interaction
         // and combat only. Contextual labels keep the landscape readable.
         Vector2 foot={screenPos.x,screenPos.y+12};
         tf2dart::Shadow(foot,11,3,.18f);
         if(nearPlayer)DrawEllipseLines((int)foot.x,(int)foot.y,18,6,Color{231,200,128,230});
-        tfworldart::Draw(*icon,*iconSrcRect,screenPos,iconTint);
+        Rectangle frame=iconSrcRect?*iconSrcRect:Rectangle{0,0,(float)icon->width,(float)icon->height};
+        tfworldart::Draw(*icon,frame,screenPos,iconTint,visualScale);
         if(nearPlayer) {
             DrawWorldLabel(label,{screenPos.x,screenPos.y+32},11,Color{244,231,201,255});
             if(!sublabel.empty())DrawWorldLabel(sublabel,{screenPos.x,screenPos.y+47},10,Color{207,207,188,255});
@@ -24321,7 +24397,7 @@ static const float kDung3DCell = 45.0f;      // wall-scan grid cell (1800/45 = 4
 static const int kDung3DGridN = 40;
 static const int kDung3DGroundPx = 1024;     // baked floor texture resolution
 static const int kDung3DMaxTorches = 8;      // torchlight shader light count
-static const Vector2 kDung3DExitPos = { 900, 1300 }; // mirrors DrawHuntScreen's kDungeonExitPos
+static const Vector2 kDung3DExitPos = { 1800, 2600 }; // mirrors DrawHuntScreen's kDungeonExitPos
 
 // Torch-light shader + baked flame sprite (both one-time).
 struct Dungeon3DTorch {
@@ -24908,7 +24984,7 @@ static void DrawPlayerLifeState(const GameState& s, Vector2 screenPos, Vector2 f
         // dark fade - reads as falling even without a dedicated prone sprite.
         float fade = 1.0f - std::max(0.0f, s.playerDeathAnimT / kPlayerDeathAnimTime);
         DrawPlayer(s, screenPos, facing, "", visualScale, ActorAnim::Idle);
-        DrawCircleV(screenPos, kPlayerRadius * 1.4f, Fade(BLACK, 0.75f * fade));
+        if(!tfgfx::hero.texture.id)DrawCircleV(screenPos, kPlayerRadius * 1.4f, Fade(BLACK, 0.75f * fade));
     } else if (s.playerIsGhost) {
         // Ghost: no body, just a drifting translucent wisp with a faint ring.
         float pulse = 0.5f + 0.2f * std::sin(s.worldTime * 3.0f);
@@ -27661,16 +27737,7 @@ static void DrawInterior2D(GameState& s, int screenW, int screenH,
         Vector2 sp = WorldToScreen({ p.x, p.y }, cam);
         bool hl = (nearest && nearest == &p);
         Rectangle rc = { sp.x - p.sw / 2, sp.y - p.sh / 2, p.sw, p.sh };
-        bool drewSprite = false;
-        // The anvil reuses the existing 2D anvil sprite; everything else is a
-        // tidy labeled shape (no other 2D prop sprites exist for these).
-        if (p.model && std::string(p.model) == "Anvil.gltf" && g_assets.townAnvilOk) {
-            float tw = p.sw * 1.7f, th = p.sh * 1.7f;
-            DrawTexturePro(g_assets.townAnvil,
-                           { 0, 0, (float)g_assets.townAnvil.width, (float)g_assets.townAnvil.height },
-                           { sp.x - tw / 2, sp.y - th / 2, tw, th }, { 0, 0 }, 0, WHITE);
-            drewSprite = true;
-        }
+        bool drewSprite=tfgfx::Prop(tfgfx::PropIndex(p.label,p.model?p.model:""),sp,p.sw,p.sh,hl);
         Color hlCol = Color{ 255, 200, 90, 255 }; // warm gold: reads on every floor color
         if (!drewSprite) {
             DrawRectangleRounded(rc, 0.18f, 4, p.c2d);
@@ -27680,7 +27747,7 @@ static void DrawInterior2D(GameState& s, int screenW, int screenH,
                                       0.18f, 4, hlCol);
         }
         int lw = MeasureText(p.label, 11);
-        DrawUIText(p.label, (int)sp.x - lw / 2, (int)(sp.y + p.sh / 2) + 3, 11,
+        if(hl)DrawUIText(p.label, (int)sp.x - lw / 2, (int)(sp.y + p.sh / 2) + 3, 11,
                    hl ? WHITE : Fade(BLACK, 0.65f));
     }
     for (auto& p : props) { // station signs on top of every prop
@@ -27694,8 +27761,9 @@ static void DrawInterior2D(GameState& s, int screenW, int screenH,
     // Static shop NPC, if any.
     if (npc) {
         Vector2 sp = WorldToScreen({ npc->x, npc->y }, cam);
-        DrawCircleV(sp, 16, Color{ 210, 170, 130, 255 });
-        DrawCircleLinesV(sp, 16, npcNearest ? Color{ 255, 200, 90, 255 } : Fade(BLACK, 0.4f));
+        const auto& shopSheet=g_assets.townNPCSheets[std::hash<std::string>{}(s.interiorKey)%g_assets.townNPCSheets.size()];
+        DrawActorSprite(shopSheet,{0,1},ActorAnim::Idle,s.worldTime,sp,tfworldart::kHeroSize);
+        if(npcNearest)DrawEllipseLines((int)sp.x,(int)sp.y+13,14,5,Color{235,205,138,255});
         int nw = MeasureText(npc->name, 11);
         DrawUIText(npc->name, (int)sp.x - nw / 2, (int)sp.y - 38, 11, WHITE);
     }
@@ -33751,6 +33819,7 @@ static void EnforceDuelInvariants(GameState& s) {
 }
 
 #include "open_world_2d.h"
+#include "actor_followers_2d.h"
 static void DrawNativeWorldVitals(const GameState& s) {
     Rectangle hud={20,76,160,48};
     DrawRectangleRounded(hud,.15f,4,Fade(Color{19,27,29,255},.85f));
@@ -34626,9 +34695,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // s.selectedDungeon is left as-is if you're re-entering the one you were already in
     // (mirrors the tab-click behavior: only a fresh spawn point on switching dungeons).
     auto tryEnterDungeon = [&](int idx) {
-        if (!s.selectedDungeon.has_value() || *s.selectedDungeon != idx) s.dungeonPlayerPos = { 900, 1300 };
+        if (!s.selectedDungeon.has_value() || *s.selectedDungeon != idx) s.dungeonPlayerPos = { 1800, 2600 };
         s.selectedDungeon = idx;
-        s.huntSubView = 0;
+        s.huntSubView = 0;g_dungeonMapOpen=false;
         s.dungeonMenuOpen = false; // entering a dungeon starts with the full view (2026-09-25)
         CancelEscort(s, "won't follow you into the dark - the escort is broken.");
         s.screen = Screen::Hunt;
@@ -35077,7 +35146,9 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         Color baseTint = WildMonsterTintFor(spot.iconIdx);
         Color hurtTint = CombatHitTint(extra ? extra->monsterHurtT : -1.0f, baseTint, Color{ 255, 130, 130, 255 });
         if (sheet.ok) {
-            Rectangle src = ActorSrcRect(sheet, { 0, 1 }, ActorAnim::Idle, s.worldTime);
+            Vector2 face=extra?Vector2{s.wildernessPlayerPos.x-extra->pos.x,s.wildernessPlayerPos.y-extra->pos.y}:WanderFacing((int)i,s.worldTime);
+            ActorAnim pose=extra?(extra->monsterAttackT>=0?ActorAnim::Attack:ActorAnim::Walk):ActorAnim::Walk;
+            Rectangle src = ActorSrcRect(sheet,face,pose,extra && extra->monsterAttackT>=0?extra->monsterAttackT:s.worldTime);
             if (isDying) {
                 float fade = std::max(0.0f, dying->timer / dying->duration);
                 DrawDyingWorldNode(screenPos, kNodeRadius * 0.7f, &sheet.tex, Fade(baseTint, fade), &src,
@@ -35120,7 +35191,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
             Vector2 toPlayer = { s.wildernessPlayerPos.x - s.wildEngaged->pos.x, s.wildernessPlayerPos.y - s.wildEngaged->pos.y };
             float toPlayerLen = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
             Vector2 facing = toPlayerLen > 0.001f ? Vector2{ toPlayer.x / toPlayerLen, toPlayer.y / toPlayerLen } : Vector2{ 0, 1 };
-            Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
+            Rectangle src = ActorSrcRect(sheet,facing,s.wildEngaged->monsterAttackT>=0?ActorAnim::Attack:(inMelee?ActorAnim::Idle:ActorAnim::Walk),s.wildEngaged->monsterAttackT>=0?s.wildEngaged->monsterAttackT:s.worldTime);
             DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, inMelee, "", &sheet.tex, fxTint, &src);
         } else {
             DrawWorldNode(screenPos, kNodeRadius * 0.7f, Color{ 122, 46, 46, 255 }, spot.name, inMelee, "");
@@ -35274,20 +35345,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // species (Pet doesn't record which of the 11 kWildCreatures it came from, only
     // its role/stats/name; adding that would mean touching the taming system, out of
     // scope for this art pass).
-    if (Pet* companion = ActivePet(s)) {
-        Vector2 companionScreenPos = WorldToScreen(s.companionPos, camera);
-        const DirSpriteSheet& sheet = WildCreatureSheetForRole(companion->role);
-        if (sheet.ok) {
-            Vector2 toPlayer = { s.wildernessPlayerPos.x - s.companionPos.x, s.wildernessPlayerPos.y - s.companionPos.y };
-            float len = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
-            Vector2 facing = len > 0.001f ? Vector2{ toPlayer.x / len, toPlayer.y / len } : Vector2{ 0, 1 };
-            Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
-            DrawWorldNode(companionScreenPos, kNodeRadius * 0.5f, Color{ 63, 94, 63, 255 }, companion->name, false, "", &sheet.tex, WHITE, &src);
-        } else {
-            DrawWorldNode(companionScreenPos, kNodeRadius * 0.5f, Color{ 63, 94, 63, 255 }, companion->name, false);
-        }
-    }
-
+    DrawPetPack2D(s,camera,0);
     // Weapon swing / spell cast (2026-09-23): the hero sheet now has real per-direction
     // Attack and Cast frames (see LoadGameAssets' heroSheet column-range comments), so
     // this picks the animation state instead of driving the old rotation-arc hack.
@@ -35878,7 +35936,13 @@ static void DrawCompactMenu(GameState& s, bool& open, bool inDungeon) {
     g_uiShieldBypass = false;
 }
 
+#include "dungeon_atlas_2d.h"
 static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
+    if(g_landscapePage && !s.hunt3DView)kViewport={0,0,(float)screenW,(float)screenH};
+    if(s.selectedDungeon && !s.hunt3DView){
+        if(IsKeyPressed(KEY_M) && (g_dungeonMapOpen || DungeonMapAllowed(s)))g_dungeonMapOpen=!g_dungeonMapOpen;
+        if(g_dungeonMapOpen){DrawDungeonOverview(s);return;}
+    }
     if(g_landscapePage && !s.hunt3DView) kViewport={0,0,(float)screenW,(float)screenH};
     if (GetTouchPointCount() > 0) g_touchSeen = true; // latch: TARGET button appears on touch devices
     // In-dungeon collapsed mode (2026-09-25): the header stack (HP/stats, corpses,
@@ -36153,7 +36217,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         DrawUIText(kDungeons[i].name.c_str(), (int)(r.x + (r.width - tw) / 2), (int)(r.y + 7), 12, BLACK);
         if (UIClick(r)) {
             if (!s.selectedDungeon.has_value() || *s.selectedDungeon != (int)i)
-                s.dungeonPlayerPos = { 900, 1300 }; // fresh spawn point when entering a (different) dungeon
+                s.dungeonPlayerPos = { 1800, 2600 }; // fresh spawn point when entering a (different) dungeon
             s.selectedDungeon = (int)i;
         }
         tabX += w + 8;
@@ -36223,7 +36287,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // Same spot every dungeon spawns you at ({900,1300}, set on entry above and on the
     // Wilderness's physical entrances) - guaranteed floor in every kDungeonRoomLayouts
     // hub room since that's already where you're standing the moment you walk in.
-    static const Vector2 kDungeonExitPos = { 900, 1300 };
+    static const Vector2 kDungeonExitPos = { 1800, 2600 };
     {
         float d = Dist(s.dungeonPlayerPos, kDungeonExitPos);
         if (d < nearestDist) { nearestDist = d; nearestIsBoss = false; nearestIsExit = true; }
@@ -36559,7 +36623,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     { // The way out is a stair up to daylight (2026-09-27): walk up it to leave. You
       // arrive at its foot, so it arms once you've stepped away from it.
         static bool stairArmed = false;
-        const Vector2 stairTop = { 900.0f, 1262.0f };
+        const Vector2 stairTop = { 1800.0f, 2524.0f };
         float d = Dist(s.dungeonPlayerPos, stairTop);
         if (d > 75.0f) stairArmed = true;
         if (stairArmed && d < 22.0f && !s.playerIsGhost && s.playerDeathAnimT <= 0.0f) {
@@ -36649,7 +36713,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     Vector2 nearest3DPos = s.dungeonPlayerPos;
     std::string nearest3DLabel;
     if (inRange && !s.dungeonEngaged.has_value()) {
-        if (nearestIsExit) { nearest3DPos = { 900, 1300 }; nearest3DLabel = "Exit"; }
+        if (nearestIsExit) { nearest3DPos = { 1800, 2600 }; nearest3DLabel = "Exit"; }
         else if (nearestIsBoss) {
             nearest3DPos = DungeonMonsterLivePos(*s.selectedDungeon, kDungeonBossSlot, s.worldTime);
             nearest3DLabel = DungeonBossTitle(s, *s.selectedDungeon);
@@ -36689,11 +36753,21 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     Color floorTint = (*s.selectedDungeon == 4) ? Color{ 200, 222, 245, 255 } : WHITE; // Phase 3: icy tomb
     for (const Rectangle& r : kDungeonRoomLayouts[*s.selectedDungeon])
         DrawTiledRect(floorTex, r, camera, 48.0f, Color{ 60, 50, 46, 255 }, floorTint);
+    // Furnished room edges create landmarks without blocking the established paths.
+    for(size_t roomIndex=0;roomIndex<kDungeonRoomLayouts[*s.selectedDungeon].size();roomIndex++){
+        auto r=kDungeonRoomLayouts[*s.selectedDungeon][roomIndex];if(r.width<450 || r.height<450)continue;
+        const int themes[6][3]={{24,17,34},{31,17,34},{16,17,34},{1,12,34},{24,13,34},{4,31,34}};
+        for(int corner=0;corner<3;corner++){
+            Vector2 p={r.x+(corner==1?r.width-65:65),r.y+(corner==2?r.height-65:65)};
+            if(Dist(p,{1800,2600})<200)continue;
+            tfgfx::Prop(themes[*s.selectedDungeon][corner],WorldToScreen(p,camera),corner==2?22:48,corner==2?35:42,false);
+        }
+    }
     // The Sunken Crypt gets a water pool in its boss room - it's the one dungeon that's
     // actually a *flooded* tomb; see assets/dungeon_themed/sunkencrypt_water.png
     // (cropped from the same "Top down dungeon" pack's water-coast animation).
     if (*s.selectedDungeon == 0 && g_assets.sunkenCryptWaterOk) { // Whisper Crypt's flooded boss room
-        DrawTiledRect(&g_assets.sunkenCryptWater, { 1260, 1260, 340, 340 }, camera, 32.0f, Color{ 55, 88, 143, 255 });
+        DrawTiledRect(&g_assets.sunkenCryptWater, { 2520, 2520, 680, 680 }, camera, 32.0f, Color{ 55, 88, 143, 255 });
     }
     // The Ember Depths gets a few scattered braziers instead - a volcanic forge-deep
     // calls for fire, not a tiled floor overlay (this pack's fire art is a
@@ -36702,7 +36776,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     if (*s.selectedDungeon == 3 && g_assets.emberveilBrazierOk) {
         // Spots sit inside the Depths' forge halls, clear of monster home spots
         // (kCenters) and the shared dungeon spawn/exit point (kDungeonExitPos).
-        static const std::array<Vector2, 2> kBrazierSpots = {{ {840,900}, {960,1150} }};
+        static const std::array<Vector2, 2> kBrazierSpots = {{ {1680,1800}, {1920,2300} }};
         for (const Vector2& pos : kBrazierSpots)
             DrawIconCentered(g_assets.emberveilBrazier, WorldToScreen(pos, camera), 40.0f, WHITE);
     }
@@ -36712,10 +36786,10 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     // lit torches along the shaft - same "tiled rect for a themed room, icons for scattered
     // props" split as the Sunken Crypt/Emberveil cases above.
     if (*s.selectedDungeon == 5 && g_assets.hollowWarrensRugOk) { // The Hollow's boss-room rug
-        DrawTiledRect(&g_assets.hollowWarrensRug, { 680, 240, 440, 400 }, camera, 48.0f, Color{ 40, 45, 60, 255 });
+        DrawTiledRect(&g_assets.hollowWarrensRug, { 1360, 480, 880, 800 }, camera, 48.0f, Color{ 40, 45, 60, 255 });
     }
     if (*s.selectedDungeon == 5 && g_assets.hollowWarrensTorchOk) { // The Hollow's shaft torches
-        static const std::array<Vector2, 2> kWarrenTorchSpots = {{ {570,1030}, {1230,1030} }};
+        static const std::array<Vector2, 2> kWarrenTorchSpots = {{ {1140,2060}, {2460,2060} }};
         for (const Vector2& pos : kWarrenTorchSpots)
             DrawIconCentered(g_assets.hollowWarrensTorch, WorldToScreen(pos, camera), 34.0f, WHITE);
     }
@@ -36743,6 +36817,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         const GameState::ActiveDungeonMonster* extra2D = !isDying2D ? FindDungeonExtra(s, i, false) : nullptr;
         if (!isDying2D && !extra2D && s.dungeonSpawnRespawn[*s.selectedDungeon][i] > 0.0f) continue;
         const DungeonMonster& m = DungeonSlotMonster(dungeon, i);
+        const DirSpriteSheet* slotSheet=DungeonActorSheet(*s.selectedDungeon,i);
         Vector2 screenPos = WorldToScreen(isDying2D ? dying2D->pos :
                                           (extra2D ? extra2D->pos : DungeonMonsterLivePos(*s.selectedDungeon, i, s.worldTime)), camera);
         bool near = !nearestIsBoss && nearestKey == std::to_string(i) && inRange;
@@ -36750,17 +36825,17 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         Color frostTint2D = DungeonMonsterTint(*s.selectedDungeon); // Phase 3: icy tint in the Frostbound Tomb
         Color hurtTint2D = CombatHitTint(extra2D ? extra2D->monsterHurtT : -1.0f, frostTint2D, Color{ 255, 130, 130, 255 });
         Rectangle monsterSrc{};
-        if (monsterSheet && monsterSheet->ok) monsterSrc = ActorSrcRect(*monsterSheet, WanderFacing(i, s.worldTime), ActorAnim::Walk, s.worldTime);
+        if(slotSheet && slotSheet->ok){auto face=extra2D?Vector2{s.dungeonPlayerPos.x-extra2D->pos.x,s.dungeonPlayerPos.y-extra2D->pos.y}:WanderFacing(i,s.worldTime);monsterSrc=ActorSrcRect(*slotSheet,face,extra2D && extra2D->monsterAttackT>=0?ActorAnim::Attack:ActorAnim::Walk,extra2D && extra2D->monsterAttackT>=0?extra2D->monsterAttackT:s.worldTime);}
         if (isDying2D) {
             float fade = std::max(0.0f, dying2D->timer / dying2D->duration);
             DrawDyingWorldNode(screenPos, kNodeRadius * 0.8f,
-                               monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr,
-                               Fade(frostTint2D, fade), monsterSheet && monsterSheet->ok ? &monsterSrc : nullptr,
+                               slotSheet && slotSheet->ok ? &slotSheet->tex : nullptr,
+                               Fade(frostTint2D, fade), slotSheet && slotSheet->ok ? &monsterSrc : nullptr,
                                1.0f + 0.25f * (1.0f - fade));
         } else {
             DrawWorldNode(screenPos, kNodeRadius * 0.8f, Color{ 122, 46, 46, 255 }, m.name, near, sub,
-                           monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr, hurtTint2D,
-                           monsterSheet && monsterSheet->ok ? &monsterSrc : nullptr);
+                           slotSheet && slotSheet->ok ? &slotSheet->tex : nullptr, hurtTint2D,
+                           slotSheet && slotSheet->ok ? &monsterSrc : nullptr,.82f+(i%5)*.09f);
         }
     }
     bool engagedIsBossNow = s.dungeonEngaged.has_value() && s.dungeonEngaged->isBoss;
@@ -36796,26 +36871,27 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     {
         bool near = nearestIsExit && inRange;
         Vector2 screenPos = WorldToScreen(kDungeonExitPos, camera);
-        DrawWorldNode(screenPos, kNodeRadius * 0.7f, kColorPanelBg, "Exit", near);
+        if(!tfgfx::Prop(35,screenPos,74,52,near))DrawWorldNode(screenPos, kNodeRadius * 0.7f, kColorPanelBg, "Exit", near);
     }
     // Live, moving engaged monster + its own HP bar - same treatment as Wilderness's
     // s.wildEngaged draw block.
     if (s.dungeonEngaged.has_value()) {
         const GameState::ActiveDungeonMonster& am = *s.dungeonEngaged;
         const DungeonMonster& m = am.isBoss ? dungeon.boss : DungeonSlotMonster(dungeon, am.monsterIdx);
+        const DirSpriteSheet* engagedSheet=DungeonActorSheet(*s.selectedDungeon,am.monsterIdx);
         const Texture2D* bossTex = am.isBoss ? BossFamilyTexture(*s.selectedDungeon) : nullptr;
-        const Texture2D* tex = bossTex ? bossTex : (monsterSheet && monsterSheet->ok ? &monsterSheet->tex : nullptr);
+        const Texture2D* tex = bossTex ? bossTex : (engagedSheet && engagedSheet->ok ? &engagedSheet->tex : nullptr);
         // Faces the player during the actual fight - same "face the player directly"
         // trick Wilderness's engaged-monster block already uses, rather than the
         // wander-derived facing the not-yet-engaged loop above uses.
         Rectangle engagedSrc{};
-        if (!bossTex && monsterSheet && monsterSheet->ok) {
+        if (!bossTex && engagedSheet && engagedSheet->ok) {
             Vector2 toPlayer = { s.dungeonPlayerPos.x - am.pos.x, s.dungeonPlayerPos.y - am.pos.y };
             float len = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
             Vector2 facing = len > 0.001f ? Vector2{ toPlayer.x / len, toPlayer.y / len } : Vector2{ 0, 1 };
-            engagedSrc = ActorSrcRect(*monsterSheet, facing, ActorAnim::Idle, s.worldTime);
+            engagedSrc = ActorSrcRect(*engagedSheet,facing,am.monsterAttackT>=0?ActorAnim::Attack:(Dist(am.pos,s.dungeonPlayerPos)>kWildMeleeRange?ActorAnim::Walk:ActorAnim::Idle),am.monsterAttackT>=0?am.monsterAttackT:s.worldTime);
         }
-        const Rectangle* srcRect = bossTex ? nullptr : (monsterSheet && monsterSheet->ok ? &engagedSrc : nullptr);
+        const Rectangle* srcRect = bossTex ? nullptr : (engagedSheet && engagedSheet->ok ? &engagedSrc : nullptr);
         Vector2 screenPos = WorldToScreen(am.pos, camera);
         // Combat FX (2026-09-24): lunge on attack, red flash on hurt - same as Wilderness.
         {
@@ -36829,26 +36905,14 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         }
         Color fxTint = CombatHitTint(am.monsterHurtT, DungeonMonsterTint(*s.selectedDungeon), Color{ 255, 130, 130, 255 }); // Phase 3: icy tint in the Frostbound Tomb
         bool inMelee = Dist(am.pos, s.dungeonPlayerPos) < kWildMeleeRange;
-        DrawWorldNode(screenPos, am.isBoss ? kNodeRadius : kNodeRadius * 0.8f, Color{ 122, 46, 46, 255 }, m.name, inMelee, "", tex, fxTint, srcRect);
+        DrawWorldNode(screenPos, am.isBoss ? kNodeRadius : kNodeRadius * 0.8f, Color{ 122, 46, 46, 255 }, m.name, inMelee, "", tex, fxTint, srcRect,am.isBoss?1.f:.82f+(am.monsterIdx%5)*.09f);
         float hpPct = std::clamp(am.hp / am.maxHp, 0.0f, 1.0f);
         Rectangle hpBg = { screenPos.x - 30, screenPos.y - kNodeRadius * 0.8f - 26, 60, 8 };
         DrawRectangleRec(hpBg, Fade(BLACK, 0.4f));
         DrawRectangleRec({ hpBg.x, hpBg.y, hpBg.width * hpPct, hpBg.height }, Color{ 122, 46, 46, 255 });
         DrawRectangleLinesEx(hpBg, 1.0f, Fade(RAYWHITE, 0.8f));
     }
-    if (Pet* companion = ActivePet(s)) {
-        Vector2 companionScreenPos = WorldToScreen(s.companionPos, camera);
-        const DirSpriteSheet& sheet = WildCreatureSheetForRole(companion->role);
-        if (sheet.ok) {
-            Vector2 toPlayer = { s.dungeonPlayerPos.x - s.companionPos.x, s.dungeonPlayerPos.y - s.companionPos.y };
-            float len = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.y * toPlayer.y);
-            Vector2 facing = len > 0.001f ? Vector2{ toPlayer.x / len, toPlayer.y / len } : Vector2{ 0, 1 };
-            Rectangle src = ActorSrcRect(sheet, facing, ActorAnim::Walk, s.worldTime);
-            DrawWorldNode(companionScreenPos, kNodeRadius * 0.5f, Color{ 63, 94, 63, 255 }, companion->name, false, "", &sheet.tex, WHITE, &src);
-        } else {
-            DrawWorldNode(companionScreenPos, kNodeRadius * 0.5f, Color{ 63, 94, 63, 255 }, companion->name, false);
-        }
-    }
+    DrawPetPack2D(s,camera,1);
     // Weapon swing / spell cast - same real Attack/Cast animation states as Wilderness
     // (see its call site's comment).
     ActorAnim dungeonCombatAnim = ActorAnim::Idle;
@@ -36865,7 +36929,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
     DrawSpellFX2D(s, camera, 1);
     EndScissorMode();
     } // end 2D arena branch - the touch/combat HUD below is shared with the 3D view
-    if(g_landscapePage && !s.dungeonMenuOpen) DrawNativeWorldVitals(s);
+    if(g_landscapePage && !s.dungeonMenuOpen){DrawNativeWorldVitals(s);DrawDungeonMinimap(s,screenW);}
 
     // --- Shared touch/combat HUD (view-independent): virtual joystick, quick
     // items / interact button, engaged spell hotbar, hotbar picker. Runs for
@@ -41461,6 +41525,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_OutdoorState() {
     return TextFormat("{\"screen\":%d,\"outdoor\":%s,\"town\":%d,\"x\":%.3f,\"y\":%.3f,\"gx\":%.3f,\"gy\":%.3f,\"fx\":%.4f,\"fy\":%.4f,\"bankX\":%.3f,\"bankY\":%.3f}",
         (int)s.screen,s.screen==Screen::Wilderness?"true":"false",OpenTownAt(s.wildernessPlayerPos),s.wildernessPlayerPos.x,s.wildernessPlayerPos.y,g.x,g.y,f.x,f.y,bank.x,bank.y);
 }
+extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_GraphicsState(){
+    if(!g_runtimeReady)return "{}";const auto& s=g_state;
+    auto camera=CameraTopLeft(s.dungeonPlayerPos,kDungeonWorldSize),hero=WorldToScreen(s.dungeonPlayerPos,camera);
+    return TextFormat("{\"heroFrames\":%d,\"northFrames\":%d,\"furnitureFrames\":%d,\"species\":%d,\"dungeon\":%s,\"map\":%s,\"size\":%.0f,\"spawns\":%d,\"x\":%.2f,\"y\":%.2f,\"heroX\":%.2f,\"heroY\":%.2f}",(int)tfgfx::hero.frames.size(),(int)tfgfx::north.frames.size(),(int)(tfgfx::props.frames.size()+tfgfx::details.frames.size()),s.pets.empty()?-1:PetSpecies(s.pets[0]),s.screen==Screen::Hunt?"true":"false",g_dungeonMapOpen?"true":"false",kDungeonWorldSize,kDungeonRegularSlots,s.dungeonPlayerPos.x,s.dungeonPlayerPos.y,hero.x,hero.y);
+}
 extern "C" EMSCRIPTEN_KEEPALIVE const char* TF_InteriorState() {
     if(!g_runtimeReady)return "{}";
     const auto& s=g_state;auto p=WorldToScreen(s.interiorPlayerPos,InteriorCameraTopLeft(s.interiorPlayerPos));
@@ -41524,6 +41593,7 @@ static int LandscapeDialogOpen(const GameState& s) {
     const bool den = s.screen == Screen::Blackwake;
     if ((town || wild || interior || den) && s.exploreMenuOpen) return 2;
     if (hunt && s.dungeonMenuOpen) return 3;
+    if (hunt && g_dungeonMapOpen) return 17;
     if (wild && s.worldMapOpen) return 4;
     if ((town || wild) && s.guideOpen) return 5;
     if ((town || interior) && s.selectedTile.has_value()) return 6;
@@ -41802,6 +41872,7 @@ static void UpdateDrawFrame() {
         // use it too: the old 540x900 panel scrolls independently of the hero.
         // Each native world sets its viewport to the actual target dimensions.
         kViewport = kViewportDefault;
+        if(state.screen!=Screen::Hunt)g_dungeonMapOpen=false;
         g_landscapePage=NativeLandscapePage(state);
         screenW=g_landscapePage ? 960:kScreenW;screenH=g_landscapePage ? 540:kScreenH;
         if (state.screen != Screen::Character) g_pdTryOn.reset();
@@ -42051,7 +42122,7 @@ static void CleanupAndClose() {
     for(auto& texture:g_openTownGround)if(texture.id)UnloadTexture(texture);
 
     GameState& state = g_state;
-    tf2dart::Unload();
+    tf2dart::Unload();tfgfx::Unload();
     SaveGame(state); // final save on quit
     if (g_assets.uiFontOk) UnloadFont(g_assets.uiFont);
     if (g_assets.playerOk) UnloadTexture(g_assets.player);
