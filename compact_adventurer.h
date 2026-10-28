@@ -1,5 +1,6 @@
 // Original compact Town Forge adventurer. Local coordinates are in world units;
 // the animated hierarchy carries equipment with the hands rather than the camera.
+#include "compact_motion.h"
 static constexpr float kCompactHeroHeight = 46.0f; // old sculpted hero: 66
 static bool DrawCompactAdventurer(int track, float x, float z, float yaw, Color tint,
                                  const Equipment& equipment, const HumanPose& p,
@@ -23,13 +24,17 @@ static bool DrawCompactAdventurer(int track, float x, float z, float yaw, Color 
     float cycle=(float)g_gameClock*9.0f, stride=sinf(cycle)*27*move;
     float atk=p.attackT>=0 ? sinf(std::clamp(p.attackT,0.f,1.f)*PI):0;
     float cast=p.castT>=0 ? sinf(std::clamp(p.castT,0.f,1.f)*PI):0;
-    float work=p.gather ? .5f+.5f*sinf((float)g_gameClock*5.f):0;
+    const bool gathering=p.gather>0 && move<.1f && p.attackT<0 && p.castT<0 && p.deathT<0;
+    const bool mining=gathering && p.gather==2;
+    const auto mine=tfcompact::Mining((float)g_gameClock);
+    float work=gathering ? .5f+.5f*sinf((float)g_gameClock*5.f):0;
     float death=p.deathT>=0 ? std::clamp(p.deathT,0.f,1.f):0;
     float bob=fabsf(sinf(cycle))*move*.9f;
     // Feet remain on the same terrain; only the visible avatar changes scale.
     DrawCircle3D({x,.7f,z},8,{1,0,0},90,Fade(BLACK,.23f*tint.a/255.f));
     rlPushMatrix();rlTranslatef(x,bob,z);rlRotatef(90-yaw*RAD2DEG,0,1,0);
     rlRotatef(-85*death,1,0,0);
+    // Lean from the hips; keep the planted feet out of the work transform.
     if(sneaking)rlRotatef(12,1,0,0);
     if(p.hurtT>=0)rlRotatef(-9*sinf(p.hurtT*PI),0,0,1);
     // Walking legs: hips -> knees -> boots, opposite phases for each side.
@@ -43,6 +48,7 @@ static bool DrawCompactAdventurer(int track, float x, float z, float yaw, Color 
         if(o.armLegs)box({0,-2,3.1f},{5.8f,6,1.6f},o.armLegsCol);
         rlPopMatrix();
     }
+    rlPushMatrix();rlTranslatef(0,20,0);rlRotatef(mining ? mine.lean:0,1,0,0);rlTranslatef(0,-20,0);
     // Broad tunic, split hem, belt and brass buckle.
     oval({0,26,0},{8.3f,8.2f,5.5f},top);
     box({0,19.5f,0},{15.5f,5,10.1f},ColorBrightness(top,-.08f));
@@ -78,32 +84,43 @@ static bool DrawCompactAdventurer(int track, float x, float z, float yaw, Color 
         float swing=-side*stride*.7f;
         if(right)swing-=atk*115+work*85+cast*95;
         else swing-=blocking ? 70:cast*85;
-        if(o.style==kHsBow && p.engaged)swing=-75;
+        if(mining)swing=right ? mine.shoulder:-52.f;
+        if(!gathering && o.style==kHsBow && p.engaged)swing=-75;
         rlRotatef(swing,1,0,0);
         oval({0,0,0},{3.7f,3.1f,4.3f},o.armArms ? o.armArmsCol:steel);
         box({0,-4,0},{4.5f,7,4.8f},top);
-        rlTranslatef(0,-7,0);rlRotatef(right ? -atk*40:0,1,0,0);
+        rlTranslatef(0,-7,0);rlRotatef(mining ? (right ? mine.elbow:-65.f):(right ? -atk*40:0),1,0,0);
         box({0,-3,0},{4.2f,6.5f,4.4f},skin);
         box({0,-5.7f,0},{4.8f,5,5},o.armArms ? o.armArmsCol:leather);
         oval({0,-8,0},{2.6f,2.7f,2.6f},leather);
         rlTranslatef(0,-8,0);
-        int weapon=p.gather ? (p.gather==1 ? kHwAxe:p.gather==2 ? kHwPickaxe:kHwRod):o.weapon;
-        if((right && o.style!=kHsBow) || (!right && o.style==kHsBow)) {
-            const Model* model=p.gather ? nullptr:MeshWeaponModel(o.meshWeapon);
+        int weapon=gathering ? (p.gather==1 ? kHwAxe:p.gather==2 ? kHwPickaxe:kHwRod):o.weapon;
+        const bool bow=!gathering && o.style==kHsBow;
+        if((right && !bow) || (!right && bow)) {
+            const Model* model=gathering ? nullptr:MeshWeaponModel(o.meshWeapon);
             float sc=17.f;
             if(!model && weapon>=0 && weapon<kHwGearCount && g_human.gearOk[weapon]) {
                 model=&g_human.gear[weapon];
                 static const float scales[]={.56f,.56f,.42f,.8f,.5f,.56f,1,1,1,1,1,1,1,1};
-                sc*=scales[weapon]*o.weaponScale;
+                sc*=scales[weapon]*(gathering ? 1.f:o.weaponScale);
             }
-            if(model){rlPushMatrix();rlRotatef(o.style==kHsBow ? 0:155,1,0,0);DrawModel(*model,{0,0,0},sc,tint);rlPopMatrix();}
+            // Grip-space +Y is the blade/shaft. A forward carry keeps swords
+            // clear of the boots and visible beside the body in the paper doll.
+            // The pick uses its own steeper grip for an overhead work arc.
+            if(model){
+                rlPushMatrix();
+                rlRotatef(bow ? 0:mining ? 130:gathering ? 100:25,1,0,0);
+                if(!bow && !gathering)rlRotatef(15,0,0,1); // outside the right hip, clear of the tunic
+                DrawModel(*model,{0,0,0},sc,tint);rlPopMatrix();
+            }
         }
-        if(!right && o.shield) {
+        if(!right && o.shield && !gathering) {
             oval({-1,2,2.2f},{1.9f,7.3f,7.3f},steel);
             oval({-2.5f,2,2.2f},{.7f,6.2f,6.2f},Color{126,83,45,255});
             oval({-3.2f,2,2.2f},{.8f,2.1f,2.1f},steel);
         }
         rlPopMatrix();
     }
-    rlPopMatrix();return true;
+    rlPopMatrix();rlPopMatrix();return true;
 }
+

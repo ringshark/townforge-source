@@ -57,8 +57,12 @@ int main() {
 }
 '''
 with tempfile.TemporaryDirectory() as temp:
+    mining=Path(temp)/'mining'
+    subprocess.run(['g++','-std=c++17','tests/compact-motion.cpp','-o',str(mining)],check=True)
+    subprocess.run([str(mining)],check=True)
     cpp=Path(temp)/'avatar.cpp'; exe=Path(temp)/'avatar'
     cpp.write_text(code)
     subprocess.run(['g++','-std=c++17','-I',str(Path(os.environ['RAYLIB_DIR'])/'src'),str(cpp),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
 print('PASS cape behind torso, anchored collar, backward lift, bind correction and independent model/actor tracks')
+
