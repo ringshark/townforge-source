@@ -8,7 +8,7 @@ const fixture=fs.readFileSync(process.env.TF_GRAPHICS_FIXTURE||'/tmp/tf-graphics
   try{
    const context=await browser.newContext({viewport:spec.viewport,hasTouch:!!spec.hasTouch,isMobile:!!spec.isMobile,serviceWorkers:'block',deviceScaleFactor:1});
    const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
-   const ready=()=>page.waitForFunction(()=>typeof _TF_GraphicsState==='function'&&JSON.parse(UTF8ToString(_TF_GraphicsState())).heroFrames>0&&document.querySelector('#loading').style.display==='none',null,{timeout:120000});
+   const ready=()=>page.waitForFunction(()=>typeof _TF_GraphicsState==='function'&&Module._TF_persistReady===1&&JSON.parse(UTF8ToString(_TF_OutdoorState())).outdoor&&JSON.parse(UTF8ToString(_TF_GraphicsState())).heroFrames>0&&document.querySelector('#loading').style.display==='none',null,{timeout:120000});
    const state=()=>page.evaluate(()=>JSON.parse(UTF8ToString(_TF_GraphicsState())));
    const outside=()=>page.evaluate(()=>JSON.parse(UTF8ToString(_TF_OutdoorState())));
    await page.goto(origin,{waitUntil:'domcontentloaded'});await ready();
