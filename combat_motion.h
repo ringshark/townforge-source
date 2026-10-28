@@ -4,7 +4,25 @@
 
 // Small, render-independent rules shared by live wilderness and dungeon combat.
 namespace tfmotion {
+// Real-time lockout prevents simultaneous hits and damage ticks from chaining
+// global pauses. Movement stays responsive in a crowd.
+struct ImpactPause {
+    float remaining=0, gap=0;
+    void Tick(float dt) {dt=std::max(0.f,dt);remaining=std::max(0.f,remaining-dt);gap=std::max(0.f,gap-dt);}
+    void Trigger(float seconds) {
+        if(gap>0 || seconds<=0)return;
+        remaining=std::min(seconds,.035f);gap=.22f;
+    }
+};
+inline float Recoil(float elapsed,float duration,float distance) {
+    if(elapsed<=0 || elapsed>=duration)return 0;
+    float t=elapsed/duration;
+    float rise=std::min(1.f,t/.18f);
+    float fall=(1.f-t)/.82f;
+    return distance*rise*std::min(1.f,fall*fall);
+}
 constexpr float swingDuration = 0.32f;
+constexpr float meleeContactPhase = .40f, bowContactPhase = .64f;
 // Arena visuals have their own duration; server damage/cooldowns stay authoritative.
 constexpr float arenaSwingDuration = 0.65f;
 inline float ArenaSwingPhase(float elapsed) {
@@ -54,3 +72,4 @@ inline float Turn(float current, float target, float dt, bool attacking) {
     return current + delta * (1.0f - std::exp(-std::max(0.0f, dt) * (attacking ? 32.0f : 22.0f)));
 }
 }
+

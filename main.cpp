@@ -187,18 +187,18 @@ static constexpr bool kHomesteadFocus = true;
 // Real time still drives the hit-stop timer itself and the shake decay, so a
 // pause can never extend itself.
 // ---------------------------------------------------------------------
-static float g_hitStopT = 0.0f;  // seconds of hit-stop left (real time)
+static tfmotion::ImpactPause g_impactPause; // bounded, real-time impact feedback
 static float g_shakeAmp = 0.0f;  // 3D camera shake amplitude, world units
 static double g_gameClock = 0.0; // hit-stop-aware clock for creature animation
-static float GameDt() { return g_hitStopT > 0.0f ? GetFrameTime() * 0.03f : GetFrameTime(); }
+static float GameDt() { return g_impactPause.remaining > 0.0f ? GetFrameTime() * 0.03f : GetFrameTime(); }
 static void CombatFeelTick() { // once per frame, before any update
     float rdt = GetFrameTime();
-    g_hitStopT = fmaxf(0.0f, g_hitStopT - rdt);
+    g_impactPause.Tick(rdt);
     g_shakeAmp *= expf(-rdt * 9.0f);
     if (g_shakeAmp < 0.05f) g_shakeAmp = 0.0f;
     g_gameClock += GameDt();
 }
-static void CombatHitStop(float sec) { g_hitStopT = fmaxf(g_hitStopT, sec); }
+static void CombatHitStop(float sec) { g_impactPause.Trigger(sec); }
 // Screen fade-in after walking between areas (2026-09-26), drawn last each frame.
 static const float kScreenFadeTime = 0.45f;
 static float g_screenFadeT = 0.0f;
@@ -15978,7 +15978,7 @@ static bool DrawPlayerHuman(const GameState& s, int trackId, float x, float z, f
         if (enemy) {
             float ax = x - enemy->x, az = z - enemy->y, al = std::sqrt(ax * ax + az * az);
             if (al > 0.001f) {
-                float kb = 16.0f * (1.0f - s.playerHurtT / 0.30f);
+                float kb = tfmotion::Recoil(s.playerHurtT, 0.25f, 8.0f);
                 x += ax / al * kb; z += az / al * kb;
             }
         }
@@ -23969,7 +23969,7 @@ static void Wild3DDrawSceneContents(GameState& s, bool shadowPass, const Town3DC
                                      s.wildernessPlayerPos.y - s.wildEngaged->pos.y };
                     float al = std::sqrt(away.x * away.x + away.y * away.y);
                     if (al > 0.001f) {
-                        float kb = 16.0f * (1.0f - s.playerHurtT / 0.30f);
+                        float kb = tfmotion::Recoil(s.playerHurtT, 0.25f, 8.0f);
                         px += away.x / al * kb; pz += away.y / al * kb;
                     }
                 }
@@ -25015,7 +25015,7 @@ static void DrawPlayerLifeState(const GameState& s, Vector2 screenPos, Vector2 f
                 Vector2 away = { ppos.x - mpos.x, ppos.y - mpos.y };
                 float al = std::sqrt(away.x * away.x + away.y * away.y);
                 if (al > 0.001f) {
-                    float kb = 12.0f * (1.0f - s.playerHurtT / 0.30f);
+                    float kb = tfmotion::Recoil(s.playerHurtT, 0.25f, 6.0f);
                     drawPos.x += away.x / al * kb;
                     drawPos.y += away.y / al * kb;
                 }
@@ -25089,7 +25089,7 @@ static void Dungeon3DDrawPlayer(const GameState& s) {
                                  s.dungeonPlayerPos.y - s.dungeonEngaged->pos.y };
                 float al = std::sqrt(away.x * away.x + away.y * away.y);
                 if (al > 0.001f) {
-                    float kb = 16.0f * (1.0f - s.playerHurtT / 0.30f);
+                    float kb = tfmotion::Recoil(s.playerHurtT, 0.25f, 8.0f);
                     px += away.x / al * kb; pz += away.y / al * kb;
                 }
             }
@@ -30005,21 +30005,21 @@ static void SpawnHitSparks(int zone, Vector2 pos, bool hit, int dmg) {
     const float y = 30.0f; // roughly chest height on the creature kit
     if (hit) {
         HitSpark& f = *SparkSlot(); // impact flash
-        f = HitSpark{ true, zone, { pos.x, y, pos.y }, { 0, 0, 0 }, 0.0f, 0.16f,
-                      48.0f + fminf((float)dmg, 30.0f), 0.0f, Color{ 255, 236, 180, 255 } };
+        f = HitSpark{ true, zone, { pos.x, y, pos.y }, { 0, 0, 0 }, 0.0f, 0.12f,
+                      18.0f + fminf((float)dmg, 16.0f) * 0.5f, 0.0f, Color{ 255, 236, 180, 255 } };
     }
-    int n = hit ? 8 + std::min(dmg / 3, 10) : 5;
+    int n = hit ? 5 + std::min(dmg / 6, 5) : 3;
     for (int i = 0; i < n; i++) {
         HitSpark& h = *SparkSlot();
         float ang = SparkRand(0.0f, 6.2832f);
-        float spd = hit ? SparkRand(90.0f, 230.0f) : SparkRand(20.0f, 60.0f);
+        float spd = hit ? SparkRand(55.0f, 125.0f) : SparkRand(15.0f, 35.0f);
         h.active = true;
         h.zone = zone;
         h.p = { pos.x, y + SparkRand(-4.0f, 4.0f), pos.y };
-        h.v = { cosf(ang) * spd, hit ? SparkRand(80.0f, 220.0f) : SparkRand(10.0f, 40.0f), sinf(ang) * spd };
+        h.v = { cosf(ang) * spd, hit ? SparkRand(45.0f, 110.0f) : SparkRand(10.0f, 25.0f), sinf(ang) * spd };
         h.t = 0.0f;
-        h.dur = hit ? SparkRand(0.28f, 0.55f) : SparkRand(0.35f, 0.6f);
-        h.size = hit ? SparkRand(9.0f, 15.0f) : SparkRand(12.0f, 20.0f);
+        h.dur = hit ? SparkRand(0.16f, 0.28f) : SparkRand(0.2f, 0.35f);
+        h.size = hit ? SparkRand(2.0f, 4.0f) : SparkRand(3.0f, 5.0f);
         h.grav = hit ? 520.0f : -30.0f; // misses: dust drifts up
         h.col = hit ? (GetRandomValue(0, 2) == 0 ? Color{ 255, 240, 170, 255 } : Color{ 255, 140, 40, 255 })
                     : Color{ 205, 198, 184, 255 };
@@ -30047,8 +30047,8 @@ static void SpawnFloatText(GameState& s, int zone, Vector2 pos, const std::strin
     if (ColorIsEqual(color, kFloatDmgColor)) {
         int dmg = std::max(1, std::atoi(text.c_str()));
         SpawnHitSparks(zone, pos, true, dmg);
-        CombatHitStop(dmg >= 20 ? 0.045f : 0.028f);
-        CombatShake(2.0f + fminf((float)dmg, 40.0f) * 0.075f);
+        CombatHitStop(dmg >= 20 ? 0.035f : 0.018f);
+        CombatShake(0.7f + fminf((float)dmg, 40.0f) * 0.035f);
     } else if (ColorIsEqual(color, kFloatMissColor)) {
         SpawnHitSparks(zone, pos, false, 0);
     }
@@ -34569,7 +34569,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         EngagedMonsterStats spot = EngagedWildMonsterStats(s, am);
         bool inRange = Dist(am.pos, s.wildernessPlayerPos) < PlayerAttackRange(s);
         HumanOutfit outfit = HumanOutfitFor(s.equipped);
-        float contactPhase = outfit.style == kHsBow ? 0.64f : 0.40f;
+        float contactPhase = outfit.style == kHsBow ? tfmotion::bowContactPhase : tfmotion::meleeContactPhase;
         auto strike = tfmotion::StepStrike(am, !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && am.hp > 0.0f,
                                           inRange, GameDt(), PlayerSwingCooldown(s), contactPhase);
         if (strike == tfmotion::Strike::Started) {
@@ -36498,7 +36498,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         const DungeonMonster& m = am.isBoss ? DungeonBoss(s, dungeon) : DungeonSlotMonster(dungeon, am.monsterIdx);
         bool inRange = Dist(am.pos, s.dungeonPlayerPos) < PlayerAttackRange(s);
         HumanOutfit outfit = HumanOutfitFor(s.equipped);
-        float contactPhase = outfit.style == kHsBow ? 0.64f : 0.40f;
+        float contactPhase = outfit.style == kHsBow ? tfmotion::bowContactPhase : tfmotion::meleeContactPhase;
         auto strike = tfmotion::StepStrike(am, !s.playerIsGhost && s.playerDeathAnimT <= 0.0f && am.hp > 0.0f,
                                           inRange, GameDt(), PlayerSwingCooldown(s), contactPhase);
         if (strike == tfmotion::Strike::Started) {
