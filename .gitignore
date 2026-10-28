@@ -11,3 +11,9 @@ build-web/
 site/
 meshy-output/
 __pycache__/
+
+build-web-2d/
+build-web-3d/
+review-build/
+review-site/
+browser-checks/

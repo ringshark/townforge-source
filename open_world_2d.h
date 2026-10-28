@@ -123,7 +123,8 @@ static void OpenTownGround(int ti,Vector2 camera) {
         const Color colors[4]={{79,94,59,255},{151,139,108,255},{205,220,220,255},{121,122,109,255}};
         Image image=GenImageColor(tile,tile,colors[ti]);auto* pixels=(Color*)image.data;
         for(int y=0;y<tile;y++)for(int x=0;x<tile;x++) {
-            float grain=(tf2dart::Noise(x+ti*137,y)-.5f)*9;
+            float broad=sinf(x*2*PI/tile)*sinf(y*2*PI/tile)*3.5f;
+            float grain=(tf2dart::Noise(x+ti*137,y)-.5f)*9+broad;
             if(ti==0 && tf2dart::Noise(x/2,y/3)>.96f)grain+=6;
             Color base=colors[ti];
             pixels[y*tile+x]={(unsigned char)(base.r+grain),(unsigned char)(base.g+grain),(unsigned char)(base.b+grain),255};
@@ -208,7 +209,7 @@ static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
                 if(near)DrawEllipseLines((int)p.x,(int)foot,25,7,Color{228,199,126,220});
                 Vector2 hero=WorldToScreen(s.wildernessPlayerPos,camera);
                 bool occludes=foreground && fabsf(hero.x-p.x)<extent.x*.45f && hero.y>foot-extent.y && hero.y<foot;
-                Color tint=ti==2?Color{216,233,239,255}:WHITE;
+                Color tint=ti==2?Color{216,233,239,255}:Color{247,244,231,255};
                 if(occludes)tint=Fade(tint,.42f);
                 DrawTexturePro(*art,{0,0,(float)art->width,(float)art->height},
                     {p.x-extent.x*.5f,foot-extent.y,extent.x,extent.y},{0,0},0,tint);
