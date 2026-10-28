@@ -12,7 +12,14 @@ const engine=process.env.TF_BROWSER||'chromium';
    await page.waitForTimeout(1500);await page.locator('#canvas').focus();
    let box=await page.locator('#canvas').boundingBox(),scale=Math.min(box.width/960,box.height/540);
    const pos=(x,y)=>({x:box.x+x*box.width/960,y:box.y+y*box.height/540});
-   const click=async(x,y)=>{box=await page.locator('#canvas').boundingBox();scale=Math.min(box.width/960,box.height/540);const p=pos(x,y);await page.mouse.click(p.x,p.y,{delay:140});await page.waitForTimeout(150);box=await page.locator('#canvas').boundingBox();scale=Math.min(box.width/960,box.height/540)};
+   const click=async(x,y)=>{
+    box=await page.locator('#canvas').boundingBox();scale=Math.min(box.width/960,box.height/540);const p=pos(x,y);
+    if(mobile){
+     const touch=type=>page.evaluate(({type,x,y})=>{const c=document.querySelector('#canvas'),point={identifier:1,target:c,clientX:x,clientY:y,pageX:x,pageY:y};const e=new Event(type,{bubbles:true,cancelable:true});for(const k of ['touches','targetTouches','changedTouches'])Object.defineProperty(e,k,{value:type==='touchend'&&k!=='changedTouches'?[]:[point]});c.dispatchEvent(e);},{type,x:p.x,y:p.y});
+     await touch('touchstart');await page.waitForTimeout(200);await touch('touchend');
+    }else await page.mouse.click(p.x,p.y,{delay:200});
+    await page.waitForTimeout(350);box=await page.locator('#canvas').boundingBox();scale=Math.min(box.width/960,box.height/540);
+   };
    const state=()=>page.evaluate(()=>JSON.parse(UTF8ToString(_TF_AtlasState())));
    const hero=()=>page.evaluate(()=>JSON.parse(UTF8ToString(_TF_OutdoorState())));
    await click(882,226);await page.waitForFunction(()=>JSON.parse(UTF8ToString(_TF_AtlasState())).open);

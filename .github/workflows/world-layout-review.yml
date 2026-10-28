@@ -1,0 +1,75 @@
+name: Verify connected-world redesign
+on:
+  push:
+    branches: [codex/world-layout-redesign]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: townforge-world-layout-review
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: source
+      - uses: actions/checkout@v4
+        with:
+          repository: ringshark/townforge
+          ref: main
+          path: current-site
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: '4.0.20'
+          actions-cache-folder: emsdk-cache
+      - name: Compile and check world access and save preservation
+        working-directory: source
+        run: |
+          git clone --depth 1 --branch 6.0 https://github.com/raysan5/raylib.git /tmp/raylib
+          make -C /tmp/raylib/src PLATFORM=PLATFORM_WEB -j2
+          TF_INTERIOR_FIXTURE=/tmp/tf-interior-fixture.txt TF_HOMESTEAD_FIXTURE=/tmp/tf-homestead-fixture.txt RAYLIB_DIR=/tmp/raylib python tests/landscape-menus.py
+          node tests/build-variants.cjs
+          python tests/player-movement.py
+          python tests/ui-input.py
+          python tests/transitions.py
+          python tests/mobile-combat.py
+          node server/mp/test/den.mjs
+          node server/mp/test/ladder.mjs
+          RAYLIB_DIR=/tmp/raylib TF_VARIANT=2d bash web/build_web.sh
+      - name: Package review build with existing online configuration
+        working-directory: source
+        run: |
+          mkdir -p site
+          for file in cloud-config.js mp-config.js; do
+            if [ -f "../current-site/$file" ]; then cp "../current-site/$file" "site/$file"; fi
+          done
+          TF_VARIANT=2d bash web/deploy_web.sh build-web-2d site
+          if [ -d ../current-site/games ]; then cp -r ../current-site/games site/games; fi
+          git rev-parse HEAD > site/source-version.txt
+          touch site/.nojekyll
+      - name: Verify desktop and phone rendering, building entry and saves
+        working-directory: source
+        run: |
+          npm install --prefix /tmp/tf-browser playwright pngjs
+          /tmp/tf-browser/node_modules/.bin/playwright install --with-deps chromium webkit
+          python3 -m http.server 8765 --directory site > /tmp/tf-http.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          NODE_PATH=/tmp/tf-browser/node_modules node tests/town-2d-web.cjs
+          TF_BROWSER=webkit NODE_PATH=/tmp/tf-browser/node_modules node tests/town-2d-web.cjs
+          NODE_PATH=/tmp/tf-browser/node_modules node tests/homestead-web.cjs
+          NODE_PATH=/tmp/tf-browser/node_modules node tests/interior-web.cjs
+          NODE_PATH=/tmp/tf-browser/node_modules node tests/atlas-web.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: world-layout-browser-checks
+          path: source/browser-checks
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: world-layout-validated-site
+          path: source/site

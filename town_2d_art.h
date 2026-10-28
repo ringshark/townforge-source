@@ -8,7 +8,7 @@ static constexpr float kActorScale = 1.16f;
 static constexpr int kMotes = 24;
 static constexpr const char* kKeys[] = {"smith", "carpenter", "tailor", "alchemy",
     "provisioner", "stable", "healer", "bank", "townhall", "house"};
-static Texture2D buildings[10]{}, scenery[8]{}, grass{}, paving{};
+static Texture2D buildings[10]{}, scenery[8]{}, grass{}, paving{}, entranceAtlas{};
 static constexpr const char* kScenery[] = {"tree_leafy","tree_autumn","tree_pine","prop_hedge",
     "prop_lamp","town_fountain","prop_barrel","prop_crates"};
 
@@ -18,6 +18,8 @@ inline float Noise(int x, int y) {
     return float(h^(h>>16))/float(0xffffffffu);
 }
 inline void Load() {
+    entranceAtlas=LoadTexture("assets/world_design/dungeon-atlas.png");
+    if(entranceAtlas.id)SetTextureFilter(entranceAtlas,TEXTURE_FILTER_BILINEAR);
     for (int i=0;i<10;i++) {
         buildings[i] = LoadTexture((std::string("assets/town_polish/")+kKeys[i]+".png").c_str());
         if (buildings[i].id) {
@@ -53,6 +55,7 @@ inline void Unload() {
     for(auto& t:buildings) {if(t.id)UnloadTexture(t);t={};}
     for(auto& t:scenery){if(t.id)UnloadTexture(t);t={};}
     if(grass.id)UnloadTexture(grass); if(paving.id)UnloadTexture(paving);
+    if(entranceAtlas.id)UnloadTexture(entranceAtlas);entranceAtlas={};
     grass={};paving={};
 }
 inline const Texture2D* Building(const std::string& key) {
