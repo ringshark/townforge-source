@@ -93,10 +93,29 @@ static Pose MakePose(const GameState& s,int direction,ActorAnim anim,bool moving
         p.angle=aim+Lerp(-110,12,cast);p.hand[0]={face.x*16-3,54+face.y*9+sinf(p.phase*PI*8)*1.5f};p.line=cast;
         if(p.phase>.75f){p.hand[0].y-=sinf(p.phase*PI*24)*2;p.angle-=sinf(p.phase*PI*24)*5;}
     }else if(p.action==Action::Hurt){p.bodyAngle=-sinf(p.phase*PI)*12;p.hand[0].y-=4;p.hand[1].y-=4;}
+    // Carry long weapons at the torso rather than dragging the support arm
+    // across from the opposite shoulder while the legs walk underneath.
+    if(p.twoHands && (p.action==Action::Idle || p.action==Action::Walk)) {
+        p.hand[0]={p.view==1?face.x*5.f:-6.f,54};
+        if(p.view==1 && (p.weapon==Weapon::Spear || p.weapon==Weapon::Staff))p.angle=aim;
+    }
     if(p.twoHands && p.action!=Action::Shoot && p.action!=Action::Cast){
         Vector2 axis=Rotate({0,-1},p.angle*DEG2RAD);p.hand[1]=Add(p.hand[0],Mul(axis,p.weapon==Weapon::Spear?15.f:p.weapon==Weapon::Longsword?-4.f:8.f));
     }
-    for(int i=0;i<2;i++)p.elbow[i]=SolveElbow(p.shoulder[i],p.hand[i],p.shoulder[i].x<0?1:-1);
+    for(int i=0;i<2;i++) {
+        if((p.action==Action::Walk || p.action==Action::Idle) && !p.twoHands) {
+            // A forward joint chain keeps bone lengths stable. Solving the elbow
+            // backwards from a swinging wrist used to straighten and stretch it.
+            float step=walk*(i==0?1.f:-1.f);
+            float sign=p.shoulder[i].x<0?-1.f:1.f;
+            bool carrying=i==0?p.weapon!=Weapon::None:p.offhand!=Weapon::None;
+            float angle=p.view==1?-step*(carrying?.18f:.32f):sign*.14f;
+            float forearm=angle+(p.view==1?face.x*.20f:sign*.07f);
+            float depth=p.view==1?1.f:1.f-.08f*(1+step);
+            p.elbow[i]=Add(p.shoulder[i],{sinf(angle)*17,cosf(angle)*17*depth});
+            p.hand[i]=Add(p.elbow[i],{sinf(forearm)*17,cosf(forearm)*17*depth});
+        } else p.elbow[i]=SolveElbow(p.shoulder[i],p.hand[i],p.shoulder[i].x<0?1:-1);
+    }
     p.head={0,0};p.torso={0,31};return p;
 }
 static Vector2 ScreenPoint(const Pose& pose,Vector2 point,Vector2 pos,float size){

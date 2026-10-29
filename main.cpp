@@ -27807,7 +27807,7 @@ static void DrawInterior2D(GameState& s, int screenW, int screenH,
     }
     // Player + floating interact prompt.
     Vector2 pp = WorldToScreen(s.interiorPlayerPos, cam);
-    DrawPlayer(s, pp, s.playerFacing, prompt, 1.15f);
+    DrawPlayer(s, pp, s.playerFacing, prompt);
     EndScissorMode();
 }
 
