@@ -60,7 +60,7 @@ static void OpenWildScenery(const GameState& s,Vector2 camera,bool foreground) {
         for(const auto& door:kWildernessDungeonEntrances)if(Dist(w,door.pos)<120){clear=false;break;}
         for(const auto& plot:kHousePlots)if(Dist(w,plot.pos)<170){clear=false;break;}
         if(!clear || (w.y>s.wildernessPlayerPos.y)!=foreground)continue;
-        Vector2 p=WorldToScreen(w,camera);if(!OpenVisible(p))continue;
+        Vector2 p=WorldToScreen(w,camera);if(!OpenVisible(p,260))continue;
         bool snow=w.y<700*kWS;
         bool coast=w.x>1950*kWS;
         bool tree=n<.22f && !coast;
@@ -137,9 +137,9 @@ static void OpenTownGround(int ti,Vector2 camera) {
     float depth=OpenTownDepth(ti),rotation=atan2f(-facing.x,facing.y)*RAD2DEG;
     // Clip the last tile to the wall. Rotation follows the actual gate basis,
     // while buildings retain their top-down art orientation.
-    for(float y=0;y<depth;y+=tile)for(float x=0;x<kOpenTownHalfW*2;x+=tile) {
-        float w=std::min((float)tile,kOpenTownHalfW*2-x),h=std::min((float)tile,depth-y);
-        Vector2 p=WorldToScreen(GateWorld({x-kOpenTownHalfW,y-depth},gate,facing),camera);
+    for(float y=0;y<depth;y+=tile)for(float x=0;x<OpenTownHalfW(ti)*2;x+=tile) {
+        float w=std::min((float)tile,OpenTownHalfW(ti)*2-x),h=std::min((float)tile,depth-y);
+        Vector2 p=WorldToScreen(GateWorld({x-OpenTownHalfW(ti),y-depth},gate,facing),camera);
         DrawTexturePro(texture,{0,0,w,h},{p.x,p.y,w,h},{0,0},rotation,WHITE);
     }
 }
@@ -148,7 +148,7 @@ static void OpenTownGround(int ti,Vector2 camera) {
 struct OpenTownWallSpan { Vector2 a,b; };
 static std::array<OpenTownWallSpan,5> OpenTownWallSpans(int ti) {
     auto point=[&](float x,float y){return GateWorld({x,y},kTownGates[ti].wildernessPos,TownGateFacing(ti));};
-    float w=kOpenTownHalfW,d=OpenTownDepth(ti);
+    float w=OpenTownHalfW(ti),d=OpenTownDepth(ti);
     return {{{point(-w,0),point(-w,-d)},{point(w,0),point(w,-d)},
              {point(-w,-d),point(w,-d)},
              {point(-w,-6),point(-56,-6)},{point(56,-6),point(w,-6)}}};
@@ -156,12 +156,12 @@ static std::array<OpenTownWallSpan,5> OpenTownWallSpans(int ti) {
 static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
     for(int ti=0;ti<4;ti++) {
         Vector2 center=OpenTownWorld(ti,TS(500,480)),sp=WorldToScreen(center,camera);
-        if(!OpenVisible(sp,640))continue;
+        if(!OpenVisible(sp,1100))continue;
         auto world=[&](Vector2 p){return OpenTownWorld(ti,p);};
         auto screen=[&](Vector2 p){return WorldToScreen(world(p),camera);};
         if(!foreground) {
             auto corner=[&](float x,float y){return WorldToScreen(GateWorld({x,y},kTownGates[ti].wildernessPos,TownGateFacing(ti)),camera);};
-            Vector2 corners[4]={corner(-kOpenTownHalfW,-OpenTownDepth(ti)),corner(kOpenTownHalfW,-OpenTownDepth(ti)),corner(kOpenTownHalfW,0),corner(-kOpenTownHalfW,0)};
+            Vector2 corners[4]={corner(-OpenTownHalfW(ti),-OpenTownDepth(ti)),corner(OpenTownHalfW(ti),-OpenTownDepth(ti)),corner(OpenTownHalfW(ti),0),corner(-OpenTownHalfW(ti),0)};
             Color ground=ti==2?Color{205,220,220,255}:ti==3?Color{121,122,109,255}:Color{79,92,57,255};
             DrawTriangle(corners[0],corners[2],corners[1],ground);
             DrawTriangle(corners[0],corners[3],corners[2],ground);
@@ -171,10 +171,10 @@ static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
             // street or the approach to a shop door. Existing trees are reused.
             for(Vector2 site:std::array<Vector2,4>{{TS(95,440),TS(905,440),TS(95,720),TS(905,720)}}){
                 Vector2 w=world(site);bool clear=OpenTownAt(w)==ti;
-                for(const auto& n:ActiveTownNodes(ti))if(Dist(w,world(n.pos))<85)clear=false;
+                for(const auto& n:ActiveTownNodes(ti))if(Dist(w,world(n.pos))<155)clear=false;
                 for(const auto& lane:tfdesign::TownLanes(ti))if(Dist(w,tfdesign::NearestOn(w,lane.a,lane.b))<48)clear=false;
                 const auto& tree=tf2dart::scenery[ti==2?2:0];
-                if(clear && tree.id){Vector2 p=WorldToScreen(w,camera);float h=72,width=h*tree.width/tree.height;tf2dart::Shadow(p,16,5,.16f);DrawTexturePro(tree,{0,0,(float)tree.width,(float)tree.height},{p.x-width/2,p.y-h,width,h},{0,0},0,WHITE);}
+                if(clear && tree.id){Vector2 p=WorldToScreen(w,camera);float h=156,width=h*tree.width/tree.height;tf2dart::Shadow(p,16,5,.16f);DrawTexturePro(tree,{0,0,(float)tree.width,(float)tree.height},{p.x-width/2,p.y-h,width,h},{0,0},0,WHITE);}
             }
             // Low planting and lamps occupy the edge of each street junction.
             // They never become new collision objects or interfere with doors.
@@ -184,7 +184,7 @@ static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
                 tf2dart::Shadow(p,7,2,.18f);
                 const auto& lamp=tf2dart::scenery[4];
                 if(lamp.id) {
-                    float h=30,w=h*lamp.width/lamp.height;
+                    float h=94,w=h*lamp.width/lamp.height;
                     DrawTexturePro(lamp,{0,0,(float)lamp.width,(float)lamp.height},{p.x-w/2,p.y-h,w,h},{0,0},0,WHITE);
                     if(night>.05f)for(int r=3;r>0;r--)DrawCircleV({p.x,p.y-h+5},r*5,Fade(Color{255,205,120,255},night*.035f));
                 }
@@ -198,7 +198,7 @@ static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
         }
         for(const auto& node:ActiveTownNodes(ti)) {
             Vector2 w=world(node.pos),p=WorldToScreen(w,camera);
-            if((w.y>s.wildernessPlayerPos.y)!=foreground || !OpenVisible(p))continue;
+            if((w.y>s.wildernessPlayerPos.y)!=foreground || !OpenVisible(p,260))continue;
             const Texture2D* art=ti==0?tf2dart::Building(node.key):nullptr;
             if(!art)art=ti==2?FindFrostmereBuildingTexture(node.key):ti==3?FindCragmoorBuildingTexture(node.key):ti==1?FindSaltmereBuildingTexture(node.key):FindTownBuildingTexture(node.key);
             bool near=Dist(w,s.wildernessPlayerPos)<80;
@@ -219,7 +219,7 @@ static void OpenTownDraw(const GameState& s,Vector2 camera,bool foreground) {
         const auto& npcs=ActiveTownNPCs(ti);
         const auto& sheets=ti==0?g_assets.townNPCSheets:g_assets.saltmereNPCSheets;
         for(int i=0;i<(int)npcs.size();i++) {
-            Vector2 w=world(TownNPCLivePos(i,s.worldTime,ti));
+            Vector2 w=OpenTownNPCWorld(ti,i,s.worldTime);
             if((w.y>s.wildernessPlayerPos.y)!=foreground)continue;
             Vector2 p=WorldToScreen(w,camera);if(!OpenVisible(p) || !sheets[i].ok)continue;
             tf2dart::Shadow(p,10,3,.18f);

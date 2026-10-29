@@ -9943,6 +9943,9 @@ static const std::array<WildernessDungeonEntrance, 6> kWildernessDungeonEntrance
 static Vector2 WildernessMonsterLivePos(int idx, float worldTime);
 static float RollWildRespawn();
 static const GameState::ActiveMonster* FindWildExtra(const GameState& s, int spotIdx);
+static void ResolveCircleRectCollision(Vector2& pos,float radius,Rectangle rc);
+static Rectangle OpenBuildingFootprint(Vector2 p) {return {p.x-72,p.y-28,144,48};}
+static void OpenBuildingResolve(Vector2& p,Vector2 building) {ResolveCircleRectCollision(p,kPlayerRadius,OpenBuildingFootprint(building));}
 static int OpenTownAt(Vector2 p);
 static bool InOutdoorTown(const GameState& s) {
     return s.screen==Screen::Town || (s.screen==Screen::Wilderness && !s.wild3DView && OpenTownAt(s.wildernessPlayerPos)>=0);
@@ -21856,50 +21859,59 @@ static Vector2 GateLocal(Vector2 p, Vector2 gate, Vector2 f) {
 static Vector2 GateWorld(Vector2 l, Vector2 gate, Vector2 f) {
     return { gate.x + l.x * f.y + l.y * f.x, gate.y - l.x * f.x + l.y * f.y };
 }
-static constexpr float kOpenTownScale = .42f;
-static constexpr float kOpenTownDepth = 660.0f;
-static constexpr float kOpenTownApron = 60.0f;
+static constexpr float kOpenTownScale = .52f;
+static constexpr float kOpenTownDepth = 1040.0f;
+static constexpr float kOpenTownApron = 90.0f;
 static constexpr float kOpenCoastalTownScale = .19f;
-static constexpr float kOpenTownHalfW = 310.f;
-static float OpenTownScale(int ti) {return (ti==1 || ti==3)?kOpenCoastalTownScale:kOpenTownScale;}
+static float OpenTownHalfW(int ti) {return ti==1?650.f:ti==0?330.f:440.f;}
+static float OpenTownScale(int ti) {return (ti==1 || ti==3)?kOpenCoastalTownScale:ti==2?.42f:kOpenTownScale;}
 static float OpenTownDepth(int ti) {
     Vector2 g=kTownGates[ti].wildernessPos,f=TownGateFacing(ti);
-    float d=kOpenTownDepth;
-    if(fabsf(f.x)>.001f) d=std::min(d,((f.x>0?g.x:kWildernessWorldSize-g.x)-kPlayerEdgeMargin-kOpenTownHalfW*fabsf(f.y))/fabsf(f.x));
-    if(fabsf(f.y)>.001f) d=std::min(d,((f.y>0?g.y:kWildernessWorldSize-g.y)-kPlayerEdgeMargin-kOpenTownHalfW*fabsf(f.x))/fabsf(f.y));
+    float d=ti==2?700.f:kOpenTownDepth;
+    if(fabsf(f.x)>.001f) d=std::min(d,((f.x>0?g.x:kWildernessWorldSize-g.x)-kPlayerEdgeMargin-OpenTownHalfW(ti)*fabsf(f.y))/fabsf(f.x));
+    if(fabsf(f.y)>.001f) d=std::min(d,((f.y>0?g.y:kWildernessWorldSize-g.y)-kPlayerEdgeMargin-OpenTownHalfW(ti)*fabsf(f.x))/fabsf(f.y));
     return d;
 }
-// Saltmere is a shallow coastal compound. Use two broad terraces rather than
-// squeezing the inland town's three rows past the edge of the connected world.
+// Coastal compounds use parallel streets along the world edge, with enough
+// frontage for full-size facades and an approach below every door.
 static Vector2 OpenCompactAnchor(int ti,const std::string& key) {
-    if(ti==3){if(key=="bank")return {-150,-260};if(key=="healer")return {150,-260};if(key=="provisioner")return {0,-300};if(key=="smith")return {-180,-100};return {180,-100};}
+    if(ti==3){if(key=="bank")return {-260,-355};if(key=="healer")return {-20,-355};if(key=="provisioner")return {220,-355};if(key=="smith")return {-200,-130};return {100,-130};}
     const char* keys[]={"smith","carpenter","townhall","tailor","alchemy","healer","bank","stable","provisioner"};
-    const Vector2 points[]={{-240,-250},{-120,-250},{0,-250},{120,-250},{240,-250},{-240,-110},{-120,-110},{120,-110},{240,-110}};
-    for(int i=0;i<9;i++)if(key==keys[i])return points[i];return {0,-110};
+    const Vector2 points[]={{-390,-355},{-160,-355},{70,-355},{300,-355},{530,-355},{-390,-130},{-160,-130},{70,-130},{300,-130}};
+    for(int i=0;i<9;i++)if(key==keys[i])return points[i];return {0,-130};
 }
 static Vector2 OpenTownWorld(int ti, Vector2 p) {
-    Vector2 l = {(p.x - kWildernessGatePos.x) * OpenTownScale(ti),
+    Vector2 l = {(p.x - kWildernessGatePos.x) * (ti==0?.4375f:OpenTownScale(ti)),
                  (p.y - kWildernessGatePos.y) * OpenTownScale(ti) - kOpenTownApron};
     if(ti==1 || ti==3)for(const auto& n:ActiveTownNodes(ti))if(Dist(n.pos,p)<.01f){l=OpenCompactAnchor(ti,n.key);break;}
+    if(ti==0){for(const auto& n:ActiveTownNodes(ti))if(Dist(n.pos,p)<.01f){if(n.key=="townhall")l.y=-755;if(n.key=="bank")l.y=-500;break;}}
     return GateWorld(l, kTownGates[ti].wildernessPos, TownGateFacing(ti));
 }
 static Vector2 OpenTownLocal(int ti, Vector2 p) {
-    if(ti==1 || ti==3)for(const auto& n:ActiveTownNodes(ti))if(Dist(OpenTownWorld(ti,n.pos),p)<.01f)return n.pos;
+    for(const auto& n:ActiveTownNodes(ti))if(Dist(OpenTownWorld(ti,n.pos),p)<.01f)return n.pos;
     Vector2 l = GateLocal(p, kTownGates[ti].wildernessPos, TownGateFacing(ti));
-    return {l.x / OpenTownScale(ti) + kWildernessGatePos.x,
+    return {l.x / (ti==0?.4375f:OpenTownScale(ti)) + kWildernessGatePos.x,
             (l.y + kOpenTownApron) / OpenTownScale(ti) + kWildernessGatePos.y};
 }
 static int OpenTownAt(Vector2 p) {
     for (int ti=0;ti<4;ti++) {
         Vector2 l=GateLocal(p,kTownGates[ti].wildernessPos,TownGateFacing(ti));
-        if(fabsf(l.x)<kOpenTownHalfW-6 && l.y<35 && l.y>-OpenTownDepth(ti)) return ti;
+        if(fabsf(l.x)<OpenTownHalfW(ti)-6 && l.y<35 && l.y>-OpenTownDepth(ti)) return ti;
     }
     return -1;
+}
+static Vector2 OpenTownNPCWorld(int ti,int index,float time) {
+    if(ti==1 || ti==3){
+        Vector2 p={ti==1?-420.f+index*170.f:-300.f+index*110.f,-245};
+        Vector2 w=GateWorld(p,kTownGates[ti].wildernessPos,TownGateFacing(ti));
+        auto wander=MonsterWanderOffset(index,time);return {w.x+wander.x*.25f,w.y+wander.y*.25f};
+    }
+    return OpenTownWorld(ti,TownNPCLivePos(index,time,ti));
 }
 static void GateCollide(Vector2& p, Vector2 gate, Vector2 f) {
     Vector2 l = GateLocal(p, gate, f);
     const float r = 17.0f; // kPlayerRadius
-    if (fabsf(l.x) > 34.0f && fabsf(l.x) < (g_openWorld2D?kOpenTownHalfW:300.0f) && fabsf(l.y + 6.0f) < 9.0f + r) { // curtain wall band
+    if (fabsf(l.x) > 34.0f && fabsf(l.x) < (g_openWorld2D?OpenTownHalfW(std::clamp(OpenTownAt({gate.x-f.x*40,gate.y-f.y*40}),0,3)):300.0f) && fabsf(l.y + 6.0f) < 9.0f + r) { // curtain wall band
         l.y = (l.y + 6.0f >= 0 ? 1.0f : -1.0f) * (9.0f + r) - 6.0f;
         p = GateWorld(l, gate, f);
     }
@@ -21945,10 +21957,10 @@ static void TownCompoundCollide(Vector2& p, int ti, float D) {
     const float r = 17.0f, t = 10.0f;
     bool moved = false;
     for (int sx = -1; sx <= 1; sx += 2) { // side walls
-        float wx = sx * (g_openWorld2D?kOpenTownHalfW:kCompoundHalfW);
+        float wx = sx * (g_openWorld2D?OpenTownHalfW(ti):kCompoundHalfW);
         if (l.y < 0.0f && l.y > -D - t && fabsf(l.x - wx) < t + r) { l.x = wx + ((l.x - wx) >= 0 ? 1.0f : -1.0f) * (t + r); moved = true; }
     }
-    if (fabsf(l.x) < (g_openWorld2D?kOpenTownHalfW:kCompoundHalfW) + t && fabsf(l.y + D) < t + r) { l.y = -D + ((l.y + D) >= 0 ? 1.0f : -1.0f) * (t + r); moved = true; } // back wall
+    if (fabsf(l.x) < (g_openWorld2D?OpenTownHalfW(ti):kCompoundHalfW) + t && fabsf(l.y + D) < t + r) { l.y = -D + ((l.y + D) >= 0 ? 1.0f : -1.0f) * (t + r); moved = true; } // back wall
     if (moved) p = GateWorld(l, g, f);
 }
 static void Wild3DDrawTownCompound(const GameState& s, int ti, Color wall, Color dark) {
@@ -22039,6 +22051,9 @@ static void Wild3DDrawTownCompound(const GameState& s, int ti, Color wall, Color
 // Which way a town's gatehouse faces: along the road that leaves it (unit vector,
 // pointing out into the wilds). The town lies behind it.
 static Vector2 TownGateFacing(int townIdx) {
+    // Axis-aligned 2D compounds use the available coastal strip efficiently.
+    // Keep the road-derived gate orientation in the separate 3D view.
+    if(g_openWorld2D && townIdx>0)return townIdx==3?Vector2{1,0}:Vector2{-1,0};
     if(townIdx==0)return {0,1}; // Emberhold faces its new south forecourt, clear of Southfen homes
     static Vector2 cache[4]; static bool done[4] = {};
     townIdx = std::clamp(townIdx, 0, 3);
@@ -26518,6 +26533,7 @@ static std::vector<InteriorPropDef> InteriorPropsFor(GameState& s, const std::st
         auto size=tfinterior::Size(key);
         for(auto& p:out) {
             auto at=tfinterior::Point({p.x,p.y},size);p.x=at.x;p.y=at.y;
+            if(!(p.action && std::string(p.action)=="exit")) {p.sw*=1.35f;p.sh*=1.35f;}
             if(p.action && std::string(p.action)=="exit"){p.x=size.x*.5f;p.y=size.y-22;}
             else if(p.bw>0 && p.bh>0) {
                 p.x=std::clamp(p.x,p.bw*.5f+2,size.x-p.bw*.5f-2);
@@ -26535,6 +26551,7 @@ static void HouseDecorDraw3D(const GameState& s); // Housing 2.0 decorate overla
 static void EnterInterior(GameState& s, const std::string& key) {
     if (!InteriorRoomFor(key)) return; // unknown key: stay outside
     s.interiorKey = key;
+    g_trackOpen=false;
     s.exploreMenuOpen = false;
     s.guideOpen = false;
     s.greetedNPC.reset();
@@ -26574,6 +26591,14 @@ static void ExitInterior(GameState& s) {
         return;
     }
     s.interiorFromWild = false;
+    if(!s.interior3DView) {
+        s.screen=Screen::Wilderness;s.wild3DView=false;g_openWorld2D=true;
+        for(const auto& node:ActiveTownNodes(s.selectedTown))if(node.key==key){
+            auto door=OpenTownWorld(s.selectedTown,node.pos);
+            s.wildernessPlayerPos={door.x,door.y+60};break;
+        }
+        s.playerFacing={0,1};s.logLine="You step back outside.";PlaySfx(SfxId::Door);return;
+    }
     s.screen = Screen::Town;
     s.town3DView = s.interior3DView; // keep whatever view was used inside
     s.selectedTile.reset();
@@ -26634,7 +26659,7 @@ static void IntBuildShopShell(const InteriorRoomDef& room,bool compact=false) {
     g_intFloors.assign(1, Rectangle{ 0, 0, g_intW, g_intH });
     g_intSegs.clear(); g_intWins.clear(); g_intBlocks.clear(); g_intDoors.clear();
     g_intFloorSurf = room.floorSurf;
-    float h = kIntWallT * 0.5f, W = g_intW, H = g_intH, gap = 34.0f;
+    float h = kIntWallT * 0.5f, W = g_intW, H = g_intH, gap = compact?44.0f:34.0f;
     int ws = room.wallSurf;
     g_intSegs.push_back({ -kIntWallT, -h, W + kIntWallT, -h, 0, 1, ws });   // north
     g_intSegs.push_back({ -h, 0, -h, H, 1, 0, ws });                         // west
@@ -27946,7 +27971,7 @@ static void DrawTownScreen(GameState& s, int screenW, int screenH) {
         g_openWorld2D=true;
         s.wildernessPlayerPos=OpenTownWorld(std::clamp(s.selectedTown,0,3),s.townPlayerPos);
         for(const auto& node:ActiveTownNodes(s.selectedTown))
-            ResolveCircleCollision(s.wildernessPlayerPos,kPlayerRadius,OpenTownWorld(s.selectedTown,node.pos),35.f);
+            OpenBuildingResolve(s.wildernessPlayerPos,OpenTownWorld(s.selectedTown,node.pos));
         s.wild3DView=false; s.screen=Screen::Wilderness;
         DrawWildernessScreen(s,screenW,screenH);
         return;
@@ -34106,7 +34131,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
         }
         const auto& npcs=ActiveTownNPCs(outdoorTown);
         for(int i=0;i<(int)npcs.size();i++) {
-            float d=Dist(s.wildernessPlayerPos,OpenTownWorld(outdoorTown,TownNPCLivePos(i,s.worldTime,outdoorTown)));
+            float d=Dist(s.wildernessPlayerPos,OpenTownNPCWorld(outdoorTown,i,s.worldTime));
             if(d<nearestDist){nearestDist=d;nearestIdx=i;nearestKind=WildNodeKind::TownNPC;}
         }
     }
@@ -35010,7 +35035,7 @@ static void DrawWildernessScreen(GameState& s, int screenW, int screenH) {
     // Both views use the walkable arch in GateCollide; no solid portal disc.
     if(outdoorTown>=0) {
         for(const auto& node:ActiveTownNodes(outdoorTown))
-            ResolveCircleCollision(s.wildernessPlayerPos,kPlayerRadius,OpenTownWorld(outdoorTown,node.pos),35.f);
+            OpenBuildingResolve(s.wildernessPlayerPos,OpenTownWorld(outdoorTown,node.pos));
     }
     s.wildernessPlayerPos = ClampToWorld(s.wildernessPlayerPos, kPlayerEdgeMargin, kWildernessWorldSize);
     // Trees, rocks, mountains and camp props (3D view; ghosts pass through).
@@ -36798,7 +36823,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
             if(sp.x<arenaViewport.x-100 || sp.y<arenaViewport.y-100 || sp.x>arenaViewport.x+arenaViewport.width+100 || sp.y>arenaViewport.y+arenaViewport.height+100)continue;
             tfscene::Contact({sp.x,sp.y+12},corner==2?7:16,4);
             if(corner==2)tfscene::Light(sp,95,.12f);
-            tfgfx::Prop(themes[*s.selectedDungeon][corner],sp,corner==2?22:48,corner==2?35:42,false);
+            tfgfx::Prop(themes[*s.selectedDungeon][corner],sp,corner==2?34:70,corner==2?58:62,false);
         }
     }
     // The Sunken Crypt gets a water pool in its boss room - it's the one dungeon that's
@@ -36817,7 +36842,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         static const std::array<Vector2, 2> kBrazierSpots = {{ {1680,1800}, {1920,2300} }};
         for (const Vector2& pos : kBrazierSpots) {
             tfscene::Light(WorldToScreen(pos,camera),100,.15f);
-            DrawIconCentered(g_assets.emberveilBrazier, WorldToScreen(pos,camera), 40.0f, WHITE);
+            DrawIconCentered(g_assets.emberveilBrazier, WorldToScreen(pos,camera), 60.0f, WHITE);
         }
     }
     // The Hollow Warrens gets its boss room floored with the fancy medallion-pattern
@@ -36832,7 +36857,7 @@ static void DrawHuntScreen(GameState& s, int screenW, int screenH) {
         static const std::array<Vector2, 2> kWarrenTorchSpots = {{ {1140,2060}, {2460,2060} }};
         for (const Vector2& pos : kWarrenTorchSpots) {
             tfscene::Light(WorldToScreen(pos,camera),100,.15f);
-            DrawIconCentered(g_assets.hollowWarrensTorch, WorldToScreen(pos,camera), 34.0f, WHITE);
+            DrawIconCentered(g_assets.hollowWarrensTorch, WorldToScreen(pos,camera), 54.0f, WHITE);
         }
     }
 
