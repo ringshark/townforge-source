@@ -123,29 +123,29 @@ for(int town=0;town<4;++town){
   const auto& span=walls[side<0?3:4];
   auto a=GateLocal(span.a,gate,facing),b=GateLocal(span.b,gate,facing);
   assert(std::abs(a.y+6)<.01f && std::abs(b.y+6)<.01f);
-  assert(std::abs(std::abs(side<0?a.x:b.x)-kOpenTownHalfW)<.01f);
+  assert(std::abs(std::abs(side<0?a.x:b.x)-OpenTownHalfW(town))<.01f);
   assert(std::abs(std::abs(side<0?b.x:a.x)-56)<.01f);
-  Vector2 probe=GateWorld({side*(kOpenTownHalfW+56)*.5f,-6},gate,facing),moved=probe;
+  Vector2 probe=GateWorld({side*(OpenTownHalfW(town)+56)*.5f,-6},gate,facing),moved=probe;
   assert(Dist(probe,tfdesign::NearestOn(probe,span.a,span.b))<.01f);
   GateCollide(moved,gate,facing);assert(Dist(probe,moved)>17);
  }
  Vector2 passage=GateWorld({0,-6},gate,facing),entered=passage;
  GateCollide(entered,gate,facing);assert(Dist(passage,entered)<.01f);
  // Flood the actual movement footprint from the gate, not just a drawn road.
- constexpr int N=140;const float step=8;auto center=GateWorld({0,-OpenTownDepth(town)*.5f},kTownGates[town].wildernessPos,TownGateFacing(town));Vector2 origin={center.x-560,center.y-560};
+ constexpr int N=220;const float step=8;auto center=GateWorld({0,-OpenTownDepth(town)*.5f},kTownGates[town].wildernessPos,TownGateFacing(town));Vector2 origin={center.x-880,center.y-880};
  auto point=[&](int i){return Vector2{origin.x+(i%N+.5f)*step,origin.y+(i/N+.5f)*step};};
  auto index=[&](Vector2 p){return std::clamp((int)((p.y-origin.y)/step),0,N-1)*N+std::clamp((int)((p.x-origin.x)/step),0,N-1);};
- auto walk=[&](Vector2 p){auto l=GateLocal(p,kTownGates[town].wildernessPos,TownGateFacing(town));if(OpenTownAt(p)!=town || fabsf(l.x)>kOpenTownHalfW-28 || l.y<-OpenTownDepth(town)+28)return false;for(const auto& n:ActiveTownNodes(town))if(Dist(p,OpenTownWorld(town,n.pos))<53)return false;return true;};
+ auto walk=[&](Vector2 p){auto l=GateLocal(p,kTownGates[town].wildernessPos,TownGateFacing(town));if(OpenTownAt(p)!=town || fabsf(l.x)>OpenTownHalfW(town)-28 || l.y<-OpenTownDepth(town)+28)return false;for(const auto& n:ActiveTownNodes(town)){auto r=OpenBuildingFootprint(OpenTownWorld(town,n.pos));r.x-=kPlayerRadius;r.y-=kPlayerRadius;r.width+=2*kPlayerRadius;r.height+=2*kPlayerRadius;if(CheckCollisionPointRec(p,r))return false;}return true;};
  std::vector<char> seen(N*N);std::vector<int> queue;int start=index(GateWorld({0,-35},kTownGates[town].wildernessPos,TownGateFacing(town)));queue.push_back(start);seen[start]=1;
  for(size_t head=0;head<queue.size();head++){int i=queue[head];for(int d:std::array<int,4>{{1,-1,N,-N}}){int j=i+d;if(j<0 || j>=N*N || std::abs(j%N-i%N)>1 || seen[j] || !walk(point(j)))continue;seen[j]=1;queue.push_back(j);}}
  for(const auto& node:ActiveTownNodes(town)){
   auto w=OpenTownWorld(town,node.pos);assert(OpenTownAt(w)==town);
-  Vector2 approach={w.x,w.y+58};float access=1e9;for(int i:queue)access=std::min(access,Dist(point(i),approach));assert(access<24);
+  Vector2 approach={w.x,w.y+58};float access=1e9;for(int i:queue)access=std::min(access,Dist(point(i),approach));if(access>=24){std::cerr<<"Unreachable facade "<<town<<" "<<node.key<<" distance "<<access<<std::endl;abort();}
   auto local=OpenTownLocal(town,w);assert(Dist(local,node.pos)<.01f);
   for(const auto& other:ActiveTownNodes(town))if(node.key!=other.key)assert(Dist(w,OpenTownWorld(town,other.pos))>100);
  }
 }
-for(const auto& plot:kHousePlots)for(int dx:{-1,0,1})for(int dy:{-1,0,1})assert(OpenTownAt({plot.pos.x+dx*plot.cells*kHouseCellSize*.5f,plot.pos.y+dy*plot.cells*kHouseCellSize*.5f})<0);
+for(const auto& plot:kHousePlots)for(int dx:{-1,0,1})for(int dy:{-1,0,1}){auto probe=Vector2{plot.pos.x+dx*plot.cells*kHouseCellSize*.5f,plot.pos.y+dy*plot.cells*kHouseCellSize*.5f};if(OpenTownAt(probe)>=0){std::cerr<<"Town overlaps plot "<<plot.name<<" town "<<OpenTownAt(probe)<<std::endl;abort();}}
 for(int i=0;i<6;i++){auto door=EntranceDoorPoint(i),body=EntranceBodyCenter(i);assert(Dist({door.x,door.y+20},body)>=79);assert(Dist(EntranceStepOut(i),door)>60);}
 tfdesign::BuildTrails();assert(!tfdesign::trails.empty());
 for(const auto& path:tfdesign::trails)for(size_t i=1;i<path.size();++i)assert(tfdesign::ClearLine(path[i-1],path[i]));
@@ -266,8 +266,9 @@ room.houseChestOpen=true;assert(LandscapeDialogOpen(room));room.houseChestOpen=f
 room.houseCraftModule=0;assert(LandscapeDialogOpen(room));
 room.housePlotIdx=0;room.selectedTile="wildhouse";room.interiorGreeted=true;
 ExitInterior(room);assert(room.screen==Screen::Wilderness && !room.selectedTile && !room.interiorGreeted && !room.houseChestOpen && room.houseCraftModule<0);
-room=GameState{};EnterInterior(room,"stable");room.interiorGreeted=true;room.selectedTile="stable";ExitInterior(room);
-assert(room.screen==Screen::Town && !LandscapeDialogOpen(room));
+room=GameState{};room.town3DView=false;EnterInterior(room,"stable");room.interiorGreeted=true;room.selectedTile="stable";ExitInterior(room);
+assert(room.screen==Screen::Wilderness && !LandscapeDialogOpen(room));
+for(const auto& n:ActiveTownNodes(room.selectedTown))if(n.key=="stable"){auto door=OpenTownWorld(room.selectedTown,n.pos);assert(Dist(room.wildernessPlayerPos,{door.x,door.y+60})<.01f);auto before=room.wildernessPlayerPos;OpenBuildingResolve(room.wildernessPlayerPos,door);assert(Dist(before,room.wildernessPlayerPos)<.01f);}
 g_trackOpen=false;
 std::cout<<"PASS interior layout: stale panels ignored, real panels retained, town and homestead exits clear interior locks"<<std::endl;
 // Opening progression uses actual gameplay events, not timeouts or arbitrary gold changes.

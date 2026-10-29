@@ -8,14 +8,14 @@ static constexpr float kHeroSize=34.f;
 // visible screen proportion in Town Forge's 540px landscape view.
 static constexpr float kPlayerVisibleHeight=76.f;
 static constexpr float kPlayerVisualScale=kPlayerVisibleHeight/kHeroSize;
-static constexpr float kBuildingHeight=94.f, kBuildingWidth=96.f;
-static constexpr float kTreeMin=74.f, kTreeVariation=22.f;
+static constexpr float kBuildingHeight=228.f, kBuildingWidth=200.f;
+static constexpr float kTreeMin=148.f, kTreeVariation=40.f;
 struct Actor {unsigned id; Rectangle crop; float size;};
 static std::vector<Actor> actors;
 
 inline float ActorSize(const std::string& path) {
     if(path.find("/monsters_boss_v2/")!=std::string::npos)return 62;
-    if(path.find("/npcs_v2/")!=std::string::npos || path.find("rival_adventurer")!=std::string::npos)return 34;
+    if(path.find("/npcs_v2/")!=std::string::npos || path.find("rival_adventurer")!=std::string::npos)return 68;
     if(path.find("/monsters_v2/")!=std::string::npos)return 38;
     if(path.find("/monsters/")!=std::string::npos) {
         if(path.find("bat.png")!=std::string::npos)return 24;

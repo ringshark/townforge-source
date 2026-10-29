@@ -65,15 +65,14 @@ static void DrawRoads(Vector2 camera) {
 static std::vector<Lane> TownLanes(int ti) {
     std::vector<Lane> out;auto add=[&](float x,float y,float X,float Y,float w){out.push_back({OpenTownWorld(ti,TS(x,y)),OpenTownWorld(ti,TS(X,Y)),w});};
     if(ti==1 || ti==3){auto world=[&](Vector2 p){return GateWorld(p,kTownGates[ti].wildernessPos,TownGateFacing(ti));};
-        out.push_back({world({-280,-180}),world({280,-180}),36});
-        out.push_back({world({-280,-35}),world({280,-35}),30});
-        out.push_back({world({-280,-180}),world({-280,-35}),30});
-        out.push_back({world({280,-180}),world({280,-35}),30});
-        out.push_back({world({0,0}),world({0,-180}),36});return out;
+        float lo=ti==1?-540.f:-350.f,hi=ti==1?580.f:350.f;
+        out.push_back({world({lo,-245}),world({hi,-245}),58});
+        out.push_back({world({lo,-55}),world({hi,-55}),52});
+        out.push_back({world({0,0}),world({0,-245}),58});return out;
     }
-    add(350,200,350,950,30);add(650,200,650,950,30);
-    for(float y:{200.f,450.f,650.f,950.f})add(350,y,650,y,y==650?38:30);
-    out.push_back({kTownGates[ti].wildernessPos,OpenTownWorld(ti,TS(500,950)),38});
+    add(350,200,350,950,58);add(650,200,650,950,58);
+    for(float y:{200.f,450.f,650.f,950.f})add(350,y,650,y,y==650?64:58);
+    out.push_back({kTownGates[ti].wildernessPos,OpenTownWorld(ti,TS(500,950)),64});
     return out;
 }
 static Vector2 NearestOn(Vector2 p,Vector2 a,Vector2 b) {
@@ -87,7 +86,7 @@ static void DrawTownStreets(int ti,Vector2 camera) {
     for(const auto& node:ActiveTownNodes(ti)){
         Vector2 door=OpenTownWorld(ti,node.pos);door.y+=24;Vector2 best{};float distance=1e9f;
         for(const auto& lane:lanes){auto q=NearestOn(door,lane.a,lane.b);float d=Dist(door,q);if(d<distance){best=q;distance=d;}}
-        lanes.push_back({door,best,22});
+        lanes.push_back({door,best,42});
     }
     for(int pass=0;pass<2;pass++)for(const auto& lane:lanes){auto a=WorldToScreen(lane.a,camera),b=WorldToScreen(lane.b,camera);float width=lane.width+(pass?0:5);Color c=pass?stone:Color{109,116,98,255};DrawLineEx(a,b,width,c);DrawCircleV(a,width*.5f,c);DrawCircleV(b,width*.5f,c);}
     // Small staggered stone joints add texture after the entire street union
