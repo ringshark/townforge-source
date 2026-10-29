@@ -4712,6 +4712,11 @@ static void DrawPlayer(const GameState& s, Vector2 screenPos, Vector2 facing, co
         }
     }
     if(s.hidden)tint=Fade(tint,.65f);
+    if(g_compactHeroAtlas) {
+        // Grow upwards from the same foot point, including equipment and effects.
+        screenPos.y-=tfworldart::kHeroSize*visualScale*(tfworldart::kPlayerVisualScale-1.f)*.48f;
+        visualScale*=tfworldart::kPlayerVisualScale;
+    }
     float kPlayerRadius = ::kPlayerRadius * visualScale; // shadows the global on purpose - see
                                                            // DrawBuildingNode's identical trick.
     bool layered=g_compactHeroAtlas && tfequip2d::Draw(s,screenPos,DirRowForFacing(facing),combatAnim,(AnyMoveKeyDown() || VirtualJoystickIsMoving() || g_walkOn) && g_mountPetId<0,tfworldart::kHeroSize*visualScale,tint);
