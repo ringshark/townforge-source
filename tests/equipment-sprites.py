@@ -62,6 +62,23 @@ for(const char* resource:{"wood","ore","richore","fish"}){
  auto first=MakePose(s,0,ActorAnim::Idle,false);s.gatherSecondsRemaining-=.25f;auto next=MakePose(s,0,ActorAnim::Idle,false);assert(first.phase!=next.phase);
 }
 s.gatheringResource="fish";s.gatherSecondsRemaining=.3f;sample("Fishing final reel",0,ActorAnim::Idle);assert(lastPose.phase>.75f&&lastPose.line==1);
+s.gatheringResource.reset();
+// Dense locomotion samples: no overextended arms or discontinuous elbow flips.
+for(int carry=0;carry<3;carry++)for(int d=0;d<4;d++){
+ s.equipped={};if(carry==1)s.equipped.rightHand=items[0];if(carry==2)s.equipped.rightHand=items[3];
+ Pose previous{};bool first=true;
+ for(int f=0;f<=120;f++){
+  s.worldTime=f/240.f;auto p=MakePose(s,d,ActorAnim::Idle,true);
+  for(int i=0;i<2;i++){
+   float upper=std::hypot(p.elbow[i].x-p.shoulder[i].x,p.elbow[i].y-p.shoulder[i].y);
+   float lower=std::hypot(p.hand[i].x-p.elbow[i].x,p.hand[i].y-p.elbow[i].y);
+   assert(upper<=17.05f && lower<=17.05f);
+   if(!first){assert(std::hypot(p.elbow[i].x-previous.elbow[i].x,p.elbow[i].y-previous.elbow[i].y)<1.1f);assert(std::hypot(p.hand[i].x-previous.hand[i].x,p.hand[i].y-previous.hand[i].y)<1.5f);}
+  }
+  previous=p;first=false;
+ }
+}
+s.equipped={};
 s.gatheringResource.reset();for(int f=0;f<8;f++){s.worldTime=f*.09f;sample("Walk phase "+std::to_string(f),f%4,ActorAnim::Idle,true);assert(lastPose.action==Action::Walk);}
 for(int d=0;d<4;d++){s.playerHurtT=.15f;sample("Hit reaction dir "+std::to_string(d),d,ActorAnim::Idle);assert(lastPose.action==Action::Hurt);}s.playerHurtT=-1;
 for(int d=0;d<4;d++){s.wildEngaged->castEffectTimer=.18f;sample("Empty hand spell dir "+std::to_string(d),d,ActorAnim::Cast);}

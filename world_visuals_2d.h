@@ -4,7 +4,10 @@
 // independent of combat radii and the compressed coordinates of outdoor towns.
 namespace tfworldart {
 static constexpr float kHeroSize=34.f;
-static constexpr float kPlayerVisualScale=1.4f; // Player only; NPC sizes and gameplay radii stay independent.
+// Ashfall's usual hero occupies about 14% of its 648px view. Match that
+// visible screen proportion in Town Forge's 540px landscape view.
+static constexpr float kPlayerVisibleHeight=76.f;
+static constexpr float kPlayerVisualScale=kPlayerVisibleHeight/kHeroSize;
 static constexpr float kBuildingHeight=94.f, kBuildingWidth=96.f;
 static constexpr float kTreeMin=74.f, kTreeVariation=22.f;
 struct Actor {unsigned id; Rectangle crop; float size;};
