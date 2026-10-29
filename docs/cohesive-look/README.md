@@ -1,3 +1,5 @@
+> The original background audit missed Cragmoor's tinted frame enclosing a baked matte. See `../compact-interiors/` for the corrected audit, native pixel regression test and GPU readback checks.
+
 # Cohesive environment rendering
 
 Implemented against `ringshark-patch-1` at `9328723`, on local branch

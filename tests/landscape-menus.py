@@ -89,6 +89,29 @@ for(const auto& room:kInteriorRooms) {
  inside.interior3DView=true;assert(!NativeLandscapePage(inside));
 }
 std::cout<<"PASS all 13 interiors: native landscape, visible hero, identity input and building panels"<<std::endl;
+// Flood actual compact-shop collision geometry from the entrance in every town.
+for(int ti=0;ti<4;ti++)for(const auto& room:kInteriorRooms){
+ if(std::string(room.key)=="wildhouse")continue;
+ GameState shop;shop.selectedTown=ti;shop.interior3DView=false;EnterInterior(shop,room.key);
+ auto size=tfinterior::Size(room.key);IntBuildShopShell(room,true);auto props=InteriorPropsFor(shop,room.key);
+ assert(size.x*size.y<520*620*.56f && g_intW==size.x && g_intH==size.y);
+ assert(Dist(shop.interiorPlayerPos,tfinterior::Spawn(room.key))<.01f);
+ constexpr int N=80;constexpr float step=6;
+ auto point=[](int i){return Vector2{(i%N)*step,(i/N)*step};};
+ auto walk=[&](Vector2 p){if(p.x<kPlayerEdgeMargin || p.y<kPlayerEdgeMargin || p.x>size.x-kPlayerRadius || p.y>size.y-kPlayerRadius)return false;
+  for(auto& prop:props)if(prop.bw>0 && prop.bh>0){float x=std::clamp(p.x,prop.x-prop.bw/2,prop.x+prop.bw/2),y=std::clamp(p.y,prop.y-prop.bh/2,prop.y+prop.bh/2);if(Dist(p,{x,y})<kPlayerRadius+1)return false;}return true;};
+ int start=(int)roundf(shop.interiorPlayerPos.y/step)*N+(int)roundf(shop.interiorPlayerPos.x/step);if(!walk(point(start))){std::cerr<<"Blocked compact spawn "<<room.key<<" town "<<ti<<std::endl;abort();}
+ std::vector<char> seen(N*N);std::vector<int> queue{start};seen[start]=1;
+ for(size_t head=0;head<queue.size();head++){int i=queue[head];for(int d:std::array<int,4>{{1,-1,N,-N}}){int j=i+d;if(j<0 || j>=N*N || std::abs(j%N-i%N)>1 || seen[j] || !walk(point(j)))continue;seen[j]=1;queue.push_back(j);}}
+ for(const auto& prop:props){
+  if(prop.bw>0 && prop.bh>0)assert(prop.x-prop.bw/2>=0 && prop.y-prop.bh/2>=0 && prop.x+prop.bw/2<=size.x && prop.y+prop.bh/2<=size.y);
+  if(!prop.action || !*prop.action)continue;float closest=1e9f;for(int i:queue)closest=std::min(closest,Dist(point(i),{prop.x,prop.y}));
+  if(closest>=kInteractRange+34){std::cerr<<"Unreachable compact station "<<room.key<<" "<<prop.label<<" town "<<ti<<std::endl;abort();}
+ }
+ for(const auto& n:InteriorNPCsFor(room.key))if(n.greeting && *n.greeting){auto p=tfinterior::Point({n.x,n.y},size);float closest=1e9f;for(int i:queue)closest=std::min(closest,Dist(point(i),p));assert(closest<kInteractRange+34);}
+}
+std::cout<<"PASS compact shop floor areas, entrance clearance, furniture bounds and reachable exits/stations/keepers across all four towns"<<std::endl;
+
 // Physical planning uses existing building keys, doors and walkable terrain.
 g_openWorld2D=true;
 for(int town=0;town<4;++town){

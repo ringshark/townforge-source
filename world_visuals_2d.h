@@ -43,6 +43,24 @@ inline void CleanMatte(Image& image,int fw,int fh) {
         for(size_t i=0;i<queue.size();i++){int x=queue[i]%image.width,y=queue[i]/image.width;add(x+1,y);add(x-1,y);add(x,y+1);add(x,y-1);}
     }
 }
+// Tinted export frames can surround an opaque white matte. Traverse transparent
+// margins and the pale frame before clearing the connected white background.
+// Enclosed white architectural details are protected by the silhouette outline.
+inline void CleanExteriorMatte(Image& image) {
+    if(!image.data)return;ImageFormat(&image,PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    auto* px=(Color*)image.data;std::vector<unsigned char> seen(image.width*image.height);std::vector<int> queue;
+    auto add=[&](int x,int y){
+        if(x<0 || y<0 || x>=image.width || y>=image.height)return;
+        int i=y*image.width+x;if(seen[i])return;seen[i]=1;auto& c=px[i];
+        int lo=std::min({(int)c.r,(int)c.g,(int)c.b}),hi=std::max({(int)c.r,(int)c.g,(int)c.b});
+        if(c.a<=112 || (lo>=210 && hi-lo<=55)){
+            c.a=0;queue.push_back(i);
+        }
+    };
+    for(int x=0;x<image.width;x++){add(x,0);add(x,image.height-1);}
+    for(int y=0;y<image.height;y++){add(0,y);add(image.width-1,y);}
+    for(size_t i=0;i<queue.size();i++){int x=queue[i]%image.width,y=queue[i]/image.width;add(x-1,y);add(x+1,y);add(x,y-1);add(x,y+1);}
+}
 // One union of the opaque bounds across all usable animation cells. A single
 // crop per sheet preserves stride/bob and never resizes individual frames.
 inline Rectangle Bounds(const Color* pixels,int width,int height,int fw,int fh,int rows,int cols) {
