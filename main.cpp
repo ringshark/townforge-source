@@ -2756,6 +2756,7 @@ struct DirSpriteSheet {
 #include "town_2d_art.h"
 #include "world_visuals_2d.h"
 #include "scene_style_2d.h"
+#include "compact_interiors_2d.h"
 #include "graphics_art_2d.h"
 #include "equipment_sprites_2d.h"
 static bool g_openWorld2D = false;
@@ -2983,8 +2984,7 @@ static Texture2D TryLoadTexture(const std::string& path, bool& okOut) {
         // Clear those low-alpha pixels so rectangular plates don't tint the ground.
         Image image=LoadImage(path.c_str());
         if(image.data) {
-            ImageAlphaClear(&image,BLANK,.44f);
-            tfworldart::CleanMatte(image,image.width,image.height);
+            tfworldart::CleanExteriorMatte(image);
             t=LoadTextureFromImage(image);UnloadImage(image);
         }
     } else if(kVariantView!=3 && (path.find("assets/monsters_boss_v2/")==0 ||
@@ -26509,6 +26509,18 @@ static std::vector<InteriorPropDef> InteriorPropsFor(GameState& s, const std::st
             frost("Ice Lantern", 440, 140, 0, Color{ 170, 215, 250, 255 }, 30, 44);
         }
     }
+    if(key!="wildhouse" && !s.interior3DView) {
+        auto size=tfinterior::Size(key);
+        for(auto& p:out) {
+            auto at=tfinterior::Point({p.x,p.y},size);p.x=at.x;p.y=at.y;
+            if(p.action && std::string(p.action)=="exit"){p.x=size.x*.5f;p.y=size.y-22;}
+            else if(p.bw>0 && p.bh>0) {
+                p.x=std::clamp(p.x,p.bw*.5f+2,size.x-p.bw*.5f-2);
+                p.y=std::clamp(p.y,p.bh*.5f+2,size.y-p.bh*.5f-2);
+            } else {p.x=std::clamp(p.x,4.f,size.x-4);p.y=std::clamp(p.y,4.f,size.y-4);}
+        }
+    }
+
     return out;
 }
 
@@ -26525,7 +26537,7 @@ static void EnterInterior(GameState& s, const std::string& key) {
     s.screen = Screen::Interior;
     s.interiorFromWild = (key == "wildhouse");
     s.interior3DView = s.interiorFromWild ? s.wild3DView : s.town3DView;
-    s.interiorPlayerPos = { 260.0f, 520.0f }; // just inside the shop door (the homestead places you itself)
+    s.interiorPlayerPos = (!s.interior3DView && key!="wildhouse") ? tfinterior::Spawn(key) : Vector2{260,520};
     g_intCamT.x = 1e9f;                        // snap the interior camera on the first frame
     g_t3dDist = 640.0f;
     s.playerFacing = { 0, -1 };
@@ -26611,8 +26623,9 @@ static void IntShopWindows(const std::string& key, float* wz, float* ez) {
     else if (key == "house") { *wz = 300.0f; *ez = 300.0f; }
 }
 // The standard shop shell: a 520x620 hall, door gap in the middle of the south wall.
-static void IntBuildShopShell(const InteriorRoomDef& room) {
-    g_intW = 520.0f; g_intH = 620.0f;
+static void IntBuildShopShell(const InteriorRoomDef& room,bool compact=false) {
+    Vector2 size=compact?tfinterior::Size(room.key):Vector2{520,620};
+    g_intW=size.x;g_intH=size.y;
     g_intFloors.assign(1, Rectangle{ 0, 0, g_intW, g_intH });
     g_intSegs.clear(); g_intWins.clear(); g_intBlocks.clear(); g_intDoors.clear();
     g_intFloorSurf = room.floorSurf;
@@ -26626,6 +26639,7 @@ static void IntBuildShopShell(const InteriorRoomDef& room) {
     g_intDoors.push_back({ W / 2, H + h, 0, -1, gap * 2, ws });
     float wz, ez;
     IntShopWindows(room.key, &wz, &ez);
+    if(compact){if(wz>0)wz=tfinterior::Point({0,wz},size).y;if(ez>0)ez=tfinterior::Point({0,ez},size).y;}
     if (wz > 0) g_intWins.push_back({ 0.0f, wz, 1, 0 });
     if (ez > 0) g_intWins.push_back({ W, ez, -1, 0 });
 }
@@ -27700,8 +27714,7 @@ static void DrawHouseCraftGump(GameState& s) {
     UIEndScissorMode();
 }
 static Vector2 InteriorCameraTopLeft(Vector2 playerPos) {
-    // The room (560x760) is nearly the viewport size (540x790): center it, with
-    // a thin dark surround where the room is smaller than the viewport.
+    // Center smaller rooms in the native viewport; larger custom homes follow the player.
     Vector2 tl = { playerPos.x - kViewport.width / 2.0f, playerPos.y - kViewport.height / 2.0f };
     float maxX = g_intW - kViewport.width;
     float maxY = g_intH - kViewport.height;
@@ -27802,9 +27815,13 @@ static void DrawInteriorScreen(GameState& s, int screenW, int screenH) {
         s.interiorFromWild = false;
         return;
     }
-    if (s.interiorKey == "wildhouse") HouseInteriorBuild(s); else IntBuildShopShell(*room);
+    if (s.interiorKey == "wildhouse") HouseInteriorBuild(s); else IntBuildShopShell(*room,!s.interior3DView);
     std::vector<InteriorPropDef> props = InteriorPropsFor(s, s.interiorKey);
     std::vector<InteriorNPCDef> npcs = InteriorNPCsFor(s.interiorKey);
+    if(s.interiorKey!="wildhouse" && !s.interior3DView)for(auto& n:npcs) {
+        auto size=tfinterior::Size(s.interiorKey),p=tfinterior::Point({n.x,n.y},size);n.x=p.x;n.y=p.y;
+        if(n.act==1 || n.act==2){auto at=tfinterior::Point({n.atX,n.atY},size);n.atX=at.x;n.atY=at.y;}
+    }
     const InteriorNPCDef* npc = nullptr; // the one you greet
     for (const auto& n : npcs) if (n.greeting && *n.greeting) { npc = &n; break; }
 
