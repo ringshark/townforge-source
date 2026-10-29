@@ -4,6 +4,7 @@
 // independent of combat radii and the compressed coordinates of outdoor towns.
 namespace tfworldart {
 static constexpr float kHeroSize=34.f;
+static constexpr float kPlayerVisualScale=1.4f; // Player only; NPC sizes and gameplay radii stay independent.
 static constexpr float kBuildingHeight=94.f, kBuildingWidth=96.f;
 static constexpr float kTreeMin=74.f, kTreeVariation=22.f;
 struct Actor {unsigned id; Rectangle crop; float size;};

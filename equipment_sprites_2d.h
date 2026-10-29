@@ -68,7 +68,7 @@ static Pose MakePose(const GameState& s,int direction,ActorAnim anim,bool moving
     if(s.playerDeathAnimT>0){p.action=Action::Fall;p.phase=std::clamp((1.2f-s.playerDeathAnimT)/1.2f,0.f,1.f);p.bodyAngle=p.phase*78;p.scale=1-p.phase*.12f;}
     float gait=sinf(p.phase*2*PI),walk=p.action==Action::Walk?gait:0;
     p.bob=p.action==Action::Walk?-fabsf(gait)*1.4f:0;
-    float side=p.view==1?5.f:17.f,flip=direction==3?-1.f:1.f;
+    float side=p.view==1?5.f:19.f,flip=direction==3?-1.f:1.f;
     for(int i=0;i<2;i++){
         float sign=(i==0?-1.f:1.f)*flip;
         p.shoulder[i]={sign*side,36};p.hand[i]={sign*(side+5),66};
@@ -133,13 +133,13 @@ static bool Draw(const GameState& s,Vector2 pos,int direction,ActorAnim anim,boo
     auto part=[&](int material,int cell,Vector2 a,Vector2 b,float width,Color color){Part(material,p.view,cell,point(a),point(b),width*size*.01f*p.scale,p.mirror,color);};
     auto cloth=[&](const std::optional<Item>& item){if(item){Color c=ClothColor(*item);return Color{(unsigned char)(c.r*tint.r/255),(unsigned char)(c.g*tint.g/255),(unsigned char)(c.b*tint.b/255),tint.a};}return tint;};
     if(p.action!=Action::Fall)DrawEllipse((int)pos.x,(int)(pos.y+size*.48f),size*.22f,size*.06f,Fade(BLACK,.20f));
-    auto arm=[&](int i){part(arms,2,p.shoulder[i],p.elbow[i],12,tint);part(gloves?gloves:arms,3,p.elbow[i],p.hand[i],10,tint);};
+    auto arm=[&](int i){part(arms,2,p.shoulder[i],p.elbow[i],14,tint);part(gloves?gloves:arms,3,p.elbow[i],p.hand[i],12,tint);};
     // Far hand/equipment are occluded by the torso, near hand covers its grip.
     int far=p.view==2?0:1,near=1-far;
     if(p.direction==3){Held(p.weapon,p,p.hand[0],pos,size,tint);if(!p.twoHands)Held(p.offhand,p,p.hand[1],pos,size,tint);}
     arm(far);
-    for(int i:{far,near}){part(legs,4,p.hip[i],p.knee[i],13,legs?tint:cloth(e.pants));part(legs,5,p.knee[i],p.ankle[i],14,legs?tint:cloth(e.shoes));}
-    part(chest,1,{0,30},{0,65},33,chest?tint:cloth(e.shirt));
+    for(int i:{far,near}){part(legs,4,p.hip[i],p.knee[i],15,legs?tint:cloth(e.pants));part(legs,5,p.knee[i],p.ankle[i],16,legs?tint:cloth(e.shoes));}
+    part(chest,1,{0,30},{0,65},39,chest?tint:cloth(e.shirt));
     if(e.gorget)part(ArmorMaterial(e.gorget),1,{0,28},{0,34},18,tint);
     part(head,0,{0,0},{0,31},34,tint);
     if(p.direction!=3){Held(p.weapon,p,p.hand[0],pos,size,tint);if(!p.twoHands)Held(p.offhand,p,p.hand[1],pos,size,tint);}
