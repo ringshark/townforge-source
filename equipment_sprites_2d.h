@@ -67,15 +67,15 @@ static Pose MakePose(const GameState& s,int direction,ActorAnim anim,bool moving
     if(s.playerHurtT>=0){p.action=Action::Hurt;p.phase=std::clamp(s.playerHurtT/.3f,0.f,1.f);}
     if(s.playerDeathAnimT>0){p.action=Action::Fall;p.phase=std::clamp((1.2f-s.playerDeathAnimT)/1.2f,0.f,1.f);p.bodyAngle=p.phase*78;p.scale=1-p.phase*.12f;}
     float gait=sinf(p.phase*2*PI),walk=p.action==Action::Walk?gait:0;
-    p.bob=p.action==Action::Walk?-fabsf(gait)*1.4f:0;
+    p.bob=p.action==Action::Walk?-.65f*(1-cosf(p.phase*4*PI)):0;
     float side=p.view==1?5.f:19.f,flip=direction==3?-1.f:1.f;
     for(int i=0;i<2;i++){
         float sign=(i==0?-1.f:1.f)*flip;
         p.shoulder[i]={sign*side,36};p.hand[i]={sign*(side+5),66};
         p.elbow[i]={sign*(side+7),50};p.hip[i]={sign*7,62};
         float step=walk*(i==0?1.f:-1.f);
-        p.knee[i]={sign*7+(p.view==1?step*9:0),80-std::max(0.f,step)*2};
-        p.ankle[i]={sign*8+(p.view==1?step*15:0),99-std::max(0.f,step)*6};
+        p.knee[i]={sign*7+(p.view==1?step*9:0),80-std::max(0.f,step)};
+        p.ankle[i]={sign*8+(p.view==1?step*15:0),99-std::max(0.f,step)*4};
         p.hand[i].x-=p.view==1?step*10:0;p.hand[i].y+=p.view==1?0:step*4;
     }
     p.angle=p.view==1?(direction==1?-20.f:20.f):direction==3?-12.f:12.f;
@@ -116,7 +116,14 @@ static Pose MakePose(const GameState& s,int direction,ActorAnim anim,bool moving
             p.hand[i]=Add(p.elbow[i],{sinf(forearm)*17,cosf(forearm)*17*depth});
         } else p.elbow[i]=SolveElbow(p.shoulder[i],p.hand[i],p.shoulder[i].x<0?1:-1);
     }
-    p.head={0,0};p.torso={0,31};return p;
+    // A connected upper-body weight shift: shoulders, elbows, wrists and held
+    // equipment travel together, with a quieter head and counter-moving hips.
+    float sway=p.action==Action::Walk?sinf(p.phase*2*PI)*.9f:0;
+    for(int i=0;i<2;i++){
+        p.shoulder[i].x+=sway;p.elbow[i].x+=sway;p.hand[i].x+=sway;
+        p.hip[i].x-=sway*.35f;
+    }
+    p.head={sway*.5f,0};p.torso={sway,27};return p;
 }
 static Vector2 ScreenPoint(const Pose& pose,Vector2 point,Vector2 pos,float size){
     point.y+=pose.bob;point=Rotate({point.x,point.y-100},pose.bodyAngle*DEG2RAD);
@@ -126,8 +133,15 @@ static void Part(int material,int view,int part,Vector2 a,Vector2 b,float width,
     const auto& atlas=material>=2?metal:soft;int row=(material%2)*3+view,cell=row*6+part;
     if(!atlas.texture.id || cell>=(int)atlas.frames.size())return;auto src=atlas.frames[cell];
     if(mirror)src.width=-src.width;
+    // Remove only the tiny painted end caps buried inside limb joins. Keep
+    // glove fingers and boot soles intact at the free ends of the chain.
+    if(part>=2){float trim=std::max(1.f,floorf(src.height*.025f));src.y+=trim;src.height-=trim;if(part==2 || part==4)src.height-=trim;}
     float length=std::hypot(b.x-a.x,b.y-a.y);if(length<.01f)return;
-    DrawTexturePro(atlas.texture,src,{a.x,a.y,width,length},{width*.5f,0},atan2f(b.y-a.y,b.x-a.x)*RAD2DEG-90,tint);
+    // Tuck the painted ends into the adjacent segment instead of exposing
+    // separately outlined cutout caps at elbows and knees. Boots end at the
+    // authored ankle/ground point so the feet never drift below their anchor.
+    float tuck=part>=2?width*.18f:0, distal=part==5?0:tuck;
+    DrawTexturePro(atlas.texture,src,{a.x,a.y,width,length+tuck+distal},{width*.5f,tuck},atan2f(b.y-a.y,b.x-a.x)*RAD2DEG-90,tint);
 }
 static int WeaponCell(Weapon w){switch(w){case Weapon::Sword:return 0;case Weapon::Longsword:return 1;case Weapon::Rapier:return 2;case Weapon::Spear:return 3;case Weapon::Axe:return 4;case Weapon::Mace:return 5;case Weapon::Staff:return 6;case Weapon::Bow:return 7;case Weapon::Crossbow:return 8;case Weapon::Shield:return 9;case Weapon::Pickaxe:return 10;case Weapon::Fishing:return 11;default:return -1;}}
 struct HeldArt {float height,grip,rotation;float gripX=.5f;};
@@ -152,17 +166,19 @@ static bool Draw(const GameState& s,Vector2 pos,int direction,ActorAnim anim,boo
     auto part=[&](int material,int cell,Vector2 a,Vector2 b,float width,Color color){Part(material,p.view,cell,point(a),point(b),width*size*.01f*p.scale,p.mirror,color);};
     auto cloth=[&](const std::optional<Item>& item){if(item){Color c=ClothColor(*item);return Color{(unsigned char)(c.r*tint.r/255),(unsigned char)(c.g*tint.g/255),(unsigned char)(c.b*tint.b/255),tint.a};}return tint;};
     if(p.action!=Action::Fall)DrawEllipse((int)pos.x,(int)(pos.y+size*.48f),size*.22f,size*.06f,Fade(BLACK,.20f));
-    auto arm=[&](int i){part(arms,2,p.shoulder[i],p.elbow[i],14,tint);part(gloves?gloves:arms,3,p.elbow[i],p.hand[i],12,tint);};
+    auto upperArm=[&](int i){part(arms,2,p.shoulder[i],p.elbow[i],14,tint);};
+    auto forearm=[&](int i){part(gloves?gloves:arms,3,p.elbow[i],p.hand[i],12,tint);};
     // Far hand/equipment are occluded by the torso, near hand covers its grip.
     int far=p.view==2?0:1,near=1-far;
     if(p.direction==3){Held(p.weapon,p,p.hand[0],pos,size,tint);if(!p.twoHands)Held(p.offhand,p,p.hand[1],pos,size,tint);}
-    arm(far);
+    upperArm(far);forearm(far);upperArm(near);
     for(int i:{far,near}){part(legs,4,p.hip[i],p.knee[i],15,legs?tint:cloth(e.pants));part(legs,5,p.knee[i],p.ankle[i],16,legs?tint:cloth(e.shoes));}
-    part(chest,1,{0,30},{0,65},39,chest?tint:cloth(e.shirt));
+    part(chest,1,p.torso,Add(p.torso,{0,41}),39,chest?tint:cloth(e.shirt));
     if(e.gorget)part(ArmorMaterial(e.gorget),1,{0,28},{0,34},18,tint);
-    part(head,0,{0,0},{0,31},34,tint);
+    part(head,0,p.head,Add(p.head,{0,28}),31,tint);
     if(p.direction!=3){Held(p.weapon,p,p.hand[0],pos,size,tint);if(!p.twoHands)Held(p.offhand,p,p.hand[1],pos,size,tint);}
-    arm(near);if(p.twoHands)arm(far);
+    // Shoulder roots stay behind the tunic; only hands cover their grips.
+    forearm(near);if(p.twoHands)forearm(far);
     if(p.action==Action::Cast){auto a=point(p.hand[0]),b=point(p.hand[1]);DrawCircleLinesV(a,size*.11f,Fade(SKYBLUE,.8f));DrawCircleLinesV(b,size*.11f,Fade(SKYBLUE,.8f));}
     if(p.action==Action::Fish){
         auto meta=HeldMetadata(Weapon::Fishing);auto tip=Add(p.hand[0],Rotate({0,-meta.height*meta.grip},p.angle*DEG2RAD));
