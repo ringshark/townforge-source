@@ -18,9 +18,9 @@ for ident,(key,path,cols,rows,xedges) in enumerate(re.findall(r'tfgfx::LoadAtlas
     assets[ident]={'path':path,'size':image.size,'data':base64.b64encode((root/path).read_bytes()).decode()}
     initial.append(f'tfequip2d::{key}.texture={{{ident},{image.width},{image.height},1,7}};tfequip2d::{key}.frames={{'+','.join('{'+','.join(map(str,b))+'}' for b in frames)+'};')
 # Log the production renderer's texture transforms, including the actual grip pivot.
-stubs=ns['stubs'].replace('struct Label{','FILE* testRender=nullptr;\nstruct Label{')
+stubs=ns['stubs'].replace('struct Label{','FILE* testRender=nullptr;Rectangle testPartDest{};Vector2 testPartOrigin{};\nstruct Label{')
 pat=r'void DrawTexturePro\([^\n]+?\) \{[^\n]*\}'
-body='void DrawTexturePro(Texture2D texture,Rectangle source,Rectangle dest,Vector2 origin,float rotation,Color tint) {if(testRender)fprintf(testRender,"T %u %f %f %f %f %f %f %f %f %f %f %f\\n",texture.id,source.x,source.y,source.width,source.height,dest.x,dest.y,dest.width,dest.height,origin.x,origin.y,rotation);}'
+body='void DrawTexturePro(Texture2D texture,Rectangle source,Rectangle dest,Vector2 origin,float rotation,Color tint) {testPartDest=dest;testPartOrigin=origin;if(testRender)fprintf(testRender,"T %u %f %f %f %f %f %f %f %f %f %f %f\\n",texture.id,source.x,source.y,source.width,source.height,dest.x,dest.y,dest.width,dest.height,origin.x,origin.y,rotation);}'
 stubs,n=re.subn(pat,lambda _:body,stubs);assert n==1
 (run/'equipment-stubs.cpp').write_text(stubs)
 cpp=r'''
@@ -30,12 +30,18 @@ void JS_CloudOpen(){}
 #define main game_main
 #include "MAIN_PATH"
 #undef main
-extern FILE* testRender;
+extern FILE* testRender;extern Rectangle testPartDest;extern Vector2 testPartOrigin;
 static Item weapon(int id,const char* name,const char* category,const char* handed="1h"){Item x{};x.id=id;x.name=name;x.type=ItemType::Weapon;x.category=category;x.handed=handed;return x;}
 static Item armor(int id,const char* slot,const char* material){Item x{};x.id=id;x.name=std::string(material)+" "+slot;x.type=ItemType::Armor;x.category=material;x.slot=slot;return x;}
 int main(){
 INITIAL
-using namespace tfequip2d;GameState s;s.screen=Screen::Wilderness;s.playerHurtT=-1;s.wildEngaged.emplace();s.optClassic2D=true;s.optOnline=false;s.youngT=1200;s.starterStep=-1;s.starterAccepted=s.starterRewarded=true;
+using namespace tfequip2d;
+// Painted joints overlap; boot bottoms retain the exact ground endpoint.
+Part(0,0,2,{0,0},{0,20},14,false,WHITE);
+assert(testPartDest.y-testPartOrigin.y<0 && testPartDest.y-testPartOrigin.y+testPartDest.height>20);
+Part(0,0,5,{0,0},{0,20},16,false,WHITE);
+assert(testPartDest.y-testPartOrigin.y<0 && std::abs(testPartDest.y-testPartOrigin.y+testPartDest.height-20)<.001f);
+GameState s;s.screen=Screen::Wilderness;s.playerHurtT=-1;s.wildEngaged.emplace();s.optClassic2D=true;s.optOnline=false;s.youngT=1200;s.starterStep=-1;s.starterAccepted=s.starterRewarded=true;
 auto fixture=[&](const char* name){if(const char* prefix=getenv("TF_EQUIPMENT_FIXTURE")){SaveGame(s);std::ifstream from(kSaveFilePath);std::ofstream to(std::string(prefix)+"-"+name+".txt");to<<from.rdbuf();}};
 testRender=fopen("TRACE_PATH","w");assert(testRender);
 auto sample=[&](const std::string& label,int direction,ActorAnim anim,bool moving=false){fprintf(testRender,"B %s\n",label.c_str());assert(Draw(s,{0,0},direction,anim,moving,100,WHITE));for(auto hand:lastPose.hand)assert(std::isfinite(hand.x)&&std::isfinite(hand.y));};
